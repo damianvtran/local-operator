@@ -23,14 +23,14 @@ class LocalCodeExecutor:
         safety_check_prompt = f"""
         Analyze the following Python code for potentially dangerous operations:
         {code}
-        
+
         Respond with only "yes" if the code contains dangerous operations that could:
         - Delete or modify files
         - Execute system commands
         - Access sensitive system resources
         - Perform network operations
         - Otherwise compromise system security
-        
+
         Respond with only "no" if the code appears safe to execute.
         """
 

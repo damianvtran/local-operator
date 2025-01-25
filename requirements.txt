@@ -1,1 +1,7 @@
-# Add your project dependencies here.
+langchain_openai==0.3.2
+pydantic==2.10.6
+python-dotenv==1.0.1
+flake8==7.1.0
+black==24.4.2
+isort==5.13.2
+pyright==1.1.368
