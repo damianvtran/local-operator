@@ -23,17 +23,36 @@ The Local Operator provides a command-line interface where you can:
 4. View execution results and error messages
 5. Maintain context between code executions
 
+## Setup
+
+Clone the `.env.template` file and rename it to `.env`.  Add your DeepSeek API key to the `.env` file.
+
+It's recommended to use a virtual environment to manage dependencies, but not necessary.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+```
+
+Install the required packages either in the virtual environment or globally:
+
+```bash
+pip install -r requirements.txt
+```
+
 ## Usage
 
-Run the script with `python3 local_operator.py`
+Run the script from the root of the project directory with `python main.py`
 
 Everything else is handled by the agent 😊
+
+Quit by typing `exit` or `quit`.
 
 ## Examples
 
 ### Hello World
 
-> You: make a new file called test.txt and write Hello World in it
+> **You: >** make a new file called test.txt and write Hello World in it
 >
 > Model Response:
 > I'll create a new file called `test.txt` and write "Hello World" in it. Here's the code I'll execute:
@@ -63,7 +82,7 @@ Everything else is handled by the agent 😊
 
 ### Creating a new git repository
 
-> You: make a git repo in the folder ~/local-operator for a project called "local-operator"
+> **You: >** make a git repo in the folder ~/local-operator for a project called "local-operator"
 > 
 > Model Response:
 > To create a Git repository in the folder `~/local-operator` for a project called "local-operator", you can follow these steps:
@@ -152,7 +171,7 @@ Everything else is handled by the agent 😊
 
 ### Performing unsafe operations
 
-> You: remove the placeholder module1.py and test-module1.py, etc. files 
+> **You: >** remove the placeholder module1.py and test-module1.py, etc. files 
 >
 > Model Response:
 > To remove the placeholder files (`module1.py`, `module2.py`, `test_module1.py`, and `test_module2.py`) from the `local-operator` repository, we can use Python's `os` module to delete these files. Here's the updated code:
@@ -336,7 +355,7 @@ The system includes multiple layers of protection:
 
 ## Requirements
 
-- Python 3.7+
+- Python 3.12+
 - DeepSeek API key (set in .env file)
 - Required packages: langchain-openai, python-dotenv, pydantic
 

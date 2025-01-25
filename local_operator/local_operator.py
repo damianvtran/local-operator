@@ -3,23 +3,49 @@ import re
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
-import asyncio
 
 
 class LocalCodeExecutor:
+    """A class to handle local Python code execution with safety checks and context management.
+
+    Attributes:
+        context (dict): A dictionary to maintain execution context between code blocks
+        conversation_history (list): A list of message dictionaries tracking the conversation
+        model: The language model used for code analysis and safety checks
+    """
+
     def __init__(self, model):
+        """Initialize the LocalCodeExecutor with a language model.
+
+        Args:
+            model: The language model instance to use for code analysis
+        """
         self.context = {}
         self.conversation_history = []
         self.model = model
 
     def extract_code_blocks(self, text):
-        """Extract Python code blocks marked with ```python``` syntax"""
+        """Extract Python code blocks from text using markdown-style syntax.
+
+        Args:
+            text (str): The text containing potential code blocks
+
+        Returns:
+            list: A list of extracted code blocks as strings
+        """
         pattern = r"```python\n(.*?)```"
         matches = re.findall(pattern, text, re.DOTALL)
         return matches
 
     async def check_code_safety(self, code):
-        """Ask the model if the code contains dangerous operations"""
+        """Analyze code for potentially dangerous operations using the language model.
+
+        Args:
+            code (str): The Python code to analyze
+
+        Returns:
+            bool: True if dangerous operations are detected, False otherwise
+        """
         safety_check_prompt = f"""
         Analyze the following Python code for potentially dangerous operations:
         {code}
@@ -34,17 +60,22 @@ class LocalCodeExecutor:
         Respond with only "no" if the code appears safe to execute.
         """
 
-        # Add safety check to conversation history
         self.conversation_history.append({"role": "user", "content": safety_check_prompt})
         response = self.model.invoke(self.conversation_history)
-        self.conversation_history.pop()  # Remove safety check from history
+        self.conversation_history.pop()
 
         return response.content.strip().lower() == "yes"
 
     async def execute_code(self, code):
-        """Execute code in a safe environment and capture output"""
+        """Execute Python code with safety checks and context management.
+
+        Args:
+            code (str): The Python code to execute
+
+        Returns:
+            str: Execution result message or error message
+        """
         try:
-            # Check code safety with the model
             is_dangerous = await self.check_code_safety(code)
             if is_dangerous:
                 confirm = input(
@@ -53,21 +84,22 @@ class LocalCodeExecutor:
                 if confirm.lower() != "y":
                     return "Code execution canceled by user"
 
-            # Execute code with access to context
             exec(code, self.context)
             return "Code executed successfully"
         except Exception as e:
             return f"Error executing code: {str(e)}"
 
     async def process_response(self, response):
-        """Process model response, extract and execute code blocks"""
+        """Process model response, extracting and executing any code blocks.
+
+        Args:
+            response (str): The model's response containing potential code blocks
+        """
         print("\nModel Response:")
         print(response)
 
-        # Add response to conversation history
         self.conversation_history.append({"role": "assistant", "content": response})
 
-        # Extract and execute code blocks
         code_blocks = self.extract_code_blocks(response)
         if code_blocks:
             print("\nExecuting code blocks...")
@@ -76,23 +108,27 @@ class LocalCodeExecutor:
                 result = await self.execute_code(code)
                 print(f"Result: {result}")
 
-                # Add code execution result to conversation history
                 self.conversation_history.append(
                     {"role": "system", "content": f"Code execution result:\n{result}"}
                 )
-
-                # Add result to context for next interaction
                 self.context["last_code_result"] = result
 
 
 class DeepSeekCLI:
+    """A command-line interface for interacting with DeepSeek's language model.
+
+    Attributes:
+        model: The configured ChatOpenAI instance for DeepSeek
+        executor: LocalCodeExecutor instance for handling code execution
+    """
+
     def __init__(self):
+        """Initialize the CLI by loading environment variables and setting up the model."""
         load_dotenv()
         api_key = os.getenv("DEEPSEEK_API_KEY")
         if not api_key:
             raise ValueError("DEEPSEEK_API_KEY not found in .env")
 
-        # Use LangChain's ChatOpenAI implementation for DeepSeek
         self.model = ChatOpenAI(
             api_key=SecretStr(api_key),
             temperature=0.5,
@@ -102,15 +138,22 @@ class DeepSeekCLI:
         self.executor = LocalCodeExecutor(self.model)
 
     async def chat(self):
-        print("DeepSeek Local Code Executor CLI")
-        print("You are interacting with a helpful CLI agent that can execute Python code locally.")
+        """Run the interactive chat interface with code execution capabilities."""
+        print("Local Executor Agent CLI")
+        print(
+            "You are interacting with a helpful CLI agent that can execute tasks locally "
+            "on your device by running Python code."
+        )
         print(
             "The agent will carefully analyze and execute code blocks, explaining any "
             "errors that occur."
         )
+        print(
+            "It will prompt you for confirmation before executing potentially dangerous "
+            "or risky operations."
+        )
         print("Type 'exit' or 'quit' to quit\n")
 
-        # Initialize system message only once
         self.executor.conversation_history = [
             {
                 "role": "system",
@@ -124,15 +167,10 @@ class DeepSeekCLI:
         ]
 
         while True:
-            user_input = input("You: ")
+            user_input = input("\033[1m\033[94mYou:\033[0m \033[1m>\033[0m ")
             if user_input.lower() == "exit" or user_input.lower() == "quit":
                 break
 
-            # Add user input to conversation history
             self.executor.conversation_history.append({"role": "user", "content": user_input})
-
-            # Get model response using existing conversation history
             response = self.model.invoke(self.executor.conversation_history)
-
-            # Process response and execute any code
             await self.executor.process_response(response.content)
