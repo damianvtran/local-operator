@@ -136,12 +136,3 @@ class DeepSeekCLI:
 
             # Process response and execute any code
             await self.executor.process_response(response.content)
-
-
-if __name__ == "__main__":
-    try:
-        cli = DeepSeekCLI()
-
-        asyncio.run(cli.chat())
-    except Exception as e:
-        print(f"Error: {str(e)}")

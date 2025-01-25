@@ -2,6 +2,10 @@
 
 Local Operator is a Python-based agent that runs locally on your device, enabling secure execution of commands through a conversational chat interface. It provides a safe environment for running Python code while maintaining system security through built-in safety checks and user confirmation prompts.
 
+This repository is open source and free to use, with an MIT license.  Feel free to incorporate it into your own projects as needed.  Though, we would love to hear your feedback and any contributions to the project will greatly help the community!
+
+Artificial intelligence tools like these should be open and freely available to the majority of people due to the exponential impact that they have on personal productivity.  We hope to make this a reality for everyone!
+
 ## Key Features
 
 - **Interactive CLI Interface**: Chat with an AI assistant that can execute Python code locally
@@ -12,8 +16,6 @@ Local Operator is a Python-based agent that runs locally on your device, enablin
 - **Asynchronous Execution**: Safe code execution with async/await pattern
 - **Environment Configuration**: Uses .env file for API key management
 
-## Usage
-
 The Local Operator provides a command-line interface where you can:
 1. Interact with the AI assistant in natural language
 2. Execute Python code blocks marked with ```python``` syntax
@@ -21,7 +23,43 @@ The Local Operator provides a command-line interface where you can:
 4. View execution results and error messages
 5. Maintain context between code executions
 
+## Usage
+
+Run the script with `python3 local_operator.py`
+
+Everything else is handled by the agent 😊
+
 ## Examples
+
+### Hello World
+
+> You: make a new file called test.txt and write Hello World in it
+>
+> Model Response:
+> I'll create a new file called `test.txt` and write "Hello World" in it. Here's the code I'll execute:
+>
+> ```python
+> # Create a new file called test.txt and write "Hello World" in it
+> with open("test.txt", "w") as file:
+>     file.write("Hello World")
+> ```
+>
+> Let me run this code for you.
+>
+> ---
+>
+> The code has been executed successfully. A file named `test.txt` has been created, and it contains the text "Hello World". You can check the file in your current working directory.
+>
+> Executing code blocks...
+>
+> Executing:
+> ```python
+> # Create a new file called test.txt and write "Hello World" in it
+> with open("test.txt", "w") as file:
+>     file.write("Hello World")
+> ```
+>
+> Result: Code executed successfully
 
 ### Creating a new git repository
 
