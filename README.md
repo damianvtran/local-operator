@@ -69,6 +69,10 @@ Run `local-operator --help` for more information about parameters and configurat
 
 ### Hello World
 
+<details>
+<summary>Simple file creation with generated content</summary>
+<br />
+
 ```shell
 You: > make a new file called test.txt and write Hello World in it
 
@@ -98,7 +102,15 @@ with open("test.txt", "w") as file:
 Hello World
 ```
 
+</details>
+
 ### Creating a new git repository
+
+<details>
+<summary>Creating a new git repository with some boilerplate requirements</summary>
+<br />
+
+The agent runs the generated code in a first step which fails due to a sub-folder not being created.  In the second step, the agent creates the sub-folder and then runs the code again to acheive the user goal.
 
 ```shell
 You: > make a git repo in the folder ~/mypackage for a project called "mypackage".  This is a python package, so add the necessary boilerplate files.  The initial branch should be "main"
@@ -265,7 +277,13 @@ Git repository initialized in /Users/damiantran/mypackage with branch 'main'.
 ╰──────────────────────────────────────────────────
 ```
 
+</details>
+
 ### Network Requests
+
+<details>
+<summary>Simple get request with data fetch</summary>
+<br />
 
 ```shell
 You: > make a get request to https://google.com
@@ -300,7 +318,15 @@ Response Content:
 ╰──────────────────────────────────────────────────
 ```
 
+</details>
+
 ### Installing missing dependencies
+
+<details>
+<summary>Missing dependency discovery through trial and error</summary>
+<br />
+
+The agent fails on the first attempt and then performs the necessary installation on the second attempt.
 
 ```shell
 You (/Users/damiantran/local-operator): > make a mock csv that has a datetime column and a person name column, with 10 rows.  Use pandas and numpy
@@ -382,7 +408,15 @@ mock_data_with_datetime.csv has been created with mock data.
 ╰──────────────────────────────────────────────────
 ```
 
+</details>
+
 ### Performing unsafe operations
+
+<details>
+<summary>Removing a folder</summary>
+<br />
+
+The agent asks for confirmation before performing the operation.
 
 ```shell
 You: > remove the ~/mypackage folder 
@@ -424,7 +458,13 @@ Folder '/Users/damiantran/mypackage' removed successfully.
 ╰──────────────────────────────────────────────────
 ```
 
+</details>
+
 ### Multi-step Agent Execution
+
+<details>
+<summary>Simple two-step Hello World</summary>
+<br />
 
 ```shell
 You (/Users/damiantran/local-operator): > do a two step execution, add more text and then read the text in two steps
@@ -512,6 +552,345 @@ It will be followed by the file content reading in step 2.
 
 ╰──────────────────────────────────────────────────
 ```
+</details>
+
+<details>
+<summary>Self-improvement loop</summary>
+<br />
+
+```shell
+You (/Users/damiantran/local-operator): > create a mock data csv and then read it and think about improvements.  Enact the improvements and make it better
+
+╭─ Agent Response (Step 1) ───────────────────────
+│ Let's break this task into logical steps:
+│ 
+│ 1. Create mock data CSV
+│ 2. Read and analyze the data
+│ 3. Identify potential improvements
+│ 4. Implement improvements
+│ 5. Save improved version
+│ 
+│ Let's start with step 1 - creating mock data. I'll create a CSV with some basic customer data.
+│ 
+│ ```python
+│ import csv
+│ import random
+│ from datetime import datetime, timedelta
+│ 
+│ # Generate mock data
+│ data = []
+│ for i in range(100):
+│     customer_id = f"CUST{i+1:03}"
+│     signup_date = (datetime.now() - timedelta(days=random.randint(0, 365))).strftime('%Y-%m-%d')
+│     purchases = random.randint(0, 50)
+│     total_spent = round(random.uniform(0, 5000), 2)
+│     last_purchase = (datetime.now() - timedelta(days=random.randint(0, 90))).strftime('%Y-%m-%d')
+│     data.append([customer_id, signup_date, purchases, total_spent, last_purchase])
+│ 
+│ # Write to CSV
+│ with open('mock_customers.csv', 'w', newline='') as file:
+│     writer = csv.writer(file)
+│     writer.writerow(['customer_id', 'signup_date', 'purchases', 'total_spent', 'last_purchase'])
+│     writer.writerows(data)
+│ 
+│ print("Mock data CSV created: mock_customers.csv")
+│ ```
+│ 
+│ Let me know when you want to proceed to step 2 (reading and analyzing the data).
+╰──────────────────────────────────────────────────
+
+╭─ Executing Code Blocks (Step 1) ───────────────
+
+│ Executing:
+import csv
+import random
+from datetime import datetime, timedelta
+
+# Generate mock data
+data = []
+for i in range(100):
+    customer_id = f"CUST{i+1:03}"
+    signup_date = (datetime.now() - timedelta(days=random.randint(0, 365))).strftime('%Y-%m-%d')
+    purchases = random.randint(0, 50)
+    total_spent = round(random.uniform(0, 5000), 2)
+    last_purchase = (datetime.now() - timedelta(days=random.randint(0, 90))).strftime('%Y-%m-%d')
+    data.append([customer_id, signup_date, purchases, total_spent, last_purchase])
+
+# Write to CSV
+with open('mock_customers.csv', 'w', newline='') as file:
+    writer = csv.writer(file)
+    writer.writerow(['customer_id', 'signup_date', 'purchases', 'total_spent', 'last_purchase'])
+    writer.writerows(data)
+
+print("Mock data CSV created: mock_customers.csv")
+
+│ Result: 
+✓ Code Execution Successful
+╞══════════════════════════════════════════╡
+│ Output:
+Mock data CSV created: mock_customers.csv
+
+╰──────────────────────────────────────────────────
+
+╭─ Agent Response (Step 2) ───────────────────────
+│ Mock data CSV created: mock_customers.csv
+│ 
+│ Now let's proceed to step 2 - reading and analyzing the data to identify potential improvements.
+│ 
+│ ```python
+│ import pandas as pd
+│ 
+│ # Read the CSV
+│ df = pd.read_csv('mock_customers.csv')
+│ 
+│ # Basic analysis
+│ print("First 5 rows:")
+│ print(df.head())
+│ print("\nData types:")
+│ print(df.dtypes)
+│ print("\nSummary statistics:")
+│ print(df.describe())
+│ print("\nMissing values:")
+│ print(df.isnull().sum())
+│ 
+│ # Identify potential improvements
+│ improvements = [
+│     "1. Convert dates to datetime format",
+│     "2. Add calculated columns (e.g., average purchase value)",
+│     "3. Add customer segmentation based on spending",
+│     "4. Add email addresses for more realistic data",
+│     "5. Add location data",
+│     "6. Add product categories purchased",
+│     "7. Add customer status (active/inactive)"
+│ ]
+│ 
+│ print("\nPotential improvements:")
+│ for improvement in improvements:
+│     print(f"- {improvement}")
+│ ```
+│ 
+│ Let me know if you want to proceed with implementing any of these improvements or if you have other suggestions.
+╰──────────────────────────────────────────────────
+
+╭─ Executing Code Blocks (Step 2) ───────────────
+
+│ Executing:
+import pandas as pd
+
+# Read the CSV
+df = pd.read_csv('mock_customers.csv')
+
+# Basic analysis
+print("First 5 rows:")
+print(df.head())
+print("\nData types:")
+print(df.dtypes)
+print("\nSummary statistics:")
+print(df.describe())
+print("\nMissing values:")
+print(df.isnull().sum())
+
+# Identify potential improvements
+improvements = [
+    "1. Convert dates to datetime format",
+    "2. Add calculated columns (e.g., average purchase value)",
+    "3. Add customer segmentation based on spending",
+    "4. Add email addresses for more realistic data",
+    "5. Add location data",
+    "6. Add product categories purchased",
+    "7. Add customer status (active/inactive)"
+]
+
+print("\nPotential improvements:")
+for improvement in improvements:
+    print(f"- {improvement}")
+
+│ Result: 
+✓ Code Execution Successful
+╞══════════════════════════════════════════╡
+│ Output:
+First 5 rows:
+  customer_id signup_date  purchases  total_spent last_purchase
+0     CUST001  2024-09-16         40       971.22    2024-12-09
+1     CUST002  2024-04-19         32      2537.07    2024-10-29
+2     CUST003  2024-11-22          2      1120.01    2025-01-21
+3     CUST004  2024-12-04         11       875.93    2024-12-13
+4     CUST005  2024-11-19         13      2601.22    2024-12-29
+
+Data types:
+customer_id       object
+signup_date       object
+purchases          int64
+total_spent      float64
+last_purchase     object
+dtype: object
+
+Summary statistics:
+        purchases  total_spent
+count  100.000000   100.000000
+mean    25.000000  2643.808800
+std     14.784649  1483.624621
+min      0.000000   112.700000
+25%     13.000000  1279.070000
+50%     26.500000  2630.115000
+75%     37.000000  3999.202500
+max     49.000000  4985.270000
+
+Missing values:
+customer_id      0
+signup_date      0
+purchases        0
+total_spent      0
+last_purchase    0
+dtype: int64
+
+Potential improvements:
+- 1. Convert dates to datetime format
+- 2. Add calculated columns (e.g., average purchase value)
+- 3. Add customer segmentation based on spending
+- 4. Add email addresses for more realistic data
+- 5. Add location data
+- 6. Add product categories purchased
+- 7. Add customer status (active/inactive)
+
+╰──────────────────────────────────────────────────
+
+╭─ Agent Response (Step 3) ───────────────────────
+│ Let's proceed with implementing the improvements. I'll start with the first few improvements:
+│ 
+│ 1. Convert dates to datetime format
+│ 2. Add calculated columns (average purchase value)
+│ 3. Add customer segmentation based on spending
+│ 4. Add email addresses
+│ 
+│ ```python
+│ import pandas as pd
+│ import numpy as np
+│ 
+│ # Read the CSV
+│ df = pd.read_csv('mock_customers.csv')
+│ 
+│ # Improvement 1: Convert dates to datetime
+│ df['signup_date'] = pd.to_datetime(df['signup_date'])
+│ df['last_purchase'] = pd.to_datetime(df['last_purchase'])
+│ 
+│ # Improvement 2: Add calculated columns
+│ df['avg_purchase_value'] = np.where(df['purchases'] > 0, 
+│                                    df['total_spent'] / df['purchases'], 
+│                                    0)
+│ 
+│ # Improvement 3: Add customer segmentation
+│ def create_segment(row):
+│     if row['total_spent'] > 4000:
+│         return 'VIP'
+│     elif row['total_spent'] > 2000:
+│         return 'Loyal'
+│     elif row['total_spent'] > 1000:
+│         return 'Regular'
+│     else:
+│         return 'New'
+│ 
+│ df['segment'] = df.apply(create_segment, axis=1)
+│ 
+│ # Improvement 4: Add email addresses
+│ df['email'] = df['customer_id'].str.lower() + '@example.com'
+│ 
+│ # Save improved version
+│ df.to_csv('improved_customers.csv', index=False)
+│ 
+│ # Show first 5 rows of improved data
+│ print("Improved data preview:")
+│ print(df.head())
+│ print("\nNew columns added:")
+│ print(df.columns)
+│ print("\nSegment distribution:")
+│ print(df['segment'].value_counts())
+│ ```
+│ 
+│ The improved dataset now includes:
+│ - Proper datetime formatting
+│ - Average purchase value calculation
+│ - Customer segmentation (VIP, Loyal, Regular, New)
+│ - Email addresses
+│ - Saved as 'improved_customers.csv'
+│ 
+│ DONE
+╰──────────────────────────────────────────────────
+
+╭─ Executing Code Blocks (Step 3) ───────────────
+
+│ Executing:
+import pandas as pd
+import numpy as np
+
+# Read the CSV
+df = pd.read_csv('mock_customers.csv')
+
+# Improvement 1: Convert dates to datetime
+df['signup_date'] = pd.to_datetime(df['signup_date'])
+df['last_purchase'] = pd.to_datetime(df['last_purchase'])
+
+# Improvement 2: Add calculated columns
+df['avg_purchase_value'] = np.where(df['purchases'] > 0, 
+                                   df['total_spent'] / df['purchases'], 
+                                   0)
+
+# Improvement 3: Add customer segmentation
+def create_segment(row):
+    if row['total_spent'] > 4000:
+        return 'VIP'
+    elif row['total_spent'] > 2000:
+        return 'Loyal'
+    elif row['total_spent'] > 1000:
+        return 'Regular'
+    else:
+        return 'New'
+
+df['segment'] = df.apply(create_segment, axis=1)
+
+# Improvement 4: Add email addresses
+df['email'] = df['customer_id'].str.lower() + '@example.com'
+
+# Save improved version
+df.to_csv('improved_customers.csv', index=False)
+
+# Show first 5 rows of improved data
+print("Improved data preview:")
+print(df.head())
+print("\nNew columns added:")
+print(df.columns)
+print("\nSegment distribution:")
+print(df['segment'].value_counts())
+
+│ Result: 
+✓ Code Execution Successful
+╞══════════════════════════════════════════╡
+│ Output:
+Improved data preview:
+  customer_id signup_date  purchases  total_spent last_purchase  avg_purchase_value  segment                email
+0     CUST001  2024-09-16         40       971.22    2024-12-09           24.280500      New  cust001@example.com
+1     CUST002  2024-04-19         32      2537.07    2024-10-29           79.283438    Loyal  cust002@example.com
+2     CUST003  2024-11-22          2      1120.01    2025-01-21          560.005000  Regular  cust003@example.com
+3     CUST004  2024-12-04         11       875.93    2024-12-13           79.630000      New  cust004@example.com
+4     CUST005  2024-11-19         13      2601.22    2024-12-29          200.093846    Loyal  cust005@example.com
+
+New columns added:
+Index(['customer_id', 'signup_date', 'purchases', 'total_spent',
+       'last_purchase', 'avg_purchase_value', 'segment', 'email'],
+      dtype='object')
+
+Segment distribution:
+segment
+Loyal      36
+VIP        25
+Regular    22
+New        17
+Name: count, dtype: int64
+
+╰──────────────────────────────────────────────────
+```
+
+</details>
 
 ## Safety Features
 
