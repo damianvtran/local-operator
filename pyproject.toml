@@ -1,3 +1,36 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-operator"
+version = "0.0.1"
+description = "A Python-based agent for local command execution"
+readme = "README.md"
+authors = [{ name = "Damian Tran", email = "damianvtran@gmail.com" }]
+license = { file = "LICENSE" }
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.12",
+]
+keywords = ["local", "agent", "execution", "operator"]
+dependencies = [
+    "langchain-openai",
+    "python-dotenv",
+    "pydantic",
+]
+requires-python = ">=3.12"
+
+[project.optional-dependencies]
+dev = ["black", "isort", "pylint", "pyright"]
+
+[project.urls]
+Homepage = "https://github.com/damianvtran/local-operator"
+
+[project.scripts]
+local-operator = "local_operator.main:main"
+
 [tool.black]
 line-length = 100
 target-version = ['py312']
@@ -6,10 +39,10 @@ target-version = ['py312']
 ignore = ["setup.py", "__init__.py"]
 disable = "all"
 enable = [
-  "empty-docstring",
-  "missing-class-docstring",
-  "missing-function-docstring",
-  "missing-module-docstring"
+    "empty-docstring",
+    "missing-class-docstring",
+    "missing-function-docstring",
+    "missing-module-docstring"
 ]
 
 [tool.isort]

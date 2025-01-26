@@ -14,7 +14,7 @@ Example Usage:
     python main.py
 """
 
-from local_operator.local_operator import DeepSeekCLI
+from local_operator.cli import DeepSeekCLI
 import asyncio
 
 if __name__ == "__main__":
