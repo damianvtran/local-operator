@@ -4,6 +4,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
+import readline  # Added for input history support
 
 
 class CredentialManager:
@@ -152,29 +153,40 @@ class LocalCodeExecutor:
         except Exception as e:
             return f"Error executing code: {str(e)}"
 
+    def _format_agent_output(self, text):
+        """Format agent output with colored sidebar and indentation."""
+        lines = text.split("\n")
+        formatted_lines = []
+        for line in lines:
+            formatted_lines.append(f"\033[1;36m│\033[0m {line}")
+        return "\n".join(formatted_lines)
+
     async def process_response(self, response):
         """Process model response, extracting and executing any code blocks.
 
         Args:
             response (str): The model's response containing potential code blocks
         """
-        print("\nModel Response:")
-        print(response)
+        formatted_response = self._format_agent_output(response)
+        print("\n\033[1;36m╭─ Agent Response ────────────────────────────────\033[0m")
+        print(formatted_response)
+        print("\033[1;36m╰──────────────────────────────────────────────────\033[0m")
 
         self.conversation_history.append({"role": "assistant", "content": response})
 
         code_blocks = self.extract_code_blocks(response)
         if code_blocks:
-            print("\nExecuting code blocks...")
+            print("\n\033[1;36m╭─ Executing Code Blocks ─────────────────────────\033[0m")
             for code in code_blocks:
-                print(f"\nExecuting:\n{code}")
+                print("\n\033[1;36m│ Executing:\033[0m\n{}".format(code))
                 result = await self.execute_code(code)
-                print(f"Result: {result}")
+                print("\033[1;36m│ Result:\033[0m {}".format(result))
 
                 self.conversation_history.append(
-                    {"role": "system", "content": f"Code execution result:\n{result}"}
+                    {"role": "system", "content": "Code execution result:\n{}".format(result)}
                 )
                 self.context["last_code_result"] = result
+            print("\033[1;36m╰──────────────────────────────────────────────────\033[0m")
 
 
 class CliOperator:
@@ -201,38 +213,78 @@ class CliOperator:
             model="deepseek-chat",
         )
         self.executor = LocalCodeExecutor(self.model)
+        self.input_history = []  # Store user input history
+        self.history_index = 0  # Track current position in history
+
+    def _get_input_with_history(self, prompt):
+        """Get user input with history navigation using up/down arrows."""
+
+        def completer(text, state):
+            # Filter history based on current input
+            options = [i for i in self.input_history if i.startswith(text)]
+            if state < len(options):
+                return options[state]
+            return None
+
+        readline.set_completer(completer)
+        readline.parse_and_bind("tab: complete")
+
+        # Set up history navigation
+        def pre_input_hook():
+            nonlocal self
+            if len(self.input_history) > 0:
+                # Add all history items
+                for item in self.input_history:
+                    readline.add_history(item)
+
+                # Add empty string to represent current position
+                readline.add_history("")
+                readline.set_history_length(len(self.input_history) + 1)
+
+        readline.set_pre_input_hook(pre_input_hook)
+
+        try:
+            # Save cursor position
+            print("\033[s", end="")
+            user_input = input(prompt)
+            # Restore cursor position and clear line
+            print("\033[u\033[K", end="")
+
+            if user_input and (not self.input_history or user_input != self.input_history[-1]):
+                self.input_history.append(user_input)
+            return user_input
+        except KeyboardInterrupt:
+            return "exit"
 
     async def chat(self):
         """Run the interactive chat interface with code execution capabilities."""
-        print("Local Executor Agent CLI")
-        print(
-            "You are interacting with a helpful CLI agent that can execute tasks locally "
-            "on your device by running Python code."
-        )
-        print(
-            "The agent will carefully analyze and execute code blocks, explaining any "
-            "errors that occur."
-        )
-        print(
-            "It will prompt you for confirmation before executing potentially dangerous "
-            "or risky operations."
-        )
-        print("Type 'exit' or 'quit' to quit\n")
+        print("\033[1;36m╭──────────────────────────────────────────────────╮\033[0m")
+        print("\033[1;36m│ Local Executor Agent CLI                         │\033[0m")
+        print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
+        print("\033[1;36m│ You are interacting with a helpful CLI agent     │\033[0m")
+        print("\033[1;36m│ that can execute tasks locally on your device    │\033[0m")
+        print("\033[1;36m│ by running Python code.                          │\033[0m")
+        print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
+        print("\033[1;36m│ Type 'exit' or 'quit' to quit                    │\033[0m")
+        print("\033[1;36m╰──────────────────────────────────────────────────╯\033[0m\n")
 
         self.executor.conversation_history = [
             {
                 "role": "system",
                 "content": "You are a Python code execution assistant. You strictly run "
-                "Python code locally. You are able to run code on the local machine. "
-                "Your functions: 1) Analyze and execute code blocks when requested 2) "
-                "Validate code safety first 3) Explain code behavior and results 4) "
-                "Never execute harmful code 5) Maintain secure execution. You only "
-                "execute Python code.",
+                "Python code locally. You are able to run python code on the local machine. "
+                "Keep your responses concise and to the point. Your functions: 1) Analyze "
+                "and execute python code blocks when requested 2) Validate python code "
+                "safety first 3) Explain python code behavior and results 4) Never "
+                "execute harmful python code 5) Maintain secure execution. You only "
+                "execute python code.",
             }
         ]
 
         while True:
-            user_input = input("\033[1m\033[94mYou:\033[0m \033[1m>\033[0m ")
+            user_input = self._get_input_with_history("\033[1m\033[94mYou:\033[0m \033[1m>\033[0m ")
+            if not user_input.strip():
+                continue
             if user_input.lower() == "exit" or user_input.lower() == "quit":
                 break
 
