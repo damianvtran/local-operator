@@ -230,7 +230,7 @@ class LocalCodeExecutor:
         print(formatted_response)
         print("\033[1;36m╰──────────────────────────────────────────────────\033[0m")
 
-        self.conversation_history.append({"role": "agent", "content": response})
+        self.conversation_history.append({"role": "assistant", "content": response})
 
         code_blocks = self.extract_code_blocks(response)
         if code_blocks:
