@@ -429,14 +429,14 @@ Folder '/Users/damiantran/mypackage' removed successfully.
 The system includes multiple layers of protection:
 - Automatic detection of dangerous operations (file access, system commands, etc.)
 - User confirmation prompts for potentially unsafe code
-- Isolated execution context to prevent system-wide changes
-- Strict Python-only code execution policy
+- Agent prompt with safety focused execution policy
+- Support for local Ollama models to prevent sending local system data to 3rd parties
 
 ## Requirements
 
 - Python 3.12+
-- DeepSeek API key (set in .env file)
-- Required packages: langchain-openai, python-dotenv, pydantic
+- For 3rd party hosting: DeepSeek API key or OpenAI API key (prompted for on first run)
+- For local hosting: Ollama model installed and running
 
 ## License
 
