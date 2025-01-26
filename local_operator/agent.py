@@ -20,16 +20,22 @@ class CredentialManager:
     def _ensure_config_exists(self):
         """Ensure config directory and file exist, prompt for API key if needed."""
         self.config_dir.mkdir(exist_ok=True, mode=0o700)
-
         if not self.config_file.exists():
-            print("DeepSeek API key not found. Let's set it up.")
-            api_key = input("Please enter your DeepSeek API key: ").strip()
+            print("\033[1;36m╭──────────────────────────────────────────────────╮\033[0m")
+            print("\033[1;36m│ DeepSeek API Key Setup                           │\033[0m")
+            print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
+            print("\033[1;36m│ API key not found. Let's set it up.              │\033[0m")
+            print("\033[1;36m╰──────────────────────────────────────────────────╯\033[0m")
+
+            api_key = input("\033[1m\033[94mPlease enter your DeepSeek API key: \033[0m").strip()
             if not api_key:
-                raise ValueError("API key is required to use this application")
+                raise ValueError("\033[1;31mAPI key is required to use this application\033[0m")
 
             with open(self.config_file, "w") as f:
                 f.write(f"DEEPSEEK_API_KEY={api_key}\n")
             self.config_file.chmod(0o600)
+
+            print("\n\033[1;32m✓ API key successfully saved!\033[0m")
 
     def get_api_key(self, key: str):
         """Retrieve the API key from config file.
