@@ -5,7 +5,6 @@ import os
 import threading
 from langchain_openai import ChatOpenAI
 from langchain_ollama import ChatOllama
-from langchain_core.messages import BaseMessage
 from pydantic import SecretStr
 import readline
 from typing import Any
