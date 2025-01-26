@@ -134,7 +134,7 @@ class LocalCodeExecutor:
         response = self.model.invoke(self.conversation_history)
         self.conversation_history.pop()
 
-        return response.content.strip().lower() == "yes"
+        return "yes" in response.content.strip().lower()
 
     async def execute_code(self, code):
         """Execute Python code with safety checks and context management.
@@ -277,13 +277,19 @@ class CliOperator:
         self.executor.conversation_history = [
             {
                 "role": "system",
-                "content": "You are a Python code execution assistant. You strictly run "
-                "Python code locally. You are able to run python code on the local machine. "
-                "Keep your responses concise and to the point. Your functions: 1) Analyze "
-                "and execute python code blocks when requested 2) Validate python code "
-                "safety first 3) Explain python code behavior and results 4) Never "
-                "execute harmful python code 5) Maintain secure execution. You only "
-                "execute python code.",
+                "content": """
+                You are a Python code execution assistant. You strictly run Python code locally.
+                You are able to run python code on the local machine.
+                Keep your responses concise and to the point. Your functions:
+                - Analyze and execute python code blocks.
+                - Any python code blocks in your response will be interpreted as code to execute.
+                - Provide all code in a single code block instead of multiple code blocks.
+                - Validate python code safety first
+                - Never execute harmful python code
+                - Maintain secure execution.
+                - Don't write any other text in your response.
+                You only execute python code and no other code.
+                """,
             }
         ]
 
