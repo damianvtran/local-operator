@@ -4,7 +4,7 @@ import sys
 import os
 import platform
 import threading
-import pkg_resources
+import importlib.metadata
 from datetime import datetime
 from langchain_openai import ChatOpenAI
 from langchain_ollama import ChatOllama
@@ -376,10 +376,10 @@ class CliOperator:
             "home_directory": os.path.expanduser("~"),
         }
 
-        installed_packages = pkg_resources.working_set
+        installed_packages = importlib.metadata.distributions()
         installed_packages_str = ""
         for package in installed_packages:
-            installed_packages_str += f"{package.project_name}=={package.version}\n"
+            installed_packages_str += f"{package.metadata['Name']}=={package.version}\n"
 
         self.executor.conversation_history = [
             {
