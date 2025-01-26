@@ -33,17 +33,37 @@ Once you have the API key, install the operator CLI with the following command:
 pip install local-operator
 ```
 
+If you would like to run with a local Ollama model, you will need to install Ollama first from [here](https://ollama.ai/download), and fetch a model using `ollama pull`.  Make sure that the ollama server is running with `ollama serve`.
+
 ## Usage
 
 Run the operator CLI with the following command:
 
+#### Run with DeepSeek
+
 ```bash
-local-operator
+local-operator --hosting deepseek --model deepseek-chat
+```
+
+#### Run with a local Ollama model
+
+Download and install Ollama first from [here](https://ollama.ai/download).
+
+```bash
+local-operator --hosting ollama --model qwen2.5:14b
+```
+
+#### Run with OpenAI
+
+```bash
+local-operator --hosting openai --model gpt-4o
 ```
 
 This will run the operator starting in the current working directory.  It will prompt you for any missing API keys or configuration on first run.  Everything else is handled by the agent 😊
 
 Quit by typing `exit` or `quit`.
+
+Run `local-operator --help` for more information about parameters and configuration.
 
 ## Examples
 
