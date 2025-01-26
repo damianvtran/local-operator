@@ -2,9 +2,11 @@ import os
 import re
 import io
 import sys
+import threading
 from pathlib import Path
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
+from langchain_ollama import ChatOllama
 from pydantic import SecretStr
 import readline  # Added for input history support
 
@@ -124,9 +126,10 @@ class LocalCodeExecutor:
 
         Respond with only "yes" if the code contains dangerous operations that could:
         - Delete or modify files
-        - Execute system commands
+        - Install or update packages that might be harmful or unsafe
+        - Execute unsafe system commands
         - Access sensitive system resources
-        - Perform network operations
+        - Perform network operations that expose the system or user data to the internet
         - Otherwise compromise system security
 
         Respond with only "no" if the code appears safe to execute.
@@ -138,93 +141,119 @@ class LocalCodeExecutor:
 
         return "yes" in response.content.strip().lower()
 
-    async def execute_code(self, code):
+    async def execute_code(self, code, max_retries=2, timeout=30):
         """Execute Python code with safety checks and context management.
 
         Args:
             code (str): The Python code to execute
+            max_retries (int): Maximum number of retry attempts
+            timeout (int): Maximum execution time in seconds
 
         Returns:
             str: Execution result message or error message
         """
+
+        async def _execute_with_timeout(code_to_execute):
+            """Helper function to execute code with timeout."""
+            result = {"success": False, "error": None}
+
+            def run_code():
+                try:
+                    exec(code_to_execute, self.context)
+                    result["success"] = True
+                except Exception as e:
+                    result["error"] = e
+                    result["success"] = False
+
+            exec_thread = threading.Thread(target=run_code)
+            exec_thread.start()
+            exec_thread.join(timeout=timeout)
+
+            if exec_thread.is_alive():
+                raise TimeoutError(f"Code execution timed out after {timeout} seconds")
+
+            if not result["success"] and result["error"]:
+                raise result["error"]
+            elif not result["success"]:
+                raise TimeoutError("Code execution failed")
+
+        async def _capture_output(code_to_execute):
+            """Helper function to capture and return execution output."""
+            old_stdout = sys.stdout
+            new_stdout = io.StringIO()
+            sys.stdout = new_stdout
+
+            try:
+                await _execute_with_timeout(code_to_execute)
+                output = new_stdout.getvalue()
+                self.context["last_code_output"] = output
+                self.conversation_history.append(
+                    {"role": "system", "content": f"Code execution output:\n{output}"}
+                )
+                return (
+                    "\n\033[1;32m✓ Code Execution Successful\033[0m\n"
+                    "\033[1;34m╞══════════════════════════════════════════╡\n"
+                    f"\033[1;36m│ Output:\033[0m\n{output}"
+                )
+            finally:
+                sys.stdout = old_stdout
+
+        async def _handle_error(error, attempt=None):
+            """Helper function to handle execution errors."""
+            error_message = str(error)
+            self.conversation_history.append(
+                {"role": "system", "content": f"Code execution failed: {error_message}"}
+            )
+
+            if attempt is not None:
+                return (
+                    f"\n\033[1;31m✗ Code Execution Failed after {attempt + 1} attempts\033[0m\n"
+                    f"\033[1;34m╞══════════════════════════════════════════╡\n"
+                    f"\033[1;36m│ Error:\033[0m\n{error_message}"
+                )
+            return (
+                "\n\033[1;31m✗ Code Execution Failed\033[0m\n"
+                f"\033[1;34m╞══════════════════════════════════════════╡\n"
+                f"\033[1;36m│ Error:\033[0m\n{error_message}"
+            )
+
+        # Main execution flow
         try:
-            is_dangerous = await self.check_code_safety(code)
-            if is_dangerous:
+            if await self.check_code_safety(code):
                 confirm = input(
                     "Warning: Potentially dangerous operation detected. Proceed? (y/n): "
                 )
                 if confirm.lower() != "y":
                     return "Code execution canceled by user"
 
-            # Capture stdout
-            old_stdout = sys.stdout
-            new_stdout = io.StringIO()
-            sys.stdout = new_stdout
+            return await _capture_output(code)
 
-            exec(code, self.context)
-
-            # Restore stdout and get captured output
-            sys.stdout = old_stdout
-            output = new_stdout.getvalue()
-
-            # Add output to context and conversation history
-            self.context["last_code_output"] = output
+        except Exception as initial_error:
+            error_message = str(initial_error)
             self.conversation_history.append(
-                {"role": "system", "content": f"Code execution output:\n{output}"}
-            )
-            return (
-                "\n\033[1;32m✓ Code Execution Successful\033[0m\n"
-                "\033[1;34m╞══════════════════════════════════════════╡\n"
-                f"\033[1;36m│ Output:\033[0m\n{output}"
-            )
-        except Exception as e:
-            error_message = str(e)
-            self.conversation_history.append(
-                {"role": "system", "content": f"Code execution failed with error: {error_message}"}
+                {
+                    "role": "user",
+                    "content": (
+                        f"The initial execution failed with error: {error_message}. "
+                        "Review the code and make corrections to run successfully."
+                    ),
+                }
             )
 
-            # Try up to 3 times with error feedback
-            for attempt in range(2):
+            for attempt in range(max_retries):
                 try:
-                    # Get new response from model with error context
                     response = self.model.invoke(self.conversation_history)
                     new_code = self.extract_code_blocks(response.content)
                     if new_code:
-                        # Capture stdout for retries
-                        old_stdout = sys.stdout
-                        new_stdout = io.StringIO()
-                        sys.stdout = new_stdout
+                        return await _capture_output(new_code[0])
+                except Exception as retry_error:
+                    print(f"\n\033[1;31m✗ Error during execution (attempt {attempt + 1}):\033[0m")
+                    print("\033[1;34m╞══════════════════════════════════════════╡")
+                    print(f"\033[1;36m│ Error:\033[0m\n{str(retry_error)}")
+                    if attempt < max_retries - 1:
+                        print("\033[1;36m│\033[0m \033[1;33mAnother attempt will be made...\033[0m")
 
-                        exec(new_code[0], self.context)
-
-                        # Restore stdout and get captured output
-                        sys.stdout = old_stdout
-                        output = new_stdout.getvalue()
-                        # Add output to context and conversation history
-                        self.context["last_code_output"] = output
-                        retry_msg = f"Code execution output after retry {attempt + 1}:\n{output}"
-                        self.conversation_history.append({"role": "system", "content": retry_msg})
-                        success_msg = (
-                            f"\n\033[1;32m✓ Code Execution Successful after "
-                            f"{attempt + 1} retries\033[0m\n"
-                            f"\033[1;34m╞══════════════════════════════════════════╡\n"
-                            f"\033[1;36m│ Output:\033[0m\n{output}"
-                        )
-                        return success_msg
-                except Exception as e:
-                    error_message = str(e)
-                    self.conversation_history.append(
-                        {
-                            "role": "system",
-                            "content": f"Retry {attempt + 1} failed with error: {error_message}",
-                        }
-                    )
-
-            return (
-                "\n\033[1;31m✗ Code Execution Failed after 3 attempts\033[0m\n"
-                f"\033[1;34m╞══════════════════════════════════════════╡\n"
-                f"\033[1;36m│ Last error:\033[0m\n{error_message}"
-            )
+            return await _handle_error(initial_error, attempt=max_retries)
 
     def _format_agent_output(self, text):
         """Format agent output with colored sidebar and indentation."""
@@ -263,33 +292,61 @@ class LocalCodeExecutor:
 
 
 class CliOperator:
-    """A command-line interface for interacting with DeepSeek's language model.
+    """A command-line interface for interacting with language models.
 
     Attributes:
-        model: The configured ChatOpenAI instance for DeepSeek
+        model: The configured ChatOpenAI or ChatOllama instance
         executor: LocalCodeExecutor instance for handling code execution
     """
 
-    def __init__(self):
-        """Initialize the CLI by loading credentials or prompting for them."""
+    def __init__(self, hosting: str, model: str):
+        """Initialize the CLI by loading credentials or prompting for them.
+
+        Args:
+            hosting (str): Hosting platform (deepseek, openai, or ollama)
+            model (str): Model name to use
+        """
+        if not hosting:
+            raise ValueError("Hosting is required")
+        if not model:
+            raise ValueError("Model is required")
+
         credential_manager = CredentialManager()
 
-        # Try to get API key from environment first, then from config file
-        api_key = credential_manager.get_api_key("DEEPSEEK_API_KEY")
-        if not api_key:
-            api_key = credential_manager.prompt_for_api_key("DEEPSEEK_API_KEY")
+        # Configure model based on hosting
+        if hosting == "deepseek":
+            base_url = "https://api.deepseek.com/v1"
+            api_key = credential_manager.get_api_key("DEEPSEEK_API_KEY")
+            if not api_key:
+                api_key = credential_manager.prompt_for_api_key("DEEPSEEK_API_KEY")
+            self.model = ChatOpenAI(
+                api_key=SecretStr(api_key),
+                temperature=0.5,
+                base_url=base_url,
+                model=model,
+            )
+        elif hosting == "openai":
+            base_url = "https://api.openai.com"
+            api_key = credential_manager.get_api_key("OPENAI_API_KEY")
+            if not api_key:
+                api_key = credential_manager.prompt_for_api_key("OPENAI_API_KEY")
+            self.model = ChatOpenAI(
+                api_key=SecretStr(api_key),
+                temperature=0.5,
+                base_url=base_url,
+                model=model,
+            )
+        elif hosting == "ollama":
+            self.model = ChatOllama(
+                model=model,
+                temperature=0.5,
+            )
 
-        self.model = ChatOpenAI(
-            api_key=SecretStr(api_key),
-            temperature=0.5,
-            base_url="https://api.deepseek.com/v1",
-            model="deepseek-chat",
-        )
         self.executor = LocalCodeExecutor(self.model)
         self.input_history = []  # Store user input history
         self.history_index = 0  # Track current position in history
 
-    def _get_input_with_history(self, prompt):
+    def _get_input_with_history(self, prompt: str) -> str:
         """Get user input with history navigation using up/down arrows."""
 
         def completer(text, state):
@@ -304,7 +361,6 @@ class CliOperator:
 
         # Set up history navigation
         def pre_input_hook():
-            nonlocal self
             if len(self.input_history) > 0:
                 # Add all history items
                 for item in self.input_history:
@@ -346,15 +402,20 @@ class CliOperator:
                 "role": "system",
                 "content": """
                 You are a Python code execution assistant. You strictly run Python code locally.
-                You are able to run python code on the local machine.
+                You are able to run python code on the local machine and install required packages
+                to run the code.  Think about the code that you will need to run in order
+                to acheive the user's goals and output this code in ```python``` code blocks.
 
                 For user commands, the following rules apply:
                 - Keep your responses concise and to the point.
                 - Analyze and execute python code blocks.
                 - Any python code blocks in your response will be interpreted as code to execute.
+                  These must all have the ```python``` syntax.
                 - Provide all code in a single code block instead of multiple code blocks.
                 - In the code block, focus on printing the results in a human readable format in the
                   terminal such that it is easy to understand and follow.
+                - Add the installation of required packages in the code blocks for any
+                  that are not the standard library (for example, pandas, numpy, and others)
                 - Validate python code safety first
                 - Never execute harmful python code
                 - Maintain secure execution.

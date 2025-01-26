@@ -11,17 +11,37 @@ The application uses asyncio for asynchronous operation and includes
 error handling for graceful failure.
 
 Example Usage:
-    python main.py
+    python main.py --hosting deepseek --model deepseek-chat
+    python main.py --hosting openai --model gpt-4
+    python main.py --hosting ollama --model llama2
 """
 
 from local_operator.agent import CliOperator
 import asyncio
+import argparse
 
 
 def main():
     try:
-        # Initialize the CLI interface
-        operator = CliOperator()
+        # Set up argument parser
+        parser = argparse.ArgumentParser(description="Local Operator CLI")
+        parser.add_argument(
+            "--hosting",
+            type=str,
+            choices=["deepseek", "openai", "ollama"],
+            default="deepseek",
+            help="Hosting platform to use (deepseek, openai, or ollama)",
+        )
+        parser.add_argument(
+            "--model",
+            type=str,
+            default="deepseek-chat",
+            help="Model to use (e.g., deepseek-chat, gpt-4o, qwen2.5:14b)",
+        )
+        args = parser.parse_args()
+
+        # Initialize the CLI interface with hosting and model parameters
+        operator = CliOperator(hosting=args.hosting, model=args.model)
 
         # Start the async chat interface
         asyncio.run(operator.chat())
