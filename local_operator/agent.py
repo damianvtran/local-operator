@@ -1,5 +1,7 @@
 import os
 import re
+import io
+import sys
 from pathlib import Path
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
@@ -154,10 +156,75 @@ class LocalCodeExecutor:
                 if confirm.lower() != "y":
                     return "Code execution canceled by user"
 
+            # Capture stdout
+            old_stdout = sys.stdout
+            new_stdout = io.StringIO()
+            sys.stdout = new_stdout
+
             exec(code, self.context)
-            return "Code executed successfully"
+
+            # Restore stdout and get captured output
+            sys.stdout = old_stdout
+            output = new_stdout.getvalue()
+
+            # Add output to context and conversation history
+            self.context["last_code_output"] = output
+            self.conversation_history.append(
+                {"role": "system", "content": f"Code execution output:\n{output}"}
+            )
+            return (
+                "\n\033[1;32m✓ Code Execution Successful\033[0m\n"
+                "\033[1;34m╞══════════════════════════════════════════╡\n"
+                f"\033[1;36m│ Output:\033[0m\n{output}"
+            )
         except Exception as e:
-            return f"Error executing code: {str(e)}"
+            error_message = str(e)
+            self.conversation_history.append(
+                {"role": "system", "content": f"Code execution failed with error: {error_message}"}
+            )
+
+            # Try up to 3 times with error feedback
+            for attempt in range(2):
+                try:
+                    # Get new response from model with error context
+                    response = self.model.invoke(self.conversation_history)
+                    new_code = self.extract_code_blocks(response.content)
+                    if new_code:
+                        # Capture stdout for retries
+                        old_stdout = sys.stdout
+                        new_stdout = io.StringIO()
+                        sys.stdout = new_stdout
+
+                        exec(new_code[0], self.context)
+
+                        # Restore stdout and get captured output
+                        sys.stdout = old_stdout
+                        output = new_stdout.getvalue()
+                        # Add output to context and conversation history
+                        self.context["last_code_output"] = output
+                        retry_msg = f"Code execution output after retry {attempt + 1}:\n{output}"
+                        self.conversation_history.append({"role": "system", "content": retry_msg})
+                        success_msg = (
+                            f"\n\033[1;32m✓ Code Execution Successful after "
+                            f"{attempt + 1} retries\033[0m\n"
+                            f"\033[1;34m╞══════════════════════════════════════════╡\n"
+                            f"\033[1;36m│ Output:\033[0m\n{output}"
+                        )
+                        return success_msg
+                except Exception as e:
+                    error_message = str(e)
+                    self.conversation_history.append(
+                        {
+                            "role": "system",
+                            "content": f"Retry {attempt + 1} failed with error: {error_message}",
+                        }
+                    )
+
+            return (
+                "\n\033[1;31m✗ Code Execution Failed after 3 attempts\033[0m\n"
+                f"\033[1;34m╞══════════════════════════════════════════╡\n"
+                f"\033[1;36m│ Last error:\033[0m\n{error_message}"
+            )
 
     def _format_agent_output(self, text):
         """Format agent output with colored sidebar and indentation."""
@@ -280,14 +347,20 @@ class CliOperator:
                 "content": """
                 You are a Python code execution assistant. You strictly run Python code locally.
                 You are able to run python code on the local machine.
-                Keep your responses concise and to the point. Your functions:
+
+                For user commands, the following rules apply:
+                - Keep your responses concise and to the point.
                 - Analyze and execute python code blocks.
                 - Any python code blocks in your response will be interpreted as code to execute.
                 - Provide all code in a single code block instead of multiple code blocks.
+                - In the code block, focus on printing the results in a human readable format in the
+                  terminal such that it is easy to understand and follow.
                 - Validate python code safety first
                 - Never execute harmful python code
                 - Maintain secure execution.
                 - Don't write any other text in your response.
+                - If the user indicates that they want to exit, respond with a goodbye message
+                  and then on a separate line, "Bye!"
                 You only execute python code and no other code.
                 """,
             }
@@ -303,3 +376,7 @@ class CliOperator:
             self.executor.conversation_history.append({"role": "user", "content": user_input})
             response = self.model.invoke(self.executor.conversation_history)
             await self.executor.process_response(response.content)
+
+            # Check if the last line of the response contains "Bye!" to exit
+            if response.content.strip().splitlines()[-1].strip() == "Bye!":
+                break
