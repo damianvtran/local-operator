@@ -2,7 +2,10 @@ import re
 import io
 import sys
 import os
+import platform
 import threading
+import pkg_resources
+from datetime import datetime
 from langchain_openai import ChatOpenAI
 from langchain_ollama import ChatOllama
 from pydantic import SecretStr
@@ -360,20 +363,23 @@ class CliOperator:
 
         return "Bye!" in response.content.strip().splitlines()[-1].strip()
 
-    async def chat(self):
-        """Run the interactive chat interface with code execution capabilities."""
-        debug_indicator = (
-            " [DEBUG MODE]" if os.getenv("LOCAL_OPERATOR_DEBUG", "false").lower() == "true" else ""
-        )
-        print("\033[1;36m╭──────────────────────────────────────────────────╮\033[0m")
-        print(f"\033[1;36m│ Local Executor Agent CLI{debug_indicator:<25}│\033[0m")
-        print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
-        print("\033[1;36m│ You are interacting with a helpful CLI agent     │\033[0m")
-        print("\033[1;36m│ that can execute tasks locally on your device    │\033[0m")
-        print("\033[1;36m│ by running Python code.                          │\033[0m")
-        print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
-        print("\033[1;36m│ Type 'exit' or 'quit' to quit                    │\033[0m")
-        print("\033[1;36m╰──────────────────────────────────────────────────╯\033[0m\n")
+    def _setup_prompt(self):
+        """Setup the prompt for the agent."""
+
+        system_details = {
+            "os": platform.system(),
+            "release": platform.release(),
+            "version": platform.version(),
+            "architecture": platform.machine(),
+            "machine": platform.machine(),
+            "processor": platform.processor(),
+            "home_directory": os.path.expanduser("~"),
+        }
+
+        installed_packages = pkg_resources.working_set
+        installed_packages_str = ""
+        for package in installed_packages:
+            installed_packages_str += f"{package.project_name}=={package.version}\n"
 
         self.executor.conversation_history = [
             {
@@ -416,14 +422,44 @@ class CliOperator:
                 - Never execute harmful python code
                 - Maintain secure execution.
                 - Don't write any other text in your response.
-                - If the user indicates that they want to exit, respond with a goodbye message
-                  and then on a separate line, "Bye!"
+                - If the user indicates that they want to exit, respond with "Bye!"
                 You only execute python code and no other code.
 
+                System Details:
+                - OS: {system_details['os']}
+                - Release: {system_details['release']}
+                - Version: {system_details['version']}
+                - Architecture: {system_details['architecture']}
+                - Machine: {system_details['machine']}
+                - Processor: {system_details['processor']}
+                - Home Directory: {system_details['home_directory']}
+
+                The current date and time is: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
                 You are currently in the following directory: {os.getcwd()}
+
+                Installed packages in the current environment:
+                {installed_packages_str}
                 """,
             }
         ]
+
+    async def chat(self):
+        """Run the interactive chat interface with code execution capabilities."""
+        debug_indicator = (
+            " [DEBUG MODE]" if os.getenv("LOCAL_OPERATOR_DEBUG", "false").lower() == "true" else ""
+        )
+        print("\033[1;36m╭──────────────────────────────────────────────────╮\033[0m")
+        print(f"\033[1;36m│ Local Executor Agent CLI{debug_indicator:<25}│\033[0m")
+        print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
+        print("\033[1;36m│ You are interacting with a helpful CLI agent     │\033[0m")
+        print("\033[1;36m│ that can execute tasks locally on your device    │\033[0m")
+        print("\033[1;36m│ by running Python code.                          │\033[0m")
+        print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
+        print("\033[1;36m│ Type 'exit' or 'quit' to quit                    │\033[0m")
+        print("\033[1;36m╰──────────────────────────────────────────────────╯\033[0m\n")
+
+        self._setup_prompt()
 
         while True:
             user_input = self._get_input_with_history(

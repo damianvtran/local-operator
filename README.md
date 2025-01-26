@@ -14,7 +14,7 @@ Artificial intelligence tools like these should be open and freely available to 
 - **Conversation History**: Tracks the full interaction history for context-aware responses
 - **DeepSeek Integration**: Uses DeepSeek's AI models through LangChain's ChatOpenAI implementation
 - **Asynchronous Execution**: Safe code execution with async/await pattern
-- **Environment Configuration**: Uses .env file for API key management
+- **Environment Configuration**: Uses credential manager for API key management
 
 The Local Operator provides a command-line interface where you can:
 1. Interact with the AI assistant in natural language
