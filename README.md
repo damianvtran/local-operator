@@ -25,26 +25,23 @@ The Local Operator provides a command-line interface where you can:
 
 ## Setup
 
-Clone the `.env.template` file and rename it to `.env`.  Add your DeepSeek API key to the `.env` file.
+To run the operator CLI, you need to have a DeepSeek API key.  You can get one [here](https://www.deepseek.com/api).
 
-It's recommended to use a virtual environment to manage dependencies, but not necessary.
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-```
-
-Install the required packages either in the virtual environment or globally:
+Once you have the API key, install the operator CLI with the following command:
 
 ```bash
-pip install -r requirements.txt
+pip install local-operator
 ```
 
 ## Usage
 
-Run the script from the root of the project directory with `python main.py`
+Run the operator CLI with the following command:
 
-Everything else is handled by the agent 😊
+```bash
+local-operator
+```
+
+This will run the operator starting in the current working directory.  It will prompt you for any missing API keys or configuration on first run.  Everything else is handled by the agent 😊
 
 Quit by typing `exit` or `quit`.
 
