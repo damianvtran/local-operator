@@ -424,6 +424,95 @@ Folder '/Users/damiantran/mypackage' removed successfully.
 ╰──────────────────────────────────────────────────
 ```
 
+### Multi-step Agent Execution
+
+```shell
+You (/Users/damiantran/local-operator): > do a two step execution, add more text and then read the text in two steps
+
+╭─ Agent Response (Step 1) ───────────────────────
+│ I'll break this into two steps as requested:
+│ 
+│ **Step 1: Add more text to the file**
+│ ```python
+│ additional_text = """\n\nThis is additional text added in step 1.
+│ It will be followed by the file content reading in step 2."""
+│ 
+│ with open('test.txt', 'a') as file:
+│     file.write(additional_text)
+│ 
+│ print("Additional text added to 'test.txt' successfully.")
+│ ```
+│ 
+│ After you confirm this step, I'll proceed with step 2 to read the file contents.
+╰──────────────────────────────────────────────────
+
+╭─ Executing Code Blocks (Step 1) ───────────────
+
+│ Executing:
+additional_text = """\n\nThis is additional text added in step 1.
+It will be followed by the file content reading in step 2."""
+
+with open('test.txt', 'a') as file:
+    file.write(additional_text)
+
+print("Additional text added to 'test.txt' successfully.")
+
+│ Result: 
+✓ Code Execution Successful
+╞══════════════════════════════════════════╡
+│ Output:
+Additional text added to 'test.txt' successfully.
+
+╰──────────────────────────────────────────────────
+
+╭─ Agent Response (Step 2) ───────────────────────
+│ Code execution output:
+│ Additional text added to 'test.txt' successfully.
+│ 
+│ 
+│ Current working directory: /Users/damiantran/local-operator**Step 2: Read the file contents**
+│ ```python
+│ with open('test.txt', 'r') as file:
+│     content = file.read()
+│ 
+│ print("File contents:\n")
+│ print(content)
+│ ```
+│ 
+│ This will read and display the complete contents of `test.txt`, including the original poem, Lorem Ipsum text, and the additional text we just added.
+│ 
+│ DONE
+╰──────────────────────────────────────────────────
+
+╭─ Executing Code Blocks (Step 2) ───────────────
+
+│ Executing:
+with open('test.txt', 'r') as file:
+    content = file.read()
+
+print("File contents:\n")
+print(content)
+
+│ Result: 
+✓ Code Execution Successful
+╞══════════════════════════════════════════╡
+│ Output:
+File contents:
+
+Roses are red,
+Violets are blue,
+Sugar is sweet,
+And so are you!
+
+Lorem ipsum dolor sit amet, consectetur adipiscing elit. 
+Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
+
+This is additional text added in step 1.
+It will be followed by the file content reading in step 2.
+
+╰──────────────────────────────────────────────────
+```
+
 ## Safety Features
 
 The system includes multiple layers of protection:
