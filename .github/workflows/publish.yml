@@ -15,6 +15,8 @@ permissions:
 jobs:
   release-build:
     runs-on: ubuntu-latest
+    outputs:
+      skip_build: ${{ steps.tag-check.outputs.skip_build }}
 
     steps:
       - uses: actions/checkout@v4
@@ -37,18 +39,18 @@ jobs:
           fi
 
       - uses: actions/setup-python@v5
-        if: steps.tag-check.outputs.skip_build == 'false'
+        if: ${{ steps.tag-check.outputs.skip_build == 'false' }}
         with:
           python-version: "3.12"
 
       - name: Build release distributions
-        if: steps.tag-check.outputs.skip_build == 'false'
+        if: ${{ steps.tag-check.outputs.skip_build == 'false' }}
         run: |
           python -m pip install build
           python -m build
 
       - name: Upload distributions
-        if: steps.tag-check.outputs.skip_build == 'false'
+        if: ${{ steps.tag-check.outputs.skip_build == 'false' }}
         uses: actions/upload-artifact@v4
         with:
           name: release-dists
@@ -58,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - release-build
-    if: needs.release-build.result == 'success' && steps.tag-check.outputs.skip_build == 'false'
+    if: ${{ needs.release-build.result == 'success' && needs.release-build.outputs.skip_build == 'false' }}
     permissions:
       id-token: write
 
