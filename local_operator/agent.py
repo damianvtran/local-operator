@@ -1,22 +1,31 @@
 import re
 import io
 import sys
+import os
 import threading
 from langchain_openai import ChatOpenAI
 from langchain_ollama import ChatOllama
+from langchain_core.messages import BaseMessage
 from pydantic import SecretStr
 import readline
+from typing import Any
 
 from local_operator.credentials import CredentialManager
 
 
 class LocalCodeExecutor:
+    context: dict[str, Any]
+    conversation_history: list[dict[str, str]]
+    model: ChatOpenAI | ChatOllama
+    step_counter: int
+
     """A class to handle local Python code execution with safety checks and context management.
 
     Attributes:
         context (dict): A dictionary to maintain execution context between code blocks
         conversation_history (list): A list of message dictionaries tracking the conversation
         model: The language model used for code analysis and safety checks
+        step_counter (int): A counter to track the current step in sequential execution
     """
 
     def __init__(self, model):
@@ -28,6 +37,11 @@ class LocalCodeExecutor:
         self.context = {}
         self.conversation_history = []
         self.model = model
+        self.reset_step_counter()
+
+    def reset_step_counter(self):
+        """Reset the step counter."""
+        self.step_counter = 1
 
     def extract_code_blocks(self, text):
         """Extract Python code blocks from text using markdown-style syntax.
@@ -207,7 +221,10 @@ class LocalCodeExecutor:
             response (str): The model's response containing potential code blocks
         """
         formatted_response = self._format_agent_output(response)
-        print("\n\033[1;36m╭─ Agent Response ────────────────────────────────\033[0m")
+        print(
+            f"\n\033[1;36m╭─ Agent Response (Step {self.step_counter}) "
+            f"───────────────────────\033[0m"
+        )
         print(formatted_response)
         print("\033[1;36m╰──────────────────────────────────────────────────\033[0m")
 
@@ -215,17 +232,23 @@ class LocalCodeExecutor:
 
         code_blocks = self.extract_code_blocks(response)
         if code_blocks:
-            print("\n\033[1;36m╭─ Executing Code Blocks ─────────────────────────\033[0m")
+            print(
+                f"\n\033[1;36m╭─ Executing Code Blocks (Step {self.step_counter}) "
+                f"───────────────\033[0m"
+            )
             for code in code_blocks:
                 print("\n\033[1;36m│ Executing:\033[0m\n{}".format(code))
                 result = await self.execute_code(code)
                 print("\033[1;36m│ Result:\033[0m {}".format(result))
 
-                self.conversation_history.append(
-                    {"role": "system", "content": "Code execution result:\n{}".format(result)}
-                )
                 self.context["last_code_result"] = result
             print("\033[1;36m╰──────────────────────────────────────────────────\033[0m")
+
+            self.conversation_history.append(
+                {"role": "system", "content": f"Current working directory: {os.getcwd()}"}
+            )
+
+            self.step_counter += 1
 
 
 class CliOperator:
@@ -322,10 +345,29 @@ class CliOperator:
         except KeyboardInterrupt:
             return "exit"
 
+    def _agent_is_done(self, response):
+        """Check if the agent has completed its task."""
+        if response is None:
+            return False
+
+        return "DONE" in response.content.strip().splitlines()[
+            -1
+        ].strip() or self._agent_should_exit(response)
+
+    def _agent_should_exit(self, response):
+        """Check if the agent should exit."""
+        if response is None:
+            return False
+
+        return "Bye!" in response.content.strip().splitlines()[-1].strip()
+
     async def chat(self):
         """Run the interactive chat interface with code execution capabilities."""
+        debug_indicator = (
+            " [DEBUG MODE]" if os.getenv("LOCAL_OPERATOR_DEBUG", "false").lower() == "true" else ""
+        )
         print("\033[1;36m╭──────────────────────────────────────────────────╮\033[0m")
-        print("\033[1;36m│ Local Executor Agent CLI                         │\033[0m")
+        print(f"\033[1;36m│ Local Executor Agent CLI{debug_indicator:<25}│\033[0m")
         print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
         print("\033[1;36m│ You are interacting with a helpful CLI agent     │\033[0m")
         print("\033[1;36m│ that can execute tasks locally on your device    │\033[0m")
@@ -337,13 +379,31 @@ class CliOperator:
         self.executor.conversation_history = [
             {
                 "role": "system",
-                "content": """
+                "content": f"""
                 You are a Python code execution assistant. You strictly run Python code locally.
                 You are able to run python code on the local machine and install required packages
                 to run the code.  Think about the code that you will need to run in order
                 to acheive the user's goals and output this code in ```python``` code blocks.
+                Output only one step at a time.  If the step is not the final step, do not
+                include DONE in that response.  If the step is the final step, include DONE
+                in that response.  Include DONE outside of the code block, on a new line after
+                the code block.  The operator will request you to keep running steps until
+                you have completed the task.  At each step you will need to figure out
+                what the next step is in real time based on the previous output.  You
+                will be able to use the output of the previous step to determine the next
+                step.
 
                 For user commands, the following rules apply:
+                - Plan the sequence of events needed to achieve the user's goals.  Break
+                  down complex tasks into sequential steps.  Output only one step at a time.
+                - For each step, generate only the code needed for that step.
+                - After completing a step, analyze the results and determine next steps.
+                - When you believe the task is complete, include "DONE" as the last line
+                  in your response.  This will end the loop for that task and the next
+                  user input will be a new task.
+                - Don't re-do any DONE steps from conversation history unless explicitly
+                  requested by the user.  Pay attention to more recent commands from
+                  the user over older commands, but use the older commands for context.
                 - Keep your responses concise and to the point.
                 - Analyze and execute python code blocks.
                 - Any python code blocks in your response will be interpreted as code to execute.
@@ -360,12 +420,16 @@ class CliOperator:
                 - If the user indicates that they want to exit, respond with a goodbye message
                   and then on a separate line, "Bye!"
                 You only execute python code and no other code.
+
+                You are currently in the following directory: {os.getcwd()}
                 """,
             }
         ]
 
         while True:
-            user_input = self._get_input_with_history("\033[1m\033[94mYou:\033[0m \033[1m>\033[0m ")
+            user_input = self._get_input_with_history(
+                f"\033[1m\033[94mYou ({os.getcwd()}):\033[0m \033[1m>\033[0m "
+            )
 
             if not user_input.strip():
                 continue
@@ -374,9 +438,24 @@ class CliOperator:
                 break
 
             self.executor.conversation_history.append({"role": "user", "content": user_input})
-            response = self.model.invoke(self.executor.conversation_history)
-            await self.executor.process_response(response.content)
+
+            response = None
+            self.executor.reset_step_counter()
+
+            while not self._agent_is_done(response):
+                response = self.model.invoke(self.executor.conversation_history)
+                await self.executor.process_response(response.content)
+
+            if os.environ.get("LOCAL_OPERATOR_DEBUG") == "true":
+                print("\n\033[1;35m╭─ Debug: Conversation History ───────────────────────\033[0m")
+                for i, entry in enumerate(self.executor.conversation_history, 1):
+                    role = entry["role"]
+                    content = entry["content"]
+                    print(f"\033[1;35m│ {i}. {role.capitalize()}:\033[0m")
+                    for line in content.split("\n"):
+                        print(f"\033[1;35m│   {line}\033[0m")
+                print("\033[1;35m╰──────────────────────────────────────────────────\033[0m\n")
 
             # Check if the last line of the response contains "Bye!" to exit
-            if response.content.strip().splitlines()[-1].strip() == "Bye!":
+            if self._agent_should_exit(response):
                 break
