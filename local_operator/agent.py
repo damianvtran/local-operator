@@ -1,8 +1,71 @@
 import os
 import re
+from pathlib import Path
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
+
+
+class CredentialManager:
+    """Manages API credentials storage and retrieval."""
+
+    def __init__(self):
+        self.config_dir = Path.home() / ".local-operator"
+        self.config_file = self.config_dir / "config.env"
+        self._ensure_config_exists()
+        # Load environment variables from config file
+        load_dotenv(self.config_file)
+
+    def _ensure_config_exists(self):
+        """Ensure config directory and file exist, prompt for API key if needed."""
+        self.config_dir.mkdir(exist_ok=True, mode=0o700)
+
+        if not self.config_file.exists():
+            print("DeepSeek API key not found. Let's set it up.")
+            api_key = input("Please enter your DeepSeek API key: ").strip()
+            if not api_key:
+                raise ValueError("API key is required to use this application")
+
+            with open(self.config_file, "w") as f:
+                f.write(f"DEEPSEEK_API_KEY={api_key}\n")
+            self.config_file.chmod(0o600)
+
+    def get_api_key(self, key: str):
+        """Retrieve the API key from config file.
+
+        Args:
+            key (str): The environment variable key to retrieve
+
+        Returns:
+            str: The API key value
+        """
+        return os.getenv(key)
+
+    def prompt_for_api_key(self, key: str) -> str:
+        """Prompt the user to enter an API key if not present in environment.
+
+        Args:
+            key (str): The environment variable key to check
+
+        Returns:
+            str: The API key value
+        """
+        api_key = self.get_api_key(key)
+        if not api_key:
+            print(f"{key} not found in configuration.")
+            api_key = input(f"Please enter your {key}: ").strip()
+            if not api_key:
+                raise ValueError(f"{key} is required to use this application")
+
+            # Save the new API key to config file
+            with open(self.config_file, "a") as f:
+                f.write(f"\n{key}={api_key}\n")
+            self.config_file.chmod(0o600)
+
+            # Reload environment variables
+            load_dotenv(self.config_file, override=True)
+
+        return api_key
 
 
 class LocalCodeExecutor:
@@ -123,11 +186,13 @@ class CliOperator:
     """
 
     def __init__(self):
-        """Initialize the CLI by loading environment variables and setting up the model."""
-        load_dotenv()
-        api_key = os.getenv("DEEPSEEK_API_KEY")
+        """Initialize the CLI by loading credentials or prompting for them."""
+        credential_manager = CredentialManager()
+
+        # Try to get API key from environment first, then from config file
+        api_key = credential_manager.get_api_key("DEEPSEEK_API_KEY")
         if not api_key:
-            raise ValueError("DEEPSEEK_API_KEY not found in .env")
+            api_key = credential_manager.prompt_for_api_key("DEEPSEEK_API_KEY")
 
         self.model = ChatOpenAI(
             api_key=SecretStr(api_key),
