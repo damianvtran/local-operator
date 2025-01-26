@@ -25,7 +25,7 @@ The Local Operator provides a command-line interface where you can:
 
 ## Setup
 
-To run the operator CLI, you need to have a DeepSeek API key.  You can get one [here](https://www.deepseek.com/api).
+To run the operator CLI, you need to have a DeepSeek API key.  You can get one [here](https://platform.deepseek.com/api_keys).
 
 Once you have the API key, install the operator CLI with the following command:
 
