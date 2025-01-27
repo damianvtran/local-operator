@@ -1,6 +1,12 @@
-# Local Operator
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./static/local-operator-icon-2-dark-clear.png">
+  <source media="(prefers-color-scheme: light)" srcset="./static/local-operator-icon-2-light-clear.png">
+  <img alt="Shows a black Local Operator Logo in light color mode and a white one in dark color mode." src="./static/local-operator-icon-2-light-clear.png"  width="full">
+</picture>
 
-Local Operator is a Python-based agent that runs locally on your device, enabling secure execution of commands through a conversational chat interface. The agent can plan a series of steps to achieve a user goal, and execute the code sequentially with self-correction to achieve the goal.  When run with local models, it provides a safe environment for running Python code while maintaining system security through built-in safety checks and user confirmation prompts.  It is also compatible with 3rd party cloud-hosted models such as those from OpenAI and DeepSeek.  
+<h1 align="center">Local Operator: On-device Agentic Task Execution</h1>
+
+**Local Operator** is a Python-based agent that runs locally on your device, enabling secure execution of commands through a conversational chat interface. The agent can plan a series of steps to achieve a user goal, and execute the code sequentially with self-correction to achieve the goal.  When run with local models, it provides a safe environment for running Python code while maintaining system security through built-in safety checks and user confirmation prompts.  It is also compatible with 3rd party cloud-hosted models such as those from OpenAI and DeepSeek.  
 
 This repository is open source and free to use, with an MIT license.  Feel free to incorporate it into your own projects as needed.  Though, we would love to hear your feedback and any contributions to the project will greatly help the community!
 
