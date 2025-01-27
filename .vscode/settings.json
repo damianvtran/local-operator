@@ -3,5 +3,12 @@
     "tests"
   ],
   "python.testing.unittestEnabled": false,
-  "python.testing.pytestEnabled": true
+  "python.testing.pytestEnabled": true,
+  "editor.formatOnSave": true,
+  "python.sortImports.args": ["--profile", "black"],
+  "[python]": {
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "always"
+    }
+  }
 }

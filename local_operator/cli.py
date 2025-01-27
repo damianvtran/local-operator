@@ -16,9 +16,9 @@ Example Usage:
     python main.py --hosting ollama --model llama2
 """
 
-import os
-import asyncio
 import argparse
+import asyncio
+import os
 import traceback
 from pathlib import Path
 

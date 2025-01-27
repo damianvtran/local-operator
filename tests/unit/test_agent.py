@@ -1,8 +1,10 @@
-import pytest
 import io
 from unittest.mock import AsyncMock, MagicMock, patch
-from local_operator.agent import LocalCodeExecutor, CliOperator
+
+import pytest
 from pydantic import SecretStr
+
+from local_operator.agent import CliOperator, LocalCodeExecutor
 
 
 @pytest.fixture

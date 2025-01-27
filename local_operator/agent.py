@@ -1,17 +1,18 @@
-import re
+import importlib.metadata
 import io
-import sys
 import os
 import platform
-import threading
-import importlib.metadata
-from pathlib import Path
-from datetime import datetime
-from langchain_openai import ChatOpenAI
-from langchain_ollama import ChatOllama
-from pydantic import SecretStr
+import re
 import readline
+import sys
+import threading
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List
+
+from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
+from pydantic import SecretStr
 
 from local_operator.credentials import CredentialManager
 
@@ -86,7 +87,10 @@ class LocalCodeExecutor:
         response = await self.model.ainvoke(self.conversation_history)
         self.conversation_history.pop()
 
-        return "yes" in response.content.strip().lower()
+        response_content = (
+            response.content if isinstance(response.content, str) else str(response.content)
+        )
+        return "yes" in response_content.strip().lower()
 
     async def execute_code(self, code: str, max_retries: int = 2, timeout: int = 30) -> str:
         """Execute Python code with safety checks and context management.
@@ -213,7 +217,12 @@ class LocalCodeExecutor:
             for attempt in range(max_retries):
                 try:
                     response = await self.model.ainvoke(self.conversation_history)
-                    new_code = self.extract_code_blocks(response.content)
+                    response_content = (
+                        response.content
+                        if isinstance(response.content, str)
+                        else str(response.content)
+                    )
+                    new_code = self.extract_code_blocks(response_content)
                     if new_code:
                         return await _capture_output(new_code[0])
                 except Exception as retry_error:
@@ -505,8 +514,14 @@ class CliOperator:
             self.executor.reset_step_counter()
 
             while not self._agent_is_done(response):
+                if self.model is None:
+                    raise ValueError("Model is not initialized")
+
                 response = self.model.invoke(self.executor.conversation_history)
-                await self.executor.process_response(response.content)
+                response_content = (
+                    response.content if isinstance(response.content, str) else str(response.content)
+                )
+                await self.executor.process_response(response_content)
 
             if os.environ.get("LOCAL_OPERATOR_DEBUG") == "true":
                 print("\n\033[1;35m╭─ Debug: Conversation History ───────────────────────\033[0m")
