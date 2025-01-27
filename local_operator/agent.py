@@ -5,19 +5,20 @@ import os
 import platform
 import threading
 import importlib.metadata
+from pathlib import Path
 from datetime import datetime
 from langchain_openai import ChatOpenAI
 from langchain_ollama import ChatOllama
 from pydantic import SecretStr
 import readline
-from typing import Any
+from typing import Any, Dict, List
 
 from local_operator.credentials import CredentialManager
 
 
 class LocalCodeExecutor:
-    context: dict[str, Any]
-    conversation_history: list[dict[str, str]]
+    context: Dict[str, Any]
+    conversation_history: List[Dict[str, str]]
     model: ChatOpenAI | ChatOllama
     step_counter: int
 
@@ -45,7 +46,7 @@ class LocalCodeExecutor:
         """Reset the step counter."""
         self.step_counter = 1
 
-    def extract_code_blocks(self, text):
+    def extract_code_blocks(self, text: str) -> List[str]:
         """Extract Python code blocks from text using markdown-style syntax.
 
         Args:
@@ -54,11 +55,10 @@ class LocalCodeExecutor:
         Returns:
             list: A list of extracted code blocks as strings
         """
-        pattern = r"```python\n(.*?)```"
-        matches = re.findall(pattern, text, re.DOTALL)
-        return matches
+        pattern = re.compile(r"```python\n(.*?)```", re.DOTALL)
+        return pattern.findall(text)
 
-    async def check_code_safety(self, code):
+    async def check_code_safety(self, code: str) -> bool:
         """Analyze code for potentially dangerous operations using the language model.
 
         Args:
@@ -83,12 +83,12 @@ class LocalCodeExecutor:
         """
 
         self.conversation_history.append({"role": "user", "content": safety_check_prompt})
-        response = self.model.invoke(self.conversation_history)
+        response = await self.model.ainvoke(self.conversation_history)
         self.conversation_history.pop()
 
         return "yes" in response.content.strip().lower()
 
-    async def execute_code(self, code, max_retries=2, timeout=30):
+    async def execute_code(self, code: str, max_retries: int = 2, timeout: int = 30) -> str:
         """Execute Python code with safety checks and context management.
 
         Args:
@@ -100,9 +100,10 @@ class LocalCodeExecutor:
             str: Execution result message or error message
         """
 
-        async def _execute_with_timeout(code_to_execute):
+        async def _execute_with_timeout(code_to_execute: str) -> None:
             """Helper function to execute code with timeout."""
             result = {"success": False, "error": None}
+            event = threading.Event()
 
             def run_code():
                 try:
@@ -110,13 +111,13 @@ class LocalCodeExecutor:
                     result["success"] = True
                 except Exception as e:
                     result["error"] = e
-                    result["success"] = False
+                finally:
+                    event.set()
 
-            exec_thread = threading.Thread(target=run_code)
+            exec_thread = threading.Thread(target=run_code, daemon=True)
             exec_thread.start()
-            exec_thread.join(timeout=timeout)
 
-            if exec_thread.is_alive():
+            if not event.wait(timeout):
                 raise TimeoutError(f"Code execution timed out after {timeout} seconds")
 
             if not result["success"] and result["error"]:
@@ -124,7 +125,7 @@ class LocalCodeExecutor:
             elif not result["success"]:
                 raise TimeoutError("Code execution failed")
 
-        async def _capture_output(code_to_execute):
+        async def _capture_output(code_to_execute: str) -> str:
             """Helper function to capture and return execution output."""
             old_stdout = sys.stdout
             new_stdout = io.StringIO()
@@ -145,7 +146,7 @@ class LocalCodeExecutor:
             finally:
                 sys.stdout = old_stdout
 
-        async def _handle_error(error, attempt=None):
+        async def _handle_error(error: Exception, attempt: int | None = None) -> str:
             """Helper function to handle execution errors."""
             error_message = str(error)
             self.conversation_history.append(
@@ -164,6 +165,7 @@ class LocalCodeExecutor:
                     f"\033[1;34m╞══════════════════════════════════════════╡\n"
                     f"\033[1;36m│ Error:\033[0m\n{error_message}"
                 )
+
             return (
                 "\n\033[1;31m✗ Code Execution Failed\033[0m\n"
                 f"\033[1;34m╞══════════════════════════════════════════╡\n"
@@ -195,7 +197,7 @@ class LocalCodeExecutor:
 
             for attempt in range(max_retries):
                 try:
-                    response = self.model.invoke(self.conversation_history)
+                    response = await self.model.ainvoke(self.conversation_history)
                     new_code = self.extract_code_blocks(response.content)
                     if new_code:
                         return await _capture_output(new_code[0])
@@ -208,15 +210,11 @@ class LocalCodeExecutor:
 
             return await _handle_error(initial_error, attempt=max_retries)
 
-    def _format_agent_output(self, text):
+    def _format_agent_output(self, text: str) -> str:
         """Format agent output with colored sidebar and indentation."""
-        lines = text.split("\n")
-        formatted_lines = []
-        for line in lines:
-            formatted_lines.append(f"\033[1;36m│\033[0m {line}")
-        return "\n".join(formatted_lines)
+        return "\n".join(f"\033[1;36m│\033[0m {line}" for line in text.split("\n"))
 
-    async def process_response(self, response):
+    async def process_response(self, response: str) -> None:
         """Process model response, extracting and executing any code blocks.
 
         Args:
@@ -305,49 +303,38 @@ class CliOperator:
             )
 
         self.executor = LocalCodeExecutor(self.model)
-        self.input_history = []  # Store user input history
-        self.history_index = 0  # Track current position in history
+
+        self._load_input_history()
+
+    def _save_input_history(self) -> None:
+        """Save input history to file."""
+        history_file = Path.home() / ".local-operator" / "input_history.txt"
+        history_file.parent.mkdir(parents=True, exist_ok=True)
+        readline.write_history_file(str(history_file))
+
+    def _load_input_history(self) -> None:
+        """Load input history from file."""
+        history_file = Path.home() / ".local-operator" / "input_history.txt"
+
+        if history_file.exists():
+            readline.read_history_file(str(history_file))
 
     def _get_input_with_history(self, prompt: str) -> str:
         """Get user input with history navigation using up/down arrows."""
-
-        def completer(text, state):
-            # Filter history based on current input
-            options = [i for i in self.input_history if i.startswith(text)]
-            if state < len(options):
-                return options[state]
-            return None
-
-        readline.set_completer(completer)
-        readline.parse_and_bind("tab: complete")
-
-        # Set up history navigation
-        def pre_input_hook():
-            if len(self.input_history) > 0:
-                # Add all history items
-                for item in self.input_history:
-                    readline.add_history(item)
-
-                # Add empty string to represent current position
-                readline.add_history("")
-                readline.set_history_length(len(self.input_history) + 1)
-
-        readline.set_pre_input_hook(pre_input_hook)
-
         try:
-            # Save cursor position
-            print("\033[s", end="")
+            # Get user input with history navigation
             user_input = input(prompt)
-            # Restore cursor position and clear line
-            print("\033[u\033[K", end="")
 
-            if user_input and (not self.input_history or user_input != self.input_history[-1]):
-                self.input_history.append(user_input)
+            if user_input == "exit" or user_input == "quit":
+                return user_input
+
+            self._save_input_history()
+
             return user_input
         except KeyboardInterrupt:
             return "exit"
 
-    def _agent_is_done(self, response):
+    def _agent_is_done(self, response) -> bool:
         """Check if the agent has completed its task."""
         if response is None:
             return False
@@ -356,14 +343,14 @@ class CliOperator:
             -1
         ].strip() or self._agent_should_exit(response)
 
-    def _agent_should_exit(self, response):
+    def _agent_should_exit(self, response) -> bool:
         """Check if the agent should exit."""
         if response is None:
             return False
 
         return "Bye!" in response.content.strip().splitlines()[-1].strip()
 
-    def _setup_prompt(self):
+    def _setup_prompt(self) -> None:
         """Setup the prompt for the agent."""
 
         system_details = {
@@ -377,9 +364,9 @@ class CliOperator:
         }
 
         installed_packages = importlib.metadata.distributions()
-        installed_packages_str = ""
-        for package in installed_packages:
-            installed_packages_str += f"{package.metadata['Name']}=={package.version}\n"
+        installed_packages_str = ", ".join(
+            package.metadata["Name"] for package in installed_packages
+        )
 
         self.executor.conversation_history = [
             {
@@ -467,7 +454,7 @@ class CliOperator:
             }
         ]
 
-    async def chat(self):
+    async def chat(self) -> None:
         """Run the interactive chat interface with code execution capabilities."""
         debug_indicator = (
             " [DEBUG MODE]" if os.getenv("LOCAL_OPERATOR_DEBUG", "false").lower() == "true" else ""
@@ -485,9 +472,8 @@ class CliOperator:
         self._setup_prompt()
 
         while True:
-            user_input = self._get_input_with_history(
-                f"\033[1m\033[94mYou ({os.getcwd()}):\033[0m \033[1m>\033[0m "
-            )
+            prompt = f"You ({os.getcwd()}): > "
+            user_input = self._get_input_with_history(prompt)
 
             if not user_input.strip():
                 continue
