@@ -3,11 +3,8 @@
 name: Upload Python Package
 
 on:
-  push:
-    tags:
-      - 'v*'  # Match tags starting with 'v'
-    branches:
-      - main  # Only trigger on main branch
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -21,22 +18,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Get full git history for version detection
+          fetch-depth: 0
 
-      - name: Check for tag changes
+      - name: Get release tag
         id: tag-check
         run: |
-          # Get previous tag
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          CURRENT_TAG=$(git describe --tags --abbrev=0 HEAD)
-          
-          if [ "$PREV_TAG" = "$CURRENT_TAG" ]; then
-            echo "No new tag detected, skipping build"
-            echo "skip_build=true" >> $GITHUB_OUTPUT
-          else
-            echo "New tag detected: $CURRENT_TAG"
-            echo "skip_build=false" >> $GITHUB_OUTPUT
-          fi
+          # Get the release tag from the GitHub event
+          CURRENT_TAG=${{ github.event.release.tag_name }}
+          echo "Release tag detected: $CURRENT_TAG"
+          echo "skip_build=false" >> $GITHUB_OUTPUT
 
       - uses: actions/setup-python@v5
         if: ${{ steps.tag-check.outputs.skip_build == 'false' }}
