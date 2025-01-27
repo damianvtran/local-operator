@@ -17,10 +17,13 @@ Example Usage:
 """
 
 import os
-from local_operator.agent import CliOperator
 import asyncio
 import argparse
 import traceback
+from pathlib import Path
+
+from local_operator.agent import CliOperator
+from local_operator.credentials import CredentialManager
 
 
 def main():
@@ -50,8 +53,13 @@ def main():
 
         os.environ["LOCAL_OPERATOR_DEBUG"] = "true" if args.debug else "false"
 
+        config_dir = Path.home() / ".local-operator"
+        credential_manager = CredentialManager(config_dir)
+
         # Initialize the CLI interface with hosting and model parameters
-        operator = CliOperator(hosting=args.hosting, model=args.model)
+        operator = CliOperator(
+            hosting=args.hosting, model=args.model, credential_manager=credential_manager
+        )
 
         # Start the async chat interface
         asyncio.run(operator.chat())

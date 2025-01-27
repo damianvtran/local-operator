@@ -11,6 +11,7 @@ setup(
     },
     install_requires=[
         "langchain-openai>=0.3.2",
+        "langchain-ollama>=0.2.2",
         "python-dotenv>=1.0.1",
         "pydantic>=2.10.6",
     ],
@@ -21,6 +22,8 @@ setup(
             "isort",
             "pylint",
             "pyright",
+            "pytest",
+            "pytest-asyncio",
         ],
     },
     long_description=open("README.md").read(),

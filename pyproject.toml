@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.0.19"
+version = "0.0.20"
 description = "A Python-based agent for local command execution"
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damianvtran@gmail.com" }]
@@ -17,14 +17,14 @@ classifiers = [
 keywords = ["local", "agent", "execution", "operator"]
 dependencies = [
     "langchain-openai",
-    "langchain-ollama",
+    "langchain-ollama", 
     "python-dotenv",
     "pydantic",
 ]
 requires-python = ">=3.12"
 
 [project.optional-dependencies]
-dev = ["black", "isort", "pylint", "pyright"]
+dev = ["black", "isort", "pylint", "pyright", "pytest", "pytest-asyncio"]
 
 [project.urls]
 Homepage = "https://github.com/damianvtran/local-operator"
@@ -53,3 +53,7 @@ profile = "black"
 reportMissingTypeArgument = true
 strictListInference = true
 reportPrivateImportUsage = false
+
+[tool.pytest.ini_options]
+addopts = "-v"
+testpaths = ["tests"]

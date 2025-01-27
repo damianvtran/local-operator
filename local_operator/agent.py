@@ -117,8 +117,14 @@ class LocalCodeExecutor:
             exec_thread = threading.Thread(target=run_code, daemon=True)
             exec_thread.start()
 
-            if not event.wait(timeout):
-                raise TimeoutError(f"Code execution timed out after {timeout} seconds")
+            # Wait for either the event or timeout
+            event_occurred = event.wait(timeout)
+
+            if not event_occurred:
+                # If timeout occurred, check if thread completed anyway
+                if not result["success"]:
+                    # Clean up the thread before raising timeout
+                    raise TimeoutError(f"Code execution timed out after {timeout} seconds")
 
             if not result["success"] and result["error"]:
                 raise result["error"]
@@ -133,7 +139,14 @@ class LocalCodeExecutor:
 
             try:
                 await _execute_with_timeout(code_to_execute)
+                # Flush the output buffer to ensure all content is captured
+                new_stdout.flush()
                 output = new_stdout.getvalue()
+
+                # Ensure the output is captured even if empty
+                if not output:
+                    output = "[No output]"
+
                 self.context["last_code_output"] = output
                 self.conversation_history.append(
                     {"role": "system", "content": f"Code execution output:\n{output}"}
@@ -144,7 +157,9 @@ class LocalCodeExecutor:
                     f"\033[1;36m│ Output:\033[0m\n{output}"
                 )
             finally:
+                # Restore stdout and ensure the buffer is flushed
                 sys.stdout = old_stdout
+                new_stdout.close()
 
         async def _handle_error(error: Exception, attempt: int | None = None) -> str:
             """Helper function to handle execution errors."""
@@ -259,7 +274,7 @@ class CliOperator:
         executor: LocalCodeExecutor instance for handling code execution
     """
 
-    def __init__(self, hosting: str, model: str):
+    def __init__(self, hosting: str, model: str, credential_manager: CredentialManager):
         """Initialize the CLI by loading credentials or prompting for them.
 
         Args:
@@ -271,14 +286,14 @@ class CliOperator:
         if not model:
             raise ValueError("Model is required")
 
-        credential_manager = CredentialManager()
+        self.credential_manager = credential_manager
 
         # Configure model based on hosting
         if hosting == "deepseek":
             base_url = "https://api.deepseek.com/v1"
-            api_key = credential_manager.get_api_key("DEEPSEEK_API_KEY")
+            api_key = self.credential_manager.get_api_key("DEEPSEEK_API_KEY")
             if not api_key:
-                api_key = credential_manager.prompt_for_api_key("DEEPSEEK_API_KEY")
+                api_key = self.credential_manager.prompt_for_api_key("DEEPSEEK_API_KEY")
             self.model = ChatOpenAI(
                 api_key=SecretStr(api_key),
                 temperature=0.5,
@@ -287,9 +302,9 @@ class CliOperator:
             )
         elif hosting == "openai":
             base_url = "https://api.openai.com"
-            api_key = credential_manager.get_api_key("OPENAI_API_KEY")
+            api_key = self.credential_manager.get_api_key("OPENAI_API_KEY")
             if not api_key:
-                api_key = credential_manager.prompt_for_api_key("OPENAI_API_KEY")
+                api_key = self.credential_manager.prompt_for_api_key("OPENAI_API_KEY")
             self.model = ChatOpenAI(
                 api_key=SecretStr(api_key),
                 temperature=0.5,
@@ -301,6 +316,9 @@ class CliOperator:
                 model=model,
                 temperature=0.5,
             )
+        elif hosting == "noop":
+            # Useful for testing, will create a dummy operator
+            self.model = None
 
         self.executor = LocalCodeExecutor(self.model)
 
