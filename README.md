@@ -1,6 +1,6 @@
 # Local Operator
 
-Local Operator is a Python-based agent that runs locally on your device, enabling secure execution of commands through a conversational chat interface. It provides a safe environment for running Python code while maintaining system security through built-in safety checks and user confirmation prompts.
+Local Operator is a Python-based agent that runs locally on your device, enabling secure execution of commands through a conversational chat interface. The agent can plan a series of steps to achieve a user goal, and execute the code sequentially with self-correction to achieve the goal.  When run with local models, it provides a safe environment for running Python code while maintaining system security through built-in safety checks and user confirmation prompts.  It is also compatible with 3rd party cloud-hosted models such as those from OpenAI and DeepSeek.  
 
 This repository is open source and free to use, with an MIT license.  Feel free to incorporate it into your own projects as needed.  Though, we would love to hear your feedback and any contributions to the project will greatly help the community!
 
@@ -17,6 +17,7 @@ Artificial intelligence tools like these should be open and freely available to 
 - **Environment Configuration**: Uses credential manager for API key management
 
 The Local Operator provides a command-line interface where you can:
+
 1. Interact with the AI assistant in natural language
 2. Execute Python code blocks marked with ```python``` syntax
 3. Get safety warnings before executing potentially dangerous operations
@@ -39,13 +40,13 @@ If you would like to run with a local Ollama model, you will need to install Oll
 
 Run the operator CLI with the following command:
 
-#### Run with DeepSeek
+### Run with DeepSeek
 
 ```bash
 local-operator --hosting deepseek --model deepseek-chat
 ```
 
-#### Run with a local Ollama model
+### Run with a local Ollama model
 
 Download and install Ollama first from [here](https://ollama.ai/download).
 
@@ -53,7 +54,7 @@ Download and install Ollama first from [here](https://ollama.ai/download).
 local-operator --hosting ollama --model qwen2.5:14b
 ```
 
-#### Run with OpenAI
+### Run with OpenAI
 
 ```bash
 local-operator --hosting openai --model gpt-4o
@@ -552,6 +553,7 @@ It will be followed by the file content reading in step 2.
 
 ╰──────────────────────────────────────────────────
 ```
+
 </details>
 
 <details>
@@ -895,6 +897,7 @@ Name: count, dtype: int64
 ## Safety Features
 
 The system includes multiple layers of protection:
+
 - Automatic detection of dangerous operations (file access, system commands, etc.)
 - User confirmation prompts for potentially unsafe code
 - Agent prompt with safety focused execution policy
