@@ -1,7 +1,7 @@
-<picture>
+<picture style="display: block; margin: 0 auto; max-width: 300px;">
   <source media="(prefers-color-scheme: dark)" srcset="./static/local-operator-icon-2-dark-clear.png">
   <source media="(prefers-color-scheme: light)" srcset="./static/local-operator-icon-2-light-clear.png">
-  <img alt="Shows a black Local Operator Logo in light color mode and a white one in dark color mode." src="./static/local-operator-icon-2-light-clear.png"  width="full">
+  <img alt="Shows a black Local Operator Logo in light color mode and a white one in dark color mode." src="./static/local-operator-icon-2-light-clear.png" style="width: 100%;">
 </picture>
 
 <h1 align="center">Local Operator: On-device Agentic Task Execution</h1>
