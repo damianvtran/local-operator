@@ -563,7 +563,7 @@ It will be followed by the file content reading in step 2.
 </details>
 
 <details>
-<summary>Self-improvement loop</summary>
+<summary>Iterative improvement loop</summary>
 <br />
 
 ```shell
@@ -896,6 +896,250 @@ New        17
 Name: count, dtype: int64
 
 ╰──────────────────────────────────────────────────
+```
+
+</details>
+
+<details>
+<summary>Automatic web scraper creation</summary>
+
+```shell
+You (/Users/damiantran/local-operator-sandbox): > Scrape the web page https://webscraper.io/test-sites/tables into a csv.  Get the site structure first and then based on that make a suitable scraper
+
+╭─ Agent Response (Step 1) ───────────────────────
+│ To understand the structure of the webpage and create a suitable scraper, we can start by printing out a portion of the HTML content. This will help us identify the relevant elements and their structure.
+│
+│ Let's fetch the webpage and print a portion of its HTML content for inspection:
+│
+│ ```python
+│ import requests
+│ from bs4 import BeautifulSoup
+│
+│ # URL of the test site with tables
+│ url = "https://webscraper.io/test-sites/tables"
+│
+│ # Fetch the webpage
+│ response = requests.get(url)
+│ soup = BeautifulSoup(response.content, 'html.parser')
+│
+│ # Print a portion of the HTML content for inspection
+│ print(soup.prettify()[:2000])  # Print the first 2000 characters of the HTML content
+│```
+│
+│ Executing this code will help us inspect the structure of the webpage. Let's proceed with this step.
+╰──────────────────────────────────────────────────
+
+╭─ Executing Code Blocks (Step 1) ───────────────
+
+│ Executing:
+import requests
+from bs4 import BeautifulSoup
+
+# URL of the test site with tables
+
+url = "<https://webscraper.io/test-sites/tables>"
+
+# Fetch the webpage
+
+response = requests.get(url)
+soup = BeautifulSoup(response.content, 'html.parser')
+
+# Print a portion of the HTML content for inspection
+
+print(soup.prettify()[:2000])  # Print the first 2000 characters of the HTML content
+│ Result:
+✓ Code Execution Successful
+╞══════════════════════════════════════════╡
+│ Output:
+<!DOCTYPE html>
+<html lang="en">
+ <head>
+  <!-- Google Tag Manager -->
+  <script nonce="BUHLfj9g94X6UEYzdoIToq91rpTAGjAl">
+   (function (w, d, s, l, i) {
+  w[l] = w[l] || [];
+    // ... Shortened for the example
+
+│ Error Output:
+[No error output]
+╰──────────────────────────────────────────────────
+
+╭─ Agent Response (Step 2) ───────────────────────
+│ The HTML content provides some initial structure, but we need to look further into the specific table elements to identify where the names are located. Let's focus on extracting and inspecting the table elements specifically.
+│
+│ I'll adjust the code to print out the table structure so we can determine the correct approach for extracting the names:
+│
+│ ```python
+│ # Extract and print the table structure
+│ tables = soup.find_all('table')
+│ for idx, table in enumerate(tables):
+│     print(f"Table {idx + 1}:")
+│     print(table.prettify()[:1000])  # Print the first 1000 characters of each table
+│     print("\n" + "="*40 + "\n")
+│```
+│
+│ This code will print the structure of each table on the webpage, allowing us to identify the relevant data. Let's execute this step.
+╰──────────────────────────────────────────────────
+
+╭─ Executing Code Blocks (Step 2) ───────────────
+
+│ Executing:
+
+# Extract and print the table structure
+
+tables = soup.find_all('table')
+for idx, table in enumerate(tables):
+    print(f"Table {idx + 1}:")
+    print(table.prettify()[:1000])  # Print the first 1000 characters of each table
+    print("\n" + "="*40 + "\n")
+│ Result:
+✓ Code Execution Successful
+╞══════════════════════════════════════════╡
+│ Output:
+Table 1:
+<table class="table table-bordered">
+ <thead>
+  <tr>
+   <th>
+    #
+   </th>
+   <th>
+    First Name
+   </th>
+   <th>
+    Last Name
+   </th>
+   <th>
+    Username
+   </th>
+  </tr>
+ </thead>
+ <tbody>
+  <tr>
+   <td>
+    1
+   </td>
+   <td>
+    Mark
+   </td>
+   <td>
+    Otto
+   </td>
+   <td>
+    @mdo
+   </td>
+  </tr>
+  // ... Shortened for the example
+
+========================================
+
+│ Error Output:
+[No error output]
+╰──────────────────────────────────────────────────
+
+╭─ Agent Response (Step 3) ───────────────────────
+│ The webpage contains two tables, each with columns for `First Name`, `Last Name`, and `Username`. We can extract the `First Name` and `Last Name` from both tables and save them to a CSV file.
+│
+│ Let's proceed with extracting the names and writing them to a CSV file:
+│
+│ ```python
+│ import csv
+│
+│ # Extract names from both tables
+│ names = []
+│ for table in tables:
+│     for row in table.find_all('tr')[1:]:  # Skip the header row
+│         columns = row.find_all('td')
+│         if columns:
+│             first_name = columns[1].get_text(strip=True)
+│             last_name = columns[2].get_text(strip=True)
+│             names.append({'First Name': first_name, 'Last Name': last_name})
+│
+│ # Write names to CSV
+│ csv_file_path = 'names_list.csv'
+│ with open(csv_file_path, 'w', newline='', encoding='utf-8') as csvfile:
+│     fieldnames = ['First Name', 'Last Name']
+│     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+│
+│     writer.writeheader()
+│     for name in names:
+│         writer.writerow(name)
+│
+│ # Read and print the contents of the CSV file
+│ with open(csv_file_path, 'r', encoding='utf-8') as csvfile:
+│     content = csvfile.read()
+│     print(content)
+│```
+│
+│ This code will extract the names from both tables and save them to a CSV file named `names_list.csv`. Let's execute this step.
+╰──────────────────────────────────────────────────
+
+╭─ Executing Code Blocks (Step 3) ───────────────
+
+│ Executing:
+import csv
+
+# Extract names from both tables
+
+names = []
+for table in tables:
+    for row in table.find_all['tr'](1:):  # Skip the header row
+        columns = row.find_all('td')
+        if columns:
+            first_name = columns[1].get_text(strip=True)
+            last_name = columns[2].get_text(strip=True)
+            names.append({'First Name': first_name, 'Last Name': last_name})
+
+# Write names to CSV
+
+csv_file_path = 'names_list.csv'
+with open(csv_file_path, 'w', newline='', encoding='utf-8') as csvfile:
+    fieldnames = ['First Name', 'Last Name']
+    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+    writer.writeheader()
+    for name in names:
+        writer.writerow(name)
+
+# Read and print the contents of the CSV file
+
+with open(csv_file_path, 'r', encoding='utf-8') as csvfile:
+    content = csvfile.read()
+    print(content)
+│ Result:
+✓ Code Execution Successful
+╞══════════════════════════════════════════╡
+│ Output:
+First Name,Last Name
+Mark,Otto
+Jacob,Thornton
+Larry,the Bird
+Harry,Potter
+John,Snow
+Tim,Bean
+
+│ Error Output:
+[No error output]
+╰──────────────────────────────────────────────────
+
+╭─ Agent Response (Step 4) ───────────────────────
+│ The names have been successfully extracted from the tables and saved to the CSV file `names_list.csv`. The contents of the file are as follows:
+│
+│ ```
+│ First Name,Last Name
+│ Mark,Otto
+│ Jacob,Thornton
+│ Larry,the Bird
+│ Harry,Potter
+│ John,Snow
+│ Tim,Bean
+│ ```
+│
+│ This CSV file contains the first and last names from both tables on the webpage.
+│
+│ DONE
+╰──────────────────────────────────────────────────
+
 ```
 
 </details>
