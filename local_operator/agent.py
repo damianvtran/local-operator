@@ -6,7 +6,7 @@ import re
 import readline
 import sys
 import threading
-from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Union
 
@@ -16,6 +16,27 @@ from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 
 from local_operator.credentials import CredentialManager
+
+
+class ProcessResponseStatus(Enum):
+    """Status codes for process_response results."""
+
+    SUCCESS = "success"
+    CANCELLED = "cancelled"
+    ERROR = "error"
+
+
+class ProcessResponseOutput:
+    """Output structure for process_response results.
+
+    Attributes:
+        status (ProcessResponseStatus): Status of the response processing
+        message (str): Descriptive message about the processing result
+    """
+
+    def __init__(self, status: ProcessResponseStatus, message: str):
+        self.status = status
+        self.message = message
 
 
 class LocalCodeExecutor:
@@ -269,6 +290,14 @@ class LocalCodeExecutor:
                     "Warning: Potentially dangerous operation detected. Proceed? (y/n): "
                 )
                 if confirm.lower() != "y":
+                    self.conversation_history.append(
+                        {
+                            "role": "user",
+                            "content": "I've identified that this is a dangerous"
+                            " operation.  Let's stop this task for now, I will"
+                            " provide further instructions shortly.",
+                        }
+                    )
                     return "Code execution canceled by user"
 
             return await _capture_output(code)
@@ -316,7 +345,7 @@ class LocalCodeExecutor:
         """Format agent output with colored sidebar and indentation."""
         return "\n".join(f"\033[1;36m│\033[0m {line}" for line in text.split("\n"))
 
-    async def process_response(self, response: str) -> None:
+    async def process_response(self, response: str) -> ProcessResponseOutput:
         """Process model response, extracting and executing any code blocks.
 
         Args:
@@ -341,6 +370,13 @@ class LocalCodeExecutor:
             for code in code_blocks:
                 print("\n\033[1;36m│ Executing:\033[0m\n{}".format(code))
                 result = await self.execute_code(code)
+
+                if "code execution cancelled by user" in result:
+                    return ProcessResponseOutput(
+                        status=ProcessResponseStatus.CANCELLED,
+                        message="Code execution cancelled by user",
+                    )
+
                 print("\033[1;36m│ Result:\033[0m {}".format(result))
 
                 self.context["last_code_result"] = result
@@ -351,6 +387,11 @@ class LocalCodeExecutor:
             )
 
             self.step_counter += 1
+
+        return ProcessResponseOutput(
+            status=ProcessResponseStatus.SUCCESS,
+            message="Code execution successful",
+        )
 
 
 class CliOperator:
@@ -406,16 +447,21 @@ class CliOperator:
         except KeyboardInterrupt:
             return "exit"
 
-    def _agent_requires_user_input(self, response) -> bool:
+    def _agent_is_done(self, response) -> bool:
         """Check if the agent has completed its task."""
         if response is None:
             return False
 
-        return (
-            "DONE" in response.content.strip().splitlines()[-1].strip()
-            or "ASK" in response.content.strip().splitlines()[-1].strip()
-            or self._agent_should_exit(response)
-        )
+        return "DONE" in response.content.strip().splitlines()[
+            -1
+        ].strip() or self._agent_should_exit(response)
+
+    def _agent_requires_user_input(self, response) -> bool:
+        """Check if the agent requires user input."""
+        if response is None:
+            return False
+
+        return "ASK" in response.content.strip().splitlines()[-1].strip()
 
     def _agent_should_exit(self, response) -> bool:
         """Check if the agent should exit."""
@@ -427,6 +473,13 @@ class CliOperator:
     def _setup_prompt(self) -> None:
         """Setup the prompt for the agent."""
 
+        base_system_prompt = Path("prompts/base_system.md").read_text()
+        user_system_prompt = Path.home() / ".local-operator" / "system_prompt.md"
+        if user_system_prompt.exists():
+            user_system_prompt = user_system_prompt.read_text()
+        else:
+            user_system_prompt = ""
+
         system_details = {
             "os": platform.system(),
             "release": platform.release(),
@@ -436,132 +489,23 @@ class CliOperator:
             "processor": platform.processor(),
             "home_directory": os.path.expanduser("~"),
         }
+        system_details_str = "\n".join(f"{key}: {value}" for key, value in system_details.items())
 
         installed_packages = importlib.metadata.distributions()
         installed_packages_str = ", ".join(
             package.metadata["Name"] for package in installed_packages
         )
 
+        base_system_prompt = (
+            base_system_prompt.replace("{{system_details_str}}", system_details_str)
+            .replace("{{installed_packages_str}}", installed_packages_str)
+            .replace("{{user_system_prompt}}", user_system_prompt)
+        )
+
         self.executor.conversation_history = [
             {
                 "role": "system",
-                "content": f"""
-                You are Local Operator - a Python code execution agent that
-                runs securely on the user's local machine. Your primary function
-                is to execute Python code safely and efficiently to help users
-                accomplish their tasks.
-
-                Core Principles:
-                1. Safety First: Never execute harmful or destructive code.
-                   Always validate code safety before execution.
-                2. Step-by-Step Execution: Break tasks into single-step code blocks.
-                   Execute each block individually, using its output to inform the
-                   next step. Never combine multiple steps in one code block.
-                3. Context Awareness: Maintain context between steps and across
-                   sessions.
-                4. Minimal Output: Keep responses concise and focused on
-                   executable code.
-                5. Data Verification: When uncertain about information, write code
-                   to fetch data rather than making assumptions.
-                6. Research: Write code to fetch data from the internet in preliminary
-                   steps before proceeding to more complex tasks.
-
-                Execution Rules:
-                - Always output Python code in ```python``` blocks
-                - Include package installation commands when needed
-                - Validate code safety before execution
-                - Print results in human-readable format
-                - Handle one step per response
-                - Mark final step with "DONE" on a new line after code block
-                - If you need user confirmation, add "ASK" on a new line after all text
-                - Maintain secure execution environment
-                - Exit with "Bye!" when user requests to quit
-                - When uncertain about system state or data, write code to:
-                  * Verify file existence
-                  * Check directory contents
-                  * Validate system information
-                  * Confirm package versions
-                  * Fetch data from the internet
-                - Only ask for clarification as a last resort when code cannot
-                  retrieve the required information
-
-                Task Handling Guidelines:
-                1. Analyze user request and break into logical steps
-                2. Each step is separate from the others, so the execution of one
-                   step can be put into the context of the next step.
-                3. For each step:
-                   - Generate minimal required code
-                   - Include necessary package installations
-                   - Add clear output formatting
-                   - Validate code safety
-                   - When uncertain, write verification code before proceeding
-                   - Use research steps as necessary to find information needed to
-                     proceed to the next step.
-                4. After execution:
-                   - Analyze results
-                   - Determine next steps
-                   - Continue until task completion
-                5. Mark final step with "DONE" on the last line of the response, only if
-                   there are no other steps that should be executed to better complete
-                   the task. Ensure that "DONE" is the last word that is generated after
-                   all other content.
-
-                Basic example:
-                - User: "Read the latest diffs in the current git repo and make a commit
-                  " with a suitable message."
-                - Agent:
-                  * Step 1:
-                    ```python
-                    print("git diff")
-                    ```
-                - System:
-                  * Executes the code and prints the output into the conversation history
-                - Agent:
-                  * Interprets the conversation history and determines the next step
-                  * Step 2:
-                    ```python
-                    print("git commit -m 'message'")
-                    ```
-                    DONE
-                - System:
-                  * Executes the code and prints the output into the conversation history
-                - Agent:
-                  "I have completed the task.  Here is the output:"
-                  [OUTPUT FROM CONSOLE]
-                  "DONE" # Important to mark the end of the task even if no code is run
-                * User can now continue with another command
-
-                Conclusion lines:
-                - "DONE": When you have completed a task which can be code or some interpretation
-                  that the user has asked for.
-                - "ASK": When you need user confirmation to proceed with the next step.
-                - "Bye!": When the user requests to quit.
-
-                System Context:
-                - OS: {system_details['os']} {system_details['release']}
-                - Architecture: {system_details['architecture']}
-                - Processor: {system_details['processor']}
-                - Python Environment: {os.getcwd()}
-                - Home Directory: {system_details['home_directory']}
-                - Current Time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-
-                Installed Packages:
-                {installed_packages_str}
-
-                If you need to help the user to use Local Operator, run the local-operator
-                --help command to see the available commands in step 1 and then read the
-                console output to respond to the user in step 2.
-
-                Remember:
-                - Always prioritize safety and security
-                - Maintain context between steps
-                - Keep responses minimal and focused
-                - Handle one step at a time
-                - Mark completion with "DONE"
-                - Exit with "Bye!" when requested
-                - When uncertain, write code to verify information
-                - Only ask for clarification when code cannot retrieve needed data
-                """,
+                "content": base_system_prompt,
             }
         ]
 
@@ -583,6 +527,7 @@ class CliOperator:
         self._setup_prompt()
 
         while True:
+
             prompt = f"You ({os.getcwd()}): > "
             user_input = self._get_input_with_history(prompt)
 
@@ -597,15 +542,22 @@ class CliOperator:
             response = None
             self.executor.reset_step_counter()
 
-            while not self._agent_requires_user_input(response):
+            while not self._agent_is_done(response) and not self._agent_requires_user_input(
+                response
+            ):
                 if self.model is None:
                     raise ValueError("Model is not initialized")
 
                 response = await self.executor.invoke_model(self.executor.conversation_history)
+
                 response_content = (
                     response.content if isinstance(response.content, str) else str(response.content)
                 )
-                await self.executor.process_response(response_content)
+                result = await self.executor.process_response(response_content)
+
+                # Break out of the agent flow if the user cancels the code execution
+                if result.status == ProcessResponseStatus.CANCELLED:
+                    break
 
             if os.environ.get("LOCAL_OPERATOR_DEBUG") == "true":
                 print("\n\033[1;35m╭─ Debug: Conversation History ───────────────────────\033[0m")
@@ -620,3 +572,12 @@ class CliOperator:
             # Check if the last line of the response contains "Bye!" to exit
             if self._agent_should_exit(response):
                 break
+
+            # Print the last assistant message if the agent is asking for user input
+            if response and self._agent_requires_user_input(response):
+                response_content = (
+                    response.content if isinstance(response.content, str) else str(response.content)
+                ).replace("ASK", "")
+                print("\n\033[1;36m╭─ Agent Question Requires Input ────────────────\033[0m")
+                print(f"\033[1;36m│\033[0m {response_content}")
+                print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
