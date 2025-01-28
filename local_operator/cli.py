@@ -39,13 +39,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--hosting",
         type=str,
         choices=["deepseek", "openai", "anthropic", "ollama", "kimi"],
+        required=True,
         default="deepseek",
         help="Hosting platform to use (deepseek, openai, anthropic, ollama, or kimi)",
     )
     parser.add_argument(
         "--model",
         type=str,
-        default="deepseek-chat",
+        default="",
         help="Model to use (e.g., deepseek-chat, gpt-4o, qwen2.5:14b, "
         "claude-3-5-sonnet-20240620, moonshot-v1-32k)",
     )
