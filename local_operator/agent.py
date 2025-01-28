@@ -142,33 +142,52 @@ class LocalCodeExecutor:
 
         async def _capture_output(code_to_execute: str) -> str:
             """Helper function to capture and return execution output."""
-            old_stdout = sys.stdout
-            new_stdout = io.StringIO()
-            sys.stdout = new_stdout
+            old_stdout, old_stderr = sys.stdout, sys.stderr
+            new_stdout, new_stderr = io.StringIO(), io.StringIO()
+            sys.stdout, sys.stderr = new_stdout, new_stderr
+
+            def _get_outputs() -> tuple[str, str]:
+                """Helper to get and format stdout/stderr outputs."""
+                new_stdout.flush()
+                new_stderr.flush()
+                output = new_stdout.getvalue() or "[No output]"
+                error_output = new_stderr.getvalue() or "[No error output]"
+                return output, error_output
+
+            def _log_outputs(output: str, error_output: str) -> None:
+                """Helper to log outputs to context and history."""
+                self.context["last_code_output"] = output
+                self.conversation_history.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "Code execution output:\n"
+                            f"{output}\n"
+                            "Error output:\n"
+                            f"{error_output}"
+                        ),
+                    }
+                )
 
             try:
                 await _execute_with_timeout(code_to_execute)
-                # Flush the output buffer to ensure all content is captured
-                new_stdout.flush()
-                output = new_stdout.getvalue()
+                output, error_output = _get_outputs()
+                _log_outputs(output, error_output)
 
-                # Ensure the output is captured even if empty
-                if not output:
-                    output = "[No output]"
-
-                self.context["last_code_output"] = output
-                self.conversation_history.append(
-                    {"role": "system", "content": f"Code execution output:\n{output}"}
-                )
                 return (
                     "\n\033[1;32m✓ Code Execution Successful\033[0m\n"
                     "\033[1;34m╞══════════════════════════════════════════╡\n"
-                    f"\033[1;36m│ Output:\033[0m\n{output}"
+                    f"\033[1;36m│ Output:\033[0m\n{output}\n"
+                    f"\033[1;36m│ Error Output:\033[0m\n{error_output}"
                 )
+            except Exception as e:
+                output, error_output = _get_outputs()
+                _log_outputs(output, error_output)
+                raise e
             finally:
-                # Restore stdout and ensure the buffer is flushed
-                sys.stdout = old_stdout
+                sys.stdout, sys.stderr = old_stdout, old_stderr
                 new_stdout.close()
+                new_stderr.close()
 
         async def _handle_error(error: Exception, attempt: int | None = None) -> str:
             """Helper function to handle execution errors."""
@@ -380,7 +399,11 @@ class CliOperator:
                 1. Safety First: Never execute harmful or destructive code.
                    Always validate code safety before execution.
                 2. Step-by-Step Execution: Break tasks into logical steps,
-                   executing one step at a time.
+                   executing one step at a time.  Sometimes you will need to execute
+                   a single code block at a time and then use the output of that code
+                   block to inform the next step.  Do not put multiple steps into a single
+                   code block, instead generate one block at a time and allow the system
+                   to execute the code and provide the output.
                 3. Context Awareness: Maintain context between steps and across
                    sessions.
                 4. Minimal Output: Keep responses concise and focused on
