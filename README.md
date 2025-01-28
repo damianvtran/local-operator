@@ -18,7 +18,8 @@ Artificial intelligence tools like these should be open and freely available to 
 - **Code Safety Verification**: Built-in safety checks analyze code for potentially dangerous operations
 - **Contextual Execution**: Maintains execution context between code blocks
 - **Conversation History**: Tracks the full interaction history for context-aware responses
-- **DeepSeek Integration**: Uses DeepSeek's AI models through LangChain's ChatOpenAI implementation
+- **Local Model Support**: Supports closed-circuit on-device execution with Ollama.
+- **LangChain Integration**: Uses 3rd party cloud-hosted LLM models through LangChain's ChatOpenAI implementation
 - **Asynchronous Execution**: Safe code execution with async/await pattern
 - **Environment Configuration**: Uses credential manager for API key management
 
@@ -32,7 +33,7 @@ The Local Operator provides a command-line interface where you can:
 
 ## Setup
 
-To run the operator CLI, you need to have a DeepSeek API key.  You can get one [here](https://platform.deepseek.com/api_keys).
+To run the operator CLI with a 3rd party cloud-hosted LLM model, you need to have an API key.  You can get one from OpenAI, DeepSeek, Anthropic, or other providers.
 
 Once you have the API key, install the operator CLI with the following command:
 
@@ -46,18 +47,18 @@ If you would like to run with a local Ollama model, you will need to install Oll
 
 Run the operator CLI with the following command:
 
-### Run with DeepSeek
-
-```bash
-local-operator --hosting deepseek --model deepseek-chat
-```
-
 ### Run with a local Ollama model
 
 Download and install Ollama first from [here](https://ollama.ai/download).
 
 ```bash
 local-operator --hosting ollama --model qwen2.5:14b
+```
+
+### Run with DeepSeek
+
+```bash
+local-operator --hosting deepseek --model deepseek-chat
 ```
 
 ### Run with OpenAI
