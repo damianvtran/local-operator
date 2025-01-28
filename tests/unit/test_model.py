@@ -1,16 +1,17 @@
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 from pydantic import SecretStr
 
-from local_operator.model import configure_model
 from local_operator.credentials import CredentialManager
+from local_operator.model import configure_model
 
 
 @pytest.fixture
 def mock_credential_manager():
     manager = MagicMock(spec=CredentialManager)
-    manager.get_api_key = MagicMock(return_value="test_key")
-    manager.prompt_for_api_key = MagicMock(return_value="test_key")
+    manager.get_credential = MagicMock(return_value="test_key")
+    manager.prompt_for_credential = MagicMock(return_value="test_key")
     return manager
 
 

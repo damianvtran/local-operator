@@ -2,7 +2,6 @@ import io
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pydantic import SecretStr
 
 from local_operator.agent import CliOperator, LocalCodeExecutor
 
@@ -11,7 +10,6 @@ from local_operator.agent import CliOperator, LocalCodeExecutor
 def mock_model():
     model = AsyncMock()
     model.ainvoke = AsyncMock()
-    model.invoke = MagicMock()
     return model
 
 
@@ -23,7 +21,7 @@ def executor(mock_model):
 @pytest.fixture
 def cli_operator(mock_model):
     credential_manager = MagicMock()
-    credential_manager.get_api_key = MagicMock(return_value="test_key")
+    credential_manager.get_credential = MagicMock(return_value="test_key")
 
     operator = CliOperator(
         credential_manager=credential_manager,
@@ -124,7 +122,7 @@ async def test_process_response(executor, mock_model):
 
 def test_cli_operator_init(mock_model):
     credential_manager = MagicMock()
-    credential_manager.get_api_key = MagicMock(return_value="test_key")
+    credential_manager.get_credential = MagicMock(return_value="test_key")
 
     operator = CliOperator(
         credential_manager=credential_manager,
@@ -138,7 +136,7 @@ def test_cli_operator_init(mock_model):
 
 @pytest.mark.asyncio
 async def test_cli_operator_chat(cli_operator, mock_model):
-    mock_model.invoke.return_value.content = "DONE"
+    mock_model.ainvoke.return_value.content = "DONE"
     cli_operator._agent_should_exit = MagicMock(return_value=True)
 
     with patch("builtins.input", return_value="exit"):

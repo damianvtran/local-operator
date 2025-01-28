@@ -8,8 +8,10 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any, Coroutine, Dict, List, Union
 
+from langchain.schema import BaseMessage
+from langchain_anthropic import ChatAnthropic
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 
@@ -19,7 +21,7 @@ from local_operator.credentials import CredentialManager
 class LocalCodeExecutor:
     context: Dict[str, Any]
     conversation_history: List[Dict[str, str]]
-    model: ChatOpenAI | ChatOllama
+    model: ChatOpenAI | ChatOllama | ChatAnthropic
     step_counter: int
 
     """A class to handle local Python code execution with safety checks and context management.
@@ -58,6 +60,10 @@ class LocalCodeExecutor:
         pattern = re.compile(r"```python\n(.*?)```", re.DOTALL)
         return pattern.findall(text)
 
+    async def invoke_model(self, messages: List[Dict[str, str]]) -> BaseMessage:
+        """Invoke the language model with a list of messages."""
+        return await self.model.ainvoke(messages)
+
     async def check_code_safety(self, code: str) -> bool:
         """Analyze code for potentially dangerous operations using the language model.
 
@@ -83,7 +89,7 @@ class LocalCodeExecutor:
         """
 
         self.conversation_history.append({"role": "user", "content": safety_check_prompt})
-        response = await self.model.ainvoke(self.conversation_history)
+        response = await self.invoke_model(self.conversation_history)
         self.conversation_history.pop()
 
         response_content = (
@@ -215,7 +221,7 @@ class LocalCodeExecutor:
 
             for attempt in range(max_retries):
                 try:
-                    response = await self.model.ainvoke(self.conversation_history)
+                    response = await self.invoke_model(self.conversation_history)
                     response_content = (
                         response.content
                         if isinstance(response.content, str)
@@ -285,7 +291,7 @@ class CliOperator:
     def __init__(
         self,
         credential_manager: CredentialManager,
-        model_instance: Union[ChatOpenAI, ChatOllama],
+        model_instance: Union[ChatOpenAI, ChatOllama, ChatAnthropic],
     ):
         """Initialize the CLI by loading credentials or prompting for them.
 
@@ -483,7 +489,7 @@ class CliOperator:
                 if self.model is None:
                     raise ValueError("Model is not initialized")
 
-                response = self.model.invoke(self.executor.conversation_history)
+                response = await self.executor.invoke_model(self.executor.conversation_history)
                 response_content = (
                     response.content if isinstance(response.content, str) else str(response.content)
                 )

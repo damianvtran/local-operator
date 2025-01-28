@@ -27,30 +27,62 @@ from local_operator.credentials import CredentialManager
 from local_operator.model import configure_model
 
 
-def main():
+def build_cli_parser() -> argparse.ArgumentParser:
+    """
+    Build and return the CLI argument parser.
+
+    Returns:
+        argparse.ArgumentParser: The CLI argument parser
+    """
+    parser = argparse.ArgumentParser(description="Local Operator CLI")
+    parser.add_argument(
+        "--hosting",
+        type=str,
+        choices=["deepseek", "openai", "anthropic", "ollama"],
+        default="deepseek",
+        help="Hosting platform to use (deepseek, openai, anthropic, or ollama)",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="deepseek-chat",
+        help="Model to use (e.g., deepseek-chat, gpt-4o, qwen2.5:14b, "
+        "claude-3-5-sonnet-20240620)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode for verbose output",
+    )
+    subparsers = parser.add_subparsers(dest="subcommand")
+    credential_parser = subparsers.add_parser("credential")
+    credential_parser.add_argument(
+        "--key",
+        type=str,
+        help="Key in the .env file to update",
+    )
+    credential_parser.add_argument(
+        "--value",
+        type=str,
+        help="Value to set for the key",
+    )
+    return parser
+
+
+def credential_command(args: argparse.Namespace) -> int:
+    credential_manager = CredentialManager(Path.home() / ".local-operator")
+    credential_manager.set_credential(args.key, args.value)
+    return 0
+
+
+def main() -> int:
     try:
-        # Set up argument parser
-        parser = argparse.ArgumentParser(description="Local Operator CLI")
-        parser.add_argument(
-            "--hosting",
-            type=str,
-            choices=["deepseek", "openai", "ollama"],
-            default="deepseek",
-            help="Hosting platform to use (deepseek, openai, or ollama)",
-        )
-        parser.add_argument(
-            "--model",
-            type=str,
-            default="deepseek-chat",
-            help="Model to use (e.g., deepseek-chat, gpt-4o, qwen2.5:14b)",
-        )
-        parser.add_argument(
-            "--debug",
-            action="store_true",
-            help="Enable debug mode for verbose output",
-        )
+        parser = build_cli_parser()
 
         args = parser.parse_args()
+
+        if args.subcommand == "credential":
+            return credential_command(args)
 
         os.environ["LOCAL_OPERATOR_DEBUG"] = "true" if args.debug else "false"
 
@@ -59,23 +91,31 @@ def main():
 
         model_instance = configure_model(args.hosting, args.model, credential_manager)
 
-        # Initialize the CLI interface with hosting and model parameters
+        if not model_instance:
+            error_msg = (
+                f"\n\033[1;31mError: Model not found for hosting: "
+                f"{args.hosting} and model: {args.model}\033[0m"
+            )
+            print(error_msg)
+            return -1
+
         operator = CliOperator(
-            hosting=args.hosting,
-            model=args.model,
             credential_manager=credential_manager,
             model_instance=model_instance,
         )
 
         # Start the async chat interface
         asyncio.run(operator.chat())
+
+        return 0
     except Exception as e:
         print(f"\n\033[1;31mError: {str(e)}\033[0m")
         print("\033[1;34m╭─ Stack Trace ────────────────────────────────────\033[0m")
         traceback.print_exc()
         print("\033[1;34m╰──────────────────────────────────────────────────\033[0m")
         print("\n\033[1;33mPlease check your .env configuration and internet connection.\033[0m")
+        return -1
 
 
 if __name__ == "__main__":
-    main()
+    exit(main())
