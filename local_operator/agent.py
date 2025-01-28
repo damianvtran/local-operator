@@ -516,6 +516,12 @@ class CliOperator:
                   "DONE" # Important to mark the end of the task even if no code is run
                 * User can now continue with another command
 
+                Conclusion lines:
+                - "DONE": When you have completed a task which can be code or some interpretation
+                  that the user has asked for.
+                - "ASK": When you need user confirmation to proceed with the next step.
+                - "Bye!": When the user requests to quit.
+
                 System Context:
                 - OS: {system_details['os']} {system_details['release']}
                 - Architecture: {system_details['architecture']}
