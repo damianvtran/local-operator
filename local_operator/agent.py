@@ -8,11 +8,10 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Union
 
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
-from pydantic import SecretStr
 
 from local_operator.credentials import CredentialManager
 
@@ -283,52 +282,19 @@ class CliOperator:
         executor: LocalCodeExecutor instance for handling code execution
     """
 
-    def __init__(self, hosting: str, model: str, credential_manager: CredentialManager):
+    def __init__(
+        self,
+        credential_manager: CredentialManager,
+        model_instance: Union[ChatOpenAI, ChatOllama],
+    ):
         """Initialize the CLI by loading credentials or prompting for them.
 
         Args:
             hosting (str): Hosting platform (deepseek, openai, or ollama)
             model (str): Model name to use
         """
-        if not hosting:
-            raise ValueError("Hosting is required")
-        if not model:
-            raise ValueError("Model is required")
-
         self.credential_manager = credential_manager
-
-        # Configure model based on hosting
-        if hosting == "deepseek":
-            base_url = "https://api.deepseek.com/v1"
-            api_key = self.credential_manager.get_api_key("DEEPSEEK_API_KEY")
-            if not api_key:
-                api_key = self.credential_manager.prompt_for_api_key("DEEPSEEK_API_KEY")
-            self.model = ChatOpenAI(
-                api_key=SecretStr(api_key),
-                temperature=0.5,
-                base_url=base_url,
-                model=model,
-            )
-        elif hosting == "openai":
-            base_url = "https://api.openai.com"
-            api_key = self.credential_manager.get_api_key("OPENAI_API_KEY")
-            if not api_key:
-                api_key = self.credential_manager.prompt_for_api_key("OPENAI_API_KEY")
-            self.model = ChatOpenAI(
-                api_key=SecretStr(api_key),
-                temperature=0.5,
-                base_url=base_url,
-                model=model,
-            )
-        elif hosting == "ollama":
-            self.model = ChatOllama(
-                model=model,
-                temperature=0.5,
-            )
-        elif hosting == "noop":
-            # Useful for testing, will create a dummy operator
-            self.model = None
-
+        self.model = model_instance
         self.executor = LocalCodeExecutor(self.model)
 
         self._load_input_history()

@@ -25,8 +25,10 @@ def cli_operator(mock_model):
     credential_manager = MagicMock()
     credential_manager.get_api_key = MagicMock(return_value="test_key")
 
-    operator = CliOperator("noop", "noop", credential_manager)
-    operator.model = mock_model
+    operator = CliOperator(
+        credential_manager=credential_manager,
+        model_instance=mock_model,
+    )
 
     operator._get_input_with_history = MagicMock(return_value="noop")
 
@@ -121,20 +123,17 @@ async def test_process_response(executor, mock_model):
 
 
 def test_cli_operator_init(mock_model):
-    with patch("local_operator.agent.ChatOpenAI", return_value=mock_model) as mock_chat_openai:
-        credential_manager = MagicMock()
-        credential_manager.get_api_key = MagicMock(return_value="test_key")
+    credential_manager = MagicMock()
+    credential_manager.get_api_key = MagicMock(return_value="test_key")
 
-        operator = CliOperator("openai", "gpt-3.5-turbo", credential_manager)
+    operator = CliOperator(
+        credential_manager=credential_manager,
+        model_instance=mock_model,
+    )
 
-        # Assert that the mock ChatOpenAI was called with the correct parameters
-        mock_chat_openai.assert_called_once()
-        call_args = mock_chat_openai.call_args
-        assert call_args.kwargs["api_key"] == SecretStr("test_key")
-        assert call_args.kwargs["model"] == "gpt-3.5-turbo"
-
-        assert operator.model == mock_model
-        assert operator.executor is not None
+    assert operator.model == mock_model
+    assert operator.credential_manager == credential_manager
+    assert operator.executor is not None
 
 
 @pytest.mark.asyncio

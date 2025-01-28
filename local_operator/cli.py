@@ -24,6 +24,7 @@ from pathlib import Path
 
 from local_operator.agent import CliOperator
 from local_operator.credentials import CredentialManager
+from local_operator.model import configure_model
 
 
 def main():
@@ -56,9 +57,14 @@ def main():
         config_dir = Path.home() / ".local-operator"
         credential_manager = CredentialManager(config_dir)
 
+        model_instance = configure_model(args.hosting, args.model, credential_manager)
+
         # Initialize the CLI interface with hosting and model parameters
         operator = CliOperator(
-            hosting=args.hosting, model=args.model, credential_manager=credential_manager
+            hosting=args.hosting,
+            model=args.model,
+            credential_manager=credential_manager,
+            model_instance=model_instance,
         )
 
         # Start the async chat interface
