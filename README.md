@@ -1144,6 +1144,468 @@ Tim,Bean
 
 </details>
 
+<details>
+<summary>Complex web scraping example</summary>
+
+```shell
+╭──────────────────────────────────────────────────╮
+│ Local Executor Agent CLI                         │
+│──────────────────────────────────────────────────│
+│ You are interacting with a helpful CLI agent     │
+│ that can execute tasks locally on your device    │
+│ by running Python code.                          │
+│──────────────────────────────────────────────────│
+│ Type 'exit' or 'quit' to quit                    │
+╰──────────────────────────────────────────────────╯
+
+You (/Users/damiantran/python-sandbox): > get the full list of sanctioned individuals from https://www.international.gc.ca/world-monde/international_relations-relations_internationales/sanctions/consolidated-consolide.aspx?lang=eng and save them to a csv.  Review the site structure first to determine how to scrape and then make sure to get every single name from the site from beginning to end
+
+╭─ Agent Response (Step 1) ───────────────────────
+│ To accomplish this task, I will first review the structure of the webpage to understand how the data is organized. This will help determine the best approach to scrape the list of sanctioned individuals. Let's start by fetching the HTML content of the page.
+│ 
+│ ```python
+│ import requests
+│ 
+│ # Fetch the HTML content of the page
+│ url = "https://www.international.gc.ca/world-monde/international_relations-relations_internationales/sanctions/consolidated-consolide.aspx?lang=eng"
+│ response = requests.get(url)
+│ 
+│ # Print the first 500 characters of the HTML content to understand the structure
+│ print(response.text[:500])
+│ ```
+│ 
+│ This code will help us understand the structure of the webpage and identify where the list of sanctioned individuals is located. Once we have this information, we can proceed with the next steps to extract the data.
+╰──────────────────────────────────────────────────
+
+╭─ Executing Code Blocks (Step 1) ───────────────
+
+│ Executing:
+import requests
+
+# Fetch the HTML content of the page
+url = "https://www.international.gc.ca/world-monde/international_relations-relations_internationales/sanctions/consolidated-consolide.aspx?lang=eng"
+response = requests.get(url)
+
+# Print the first 500 characters of the HTML content to understand the structure
+print(response.text[:500])
+│ Result: 
+✓ Code Execution Successful
+╞══════════════════════════════════════════╡
+│ Output:
+<!DOCTYPE html>  <html class="no-js" lang="en" dir="ltr">    <head>      <meta charset="utf-8">      <!-- IW --><!--<iw_root><iw><iw_components><iw_component type="Page" display_name_eng="Page" display_name_fra="Page" vpath="//server/dfait-maeci/main/internet-internet/international/world-monde/WORKAREA/content-contenu/templatedata/pages-pages/generic-generique/data/international_relations-relations_internationales/sanctions/consolidated-consolide"/></iw_components></iw></iw_root>-->      <!-- We
+
+│ Error Output:
+[No error output]
+╰──────────────────────────────────────────────────
+
+╭─ Agent Response (Step 2) ───────────────────────
+│ The initial HTML snippet indicates that the page uses a templated structure, but it doesn't provide enough information about where the list of sanctioned individuals is located. To proceed, I'll fetch a larger portion of the HTML content to better understand the structure and identify the relevant section.
+│ 
+│ ```python
+│ # Print the first 2000 characters of the HTML content to get more context
+│ print(response.text[:2000])
+│ ```
+│ 
+│ This will give us a more comprehensive view of the HTML structure and help us locate the section containing the list of sanctioned individuals.
+╰──────────────────────────────────────────────────
+
+╭─ Executing Code Blocks (Step 2) ───────────────
+
+│ Executing:
+# Print the first 2000 characters of the HTML content to get more context
+print(response.text[:2000])
+│ Result: 
+✓ Code Execution Successful
+╞══════════════════════════════════════════╡
+│ Output:
+<!DOCTYPE html>  <html class="no-js" lang="en" dir="ltr">    <head>      <meta charset="utf-8">      <!-- IW --><!--<iw_root><iw><iw_components><iw_component type="Page" display_name_eng="Page" display_name_fra="Page" vpath="//server/dfait-maeci/main/internet-internet/international/world-monde/WORKAREA/content-contenu/templatedata/pages-pages/generic-generique/data/international_relations-relations_internationales/sanctions/consolidated-consolide"/></iw_components></iw></iw_root>-->      <!-- Web Experience Toolkit (WET) / Boîte à outils de l'expérience Web (BOEW)        wet-boew.github.io/wet-boew/License-en.html / wet-boew.github.io/wet-boew/Licence-fr.html -->      <!-- WET v4.0.70.1 -->      <title>Consolidated Canadian Autonomous Sanctions List</title>      <!-- Meta data begins -->      <meta content="width=device-width,initial-scale=1" name="viewport">      <meta name="description" content="The Consolidated Canadian Autonomous Sanctions List includes individuals and entities subject to specific sanctions regulations made under the Special Economic Measures Act (SEMA) and the Justice for Victims of Corrupt Foreign Officials Act (JVCFOA)." />      <meta name="dcterms.title" content="Consolidated Canadian Autonomous Sanctions List" />      <meta name="dcterms:service" content="GAC-AMC_International" />      <meta name="dcterms.accessRights" content="2" />      <meta name="dcterms.creator" content="Global Affairs Canada" />      <meta name="dcterms.issued" title="W3CDTF" content="2015-10-19" />      <meta name="dcterms.modified" title="W3CDTF" content="2025-01-27" />      <meta name="dcterms.subject" title="scheme" content="Foreign service" />      <meta name="dcterms.language" title="ISO639-2/T" content="eng" />       <!-- REVIEW -->                <meta name="twitter:card" content="summary_large_image" />        <meta property="og:type" content="article" />        <meta property="og:site_name" content="GAC" />                                            <link re
+
+│ Error Output:
+[No error output]
+╰──────────────────────────────────────────────────
+
+╭─ Agent Response (Step 3) ───────────────────────
+│ The HTML content fetched so far mainly contains metadata and does not reveal the structure of the list of sanctioned individuals. To effectively locate the data, I'll search for any downloadable files, such as CSV or Excel files, that might contain the list. This is a common practice for such datasets.
+│ 
+│ Let's search for any links to downloadable files in the HTML content.
+│ 
+│ ```python
+│ from bs4 import BeautifulSoup
+│ 
+│ # Parse the HTML content using BeautifulSoup
+│ soup = BeautifulSoup(response.text, 'html.parser')
+│ 
+│ # Find all links in the HTML content
+│ links = soup.find_all('a', href=True)
+│ 
+│ # Filter links that point to downloadable files (e.g., CSV, Excel)
+│ download_links = [link['href'] for link in links if link['href'].endswith(('.csv', '.xls', '.xlsx'))]
+│ 
+│ # Print the download links
+│ print(download_links)
+│ ```
+│ 
+│ This code will help identify if there are any downloadable files containing the list of sanctioned individuals. If such files are found, we can proceed to download and process them.
+╰──────────────────────────────────────────────────
+
+╭─ Executing Code Blocks (Step 3) ───────────────
+
+│ Executing:
+from bs4 import BeautifulSoup
+
+# Parse the HTML content using BeautifulSoup
+soup = BeautifulSoup(response.text, 'html.parser')
+
+# Find all links in the HTML content
+links = soup.find_all('a', href=True)
+
+# Filter links that point to downloadable files (e.g., CSV, Excel)
+download_links = [link['href'] for link in links if link['href'].endswith(('.csv', '.xls', '.xlsx'))]
+
+# Print the download links
+print(download_links)
+│ Result: 
+✓ Code Execution Successful
+╞══════════════════════════════════════════╡
+│ Output:
+[]
+
+│ Error Output:
+[No error output]
+╰──────────────────────────────────────────────────
+
+╭─ Agent Response (Step 4) ───────────────────────
+│ It appears that there are no direct links to downloadable CSV or Excel files in the HTML content. This suggests that the list of sanctioned individuals might be embedded within the webpage itself, possibly in a table or another structured format.
+│ 
+│ Let's search for any tables in the HTML content that might contain the data we need.
+│ 
+│ ```python
+│ # Find all tables in the HTML content
+│ tables = soup.find_all('table')
+│ 
+│ # Print the number of tables found
+│ print(f"Number of tables found: {len(tables)}")
+│ 
+│ # If tables are found, print the first few rows of the first table for inspection
+│ if tables:
+│     first_table = tables[0]
+│     rows = first_table.find_all('tr')
+│     for row in rows[:5]:  # Print first 5 rows
+│         columns = row.find_all(['td', 'th'])
+│         print([column.get_text(strip=True) for column in columns])
+│ ```
+│ 
+│ This code will help us identify if there is a table containing the list of sanctioned individuals and allow us to inspect its structure.
+╰──────────────────────────────────────────────────
+
+╭─ Executing Code Blocks (Step 4) ───────────────
+
+│ Executing:
+# Find all tables in the HTML content
+tables = soup.find_all('table')
+
+# Print the number of tables found
+print(f"Number of tables found: {len(tables)}")
+
+# If tables are found, print the first few rows of the first table for inspection
+if tables:
+    first_table = tables[0]
+    rows = first_table.find_all('tr')
+    for row in rows[:5]:  # Print first 5 rows
+        columns = row.find_all(['td', 'th'])
+        print([column.get_text(strip=True) for column in columns])
+│ Result: 
+✓ Code Execution Successful
+╞══════════════════════════════════════════╡
+│ Output:
+Number of tables found: 1
+['Regulation', 'Entity', 'Title', 'Last Name', 'Given Names', 'Aliases', 'Date of Birth(YYYY/MM/DD)', 'Schedule', 'Item #', 'Date of Listing(YYYY/MM/DD)']
+['Belarus', '', '', 'Atabekov', 'Khazalbek Bakhtibekovich', '', '', '1, Part 1', '1', '2020-09-28']
+['Belarus', '', '', 'Balaba', 'Dmitry Vladimirovich', '', '1972', '1, Part 1', '2', '2020-09-28']
+['Belarus', '', '', 'Barsukov', 'Aleksandr Petrovich', '', '1965-04-29', '1, Part 1', '3', '2020-09-28']
+['Belarus', '', '', 'Dmukhailo', 'Yelena Nikolaevna', '', '1971', '1, Part 1', '4', '2020-09-28']
+
+│ Error Output:
+[No error output]
+╰──────────────────────────────────────────────────
+
+╭─ Agent Response (Step 5) ───────────────────────
+│ We have successfully identified a table containing the list of sanctioned individuals. The table includes columns such as "Regulation," "Entity," "Title," "Last Name," "Given Names," "Aliases," "Date of Birth," "Schedule," "Item #," and "Date of Listing."
+│ 
+│ Next, let's extract the data from this table and save it to a CSV file.
+│ 
+│ ```python
+│ import csv
+│ 
+│ # Extract table headers
+│ headers = [header.get_text(strip=True) for header in tables[0].find_all('th')]
+│ 
+│ # Extract table rows
+│ data = []
+│ for row in tables[0].find_all('tr')[1:]:  # Skip header row
+│     columns = row.find_all('td')
+│     data.append([column.get_text(strip=True) for column in columns])
+│ 
+│ # Save the data to a CSV file
+│ csv_file_path = 'sanctioned_individuals.csv'
+│ with open(csv_file_path, mode='w', newline='', encoding='utf-8') as file:
+│     writer = csv.writer(file)
+│     writer.writerow(headers)
+│     writer.writerows(data)
+│ 
+│ print(f"Data saved to {csv_file_path}")
+│ ```
+│ 
+│ This code will extract the data from the table and save it to a CSV file named `sanctioned_individuals.csv`. Let's execute this step to complete the task.
+╰──────────────────────────────────────────────────
+
+╭─ Executing Code Blocks (Step 5) ───────────────
+
+│ Executing:
+import csv
+
+# Extract table headers
+headers = [header.get_text(strip=True) for header in tables[0].find_all('th')]
+
+# Extract table rows
+data = []
+for row in tables[0].find_all('tr')[1:]:  # Skip header row
+    columns = row.find_all('td')
+    data.append([column.get_text(strip=True) for column in columns])
+
+# Save the data to a CSV file
+csv_file_path = 'sanctioned_individuals.csv'
+with open(csv_file_path, mode='w', newline='', encoding='utf-8') as file:
+    writer = csv.writer(file)
+    writer.writerow(headers)
+    writer.writerows(data)
+
+print(f"Data saved to {csv_file_path}")
+│ Result: 
+✓ Code Execution Successful
+╞══════════════════════════════════════════╡
+│ Output:
+Data saved to sanctioned_individuals.csv
+
+│ Error Output:
+[No error output]
+╰──────────────────────────────────────────────────
+
+╭─ Agent Response (Step 6) ───────────────────────
+│ The data has been successfully extracted from the table and saved to a CSV file named `sanctioned_individuals.csv` in your current working directory. You can now access the full list of sanctioned individuals from this file.
+│ 
+│ DONE
+╰──────────────────────────────────────────────────
+You (/Users/damiantran/python-sandbox): > show the content of the csv
+
+╭─ Agent Response (Step 1) ───────────────────────
+│ Let's read and display the content of the `sanctioned_individuals.csv` file to verify its contents.
+│ 
+│ ```python
+│ import pandas as pd
+│ 
+│ # Read the CSV file and display its contents
+│ csv_file_path = 'sanctioned_individuals.csv'
+│ data = pd.read_csv(csv_file_path)
+│ 
+│ # Display the first few rows of the CSV file
+│ print(data.head())
+│ ```
+│ 
+│ This code will read the CSV file using the `pandas` library and display the first few rows for inspection. Let's execute this to see the content.
+╰──────────────────────────────────────────────────
+
+╭─ Executing Code Blocks (Step 1) ───────────────
+
+│ Executing:
+import pandas as pd
+
+# Read the CSV file and display its contents
+csv_file_path = 'sanctioned_individuals.csv'
+data = pd.read_csv(csv_file_path)
+
+# Display the first few rows of the CSV file
+print(data.head())
+
+✗ Error during execution:
+╞══════════════════════════════════════════╡
+│ Error:
+No module named 'pandas'
+╞══════════════════════════════════════════╡
+│ Attempting to fix the error...
+╰══════════════════════════════════════════╯
+
+✗ Error during execution (attempt 1):
+╞══════════════════════════════════════════╡
+│ Error:
+invalid syntax (<string>, line 2)
+│ Another attempt will be made...
+
+✗ Error during execution (attempt 2):
+╞══════════════════════════════════════════╡
+│ Error:
+invalid syntax (<string>, line 2)
+│ Result: 
+✗ Code Execution Failed after 3 attempts
+╞══════════════════════════════════════════╡
+│ Error:
+No module named 'pandas'
+╰──────────────────────────────────────────────────
+
+╭─ Agent Response (Step 2) ───────────────────────
+│ It seems that the `pandas` library is not installed in your environment. Let's install it first and then proceed to read and display the CSV file.
+│ 
+│ ```python
+│ # Install pandas package
+│ !pip install pandas
+│ ```
+│ 
+│ Once pandas is installed, we can proceed to read and display the contents of the CSV file.
+│ 
+│ ```python
+│ import pandas as pd
+│ 
+│ # Read the CSV file and display its contents
+│ csv_file_path = 'sanctioned_individuals.csv'
+│ data = pd.read_csv(csv_file_path)
+│ 
+│ # Display the first few rows of the CSV file
+│ print(data.head())
+│ ```
+│ 
+│ Let's execute these steps to ensure the code runs successfully.
+╰──────────────────────────────────────────────────
+
+╭─ Executing Code Blocks (Step 2) ───────────────
+
+│ Executing:
+# Install pandas package
+!pip install pandas
+Warning: Potentially dangerous operation detected. Proceed? (y/n): y
+
+✗ Error during execution:
+╞══════════════════════════════════════════╡
+│ Error:
+invalid syntax (<string>, line 2)
+╞══════════════════════════════════════════╡
+│ Attempting to fix the error...
+╰══════════════════════════════════════════╯
+Collecting pandas
+  Downloading pandas-2.2.3-cp312-cp312-macosx_11_0_arm64.whl.metadata (89 kB)
+Requirement already satisfied: numpy>=1.26.0 in /Users/damiantran/.local/pipx/venvs/local-operator/lib/python3.12/site-packages (from pandas) (2.2.2)
+Requirement already satisfied: python-dateutil>=2.8.2 in /Users/damiantran/.local/pipx/venvs/local-operator/lib/python3.12/site-packages (from pandas) (2.9.0.post0)
+Collecting pytz>=2020.1 (from pandas)
+  Using cached pytz-2024.2-py2.py3-none-any.whl.metadata (22 kB)
+Collecting tzdata>=2022.7 (from pandas)
+  Using cached tzdata-2025.1-py2.py3-none-any.whl.metadata (1.4 kB)
+Requirement already satisfied: six>=1.5 in /Users/damiantran/.local/pipx/venvs/local-operator/lib/python3.12/site-packages (from python-dateutil>=2.8.2->pandas) (1.17.0)
+Downloading pandas-2.2.3-cp312-cp312-macosx_11_0_arm64.whl (11.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 11.4/11.4 MB 10.6 MB/s eta 0:00:00
+Using cached pytz-2024.2-py2.py3-none-any.whl (508 kB)
+Using cached tzdata-2025.1-py2.py3-none-any.whl (346 kB)
+Installing collected packages: pytz, tzdata, pandas
+Successfully installed pandas-2.2.3 pytz-2024.2 tzdata-2025.1
+│ Result: 
+✓ Code Execution Successful
+╞══════════════════════════════════════════╡
+│ Output:
+  Regulation Entity Title  Last Name  ... Date of Birth(YYYY/MM/DD)   Schedule Item # Date of Listing(YYYY/MM/DD)
+0    Belarus    NaN   NaN   Atabekov  ...                       NaN  1, Part 1      1                  2020-09-28
+1    Belarus    NaN   NaN     Balaba  ...                      1972  1, Part 1      2                  2020-09-28
+2    Belarus    NaN   NaN   Barsukov  ...                1965-04-29  1, Part 1      3                  2020-09-28
+3    Belarus    NaN   NaN  Dmukhailo  ...                      1971  1, Part 1      4                  2020-09-28
+4    Belarus    NaN   NaN     Ipatov  ...                1964-10-30  1, Part 1      5                  2020-09-28
+
+[5 rows x 10 columns]
+
+│ Error Output:
+[No error output]
+
+│ Executing:
+import pandas as pd
+
+# Read the CSV file and display its contents
+csv_file_path = 'sanctioned_individuals.csv'
+data = pd.read_csv(csv_file_path)
+
+# Display the first few rows of the CSV file
+print(data.head())
+│ Result: 
+✓ Code Execution Successful
+╞══════════════════════════════════════════╡
+│ Output:
+  Regulation Entity Title  Last Name  ... Date of Birth(YYYY/MM/DD)   Schedule Item # Date of Listing(YYYY/MM/DD)
+0    Belarus    NaN   NaN   Atabekov  ...                       NaN  1, Part 1      1                  2020-09-28
+1    Belarus    NaN   NaN     Balaba  ...                      1972  1, Part 1      2                  2020-09-28
+2    Belarus    NaN   NaN   Barsukov  ...                1965-04-29  1, Part 1      3                  2020-09-28
+3    Belarus    NaN   NaN  Dmukhailo  ...                      1971  1, Part 1      4                  2020-09-28
+4    Belarus    NaN   NaN     Ipatov  ...                1964-10-30  1, Part 1      5                  2020-09-28
+
+[5 rows x 10 columns]
+
+│ Error Output:
+[No error output]
+╰──────────────────────────────────────────────────
+
+╭─ Agent Response (Step 3) ───────────────────────
+│ The content of the `sanctioned_individuals.csv` file has been successfully read and displayed. Here are the first few rows of the file:
+│ 
+│ ```
+│   Regulation Entity Title  Last Name  ... Date of Birth(YYYY/MM/DD)   Schedule Item # Date of Listing(YYYY/MM/DD)
+│ 0    Belarus    NaN   NaN   Atabekov  ...                       NaN  1, Part 1      1                  2020-09-28
+│ 1    Belarus    NaN   NaN     Balaba  ...                      1972  1, Part 1      2                  2020-09-28
+│ 2    Belarus    NaN   NaN   Barsukov  ...                1965-04-29  1, Part 1      3                  2020-09-28
+│ 3    Belarus    NaN   NaN  Dmukhailo  ...                      1971  1, Part 1      4                  2020-09-28
+│ 4    Belarus    NaN   NaN     Ipatov  ...                1964-10-30  1, Part 1      5                  2020-09-28
+│ ```
+│ 
+│ This output shows the first five rows of the data, including columns such as "Regulation," "Last Name," "Given Names," "Date of Birth," and others.
+│ 
+│ DONE
+╰──────────────────────────────────────────────────
+You (/Users/damiantran/python-sandbox): > how many rows are there in total?
+
+╭─ Agent Response (Step 1) ───────────────────────
+│ To determine the total number of rows in the CSV file, we can simply check the length of the DataFrame. Let's do that:
+│ 
+│ ```python
+│ # Get the total number of rows in the CSV file
+│ total_rows = len(data)
+│ 
+│ # Print the total number of rows
+│ print(f"Total number of rows: {total_rows}")
+│ ```
+│ 
+│ This code will output the total number of rows in the `sanctioned_individuals.csv` file. Let's execute it.
+╰──────────────────────────────────────────────────
+
+╭─ Executing Code Blocks (Step 1) ───────────────
+
+│ Executing:
+# Get the total number of rows in the CSV file
+total_rows = len(data)
+
+# Print the total number of rows
+print(f"Total number of rows: {total_rows}")
+│ Result: 
+✓ Code Execution Successful
+╞══════════════════════════════════════════╡
+│ Output:
+Total number of rows: 4495
+
+│ Error Output:
+[No error output]
+╰──────────────────────────────────────────────────
+
+╭─ Agent Response (Step 2) ───────────────────────
+│ The `sanctioned_individuals.csv` file contains a total of 4,495 rows. 
+│ 
+│ DONE
+╰──────────────────────────────────────────────────
+```
+
+</details>
+
 ## Safety Features
 
 The system includes multiple layers of protection:
