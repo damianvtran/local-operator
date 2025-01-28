@@ -57,8 +57,40 @@ class LocalCodeExecutor:
         Returns:
             list: A list of extracted code blocks as strings
         """
-        pattern = re.compile(r"```python\n(.*?)```", re.DOTALL)
-        return pattern.findall(text)
+        pattern = re.compile(
+            r"```python\s*(.*?)\s*```",
+            re.DOTALL,
+        )
+        blocks = pattern.findall(text)
+        valid_blocks = []
+
+        # Check that each code block is not a comment or git diff
+        for block in blocks:
+            is_comment = True
+
+            # Check the lines of the code block
+            for line in block.split("\n"):
+                trimmed_line = line.strip()
+
+                if trimmed_line.startswith("```"):
+                    continue
+
+                if not (
+                    trimmed_line.startswith("//")
+                    or trimmed_line.startswith("/*")
+                    or trimmed_line.startswith("#")
+                    or trimmed_line.startswith("+")
+                    or trimmed_line.startswith("-")
+                    or trimmed_line.startswith("<<<<<<<")
+                    or trimmed_line.startswith(">>>>>>>")
+                    or trimmed_line.startswith("=======")
+                ):
+                    is_comment = False
+                    break
+            if not is_comment:
+                valid_blocks.append(block)
+
+        return valid_blocks
 
     async def invoke_model(self, messages: List[Dict[str, str]]) -> BaseMessage:
         """Invoke the language model with a list of messages."""
@@ -238,6 +270,13 @@ class LocalCodeExecutor:
                 }
             )
 
+            print("\n\033[1;31m✗ Error during execution:\033[0m")
+            print("\033[1;34m╞══════════════════════════════════════════╡")
+            print(f"\033[1;36m│ Error:\033[0m\n{error_message}")
+            print("\033[1;34m╞══════════════════════════════════════════╡")
+            print("\033[1;36m│ Attempting to fix the error...\033[0m")
+            print("\033[1;34m╰══════════════════════════════════════════╯\033[0m")
+
             for attempt in range(max_retries):
                 try:
                     response = await self.invoke_model(self.conversation_history)
@@ -398,12 +437,9 @@ class CliOperator:
                 Core Principles:
                 1. Safety First: Never execute harmful or destructive code.
                    Always validate code safety before execution.
-                2. Step-by-Step Execution: Break tasks into logical steps,
-                   executing one step at a time.  Sometimes you will need to execute
-                   a single code block at a time and then use the output of that code
-                   block to inform the next step.  Do not put multiple steps into a single
-                   code block, instead generate one block at a time and allow the system
-                   to execute the code and provide the output.
+                2. Step-by-Step Execution: Break tasks into single-step code blocks.
+                   Execute each block individually, using its output to inform the
+                   next step. Never combine multiple steps in one code block.
                 3. Context Awareness: Maintain context between steps and across
                    sessions.
                 4. Minimal Output: Keep responses concise and focused on
@@ -452,6 +488,27 @@ class CliOperator:
                    the task. Ensure that "DONE" is the last word that is generated after
                    all other content.
 
+                Basic example:
+                - User: "Read the latest diffs in the current git repo and make a commit
+                  " with a suitable message."
+                - Agent:
+                  * Step 1:
+                    ```python
+                    print("git diff")
+                    ```
+                - System:
+                  * Executes the code and prints the output into the conversation history
+                - Agent:
+                  * Interprets the conversation history and determines the next step
+                  * Step 2:
+                    ```python
+                    print("git commit -m 'message'")
+                    ```
+                    DONE
+                - System:
+                  * Executes the code and prints the output into the conversation history
+                * User can now continue with another command
+
                 System Context:
                 - OS: {system_details['os']} {system_details['release']}
                 - Architecture: {system_details['architecture']}
@@ -462,6 +519,10 @@ class CliOperator:
 
                 Installed Packages:
                 {installed_packages_str}
+
+                If you need to help the user to use Local Operator, run the local-operator
+                --help command to see the available commands in step 1 and then read the
+                console output to respond to the user in step 2.
 
                 Remember:
                 - Always prioritize safety and security

@@ -34,20 +34,143 @@ def cli_operator(mock_model):
 
 
 def test_extract_code_blocks(executor):
-    test_text = """
-    Some text
-    ```python
-    print('hello')
-    ```
-    More text
-    ```python
-    x = 1 + 1
-    ```
-    """
-    result = executor.extract_code_blocks(test_text)
-    assert len(result) == 2
-    assert "print('hello')" in result[0]
-    assert "x = 1 + 1" in result[1]
+    test_cases = [
+        {
+            "name": "Multiple code blocks",
+            "input": """
+            Some text
+            ```python
+            print('hello')
+            ```
+            More text
+            ```python
+            x = 1 + 1
+            ```
+            """,
+            "expected_blocks": ["print('hello')", "x = 1 + 1"],
+            "expected_count": 2,
+        },
+        {
+            "name": "Multi-line code block",
+            "input": """
+            Here's a multi-line code block:
+            ```python
+            def calculate_sum(a, b):
+                result = a + b
+                return result
+
+            total = calculate_sum(5, 3)
+            print(f"The sum is: {total}")
+            ```
+            """,
+            "expected_blocks": [
+                "def calculate_sum(a, b):\n                result = a + b\n"
+                "                return result\n\n            total = calculate_sum(5, 3)\n"
+                '            print(f"The sum is: {total}")'
+            ],
+            "expected_count": 1,
+        },
+        {
+            "name": "No code blocks",
+            "input": """
+            No code blocks here
+            Just plain text
+            """,
+            "expected_blocks": [],
+            "expected_count": 0,
+        },
+        {
+            "name": "Only commented block",
+            "input": """
+            # ```python
+            # This is a comment
+            # Another comment
+            # Yet another comment
+            # ```
+            """,
+            "expected_blocks": [],
+            "expected_count": 0,
+        },
+        {
+            "name": "Code block with commented block and valid code",
+            "input": """
+            # ```python
+            # Block in a comment
+            # ```
+            ```python
+            def real_code():
+                pass
+            ```
+            """,
+            "expected_blocks": ["def real_code():\n                pass"],
+            "expected_count": 1,
+        },
+        {
+            "name": "Code block with single comment",
+            "input": """
+            ```python
+            # This function calculates the square
+            def square(x):
+                return x * x
+            ```
+            """,
+            "expected_blocks": [
+                "# This function calculates the square\n"
+                "            def square(x):\n"
+                "                return x * x"
+            ],
+            "expected_count": 1,
+        },
+        {
+            "name": "Code block with git diff markers",
+            "input": """
+            - ```python
+            - def old_function():
+            -     return "old"
+            + def new_function():
+            +     return "new"
+            + ```
+            ```python
+            def actual_code():
+                return True
+            ```
+            """,
+            "expected_blocks": ["def actual_code():\n                return True"],
+            "expected_count": 1,
+        },
+        {
+            "name": "Code block with git diff and conflict markers",
+            "input": """
+            + ```python
+            <<<<<<< HEAD
+            - def main():
+            -     return "local"
+            =======
+            + def main():
+            +     return "remote"
+            >>>>>>> feature-branch
+            + ```
+            + ```python
+            + def valid_code():
+            +     return "this is valid"
+            + ```
+            """,
+            "expected_blocks": [],
+            "expected_count": 0,
+        },
+    ]
+
+    for case in test_cases:
+        result = executor.extract_code_blocks(case["input"])
+        assert len(result) == case["expected_count"], (
+            f"Test case '{case['name']}' failed: "
+            f"expected {case['expected_count']} code blocks but got {len(result)}"
+        )
+        for expected, actual in zip(case["expected_blocks"], result):
+            assert expected in actual.strip(), (
+                f"Test case '{case['name']}' failed: "
+                f"expected code block '{expected}' not found in actual result '{actual.strip()}'"
+            )
 
 
 @pytest.mark.asyncio

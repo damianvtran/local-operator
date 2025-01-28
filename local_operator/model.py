@@ -57,6 +57,16 @@ def configure_model(
             timeout=120,
             stop=["\n\nHuman:"],
         )
+    elif hosting == "kimi":
+        api_key = credential_manager.get_credential("KIMI_API_KEY")
+        if not api_key:
+            api_key = credential_manager.prompt_for_credential("KIMI_API_KEY")
+        return ChatOpenAI(
+            api_key=SecretStr(api_key),
+            temperature=0.5,
+            model=model,
+            base_url="https://api.moonshot.cn/v1",
+        )
     elif hosting == "ollama":
         return ChatOllama(
             model=model,

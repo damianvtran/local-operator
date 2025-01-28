@@ -38,16 +38,16 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--hosting",
         type=str,
-        choices=["deepseek", "openai", "anthropic", "ollama"],
+        choices=["deepseek", "openai", "anthropic", "ollama", "kimi"],
         default="deepseek",
-        help="Hosting platform to use (deepseek, openai, anthropic, or ollama)",
+        help="Hosting platform to use (deepseek, openai, anthropic, ollama, or kimi)",
     )
     parser.add_argument(
         "--model",
         type=str,
         default="deepseek-chat",
         help="Model to use (e.g., deepseek-chat, gpt-4o, qwen2.5:14b, "
-        "claude-3-5-sonnet-20240620)",
+        "claude-3-5-sonnet-20240620, moonshot-v1-32k)",
     )
     parser.add_argument(
         "--debug",
@@ -63,7 +63,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=str,
         required=True,
         help="Credential key to update (e.g., DEEPSEEK_API_KEY, "
-        "OPENAI_API_KEY, ANTHROPIC_API_KEY)",
+        "OPENAI_API_KEY, ANTHROPIC_API_KEY, KIMI_API_KEY)",
     )
     credential_parser.add_argument(
         "--value",
