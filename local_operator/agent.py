@@ -8,7 +8,7 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Coroutine, Dict, List, Union
+from typing import Any, Dict, List, Union
 
 from langchain.schema import BaseMessage
 from langchain_anthropic import ChatAnthropic
