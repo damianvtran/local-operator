@@ -16,6 +16,7 @@ from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 
 from local_operator.credentials import CredentialManager
+from local_operator.prompts import BaseSystemPrompt
 
 
 class ProcessResponseStatus(Enum):
@@ -473,7 +474,7 @@ class CliOperator:
     def _setup_prompt(self) -> None:
         """Setup the prompt for the agent."""
 
-        base_system_prompt = Path("prompts/base_system.md").read_text()
+        base_system_prompt = BaseSystemPrompt
         user_system_prompt = Path.home() / ".local-operator" / "system_prompt.md"
         if user_system_prompt.exists():
             user_system_prompt = user_system_prompt.read_text()
