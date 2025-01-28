@@ -55,16 +55,21 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Enable debug mode for verbose output",
     )
     subparsers = parser.add_subparsers(dest="subcommand")
-    credential_parser = subparsers.add_parser("credential")
+    credential_parser = subparsers.add_parser(
+        "credential", help="Manage API keys and credentials for different hosting platforms"
+    )
     credential_parser.add_argument(
         "--key",
         type=str,
-        help="Key in the .env file to update",
+        required=True,
+        help="Credential key to update (e.g., DEEPSEEK_API_KEY, "
+        "OPENAI_API_KEY, ANTHROPIC_API_KEY)",
     )
     credential_parser.add_argument(
         "--value",
         type=str,
-        help="Value to set for the key",
+        required=True,
+        help="The API key or credential value to set for the specified key",
     )
     return parser
 
