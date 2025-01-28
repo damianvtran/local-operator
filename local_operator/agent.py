@@ -33,7 +33,7 @@ class LocalCodeExecutor:
         step_counter (int): A counter to track the current step in sequential execution
     """
 
-    def __init__(self, model):
+    def __init__(self, model: ChatOpenAI | ChatOllama | ChatAnthropic):
         """Initialize the LocalCodeExecutor with a language model.
 
         Args:
@@ -94,7 +94,22 @@ class LocalCodeExecutor:
 
     async def invoke_model(self, messages: List[Dict[str, str]]) -> BaseMessage:
         """Invoke the language model with a list of messages."""
-        return await self.model.ainvoke(messages)
+        if isinstance(self.model, ChatAnthropic):
+            # Anthropic models expect a single message, so combine the conversation history
+            combined_message = ""
+            for msg in messages:
+                role_prefix = (
+                    "Human: "
+                    if msg["role"] == "user"
+                    else "Assistant: " if msg["role"] == "assistant" else "System: "
+                )
+                combined_message += f"{role_prefix}{msg['content']}\n\n"
+
+            # Remove trailing newlines and invoke the model
+            combined_message = combined_message.strip()
+            return await self.model.ainvoke(combined_message)
+        else:
+            return await self.model.ainvoke(messages)
 
     async def check_code_safety(self, code: str) -> bool:
         """Analyze code for potentially dangerous operations using the language model.
