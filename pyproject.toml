@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.0.21"
+version = "0.0.22"
 description = "A Python-based agent for local command execution"
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damianvtran@gmail.com" }]
@@ -57,5 +57,5 @@ strictListInference = true
 reportPrivateImportUsage = false
 
 [tool.pytest.ini_options]
-addopts = "-v"
+addopts = "-v -s"
 testpaths = ["tests"]

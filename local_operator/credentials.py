@@ -70,7 +70,7 @@ class CredentialManager:
         # Reload environment variables
         load_dotenv(self.config_file, override=True)
 
-    def prompt_for_credential(self, key: str) -> str:
+    def prompt_for_credential(self, key: str, reason: str = "not found in configuration") -> str:
         """Prompt the user to enter a credential if not present in environment.
 
         Args:
@@ -79,39 +79,37 @@ class CredentialManager:
         Returns:
             str: The credential value
         """
-        credential = self.get_credential(key)
+        # Calculate border length based on key length
+        line_length = max(50, len(key) + 12)
+        border = "─" * line_length
+
+        # Create box components with colors
+        cyan = "\033[1;36m"
+        blue = "\033[1;94m"
+        reset = "\033[0m"
+
+        # Print the setup box
+        print(f"{cyan}╭{border}╮{reset}")
+        setup_padding = " " * (line_length - len(key) - 7)
+        print(f"{cyan}│ {key} Setup{setup_padding}│{reset}")
+        print(f"{cyan}├{border}┤{reset}")
+        reason_padding = " " * (line_length - len(key) - len(reason) - 3)
+        print(f"{cyan}│ {key} {reason}.{reason_padding}│{reset}")
+        print(f"{cyan}╰{border}╯{reset}")
+
+        # Prompt for API key
+        credential = input(f"{blue}Please enter your {key}: {reset}").strip()
         if not credential:
-            # Calculate border length based on key length
-            line_length = max(50, len(key) + 12)
-            border = "─" * line_length
+            raise ValueError(f"\033[1;31m{key} is required for this step.\033[0m")
 
-            # Create box components with colors
-            cyan = "\033[1;36m"
-            blue = "\033[1;94m"
-            reset = "\033[0m"
+        # Save the new API key to config file
+        with open(self.config_file, "a") as f:
+            f.write(f"\n{key}={credential}\n")
+        self.config_file.chmod(0o600)
 
-            # Print the setup box
-            print(f"{cyan}╭{border}╮{reset}")
-            setup_padding = " " * (line_length - len(key) - 9)
-            print(f"{cyan}│ {key} Setup{setup_padding}│{reset}")
-            print(f"{cyan}├{border}┤{reset}")
-            not_found_padding = " " * (line_length - len(key) - 28)
-            print(f"{cyan}│ {key} not found in configuration.{not_found_padding}│{reset}")
-            print(f"{cyan}╰{border}╯{reset}")
+        print("\n\033[1;32m✓ Credential successfully saved!\033[0m")
 
-            # Prompt for API key
-            credential = input(f"{blue}Please enter your {key}: {reset}").strip()
-            if not credential:
-                raise ValueError(f"\033[1;31m{key} is required to use this application\033[0m")
-
-            # Save the new API key to config file
-            with open(self.config_file, "a") as f:
-                f.write(f"\n{key}={credential}\n")
-            self.config_file.chmod(0o600)
-
-            print("\n\033[1;32m✓ Credential successfully saved!\033[0m")
-
-            # Reload environment variables
-            load_dotenv(self.config_file, override=True)
+        # Reload environment variables
+        load_dotenv(self.config_file, override=True)
 
         return credential
