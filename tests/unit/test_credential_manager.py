@@ -9,12 +9,14 @@ from local_operator.credentials import CredentialManager
 
 @pytest.fixture
 def temp_config():
+    initial_env = os.environ.copy()
     """Fixture to create a temporary config file for testing."""
     with tempfile.TemporaryDirectory() as temp_dir:
         config_path = Path(temp_dir) / "config.env"
         yield config_path
-        # Clear environment variables after each test
+        # Clear any used environment variables after each test
         os.environ.clear()
+        os.environ.update(initial_env)
 
 
 def test_credential_manager_initialization(temp_config):
