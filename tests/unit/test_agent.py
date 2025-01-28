@@ -268,10 +268,25 @@ async def test_cli_operator_chat(cli_operator, mock_model):
         assert cli_operator.executor.conversation_history[-1]["content"] == "DONE"
 
 
+def test_agent_is_done(cli_operator):
+    test_cases = [
+        {"name": "DONE keyword", "content": "Some output\nDONE", "expected": True},
+        {"name": "ASK keyword", "content": "Some output\nASK", "expected": False},
+        {"name": "No special keyword", "content": "Some output\nregular text", "expected": False},
+    ]
+
+    for test_case in test_cases:
+        mock_response = MagicMock()
+        mock_response.content = test_case["content"]
+        assert (
+            cli_operator._agent_is_done(mock_response) == test_case["expected"]
+        ), f"Failed test case: {test_case['name']}"
+
+
 def test_agent_requires_user_input(cli_operator):
     test_cases = [
         {"name": "ASK keyword", "content": "Some output\nASK", "expected": True},
-        {"name": "DONE keyword", "content": "Some output\nDONE", "expected": True},
+        {"name": "DONE keyword", "content": "Some output\nDONE", "expected": False},
         {"name": "No special keyword", "content": "Some output\nregular text", "expected": False},
     ]
 
