@@ -507,6 +507,10 @@ class CliOperator:
                     DONE
                 - System:
                   * Executes the code and prints the output into the conversation history
+                - Agent:
+                  "I have completed the task.  Here is the output:"
+                  [OUTPUT FROM CONSOLE]
+                  "DONE" # Important to mark the end of the task even if no code is run
                 * User can now continue with another command
 
                 System Context:

@@ -34,7 +34,7 @@ def configure_model(
 
         return ChatOpenAI(
             api_key=SecretStr(api_key),
-            temperature=0.5,
+            temperature=0.3,
             base_url=base_url,
             model=model,
         )
@@ -47,7 +47,7 @@ def configure_model(
             api_key = credential_manager.prompt_for_credential("OPENAI_API_KEY")
         return ChatOpenAI(
             api_key=SecretStr(api_key),
-            temperature=0.5,
+            temperature=0.3,
             model=model,
         )
     elif hosting == "anthropic":
@@ -59,7 +59,7 @@ def configure_model(
             api_key = credential_manager.prompt_for_credential("ANTHROPIC_API_KEY")
         return ChatAnthropic(
             api_key=SecretStr(api_key),
-            temperature=0.5,
+            temperature=0.3,
             model_name=model,
             timeout=120,
             stop=["\n\nHuman:"],
@@ -74,7 +74,7 @@ def configure_model(
 
         return ChatOpenAI(
             api_key=SecretStr(api_key),
-            temperature=0.5,
+            temperature=0.3,
             model=model,
             base_url="https://api.moonshot.cn/v1",
         )
@@ -84,7 +84,7 @@ def configure_model(
 
         return ChatOllama(
             model=model,
-            temperature=0.5,
+            temperature=0.3,
         )
     elif hosting == "noop":
         # Useful for testing, will create a dummy operator
