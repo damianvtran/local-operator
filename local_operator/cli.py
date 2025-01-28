@@ -39,7 +39,6 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--hosting",
         type=str,
         choices=["deepseek", "openai", "anthropic", "ollama", "kimi"],
-        required=True,
         default="deepseek",
         help="Hosting platform to use (deepseek, openai, anthropic, ollama, or kimi)",
     )
@@ -66,18 +65,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Credential key to update (e.g., DEEPSEEK_API_KEY, "
         "OPENAI_API_KEY, ANTHROPIC_API_KEY, KIMI_API_KEY)",
     )
-    credential_parser.add_argument(
-        "--value",
-        type=str,
-        required=True,
-        help="The API key or credential value to set for the specified key",
-    )
     return parser
 
 
 def credential_command(args: argparse.Namespace) -> int:
     credential_manager = CredentialManager(Path.home() / ".local-operator")
-    credential_manager.set_credential(args.key, args.value)
+    credential_manager.prompt_for_credential(args.key, reason="update requested")
     return 0
 
 

@@ -391,14 +391,16 @@ class CliOperator:
         except KeyboardInterrupt:
             return "exit"
 
-    def _agent_is_done(self, response) -> bool:
+    def _agent_requires_user_input(self, response) -> bool:
         """Check if the agent has completed its task."""
         if response is None:
             return False
 
-        return "DONE" in response.content.strip().splitlines()[
-            -1
-        ].strip() or self._agent_should_exit(response)
+        return (
+            "DONE" in response.content.strip().splitlines()[-1].strip()
+            or "ASK" in response.content.strip().splitlines()[-1].strip()
+            or self._agent_should_exit(response)
+        )
 
     def _agent_should_exit(self, response) -> bool:
         """Check if the agent should exit."""
@@ -456,6 +458,7 @@ class CliOperator:
                 - Print results in human-readable format
                 - Handle one step per response
                 - Mark final step with "DONE" on a new line after code block
+                - If you need user confirmation, add "ASK" on a new line after all text
                 - Maintain secure execution environment
                 - Exit with "Bye!" when user requests to quit
                 - When uncertain about system state or data, write code to:
@@ -573,7 +576,7 @@ class CliOperator:
             response = None
             self.executor.reset_step_counter()
 
-            while not self._agent_is_done(response):
+            while not self._agent_requires_user_input(response):
                 if self.model is None:
                     raise ValueError("Model is not initialized")
 

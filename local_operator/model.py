@@ -61,8 +61,8 @@ def configure_model(
             api_key=SecretStr(api_key),
             temperature=0.3,
             model_name=model,
-            timeout=120,
-            stop=["\n\nHuman:"],
+            timeout=None,
+            stop=None,
         )
     elif hosting == "kimi":
         if not model:
