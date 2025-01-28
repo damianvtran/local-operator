@@ -12,6 +12,8 @@ setup(
     install_requires=[
         "langchain-openai>=0.3.2",
         "langchain-ollama>=0.2.2",
+        "langchain-anthropic>=0.3.3",
+        "langchain>=0.3.14",
         "python-dotenv>=1.0.1",
         "pydantic>=2.10.6",
     ],

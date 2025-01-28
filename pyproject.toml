@@ -18,6 +18,8 @@ keywords = ["local", "agent", "execution", "operator"]
 dependencies = [
     "langchain-openai",
     "langchain-ollama", 
+    "langchain-anthropic",
+    "langchain",
     "python-dotenv",
     "pydantic",
 ]

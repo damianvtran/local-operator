@@ -8,3 +8,5 @@ pyright==1.1.368
 langchain-ollama==0.2.2
 pytest==8.3.4
 pytest-asyncio==0.25.2
+langchain==0.3.14
+langchain-anthropic==0.3.3
