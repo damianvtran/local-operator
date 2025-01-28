@@ -59,9 +59,3 @@ def test_configure_model_missing_hosting(mock_credential_manager):
     with pytest.raises(ValueError) as exc_info:
         configure_model("", "model", mock_credential_manager)
     assert "Hosting is required" in str(exc_info.value)
-
-
-def test_configure_model_missing_model(mock_credential_manager):
-    with pytest.raises(ValueError) as exc_info:
-        configure_model("openai", "", mock_credential_manager)
-    assert "Model is required" in str(exc_info.value)

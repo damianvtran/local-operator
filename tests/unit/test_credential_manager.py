@@ -88,7 +88,7 @@ def test_missing_credential_raises_error(temp_config, monkeypatch):
 
     with pytest.raises(ValueError) as exc_info:
         manager.prompt_for_credential("NON_EXISTENT_KEY")
-    assert "is required to use this application" in str(exc_info.value)
+    assert "is required for this step" in str(exc_info.value)
 
 
 def test_config_file_permissions(temp_config):

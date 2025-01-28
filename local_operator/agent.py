@@ -8,7 +8,7 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Coroutine, Dict, List, Union
+from typing import Any, Dict, List, Union
 
 from langchain.schema import BaseMessage
 from langchain_anthropic import ChatAnthropic
@@ -33,7 +33,7 @@ class LocalCodeExecutor:
         step_counter (int): A counter to track the current step in sequential execution
     """
 
-    def __init__(self, model):
+    def __init__(self, model: ChatOpenAI | ChatOllama | ChatAnthropic):
         """Initialize the LocalCodeExecutor with a language model.
 
         Args:
@@ -57,12 +57,59 @@ class LocalCodeExecutor:
         Returns:
             list: A list of extracted code blocks as strings
         """
-        pattern = re.compile(r"```python\n(.*?)```", re.DOTALL)
-        return pattern.findall(text)
+        pattern = re.compile(
+            r"```python\s*(.*?)\s*```",
+            re.DOTALL,
+        )
+        blocks = pattern.findall(text)
+        valid_blocks = []
+
+        # Check that each code block is not a comment or git diff
+        for block in blocks:
+            is_comment = True
+
+            # Check the lines of the code block
+            for line in block.split("\n"):
+                trimmed_line = line.strip()
+
+                if trimmed_line.startswith("```"):
+                    continue
+
+                if not (
+                    trimmed_line.startswith("//")
+                    or trimmed_line.startswith("/*")
+                    or trimmed_line.startswith("#")
+                    or trimmed_line.startswith("+")
+                    or trimmed_line.startswith("-")
+                    or trimmed_line.startswith("<<<<<<<")
+                    or trimmed_line.startswith(">>>>>>>")
+                    or trimmed_line.startswith("=======")
+                ):
+                    is_comment = False
+                    break
+            if not is_comment:
+                valid_blocks.append(block)
+
+        return valid_blocks
 
     async def invoke_model(self, messages: List[Dict[str, str]]) -> BaseMessage:
         """Invoke the language model with a list of messages."""
-        return await self.model.ainvoke(messages)
+        if isinstance(self.model, ChatAnthropic):
+            # Anthropic models expect a single message, so combine the conversation history
+            combined_message = ""
+            for msg in messages:
+                role_prefix = (
+                    "Human: "
+                    if msg["role"] == "user"
+                    else "Assistant: " if msg["role"] == "assistant" else "System: "
+                )
+                combined_message += f"{role_prefix}{msg['content']}\n\n"
+
+            # Remove trailing newlines and invoke the model
+            combined_message = combined_message.strip()
+            return await self.model.ainvoke(combined_message)
+        else:
+            return await self.model.ainvoke(messages)
 
     async def check_code_safety(self, code: str) -> bool:
         """Analyze code for potentially dangerous operations using the language model.
@@ -142,33 +189,52 @@ class LocalCodeExecutor:
 
         async def _capture_output(code_to_execute: str) -> str:
             """Helper function to capture and return execution output."""
-            old_stdout = sys.stdout
-            new_stdout = io.StringIO()
-            sys.stdout = new_stdout
+            old_stdout, old_stderr = sys.stdout, sys.stderr
+            new_stdout, new_stderr = io.StringIO(), io.StringIO()
+            sys.stdout, sys.stderr = new_stdout, new_stderr
+
+            def _get_outputs() -> tuple[str, str]:
+                """Helper to get and format stdout/stderr outputs."""
+                new_stdout.flush()
+                new_stderr.flush()
+                output = new_stdout.getvalue() or "[No output]"
+                error_output = new_stderr.getvalue() or "[No error output]"
+                return output, error_output
+
+            def _log_outputs(output: str, error_output: str) -> None:
+                """Helper to log outputs to context and history."""
+                self.context["last_code_output"] = output
+                self.conversation_history.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "Code execution output:\n"
+                            f"{output}\n"
+                            "Error output:\n"
+                            f"{error_output}"
+                        ),
+                    }
+                )
 
             try:
                 await _execute_with_timeout(code_to_execute)
-                # Flush the output buffer to ensure all content is captured
-                new_stdout.flush()
-                output = new_stdout.getvalue()
+                output, error_output = _get_outputs()
+                _log_outputs(output, error_output)
 
-                # Ensure the output is captured even if empty
-                if not output:
-                    output = "[No output]"
-
-                self.context["last_code_output"] = output
-                self.conversation_history.append(
-                    {"role": "system", "content": f"Code execution output:\n{output}"}
-                )
                 return (
                     "\n\033[1;32m✓ Code Execution Successful\033[0m\n"
                     "\033[1;34m╞══════════════════════════════════════════╡\n"
-                    f"\033[1;36m│ Output:\033[0m\n{output}"
+                    f"\033[1;36m│ Output:\033[0m\n{output}\n"
+                    f"\033[1;36m│ Error Output:\033[0m\n{error_output}"
                 )
+            except Exception as e:
+                output, error_output = _get_outputs()
+                _log_outputs(output, error_output)
+                raise e
             finally:
-                # Restore stdout and ensure the buffer is flushed
-                sys.stdout = old_stdout
+                sys.stdout, sys.stderr = old_stdout, old_stderr
                 new_stdout.close()
+                new_stderr.close()
 
         async def _handle_error(error: Exception, attempt: int | None = None) -> str:
             """Helper function to handle execution errors."""
@@ -218,6 +284,13 @@ class LocalCodeExecutor:
                     ),
                 }
             )
+
+            print("\n\033[1;31m✗ Error during execution:\033[0m")
+            print("\033[1;34m╞══════════════════════════════════════════╡")
+            print(f"\033[1;36m│ Error:\033[0m\n{error_message}")
+            print("\033[1;34m╞══════════════════════════════════════════╡")
+            print("\033[1;36m│ Attempting to fix the error...\033[0m")
+            print("\033[1;34m╰══════════════════════════════════════════╯\033[0m")
 
             for attempt in range(max_retries):
                 try:
@@ -333,14 +406,16 @@ class CliOperator:
         except KeyboardInterrupt:
             return "exit"
 
-    def _agent_is_done(self, response) -> bool:
+    def _agent_requires_user_input(self, response) -> bool:
         """Check if the agent has completed its task."""
         if response is None:
             return False
 
-        return "DONE" in response.content.strip().splitlines()[
-            -1
-        ].strip() or self._agent_should_exit(response)
+        return (
+            "DONE" in response.content.strip().splitlines()[-1].strip()
+            or "ASK" in response.content.strip().splitlines()[-1].strip()
+            or self._agent_should_exit(response)
+        )
 
     def _agent_should_exit(self, response) -> bool:
         """Check if the agent should exit."""
@@ -379,8 +454,9 @@ class CliOperator:
                 Core Principles:
                 1. Safety First: Never execute harmful or destructive code.
                    Always validate code safety before execution.
-                2. Step-by-Step Execution: Break tasks into logical steps,
-                   executing one step at a time.
+                2. Step-by-Step Execution: Break tasks into single-step code blocks.
+                   Execute each block individually, using its output to inform the
+                   next step. Never combine multiple steps in one code block.
                 3. Context Awareness: Maintain context between steps and across
                    sessions.
                 4. Minimal Output: Keep responses concise and focused on
@@ -397,6 +473,7 @@ class CliOperator:
                 - Print results in human-readable format
                 - Handle one step per response
                 - Mark final step with "DONE" on a new line after code block
+                - If you need user confirmation, add "ASK" on a new line after all text
                 - Maintain secure execution environment
                 - Exit with "Bye!" when user requests to quit
                 - When uncertain about system state or data, write code to:
@@ -429,6 +506,37 @@ class CliOperator:
                    the task. Ensure that "DONE" is the last word that is generated after
                    all other content.
 
+                Basic example:
+                - User: "Read the latest diffs in the current git repo and make a commit
+                  " with a suitable message."
+                - Agent:
+                  * Step 1:
+                    ```python
+                    print("git diff")
+                    ```
+                - System:
+                  * Executes the code and prints the output into the conversation history
+                - Agent:
+                  * Interprets the conversation history and determines the next step
+                  * Step 2:
+                    ```python
+                    print("git commit -m 'message'")
+                    ```
+                    DONE
+                - System:
+                  * Executes the code and prints the output into the conversation history
+                - Agent:
+                  "I have completed the task.  Here is the output:"
+                  [OUTPUT FROM CONSOLE]
+                  "DONE" # Important to mark the end of the task even if no code is run
+                * User can now continue with another command
+
+                Conclusion lines:
+                - "DONE": When you have completed a task which can be code or some interpretation
+                  that the user has asked for.
+                - "ASK": When you need user confirmation to proceed with the next step.
+                - "Bye!": When the user requests to quit.
+
                 System Context:
                 - OS: {system_details['os']} {system_details['release']}
                 - Architecture: {system_details['architecture']}
@@ -439,6 +547,10 @@ class CliOperator:
 
                 Installed Packages:
                 {installed_packages_str}
+
+                If you need to help the user to use Local Operator, run the local-operator
+                --help command to see the available commands in step 1 and then read the
+                console output to respond to the user in step 2.
 
                 Remember:
                 - Always prioritize safety and security
@@ -485,7 +597,7 @@ class CliOperator:
             response = None
             self.executor.reset_step_counter()
 
-            while not self._agent_is_done(response):
+            while not self._agent_requires_user_input(response):
                 if self.model is None:
                     raise ValueError("Model is not initialized")
 
