@@ -158,6 +158,105 @@ def test_extract_code_blocks(executor):
             "expected_blocks": [],
             "expected_count": 0,
         },
+        {
+            "name": "Code block with nested code enclosure",
+            "input": '''
+            Here's a code example:
+            ```python
+            def outer_function():
+                print("""
+                ```python
+                def inner_code():
+                    return None
+                ```
+                """)
+                return True
+            ```
+            ''',
+            "expected_blocks": [
+                "def outer_function():\n"
+                '                print("""\n'
+                "                ```python\n"
+                "                def inner_code():\n"
+                "                    return None\n"
+                "                ```\n"
+                '                """)\n'
+                "                return True",
+            ],
+            "expected_count": 1,
+        },
+        {
+            "name": "Code block with triple nested code enclosure",
+            "input": '''
+            Here's a code example:
+            ```python
+            def outer_function():
+                print("""
+                ```markdown
+                # Title
+                ## Subtitle
+                ```python
+                def inner_code():
+                    return None
+                ```
+
+                End of markdown
+                ```
+                """)
+                return True
+            ```
+            ''',
+            "expected_blocks": [
+                "def outer_function():\n"
+                '                print("""\n'
+                "                ```markdown\n"
+                "                # Title\n"
+                "                ## Subtitle\n"
+                "                ```python\n"
+                "                def inner_code():\n"
+                "                    return None\n"
+                "                ```\n"
+                "\n"
+                "                End of markdown\n"
+                "                ```\n"
+                '                """)\n'
+                "                return True",
+            ],
+            "expected_count": 1,
+        },
+        {
+            "name": "Code block with nested code enclosure and subsequent code block",
+            "input": '''
+            Here's a code example:
+            ```python
+            def outer_function():
+                print("""
+                ```python
+                def inner_code():
+                    return None
+                ```
+                """)
+                return True
+            ```
+
+            Here's another example:
+            ```python
+            x = 1 + 1
+            ```
+            ''',
+            "expected_blocks": [
+                "def outer_function():\n"
+                '                print("""\n'
+                "                ```python\n"
+                "                def inner_code():\n"
+                "                    return None\n"
+                "                ```\n"
+                '                """)\n'
+                "                return True",
+                "x = 1 + 1",
+            ],
+            "expected_count": 2,
+        },
     ]
 
     for case in test_cases:
