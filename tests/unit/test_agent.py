@@ -358,19 +358,19 @@ def test_cli_operator_init(mock_model):
 
 @pytest.mark.asyncio
 async def test_cli_operator_chat(cli_operator, mock_model):
-    mock_model.ainvoke.return_value.content = "DONE"
+    mock_model.ainvoke.return_value.content = "[DONE]"
     cli_operator._agent_should_exit = MagicMock(return_value=True)
 
     with patch("builtins.input", return_value="exit"):
         await cli_operator.chat()
 
-        assert cli_operator.executor.conversation_history[-1]["content"] == "DONE"
+        assert cli_operator.executor.conversation_history[-1]["content"] == "[DONE]"
 
 
 def test_agent_is_done(cli_operator):
     test_cases = [
-        {"name": "DONE keyword", "content": "Some output\nDONE", "expected": True},
-        {"name": "ASK keyword", "content": "Some output\nASK", "expected": False},
+        {"name": "DONE keyword", "content": "Some output\n[DONE]", "expected": True},
+        {"name": "ASK keyword", "content": "Some output\n[ASK]", "expected": False},
         {"name": "No special keyword", "content": "Some output\nregular text", "expected": False},
     ]
 
@@ -384,8 +384,8 @@ def test_agent_is_done(cli_operator):
 
 def test_agent_requires_user_input(cli_operator):
     test_cases = [
-        {"name": "ASK keyword", "content": "Some output\nASK", "expected": True},
-        {"name": "DONE keyword", "content": "Some output\nDONE", "expected": False},
+        {"name": "ASK keyword", "content": "Some output\n[ASK]", "expected": True},
+        {"name": "DONE keyword", "content": "Some output\n[DONE]", "expected": False},
         {"name": "No special keyword", "content": "Some output\nregular text", "expected": False},
     ]
 
@@ -399,5 +399,5 @@ def test_agent_requires_user_input(cli_operator):
 
 def test_agent_should_exit(cli_operator):
     mock_response = MagicMock()
-    mock_response.content = "Some output\nBye!"
+    mock_response.content = "Some output\n[BYE]"
     assert cli_operator._agent_should_exit(mock_response) is True
