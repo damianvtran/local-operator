@@ -72,6 +72,7 @@ class LocalCodeExecutor:
 
     def extract_code_blocks(self, text: str) -> List[str]:
         """Extract Python code blocks from text using markdown-style syntax.
+        Handles nested code blocks by matching outermost ```python enclosures.
 
         Args:
             text (str): The text containing potential code blocks
@@ -79,40 +80,60 @@ class LocalCodeExecutor:
         Returns:
             list: A list of extracted code blocks as strings
         """
-        pattern = re.compile(
-            r"```python\s*(.*?)\s*```",
-            re.DOTALL,
-        )
-        blocks = pattern.findall(text)
-        valid_blocks = []
+        blocks = []
+        current_pos = 0
 
-        # Check that each code block is not a comment or git diff
-        for block in blocks:
-            is_comment = True
+        while True:
+            # Find start of next ```python block
+            start = text.find("```python", current_pos)
+            if start == -1:
+                break
 
-            # Check the lines of the code block
-            for line in block.split("\n"):
-                trimmed_line = line.strip()
+            # Find matching end block by counting nested blocks
+            nested_count = 1
+            pos = start + 9  # Length of ```python
 
-                if trimmed_line.startswith("```"):
-                    continue
+            while nested_count > 0 and pos < len(text):
+                if text[pos:].startswith("```") and not text[pos:].startswith("```\n"):
+                    nested_count += 1
+                    pos += 9
+                elif text[pos:].startswith("```"):
+                    nested_count -= 1
+                    pos += 3
+                else:
+                    pos += 1
 
-                if not (
-                    trimmed_line.startswith("//")
-                    or trimmed_line.startswith("/*")
-                    or trimmed_line.startswith("#")
-                    or trimmed_line.startswith("+")
-                    or trimmed_line.startswith("-")
-                    or trimmed_line.startswith("<<<<<<<")
-                    or trimmed_line.startswith(">>>>>>>")
-                    or trimmed_line.startswith("=======")
-                ):
-                    is_comment = False
-                    break
-            if not is_comment:
-                valid_blocks.append(block)
+            if nested_count == 0:
+                # Extract the block content between the outermost delimiters
+                block = text[start + 9 : pos - 3].strip()
 
-        return valid_blocks
+                # Validate block is not just comments/diffs
+                is_comment = True
+                for line in block.split("\n"):
+                    trimmed_line = line.strip()
+                    if not (
+                        trimmed_line.startswith("//")
+                        or trimmed_line.startswith("/*")
+                        or trimmed_line.startswith("#")
+                        or trimmed_line.startswith("+")
+                        or trimmed_line.startswith("-")
+                        or trimmed_line.startswith("<<<<<<<")
+                        or trimmed_line.startswith(">>>>>>>")
+                        or trimmed_line.startswith("=======")
+                        or trimmed_line.startswith("```")
+                    ):
+                        is_comment = False
+                        break
+
+                if not is_comment:
+                    blocks.append(block)
+
+                current_pos = pos
+            else:
+                # No matching end found, move past this start marker
+                current_pos = start + 9
+
+        return blocks
 
     async def invoke_model(self, messages: List[Dict[str, str]]) -> BaseMessage:
         """Invoke the language model with a list of messages."""
