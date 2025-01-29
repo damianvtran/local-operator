@@ -16,6 +16,7 @@ setup(
         "langchain>=0.3.14",
         "python-dotenv>=1.0.1",
         "pydantic>=2.10.6",
+        "tiktoken>=0.8.0",
     ],
     python_requires=">=3.12",
     extras_require={

@@ -2,7 +2,6 @@ import importlib.metadata
 import io
 import os
 import platform
-import re
 import readline
 import sys
 import threading
@@ -14,6 +13,7 @@ from langchain.schema import BaseMessage
 from langchain_anthropic import ChatAnthropic
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
+from tiktoken import encoding_for_model
 
 from local_operator.credentials import CredentialManager
 from local_operator.prompts import BaseSystemPrompt
@@ -365,7 +365,16 @@ class LocalCodeExecutor:
 
     def _format_agent_output(self, text: str) -> str:
         """Format agent output with colored sidebar and indentation."""
-        return "\n".join(f"\033[1;36m│\033[0m {line}" for line in text.split("\n"))
+
+        # Add colored sidebar to each line and remove control tags
+        lines = [f"\033[1;36m│\033[0m {line}" for line in text.split("\n")]
+        output = "\n".join(lines)
+        output = output.replace("[ASK]", "").replace("[DONE]", "").replace("[BYE]", "").strip()
+
+        # Remove trailing empty lines
+        lines = [line for line in output.split("\n") if line.strip()]
+
+        return "\n".join(lines)
 
     async def process_response(self, response: str) -> ProcessResponseOutput:
         """Process model response, extracting and executing any code blocks.
@@ -474,7 +483,7 @@ class CliOperator:
         if response is None:
             return False
 
-        return "DONE" in response.content.strip().splitlines()[
+        return "[DONE]" in response.content.strip().splitlines()[
             -1
         ].strip() or self._agent_should_exit(response)
 
@@ -483,14 +492,14 @@ class CliOperator:
         if response is None:
             return False
 
-        return "ASK" in response.content.strip().splitlines()[-1].strip()
+        return "[ASK]" in response.content.strip().splitlines()[-1].strip()
 
     def _agent_should_exit(self, response) -> bool:
         """Check if the agent should exit."""
         if response is None:
             return False
 
-        return "Bye!" in response.content.strip().splitlines()[-1].strip()
+        return "[BYE]" in response.content.strip().splitlines()[-1].strip()
 
     def _setup_prompt(self) -> None:
         """Setup the prompt for the agent."""
@@ -582,7 +591,14 @@ class CliOperator:
                     break
 
             if os.environ.get("LOCAL_OPERATOR_DEBUG") == "true":
+                tokenizer = encoding_for_model("gpt-4o")
+                total_tokens = sum(
+                    len(tokenizer.encode(entry["content"]))
+                    for entry in self.executor.conversation_history
+                )
+
                 print("\n\033[1;35m╭─ Debug: Conversation History ───────────────────────\033[0m")
+                print(f"\033[1;35m│ Total tokens: {total_tokens}\033[0m")
                 for i, entry in enumerate(self.executor.conversation_history, 1):
                     role = entry["role"]
                     content = entry["content"]
@@ -591,7 +607,7 @@ class CliOperator:
                         print(f"\033[1;35m│   {line}\033[0m")
                 print("\033[1;35m╰──────────────────────────────────────────────────\033[0m\n")
 
-            # Check if the last line of the response contains "Bye!" to exit
+            # Check if the last line of the response contains "[BYE]" to exit
             if self._agent_should_exit(response):
                 break
 
