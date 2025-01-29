@@ -78,6 +78,20 @@ def configure_model(
             model=model,
             base_url="https://api.moonshot.cn/v1",
         )
+    elif hosting == "alibaba":
+        if not model:
+            model = "qwen-plus"
+
+        api_key = credential_manager.get_credential("ALIBABA_CLOUD_API_KEY")
+        if not api_key:
+            api_key = credential_manager.prompt_for_credential("ALIBABA_CLOUD_API_KEY")
+
+        return ChatOpenAI(
+            api_key=SecretStr(api_key),
+            temperature=0.3,
+            model=model,
+            base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        )
     elif hosting == "ollama":
         if not model:
             raise ValueError("Model is required for ollama hosting")
