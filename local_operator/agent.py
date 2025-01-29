@@ -4,7 +4,6 @@ import os
 import platform
 import readline
 import sys
-import threading
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Union
@@ -40,11 +39,18 @@ class ProcessResponseOutput:
         self.message = message
 
 
+class ConversationRole(Enum):
+    SYSTEM = "system"
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
 class LocalCodeExecutor:
     context: Dict[str, Any]
     conversation_history: List[Dict[str, str]]
     model: ChatOpenAI | ChatOllama | ChatAnthropic
     step_counter: int
+    max_conversation_history: int
 
     """A class to handle local Python code execution with safety checks and context management.
 
@@ -55,20 +61,35 @@ class LocalCodeExecutor:
         step_counter (int): A counter to track the current step in sequential execution
     """
 
-    def __init__(self, model: ChatOpenAI | ChatOllama | ChatAnthropic):
+    def __init__(
+        self, model: ChatOpenAI | ChatOllama | ChatAnthropic, max_conversation_history: int = 100
+    ):
         """Initialize the LocalCodeExecutor with a language model.
 
         Args:
             model: The language model instance to use for code analysis
+            max_conversation_history: The maximum number of messages to keep in
+            the conversation history.  This doesn't include the system prompt.
         """
         self.context = {}
         self.conversation_history = []
         self.model = model
+        self.max_conversation_history = max_conversation_history
         self.reset_step_counter()
 
     def reset_step_counter(self):
         """Reset the step counter."""
         self.step_counter = 1
+
+    def _append_to_history(self, role: ConversationRole, content: str) -> None:
+        """Append a message to conversation history and maintain length limit.
+
+        Args:
+            role (str): The role of the message sender (user/assistant/system)
+            content (str): The message content
+        """
+        self.conversation_history.append({"role": role.value, "content": content})
+        self._limit_conversation_history()
 
     def extract_code_blocks(self, text: str) -> List[str]:
         """Extract Python code blocks from text using markdown-style syntax.
@@ -143,8 +164,12 @@ class LocalCodeExecutor:
             for msg in messages:
                 role_prefix = (
                     "Human: "
-                    if msg["role"] == "user"
-                    else "Assistant: " if msg["role"] == "assistant" else "System: "
+                    if msg["role"] == ConversationRole.USER.value
+                    else (
+                        "Assistant: "
+                        if msg["role"] == ConversationRole.ASSISTANT.value
+                        else "System: "
+                    )
                 )
                 combined_message += f"{role_prefix}{msg['content']}\n\n"
 
@@ -164,21 +189,22 @@ class LocalCodeExecutor:
             bool: True if dangerous operations are detected, False otherwise
         """
         safety_check_prompt = f"""
-        Analyze the following Python code for potentially dangerous operations:
+        Analyze code for dangerous ops:
         {code}
 
-        Respond with only "yes" if the code contains dangerous operations that could:
-        - Delete or modify files
-        - Install or update packages that might be harmful or unsafe
-        - Execute unsafe system commands
-        - Access sensitive system resources
-        - Perform network operations that expose the system or user data to the internet
-        - Otherwise compromise system security
+        🚫 Respond "yes" if contains:
+        - File deletion/modification
+        - Suspicious package installs
+        - System commands execution
+        - Sensitive system access
+        - Risky network operations
 
-        Respond with only "no" if the code appears safe to execute.
+        ✅ Respond "no" if none detected
+
+        Format: "yes" or "no"
         """
 
-        self.conversation_history.append({"role": "user", "content": safety_check_prompt})
+        self._append_to_history(ConversationRole.USER, safety_check_prompt)
         response = await self.invoke_model(self.conversation_history)
         self.conversation_history.pop()
 
@@ -187,13 +213,12 @@ class LocalCodeExecutor:
         )
         return "yes" in response_content.strip().lower()
 
-    async def execute_code(self, code: str, max_retries: int = 2, timeout: int = 30) -> str:
+    async def execute_code(self, code: str, max_retries: int = 2) -> str:
         """Execute Python code with safety checks and context management.
 
         Args:
             code (str): The Python code to execute
             max_retries (int): Maximum number of retry attempts
-            timeout (int): Maximum execution time in seconds
 
         Returns:
             str: Execution result message or error message
@@ -204,9 +229,9 @@ class LocalCodeExecutor:
 
         # Try initial execution
         try:
-            return await self._execute_with_output(code, timeout)
+            return await self._execute_with_output(code)
         except Exception as initial_error:
-            return await self._handle_execution_error(initial_error, code, max_retries)
+            return await self._handle_execution_error(initial_error, max_retries)
 
     async def _check_and_confirm_safety(self, code: str) -> bool:
         """Check code safety and get user confirmation if needed.
@@ -219,11 +244,11 @@ class LocalCodeExecutor:
                     "I've identified that this is a dangerous operation. "
                     "Let's stop this task for now, I will provide further instructions shortly."
                 )
-                self.conversation_history.append({"role": "user", "content": msg})
+                self._append_to_history(ConversationRole.USER, msg)
                 return True
         return False
 
-    async def _execute_with_output(self, code: str, timeout: int = 30) -> str:
+    async def _execute_with_output(self, code: str) -> str:
         """Execute code and capture stdout/stderr output.
 
         Args:
@@ -241,51 +266,44 @@ class LocalCodeExecutor:
         sys.stdout, sys.stderr = new_stdout, new_stderr
 
         try:
-            await self._run_code_with_timeout(code, timeout)
-            output = self._capture_and_record_output(new_stdout, new_stderr)
-            return self._format_success_output(output)
+            await self._run_code(code)
+            output, error_output = self._capture_and_record_output(new_stdout, new_stderr)
+            return self._format_success_output((output, error_output))
         except Exception as e:
-            self._capture_and_record_output(new_stdout, new_stderr)
+            output, error_output = self._capture_and_record_output(new_stdout, new_stderr)
+            error_msg = (
+                f"Code execution error:\n{str(e)}\n"
+                f"Output:\n{output}\n"
+                f"Error output:\n{error_output}"
+            )
+            self._append_to_history(ConversationRole.SYSTEM, error_msg)
             raise e
         finally:
             sys.stdout, sys.stderr = old_stdout, old_stderr
             new_stdout.close()
             new_stderr.close()
 
-    async def _run_code_with_timeout(self, code: str, timeout: int) -> None:
-        """Run code with timeout control in a separate thread.
+    async def _run_code(self, code: str) -> None:
+        """Run code in the main thread.
 
         Args:
             code (str): The Python code to execute
-            timeout (int): Maximum execution time in seconds
+            timeout (int): Unused parameter kept for compatibility
 
         Raises:
-            TimeoutError: If code execution exceeds the timeout period
             Exception: Any exceptions raised during code execution
         """
-        result = {"success": False, "error": None}
-        event = threading.Event()
+        old_stdin = sys.stdin
 
-        def run_code():
-            try:
+        try:
+            # Redirect stdin to /dev/null to ignore input requests
+            with open(os.devnull) as devnull:
+                sys.stdin = devnull
                 exec(code, self.context)
-                result["success"] = True
-            except Exception as e:
-                result["error"] = e
-            finally:
-                event.set()
-
-        exec_thread = threading.Thread(target=run_code, daemon=True)
-        exec_thread.start()
-
-        if not event.wait(timeout):
-            if not result["success"]:
-                raise TimeoutError(f"Code execution timed out after {timeout} seconds")
-
-        if not result["success"]:
-            if result["error"]:
-                raise result["error"]
-            raise TimeoutError("Code execution failed")
+        except Exception as e:
+            raise e
+        finally:
+            sys.stdin = old_stdin
 
     def _capture_and_record_output(
         self, stdout: io.StringIO, stderr: io.StringIO
@@ -305,11 +323,10 @@ class LocalCodeExecutor:
         error_output = stderr.getvalue() or "[No error output]"
 
         self.context["last_code_output"] = output
-        self.conversation_history.append(
-            {
-                "role": "system",
-                "content": f"Code execution output:\n{output}\nError output:\n{error_output}",
-            }
+        self.context["last_code_error"] = error_output
+        self._append_to_history(
+            ConversationRole.SYSTEM,
+            f"Code execution output:\n{output}\nError output:\n{error_output}",
         )
 
         return output, error_output
@@ -331,9 +348,7 @@ class LocalCodeExecutor:
             f"\033[1;36m│ Error Output:\033[0m\n{stderr}"
         )
 
-    async def _handle_execution_error(
-        self, initial_error: Exception, code: str, max_retries: int
-    ) -> str:
+    async def _handle_execution_error(self, initial_error: Exception, max_retries: int) -> str:
         """Handle code execution errors with retry logic.
 
         Args:
@@ -368,7 +383,7 @@ class LocalCodeExecutor:
             f"The initial execution failed with error: {str(error)}. "
             "Review the code and make corrections to run successfully."
         )
-        self.conversation_history.append({"role": "user", "content": msg})
+        self._append_to_history(ConversationRole.USER, msg)
 
     def _record_retry_error(self, error: Exception, attempt: int) -> None:
         """Record retry attempt errors in conversation history.
@@ -381,7 +396,7 @@ class LocalCodeExecutor:
             f"The code execution failed with error: {str(error)}. "
             "Please review and make corrections to the code to fix this error and try again."
         )
-        self.conversation_history.append({"role": "user", "content": msg})
+        self._append_to_history(ConversationRole.USER, msg)
 
     def _log_error_and_retry_message(self, error: Exception) -> None:
         """Print formatted error message and retry notification.
@@ -471,7 +486,7 @@ class LocalCodeExecutor:
         print(formatted_response)
         print("\033[1;36m╰──────────────────────────────────────────────────\033[0m")
 
-        self.conversation_history.append({"role": "assistant", "content": response})
+        self._append_to_history(ConversationRole.ASSISTANT, response)
 
         code_blocks = self.extract_code_blocks(response)
         if code_blocks:
@@ -494,8 +509,8 @@ class LocalCodeExecutor:
                 self.context["last_code_result"] = result
             print("\033[1;36m╰──────────────────────────────────────────────────\033[0m")
 
-            self.conversation_history.append(
-                {"role": "system", "content": f"Current working directory: {os.getcwd()}"}
+            self._append_to_history(
+                ConversationRole.SYSTEM, f"Current working directory: {os.getcwd()}"
             )
 
             self.step_counter += 1
@@ -504,6 +519,14 @@ class LocalCodeExecutor:
             status=ProcessResponseStatus.SUCCESS,
             message="Code execution successful",
         )
+
+    def _limit_conversation_history(self) -> None:
+        """Limit the conversation history to the maximum number of messages."""
+        if len(self.conversation_history) > self.max_conversation_history:
+            # Keep the first message (system prompt) and the most recent messages
+            self.conversation_history = [self.conversation_history[0]] + self.conversation_history[
+                -self.max_conversation_history + 1 :
+            ]
 
 
 class CliOperator:
@@ -582,6 +605,47 @@ class CliOperator:
 
         return "[BYE]" in response.content.strip().splitlines()[-1].strip()
 
+    def _get_installed_packages(self) -> str:
+        """Get installed packages for the system prompt context."""
+
+        # Filter to show only commonly used packages and require that the model
+        # check for any other packages as needed.
+        key_packages = {
+            "numpy",
+            "pandas",
+            "torch",
+            "tensorflow",
+            "scikit-learn",
+            "matplotlib",
+            "seaborn",
+            "requests",
+            "pillow",
+            "pip",
+            "setuptools",
+            "wheel",
+            "langchain",
+            "plotly",
+            "scipy",
+            "statsmodels",
+            "tqdm",
+        }
+
+        installed_packages = [dist.metadata["Name"] for dist in importlib.metadata.distributions()]
+
+        # Filter and sort with priority for key packages
+        filtered_packages = sorted(
+            (pkg for pkg in installed_packages if pkg.lower() in key_packages),
+            key=lambda x: (x.lower() not in key_packages, x.lower()),
+        )
+
+        # Add count of non-critical packages
+        other_count = len(installed_packages) - len(filtered_packages)
+        package_str = ", ".join(filtered_packages[:15])  # Show first 15 matches
+        if other_count > 0:
+            package_str += f" + {other_count} others"
+
+        return package_str
+
     def _setup_prompt(self) -> None:
         """Setup the prompt for the agent."""
 
@@ -603,10 +667,7 @@ class CliOperator:
         }
         system_details_str = "\n".join(f"{key}: {value}" for key, value in system_details.items())
 
-        installed_packages = importlib.metadata.distributions()
-        installed_packages_str = ", ".join(
-            package.metadata["Name"] for package in installed_packages
-        )
+        installed_packages_str = self._get_installed_packages()
 
         base_system_prompt = (
             base_system_prompt.replace("{{system_details_str}}", system_details_str)
@@ -616,7 +677,7 @@ class CliOperator:
 
         self.executor.conversation_history = [
             {
-                "role": "system",
+                "role": ConversationRole.SYSTEM.value,
                 "content": base_system_prompt,
             }
         ]
@@ -649,7 +710,9 @@ class CliOperator:
             if user_input.lower() == "exit" or user_input.lower() == "quit":
                 break
 
-            self.executor.conversation_history.append({"role": "user", "content": user_input})
+            self.executor.conversation_history.append(
+                {"role": ConversationRole.USER.value, "content": user_input}
+            )
 
             response = None
             self.executor.reset_step_counter()

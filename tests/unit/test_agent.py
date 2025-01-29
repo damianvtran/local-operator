@@ -313,19 +313,6 @@ async def test_execute_code_no_output(executor, mock_model):
 
 
 @pytest.mark.asyncio
-async def test_execute_code_timeout(executor, mock_model):
-    mock_model.ainvoke.return_value.content = "no"
-    code = "import time; time.sleep(5)"
-
-    result = await executor.execute_code(code, max_retries=0, timeout=0.1)
-
-    assert "✗ Code Execution Failed" in result
-    assert "timed out after 0.1 seconds" in result
-    assert len(executor.conversation_history) > 0
-    assert "timed out" in executor.conversation_history[-1]["content"]
-
-
-@pytest.mark.asyncio
 async def test_process_response(executor, mock_model):
     response = """
     Here's some code:
@@ -340,6 +327,70 @@ async def test_process_response(executor, mock_model):
         output = mock_stdout.getvalue()
         assert "Executing Code Blocks" in output
         assert "hello world" in output
+
+
+def test_limit_conversation_history(executor):
+    test_cases = [
+        {"name": "Empty history", "initial": [], "expected": []},
+        {
+            "name": "Only system prompt",
+            "initial": [{"role": "system", "content": "system prompt"}],
+            "expected": [{"role": "system", "content": "system prompt"}],
+        },
+        {
+            "name": "History within limit",
+            "initial": [
+                {"role": "system", "content": "system prompt"},
+                {"role": "user", "content": "msg1"},
+                {"role": "assistant", "content": "msg2"},
+            ],
+            "expected": [
+                {"role": "system", "content": "system prompt"},
+                {"role": "user", "content": "msg1"},
+                {"role": "assistant", "content": "msg2"},
+            ],
+        },
+        {
+            "name": "History exceeding limit",
+            "initial": [
+                {"role": "system", "content": "system prompt"},
+                {"role": "user", "content": "msg1"},
+                {"role": "assistant", "content": "msg2"},
+                {"role": "user", "content": "msg3"},
+                {"role": "assistant", "content": "msg4"},
+            ],
+            "expected": [
+                {"role": "system", "content": "system prompt"},
+                {"role": "user", "content": "msg3"},
+                {"role": "assistant", "content": "msg4"},
+            ],
+        },
+    ]
+    for test_case in test_cases:
+        executor.max_conversation_history = 3
+        executor.conversation_history = test_case["initial"]
+        executor._limit_conversation_history()
+
+        expected_len = len(test_case["expected"])
+        actual_len = len(executor.conversation_history)
+        assert (
+            expected_len == actual_len
+        ), f"{test_case['name']}: Expected length {expected_len} but got {actual_len}"
+
+        for i, msg in enumerate(test_case["expected"]):
+            expected_role = msg["role"]
+            actual_role = executor.conversation_history[i]["role"]
+            assert expected_role == actual_role, (
+                f"{test_case['name']}: Expected role {expected_role} but got {actual_role} "
+                f"at position {i}"
+            )
+
+            expected_content = msg["content"]
+            actual_content = executor.conversation_history[i]["content"]
+            assert expected_content == actual_content, (
+                f"{test_case['name']}: Expected content {expected_content} "
+                f"but got {actual_content} at position {i}"
+            )
 
 
 def test_cli_operator_init(mock_model):
