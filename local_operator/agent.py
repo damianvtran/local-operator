@@ -262,15 +262,17 @@ class LocalCodeExecutor:
         Raises:
             Exception: Any exceptions raised during code execution
         """
+        old_stdin = sys.stdin
+
         try:
             # Redirect stdin to /dev/null to ignore input requests
             with open(os.devnull) as devnull:
-                old_stdin = sys.stdin
                 sys.stdin = devnull
                 exec(code, self.context)
-                sys.stdin = old_stdin
         except Exception as e:
             raise e
+        finally:
+            sys.stdin = old_stdin
 
     def _capture_and_record_output(
         self, stdout: io.StringIO, stderr: io.StringIO
