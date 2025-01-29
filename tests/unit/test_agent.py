@@ -313,19 +313,6 @@ async def test_execute_code_no_output(executor, mock_model):
 
 
 @pytest.mark.asyncio
-async def test_execute_code_timeout(executor, mock_model):
-    mock_model.ainvoke.return_value.content = "no"
-    code = "import time; time.sleep(5)"
-
-    result = await executor.execute_code(code, max_retries=0, timeout=0.1)
-
-    assert "✗ Code Execution Failed" in result
-    assert "timed out after 0.1 seconds" in result
-    assert len(executor.conversation_history) > 0
-    assert "timed out" in executor.conversation_history[-1]["content"]
-
-
-@pytest.mark.asyncio
 async def test_process_response(executor, mock_model):
     response = """
     Here's some code:

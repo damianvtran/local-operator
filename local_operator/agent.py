@@ -187,7 +187,7 @@ class LocalCodeExecutor:
         )
         return "yes" in response_content.strip().lower()
 
-    async def execute_code(self, code: str, max_retries: int = 2, timeout: int = 30) -> str:
+    async def execute_code(self, code: str, max_retries: int = 2, timeout: int = 300) -> str:
         """Execute Python code with safety checks and context management.
 
         Args:
@@ -241,7 +241,7 @@ class LocalCodeExecutor:
         sys.stdout, sys.stderr = new_stdout, new_stderr
 
         try:
-            await self._run_code_with_timeout(code, timeout)
+            await self._run_code(code)
             output = self._capture_and_record_output(new_stdout, new_stderr)
             return self._format_success_output(output)
         except Exception as e:
@@ -252,40 +252,25 @@ class LocalCodeExecutor:
             new_stdout.close()
             new_stderr.close()
 
-    async def _run_code_with_timeout(self, code: str, timeout: int) -> None:
-        """Run code with timeout control in a separate thread.
+    async def _run_code(self, code: str) -> None:
+        """Run code in the main thread.
 
         Args:
             code (str): The Python code to execute
-            timeout (int): Maximum execution time in seconds
+            timeout (int): Unused parameter kept for compatibility
 
         Raises:
-            TimeoutError: If code execution exceeds the timeout period
             Exception: Any exceptions raised during code execution
         """
-        result = {"success": False, "error": None}
-        event = threading.Event()
-
-        def run_code():
-            try:
+        try:
+            # Redirect stdin to /dev/null to ignore input requests
+            with open(os.devnull) as devnull:
+                old_stdin = sys.stdin
+                sys.stdin = devnull
                 exec(code, self.context)
-                result["success"] = True
-            except Exception as e:
-                result["error"] = e
-            finally:
-                event.set()
-
-        exec_thread = threading.Thread(target=run_code, daemon=True)
-        exec_thread.start()
-
-        if not event.wait(timeout):
-            if not result["success"]:
-                raise TimeoutError(f"Code execution timed out after {timeout} seconds")
-
-        if not result["success"]:
-            if result["error"]:
-                raise result["error"]
-            raise TimeoutError("Code execution failed")
+                sys.stdin = old_stdin
+        except Exception as e:
+            raise e
 
     def _capture_and_record_output(
         self, stdout: io.StringIO, stderr: io.StringIO
