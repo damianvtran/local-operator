@@ -192,14 +192,15 @@ class LocalCodeExecutor:
         Returns:
             bool: True if dangerous operations are detected, False otherwise
         """
-        safety_check_prompt = f"""
-        Analyze code for dangerous ops:
-        {code}
+        safety_check_prompt = """
+        You are a code safety and security checker.
+
+        You will be given a code snippet and asked to check if it contains any dangerous operations.
 
         🚫 Respond "yes" if contains:
-        - File deletion/modification
+        - High risk file deletion/editing
         - Suspicious package installs
-        - System commands execution
+        - High risk system commands execution
         - Sensitive system access
         - Risky network operations
 
@@ -208,9 +209,15 @@ class LocalCodeExecutor:
         Format: "yes" or "no"
         """
 
-        self._append_to_history(ConversationRole.USER, safety_check_prompt)
-        response = await self.invoke_model(self.conversation_history)
-        self.conversation_history.pop()
+        safety_history = [
+            {"role": ConversationRole.SYSTEM.value, "content": safety_check_prompt},
+            {
+                "role": ConversationRole.USER.value,
+                "content": f"Determine if the following code is safe: {code}",
+            },
+        ]
+
+        response = await self.invoke_model(safety_history)
 
         response_content = (
             response.content if isinstance(response.content, str) else str(response.content)
