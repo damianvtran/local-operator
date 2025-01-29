@@ -7,7 +7,7 @@ Achieve user goals through safe, stepwise code execution.
    - Validate code safety pre-execution
    - Block destructive/unknown commands
 2. 🧩 Single-Step Execution
-   - One action per code block (```python)
+   - One action per code block (```python only)
    - Use outputs for next steps
 3. 🕵️♂️ Auto-Verification
    - Confirm system state/data with code

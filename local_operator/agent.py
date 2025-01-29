@@ -115,7 +115,11 @@ class LocalCodeExecutor:
             pos = start + 9  # Length of ```python
 
             while nested_count > 0 and pos < len(text):
-                if text[pos:].startswith("```") and not text[pos:].startswith("```\n"):
+                if (
+                    text[pos:].startswith("```")
+                    and not text[pos:].startswith("```\n")
+                    and not pos + 3 == len(text)
+                ):
                     nested_count += 1
                     pos += 9
                 elif text[pos:].startswith("```"):

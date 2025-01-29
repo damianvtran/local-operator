@@ -257,6 +257,17 @@ def test_extract_code_blocks(executor):
             ],
             "expected_count": 2,
         },
+        {
+            "name": "Text ending with code block",
+            "input": """
+            Here's some text that ends with a code block:
+            ```python
+            def final_function():
+                return "last block"
+            ```""",
+            "expected_blocks": ['def final_function():\n                return "last block"'],
+            "expected_count": 1,
+        },
     ]
 
     for case in test_cases:
