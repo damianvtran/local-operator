@@ -198,174 +198,255 @@ class LocalCodeExecutor:
         Returns:
             str: Execution result message or error message
         """
+        # First check code safety
+        if await self._check_and_confirm_safety(code):
+            return "Code execution canceled by user"
 
-        async def _execute_with_timeout(code_to_execute: str) -> None:
-            """Helper function to execute code with timeout."""
-            result = {"success": False, "error": None}
-            event = threading.Event()
-
-            def run_code():
-                try:
-                    exec(code_to_execute, self.context)
-                    result["success"] = True
-                except Exception as e:
-                    result["error"] = e
-                finally:
-                    event.set()
-
-            exec_thread = threading.Thread(target=run_code, daemon=True)
-            exec_thread.start()
-
-            # Wait for either the event or timeout
-            event_occurred = event.wait(timeout)
-
-            if not event_occurred:
-                # If timeout occurred, check if thread completed anyway
-                if not result["success"]:
-                    # Clean up the thread before raising timeout
-                    raise TimeoutError(f"Code execution timed out after {timeout} seconds")
-
-            if not result["success"] and result["error"]:
-                raise result["error"]
-            elif not result["success"]:
-                raise TimeoutError("Code execution failed")
-
-        async def _capture_output(code_to_execute: str) -> str:
-            """Helper function to capture and return execution output."""
-            old_stdout, old_stderr = sys.stdout, sys.stderr
-            new_stdout, new_stderr = io.StringIO(), io.StringIO()
-            sys.stdout, sys.stderr = new_stdout, new_stderr
-
-            def _get_outputs() -> tuple[str, str]:
-                """Helper to get and format stdout/stderr outputs."""
-                new_stdout.flush()
-                new_stderr.flush()
-                output = new_stdout.getvalue() or "[No output]"
-                error_output = new_stderr.getvalue() or "[No error output]"
-                return output, error_output
-
-            def _log_outputs(output: str, error_output: str) -> None:
-                """Helper to log outputs to context and history."""
-                self.context["last_code_output"] = output
-                self.conversation_history.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            "Code execution output:\n"
-                            f"{output}\n"
-                            "Error output:\n"
-                            f"{error_output}"
-                        ),
-                    }
-                )
-
-            try:
-                await _execute_with_timeout(code_to_execute)
-                output, error_output = _get_outputs()
-                _log_outputs(output, error_output)
-
-                return (
-                    "\n\033[1;32m✓ Code Execution Successful\033[0m\n"
-                    "\033[1;34m╞══════════════════════════════════════════╡\n"
-                    f"\033[1;36m│ Output:\033[0m\n{output}\n"
-                    f"\033[1;36m│ Error Output:\033[0m\n{error_output}"
-                )
-            except Exception as e:
-                output, error_output = _get_outputs()
-                _log_outputs(output, error_output)
-                raise e
-            finally:
-                sys.stdout, sys.stderr = old_stdout, old_stderr
-                new_stdout.close()
-                new_stderr.close()
-
-        async def _handle_error(error: Exception, attempt: int | None = None) -> str:
-            """Helper function to handle execution errors."""
-            error_message = str(error)
-            self.conversation_history.append(
-                {
-                    "role": "user",
-                    "content": (
-                        f"The code execution failed with error: {error_message}. "
-                        "Please review and make corrections to the code to fix this error."
-                    ),
-                }
-            )
-
-            if attempt is not None:
-                return (
-                    f"\n\033[1;31m✗ Code Execution Failed after {attempt + 1} attempts\033[0m\n"
-                    f"\033[1;34m╞══════════════════════════════════════════╡\n"
-                    f"\033[1;36m│ Error:\033[0m\n{error_message}"
-                )
-
-            return (
-                "\n\033[1;31m✗ Code Execution Failed\033[0m\n"
-                f"\033[1;34m╞══════════════════════════════════════════╡\n"
-                f"\033[1;36m│ Error:\033[0m\n{error_message}"
-            )
-
-        # Main execution flow
+        # Try initial execution
         try:
-            if await self.check_code_safety(code):
-                confirm = input(
-                    "Warning: Potentially dangerous operation detected. Proceed? (y/n): "
-                )
-                if confirm.lower() != "y":
-                    self.conversation_history.append(
-                        {
-                            "role": "user",
-                            "content": "I've identified that this is a dangerous"
-                            " operation.  Let's stop this task for now, I will"
-                            " provide further instructions shortly.",
-                        }
-                    )
-                    return "Code execution canceled by user"
-
-            return await _capture_output(code)
-
+            return await self._execute_with_output(code, timeout)
         except Exception as initial_error:
-            error_message = str(initial_error)
-            self.conversation_history.append(
-                {
-                    "role": "user",
-                    "content": (
-                        f"The initial execution failed with error: {error_message}. "
-                        "Review the code and make corrections to run successfully."
-                    ),
-                }
-            )
+            return await self._handle_execution_error(initial_error, code, max_retries)
 
-            print("\n\033[1;31m✗ Error during execution:\033[0m")
-            print("\033[1;34m╞══════════════════════════════════════════╡")
-            print(f"\033[1;36m│ Error:\033[0m\n{error_message}")
-            print("\033[1;34m╞══════════════════════════════════════════╡")
-            print("\033[1;36m│ Attempting to fix the error...\033[0m")
-            print("\033[1;34m╰══════════════════════════════════════════╯\033[0m")
+    async def _check_and_confirm_safety(self, code: str) -> bool:
+        """Check code safety and get user confirmation if needed.
 
-            for attempt in range(max_retries):
-                try:
-                    response = await self.invoke_model(self.conversation_history)
-                    response_content = (
-                        response.content
-                        if isinstance(response.content, str)
-                        else str(response.content)
-                    )
-                    new_code = self.extract_code_blocks(response_content)
-                    if new_code:
-                        return await _capture_output(new_code[0])
-                except Exception as retry_error:
-                    print(f"\n\033[1;31m✗ Error during execution (attempt {attempt + 1}):\033[0m")
-                    print("\033[1;34m╞══════════════════════════════════════════╡")
-                    print(f"\033[1;36m│ Error:\033[0m\n{str(retry_error)}")
-                    if attempt < max_retries - 1:
-                        print("\033[1;36m│\033[0m \033[1;33mAnother attempt will be made...\033[0m")
+        Returns True if execution should be cancelled."""
+        if await self.check_code_safety(code):
+            confirm = input("Warning: Potentially dangerous operation detected. Proceed? (y/n): ")
+            if confirm.lower() != "y":
+                msg = (
+                    "I've identified that this is a dangerous operation. "
+                    "Let's stop this task for now, I will provide further instructions shortly."
+                )
+                self.conversation_history.append({"role": "user", "content": msg})
+                return True
+        return False
 
-            return await _handle_error(initial_error, attempt=max_retries)
+    async def _execute_with_output(self, code: str, timeout: int = 30) -> str:
+        """Execute code and capture stdout/stderr output.
+
+        Args:
+            code (str): The Python code to execute
+            timeout (int, optional): Maximum execution time in seconds. Defaults to 30.
+
+        Returns:
+            str: Formatted string containing execution output and any error messages
+
+        Raises:
+            Exception: Re-raises any exceptions that occur during code execution
+        """
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        new_stdout, new_stderr = io.StringIO(), io.StringIO()
+        sys.stdout, sys.stderr = new_stdout, new_stderr
+
+        try:
+            await self._run_code_with_timeout(code, timeout)
+            output = self._capture_and_record_output(new_stdout, new_stderr)
+            return self._format_success_output(output)
+        except Exception as e:
+            self._capture_and_record_output(new_stdout, new_stderr)
+            raise e
+        finally:
+            sys.stdout, sys.stderr = old_stdout, old_stderr
+            new_stdout.close()
+            new_stderr.close()
+
+    async def _run_code_with_timeout(self, code: str, timeout: int) -> None:
+        """Run code with timeout control in a separate thread.
+
+        Args:
+            code (str): The Python code to execute
+            timeout (int): Maximum execution time in seconds
+
+        Raises:
+            TimeoutError: If code execution exceeds the timeout period
+            Exception: Any exceptions raised during code execution
+        """
+        result = {"success": False, "error": None}
+        event = threading.Event()
+
+        def run_code():
+            try:
+                exec(code, self.context)
+                result["success"] = True
+            except Exception as e:
+                result["error"] = e
+            finally:
+                event.set()
+
+        exec_thread = threading.Thread(target=run_code, daemon=True)
+        exec_thread.start()
+
+        if not event.wait(timeout):
+            if not result["success"]:
+                raise TimeoutError(f"Code execution timed out after {timeout} seconds")
+
+        if not result["success"]:
+            if result["error"]:
+                raise result["error"]
+            raise TimeoutError("Code execution failed")
+
+    def _capture_and_record_output(
+        self, stdout: io.StringIO, stderr: io.StringIO
+    ) -> tuple[str, str]:
+        """Capture stdout/stderr output and record it in conversation history.
+
+        Args:
+            stdout (io.StringIO): Buffer containing standard output
+            stderr (io.StringIO): Buffer containing error output
+
+        Returns:
+            tuple[str, str]: Tuple containing (stdout output, stderr output)
+        """
+        stdout.flush()
+        stderr.flush()
+        output = stdout.getvalue() or "[No output]"
+        error_output = stderr.getvalue() or "[No error output]"
+
+        self.context["last_code_output"] = output
+        self.conversation_history.append(
+            {
+                "role": "system",
+                "content": f"Code execution output:\n{output}\nError output:\n{error_output}",
+            }
+        )
+
+        return output, error_output
+
+    def _format_success_output(self, output: tuple[str, str]) -> str:
+        """Format successful execution output with ANSI color codes.
+
+        Args:
+            output (tuple[str, str]): Tuple containing (stdout output, stderr output)
+
+        Returns:
+            str: Formatted string with colored success message and execution output
+        """
+        stdout, stderr = output
+        return (
+            "\n\033[1;32m✓ Code Execution Successful\033[0m\n"
+            "\033[1;34m╞══════════════════════════════════════════╡\n"
+            f"\033[1;36m│ Output:\033[0m\n{stdout}\n"
+            f"\033[1;36m│ Error Output:\033[0m\n{stderr}"
+        )
+
+    async def _handle_execution_error(
+        self, initial_error: Exception, code: str, max_retries: int
+    ) -> str:
+        """Handle code execution errors with retry logic.
+
+        Args:
+            initial_error (Exception): The original error that occurred
+            code (str): The Python code that failed
+            max_retries (int): Maximum number of retry attempts
+
+        Returns:
+            str: Final execution output or formatted error message
+        """
+        self._record_initial_error(initial_error)
+        self._log_error_and_retry_message(initial_error)
+
+        for attempt in range(max_retries):
+            try:
+                new_code = await self._get_corrected_code()
+                if new_code:
+                    return await self._execute_with_output(new_code[0])
+            except Exception as retry_error:
+                self._record_retry_error(retry_error, attempt)
+                self._log_retry_error(retry_error, attempt, max_retries)
+
+        return self._format_error_output(initial_error, max_retries)
+
+    def _record_initial_error(self, error: Exception) -> None:
+        """Record the initial execution error in conversation history.
+
+        Args:
+            error (Exception): The error that occurred during initial execution
+        """
+        msg = (
+            f"The initial execution failed with error: {str(error)}. "
+            "Review the code and make corrections to run successfully."
+        )
+        self.conversation_history.append({"role": "user", "content": msg})
+
+    def _record_retry_error(self, error: Exception, attempt: int) -> None:
+        """Record retry attempt errors in conversation history.
+
+        Args:
+            error (Exception): The error that occurred during retry
+            attempt (int): The current retry attempt number
+        """
+        msg = (
+            f"The code execution failed with error: {str(error)}. "
+            "Please review and make corrections to the code to fix this error and try again."
+        )
+        self.conversation_history.append({"role": "user", "content": msg})
+
+    def _log_error_and_retry_message(self, error: Exception) -> None:
+        """Print formatted error message and retry notification.
+
+        Args:
+            error (Exception): The error to display
+        """
+        print("\n\033[1;31m✗ Error during execution:\033[0m")
+        print("\033[1;34m╞══════════════════════════════════════════╡")
+        print(f"\033[1;36m│ Error:\033[0m\n{str(error)}")
+        print("\033[1;34m╞══════════════════════════════════════════╡")
+        print("\033[1;36m│ Attempting to fix the error...\033[0m")
+        print("\033[1;34m╰══════════════════════════════════════════╯\033[0m")
+
+    def _log_retry_error(self, error: Exception, attempt: int, max_retries: int) -> None:
+        """Print formatted retry error message.
+
+        Args:
+            error (Exception): The error that occurred during retry
+            attempt (int): Current retry attempt number
+            max_retries (int): Maximum number of retry attempts
+        """
+        print(f"\n\033[1;31m✗ Error during execution (attempt {attempt + 1}):\033[0m")
+        print("\033[1;34m╞══════════════════════════════════════════╡")
+        print(f"\033[1;36m│ Error:\033[0m\n{str(error)}")
+        if attempt < max_retries - 1:
+            print("\033[1;36m│\033[0m \033[1;33mAnother attempt will be made...\033[0m")
+
+    async def _get_corrected_code(self) -> List[str]:
+        """Get corrected code from the language model.
+
+        Returns:
+            List[str]: List of extracted code blocks from model response
+        """
+        response = await self.invoke_model(self.conversation_history)
+        response_content = (
+            response.content if isinstance(response.content, str) else str(response.content)
+        )
+        return self.extract_code_blocks(response_content)
+
+    def _format_error_output(self, error: Exception, max_retries: int) -> str:
+        """Format error output message with ANSI color codes.
+
+        Args:
+            error (Exception): The error to format
+            max_retries (int): Number of retry attempts made
+
+        Returns:
+            str: Formatted error message string
+        """
+        return (
+            f"\n\033[1;31m✗ Code Execution Failed after {max_retries} attempts\033[0m\n"
+            f"\033[1;34m╞══════════════════════════════════════════╡\n"
+            f"\033[1;36m│ Error:\033[0m\n{str(error)}"
+        )
 
     def _format_agent_output(self, text: str) -> str:
-        """Format agent output with colored sidebar and indentation."""
+        """Format agent output with colored sidebar and indentation.
 
+        Args:
+            text (str): Raw agent output text
+
+        Returns:
+            str: Formatted text with colored sidebar and control tags removed
+        """
         # Add colored sidebar to each line and remove control tags
         lines = [f"\033[1;36m│\033[0m {line}" for line in text.split("\n")]
         output = "\n".join(lines)
