@@ -3,6 +3,7 @@ import io
 import os
 import platform
 import readline
+import signal
 import sys
 from enum import Enum
 from pathlib import Path
@@ -24,6 +25,7 @@ class ProcessResponseStatus(Enum):
     SUCCESS = "success"
     CANCELLED = "cancelled"
     ERROR = "error"
+    INTERRUPTED = "interrupted"
 
 
 class ProcessResponseOutput:
@@ -51,6 +53,8 @@ class LocalCodeExecutor:
     model: ChatOpenAI | ChatOllama | ChatAnthropic
     step_counter: int
     max_conversation_history: int
+    detail_conversation_length: int
+    interrupted: bool
 
     """A class to handle local Python code execution with safety checks and context management.
 
@@ -59,6 +63,12 @@ class LocalCodeExecutor:
         conversation_history (list): A list of message dictionaries tracking the conversation
         model: The language model used for code analysis and safety checks
         step_counter (int): A counter to track the current step in sequential execution
+        max_conversation_history (int): The maximum number of messages to keep in
+            the conversation history.  This doesn't include the system prompt.
+        detail_conversation_length (int): The number of messages to keep in full detail in the
+            conversation history.  Every step before this except the system prompt will be
+            summarized.
+        interrupted (bool): Flag indicating if execution was interrupted
     """
 
     def __init__(
@@ -83,6 +93,7 @@ class LocalCodeExecutor:
         self.max_conversation_history = max_conversation_history
         self.detail_conversation_length = detail_conversation_length
         self.reset_step_counter()
+        self.interrupted = False
 
     def reset_step_counter(self):
         """Reset the step counter."""
@@ -533,6 +544,16 @@ class LocalCodeExecutor:
         Args:
             response (str): The model's response containing potential code blocks
         """
+        if self.interrupted:
+            print("\n\033[1;33m╭─ Task Interrupted ────────────────────────────\033[0m")
+            print("\033[1;33m│ User requested to stop current task\033[0m")
+            print("\033[1;33m╰──────────────────────────────────────────────────\033[0m\n")
+            self.interrupted = False
+            return ProcessResponseOutput(
+                status=ProcessResponseStatus.INTERRUPTED,
+                message="Task interrupted by user",
+            )
+
         formatted_response = self._format_agent_output(response)
         print(
             f"\n\033[1;36m╭─ Agent Response (Step {self.step_counter}) "
@@ -647,6 +668,22 @@ class CliOperator:
         self.executor = LocalCodeExecutor(self.model)
 
         self._load_input_history()
+        self._setup_interrupt_handler()
+
+    def _setup_interrupt_handler(self) -> None:
+        """Set up the interrupt handler for Ctrl+C."""
+
+        def handle_interrupt(signum, frame):
+            if self.executor.interrupted:
+                # Pass through SIGINT if already interrupted
+                signal.default_int_handler(signum, frame)
+            self.executor.interrupted = True
+            print(
+                "\033[33m⚠️  Received interrupt signal, execution will"
+                " stop after current step\033[0m"
+            )
+
+        signal.signal(signal.SIGINT, handle_interrupt)
 
     def _save_input_history(self) -> None:
         """Save input history to file."""
@@ -789,6 +826,7 @@ class CliOperator:
         print("\033[1;36m│ by running Python code.                          │\033[0m")
         print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
         print("\033[1;36m│ Type 'exit' or 'quit' to quit                    │\033[0m")
+        print("\033[1;36m│ Press Ctrl+C to interrupt current task           │\033[0m")
         print("\033[1;36m╰──────────────────────────────────────────────────╯\033[0m\n")
 
         self._setup_prompt()
@@ -811,8 +849,10 @@ class CliOperator:
             response = None
             self.executor.reset_step_counter()
 
-            while not self._agent_is_done(response) and not self._agent_requires_user_input(
-                response
+            while (
+                not self._agent_is_done(response)
+                and not self._agent_requires_user_input(response)
+                and not self.executor.interrupted
             ):
                 if self.model is None:
                     raise ValueError("Model is not initialized")
@@ -825,7 +865,10 @@ class CliOperator:
                 result = await self.executor.process_response(response_content)
 
                 # Break out of the agent flow if the user cancels the code execution
-                if result.status == ProcessResponseStatus.CANCELLED:
+                if (
+                    result.status == ProcessResponseStatus.CANCELLED
+                    or result.status == ProcessResponseStatus.INTERRUPTED
+                ):
                     break
 
             if os.environ.get("LOCAL_OPERATOR_DEBUG") == "true":
