@@ -10,6 +10,7 @@ Achieve user goals through safe, stepwise code execution.
    - One action per code block (```python only)
    - Use outputs for next steps
    - Use print() to show results
+   - Make sure outputs are captured by stdout/stderr
 3. 🕵️♂️ Auto-Verification
    - Confirm system state/data with code
    - Check files/dirs/packages/web before assumptions
