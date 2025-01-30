@@ -15,6 +15,7 @@ from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 from tiktoken import encoding_for_model
 
+from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.prompts import BaseSystemPrompt
 
@@ -656,6 +657,7 @@ class CliOperator:
         self,
         credential_manager: CredentialManager,
         model_instance: Union[ChatOpenAI, ChatOllama, ChatAnthropic],
+        config_manager: ConfigManager,
     ):
         """Initialize the CLI by loading credentials or prompting for them.
 
@@ -664,6 +666,7 @@ class CliOperator:
             model (str): Model name to use
         """
         self.credential_manager = credential_manager
+        self.config_manager = config_manager
         self.model = model_instance
         self.executor = LocalCodeExecutor(self.model)
 
@@ -813,11 +816,12 @@ class CliOperator:
             }
         ]
 
-    async def chat(self) -> None:
-        """Run the interactive chat interface with code execution capabilities."""
+    def _print_banner(self) -> None:
+        """Print the banner for the chat CLI."""
         debug_indicator = (
             " [DEBUG MODE]" if os.getenv("LOCAL_OPERATOR_DEBUG", "false").lower() == "true" else ""
         )
+
         print("\033[1;36m╭──────────────────────────────────────────────────╮\033[0m")
         print(f"\033[1;36m│ Local Executor Agent CLI{debug_indicator:<25}│\033[0m")
         print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
@@ -825,10 +829,36 @@ class CliOperator:
         print("\033[1;36m│ that can execute tasks locally on your device    │\033[0m")
         print("\033[1;36m│ by running Python code.                          │\033[0m")
         print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
+        hosting = self.config_manager.get_config_value("hosting")
+        model = self.config_manager.get_config_value("model_name")
+        if hosting:
+            hosting_text = f"Using hosting: {hosting}"
+            padding = 49 - len(hosting_text)
+            print(f"\033[1;36m│ {hosting_text}{' ' * padding}│\033[0m")
+        if model:
+            model_text = f"Using model: {model}"
+            padding = 49 - len(model_text)
+            print(f"\033[1;36m│ {model_text}{' ' * padding}│\033[0m")
+        if hosting or model:
+            print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
         print("\033[1;36m│ Type 'exit' or 'quit' to quit                    │\033[0m")
         print("\033[1;36m│ Press Ctrl+C to interrupt current task           │\033[0m")
         print("\033[1;36m╰──────────────────────────────────────────────────╯\033[0m\n")
 
+        # Print configuration options
+        if os.getenv("LOCAL_OPERATOR_DEBUG", "false").lower() == "true":
+            print("\033[1;36m╭─ Configuration ────────────────────────────────\033[0m")
+            print(f"\033[1;36m│\033[0m Hosting: {self.config_manager.get_config_value('hosting')}")
+            print(f"\033[1;36m│\033[0m Model: {self.config_manager.get_config_value('model_name')}")
+            conv_len = self.config_manager.get_config_value("conversation_length")
+            detail_len = self.config_manager.get_config_value("detail_length")
+            print(f"\033[1;36m│\033[0m Conversation Length: {conv_len}")
+            print(f"\033[1;36m│\033[0m Detail Length: {detail_len}")
+            print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
+
+    async def chat(self) -> None:
+        """Run the interactive chat interface with code execution capabilities."""
+        self._print_banner()
         self._setup_prompt()
 
         while True:
