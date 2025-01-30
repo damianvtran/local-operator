@@ -5,27 +5,48 @@ It securely stores credentials in a local config file and provides methods
 for accessing them when needed.
 """
 
+import getpass
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
 
+# Name of the file used to store credentials in .env format
+CREDENTIALS_FILE_NAME: str = "credentials.env"
+
 
 class CredentialManager:
-    """Manages credentials storage and retrieval."""
+    """Manages secure storage and retrieval of API credentials.
+
+    This class handles storing API keys and other sensitive credentials in a local
+    encrypted configuration file. It provides methods for safely reading and writing
+    credentials while maintaining proper file permissions.
+
+    Attributes:
+        config_dir (Path): Directory where credential files are stored
+        config_file (Path): Path to the credentials file
+    """
 
     config_dir: Path
     config_file: Path
 
     def __init__(self, config_dir: Path):
         self.config_dir = config_dir
-        self.config_file = self.config_dir / "config.env"
+        self.config_file = self.config_dir / CREDENTIALS_FILE_NAME
         self._ensure_config_exists()
         # Load environment variables from config file
         load_dotenv(self.config_file)
 
     def _ensure_config_exists(self):
-        """Ensure config directory and file exist, prompt for credential if needed."""
+        """Ensure the credentials configuration file exists and has proper permissions.
+
+        Creates the config directory and credentials file if they don't exist.
+        Sets restrictive file permissions (600) to protect sensitive credential data.
+        The file permissions ensure only the owner can read/write the credentials.
+
+        The config file is created as an empty file that will be populated later
+        when credentials are added via set_credential().
+        """
         if not self.config_file.exists():
             self.config_file.parent.mkdir(parents=True, exist_ok=True)
             self.config_file.touch()
@@ -75,6 +96,7 @@ class CredentialManager:
 
         Args:
             key (str): The environment variable key to check
+            reason (str): The reason for prompting the user
 
         Returns:
             str: The credential value
@@ -97,8 +119,8 @@ class CredentialManager:
         print(f"{cyan}│ {key} {reason}.{reason_padding}│{reset}")
         print(f"{cyan}╰{border}╯{reset}")
 
-        # Prompt for API key
-        credential = input(f"{blue}Please enter your {key}: {reset}").strip()
+        # Prompt for API key using getpass to hide input
+        credential = getpass.getpass(f"{blue}Please enter your {key}: {reset}").strip()
         if not credential:
             raise ValueError(f"\033[1;31m{key} is required for this step.\033[0m")
 
