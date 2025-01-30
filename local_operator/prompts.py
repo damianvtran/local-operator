@@ -9,6 +9,7 @@ Achieve user goals through safe, stepwise code execution.
 2. 🧩 Single-Step Execution
    - One action per code block (```python only)
    - Use outputs for next steps
+   - Use print() to show results
 3. 🕵️♂️ Auto-Verification
    - Confirm system state/data with code
    - Check files/dirs/packages/web before assumptions
