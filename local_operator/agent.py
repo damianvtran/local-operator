@@ -62,7 +62,10 @@ class LocalCodeExecutor:
     """
 
     def __init__(
-        self, model: ChatOpenAI | ChatOllama | ChatAnthropic, max_conversation_history: int = 100
+        self,
+        model: ChatOpenAI | ChatOllama | ChatAnthropic,
+        max_conversation_history: int = 100,
+        detail_conversation_length: int = 10,
     ):
         """Initialize the LocalCodeExecutor with a language model.
 
@@ -70,26 +73,67 @@ class LocalCodeExecutor:
             model: The language model instance to use for code analysis
             max_conversation_history: The maximum number of messages to keep in
             the conversation history.  This doesn't include the system prompt.
+            detail_conversation_length: The number of messages to keep in full detail in the
+            conversation history.  Every step before this except the system prompt will be
+            summarized.
         """
         self.context = {}
         self.conversation_history = []
         self.model = model
         self.max_conversation_history = max_conversation_history
+        self.detail_conversation_length = detail_conversation_length
         self.reset_step_counter()
 
     def reset_step_counter(self):
         """Reset the step counter."""
         self.step_counter = 1
 
-    def _append_to_history(self, role: ConversationRole, content: str) -> None:
+    def _append_to_history(
+        self, role: ConversationRole, content: str, should_summarize: str = "True"
+    ) -> None:
         """Append a message to conversation history and maintain length limit.
 
         Args:
             role (str): The role of the message sender (user/assistant/system)
             content (str): The message content
+            should_summarize (str): Whether to summarize the message in the future.
+            This can be set to False for messages that are already sufficiently
+            summarized.
         """
-        self.conversation_history.append({"role": role.value, "content": content})
+        self.conversation_history.append(
+            {
+                "role": role.value,
+                "content": content,
+                "summarized": "False",
+                "should_summarize": should_summarize,
+            }
+        )
         self._limit_conversation_history()
+
+    async def _summarize_old_steps(self) -> None:
+        """Summarize old conversation steps beyond the detail conversation length.
+        Only summarizes steps that haven't been summarized yet."""
+        if len(self.conversation_history) <= 1:  # Just system prompt or empty
+            return
+
+        # Calculate which messages need summarizing
+        history_to_summarize = self.conversation_history[1 : -self.detail_conversation_length]
+
+        for msg in history_to_summarize:
+            # Skip messages that are already sufficiently concise/summarized
+            if msg.get("should_summarize") == "False":
+                continue
+
+            if msg.get("summarized") == "True":
+                continue
+
+            # Leave the user prompts intact
+            if msg.get("role") == ConversationRole.USER.value:
+                continue
+
+            summary = await self._summarize_conversation_step(msg)
+            msg["content"] = summary
+            msg["summarized"] = "True"
 
     def extract_code_blocks(self, text: str) -> List[str]:
         """Extract Python code blocks from text using markdown-style syntax.
@@ -198,7 +242,7 @@ class LocalCodeExecutor:
         You will be given a code snippet and asked to check if it contains any dangerous operations.
 
         🚫 Respond "yes" if contains:
-        - High risk file deletion/editing
+        - High risk file deletion
         - Suspicious package installs
         - High risk system commands execution
         - Sensitive system access
@@ -353,7 +397,7 @@ class LocalCodeExecutor:
         """
         stdout, stderr = output
         return (
-            "\n\033[1;32m✓ Code Execution Successful\033[0m\n"
+            "\n\033[1;32m✓ Code Execution Complete\033[0m\n"
             "\033[1;34m╞══════════════════════════════════════════╡\n"
             f"\033[1;36m│ Output:\033[0m\n{stdout}\n"
             f"\033[1;36m│ Error Output:\033[0m\n{stderr}"
@@ -521,14 +565,19 @@ class LocalCodeExecutor:
             print("\033[1;36m╰──────────────────────────────────────────────────\033[0m")
 
             self._append_to_history(
-                ConversationRole.SYSTEM, f"Current working directory: {os.getcwd()}"
+                ConversationRole.SYSTEM,
+                f"Current working directory: {os.getcwd()}",
+                should_summarize="False",
             )
 
             self.step_counter += 1
 
+        # Summarize old steps to reduce token usage
+        await self._summarize_old_steps()
+
         return ProcessResponseOutput(
             status=ProcessResponseStatus.SUCCESS,
-            message="Code execution successful",
+            message="Code execution complete",
         )
 
     def _limit_conversation_history(self) -> None:
@@ -538,6 +587,40 @@ class LocalCodeExecutor:
             self.conversation_history = [self.conversation_history[0]] + self.conversation_history[
                 -self.max_conversation_history + 1 :
             ]
+
+    async def _summarize_conversation_step(self, msg: dict[str, str]) -> str:
+        """Summarize the conversation step by invoking the model to generate a concise summary.
+
+        Args:
+            step_number (int): The step number to summarize
+
+        Returns:
+            str: A concise summary of the critical information from this step
+        """
+        summary_prompt = """
+        You are a conversation summarizer. Your task is to summarize what happened in the given
+        conversation step in a single concise sentence. Focus only on capturing critical details
+        that may be relevant for future reference, such as:
+        - Key actions taken
+        - Important changes made
+        - Significant results or outcomes
+        - Any errors or issues encountered
+
+        Format your response as a single sentence with the format:
+        "[SUMMARY] {summary}"
+        """
+
+        step_info = "Please summarize the following conversation step:\n" + "\n".join(
+            f"{msg['role']}: {msg['content']}"
+        )
+
+        summary_history = [
+            {"role": ConversationRole.SYSTEM.value, "content": summary_prompt},
+            {"role": ConversationRole.USER.value, "content": step_info},
+        ]
+
+        response = await self.invoke_model(summary_history)
+        return response.content if isinstance(response.content, str) else str(response.content)
 
 
 class CliOperator:
