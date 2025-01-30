@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from local_operator.agent import CliOperator, LocalCodeExecutor
+from local_operator.agent import CliOperator, ConversationRole, LocalCodeExecutor
 
 
 @pytest.fixture
@@ -308,7 +308,7 @@ async def test_execute_code_success(executor, mock_model):
 
     with patch("sys.stdout", new_callable=io.StringIO):
         result = await executor.execute_code(code)
-        assert "✓ Code Execution Successful" in result
+        assert "✓ Code Execution Complete" in result
         assert "hello" in result
 
 
@@ -319,7 +319,7 @@ async def test_execute_code_no_output(executor, mock_model):
 
     with patch("sys.stdout", new_callable=io.StringIO):
         result = await executor.execute_code(code)
-        assert "✓ Code Execution Successful" in result
+        assert "✓ Code Execution Complete" in result
         assert "[No output]" in result
 
 
@@ -402,6 +402,185 @@ def test_limit_conversation_history(executor):
                 f"{test_case['name']}: Expected content {expected_content} "
                 f"but got {actual_content} at position {i}"
             )
+
+
+@pytest.mark.asyncio
+async def test_summarize_old_steps(mock_model):
+    executor = LocalCodeExecutor(model=mock_model, detail_conversation_length=2)
+
+    # Mock the summarization response
+    mock_model.ainvoke.return_value.content = "[SUMMARY] This is a summary"
+
+    test_cases = [
+        {
+            "name": "Empty history",
+            "initial": [],
+            "expected": [],
+        },
+        {
+            "name": "Only system prompt",
+            "initial": [
+                {
+                    "role": "system",
+                    "content": "system prompt",
+                    "summarized": "False",
+                    "should_summarize": "True",
+                }
+            ],
+            "expected": [
+                {
+                    "role": "system",
+                    "content": "system prompt",
+                    "summarized": "False",
+                    "should_summarize": "True",
+                }
+            ],
+        },
+        {
+            "name": "Within detail length",
+            "initial": [
+                {
+                    "role": "system",
+                    "content": "system prompt",
+                    "summarized": "False",
+                    "should_summarize": "True",
+                },
+                {
+                    "role": "assistant",
+                    "content": "msg1",
+                    "summarized": "False",
+                    "should_summarize": "True",
+                },
+                {
+                    "role": "assistant",
+                    "content": "msg2",
+                    "summarized": "False",
+                    "should_summarize": "True",
+                },
+            ],
+            "expected": [
+                {
+                    "role": "system",
+                    "content": "system prompt",
+                    "summarized": "False",
+                    "should_summarize": "True",
+                },
+                {
+                    "role": "assistant",
+                    "content": "msg1",
+                    "summarized": "False",
+                    "should_summarize": "True",
+                },
+                {
+                    "role": "assistant",
+                    "content": "msg2",
+                    "summarized": "False",
+                    "should_summarize": "True",
+                },
+            ],
+        },
+        {
+            "name": "Beyond detail length with skip conditions",
+            "initial": [
+                {
+                    "role": "system",
+                    "content": "system prompt",
+                    "summarized": "False",
+                    "should_summarize": "True",
+                },
+                {
+                    "role": "user",
+                    "content": "user msg",
+                    "summarized": "False",
+                    "should_summarize": "True",
+                },
+                {
+                    "role": "assistant",
+                    "content": "skip me",
+                    "summarized": "False",
+                    "should_summarize": "False",
+                },
+                {
+                    "role": "assistant",
+                    "content": "already summarized",
+                    "summarized": "True",
+                    "should_summarize": "True",
+                },
+                {
+                    "role": "assistant",
+                    "content": "summarize me",
+                    "summarized": "False",
+                    "should_summarize": "True",
+                },
+                {
+                    "role": "assistant",
+                    "content": "recent1",
+                    "summarized": "False",
+                    "should_summarize": "True",
+                },
+                {
+                    "role": "assistant",
+                    "content": "recent2",
+                    "summarized": "False",
+                    "should_summarize": "True",
+                },
+            ],
+            "expected": [
+                {
+                    "role": "system",
+                    "content": "system prompt",
+                    "summarized": "False",
+                    "should_summarize": "True",
+                },
+                {
+                    "role": "user",
+                    "content": "user msg",
+                    "summarized": "False",
+                    "should_summarize": "True",
+                },
+                {
+                    "role": "assistant",
+                    "content": "skip me",
+                    "summarized": "False",
+                    "should_summarize": "False",
+                },
+                {
+                    "role": "assistant",
+                    "content": "already summarized",
+                    "summarized": "True",
+                    "should_summarize": "True",
+                },
+                {
+                    "role": "assistant",
+                    "content": "[SUMMARY] This is a summary",
+                    "summarized": "True",
+                    "should_summarize": "True",
+                },
+                {
+                    "role": "assistant",
+                    "content": "recent1",
+                    "summarized": "False",
+                    "should_summarize": "True",
+                },
+                {
+                    "role": "assistant",
+                    "content": "recent2",
+                    "summarized": "False",
+                    "should_summarize": "True",
+                },
+            ],
+        },
+    ]
+
+    for test_case in test_cases:
+        executor.conversation_history = test_case["initial"]
+        executor.detail_conversation_length = 2
+        await executor._summarize_old_steps()
+
+        assert executor.conversation_history == test_case["expected"], (
+            f"{test_case['name']}: Expected conversation history to match "
+            f"but got {executor.conversation_history}"
+        )
 
 
 def test_cli_operator_init(mock_model):
