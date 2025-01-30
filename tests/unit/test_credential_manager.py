@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.credentials import CredentialManager
+from local_operator.credentials import CREDENTIALS_FILE_NAME, CredentialManager
 
 
 @pytest.fixture
@@ -12,7 +12,7 @@ def temp_config():
     initial_env = os.environ.copy()
     """Fixture to create a temporary config file for testing."""
     with tempfile.TemporaryDirectory() as temp_dir:
-        config_path = Path(temp_dir) / "config.env"
+        config_path = Path(temp_dir) / CREDENTIALS_FILE_NAME
         yield config_path
         # Clear any used environment variables after each test
         os.environ.clear()
@@ -65,8 +65,8 @@ def test_prompt_for_credential(temp_config, monkeypatch):
     """Test prompting for and saving a new credential."""
     manager = CredentialManager(config_dir=temp_config.parent)
 
-    # Mock user input and print statements
-    monkeypatch.setattr("builtins.input", lambda _: "new_test_key")
+    # Mock getpass and print statements
+    monkeypatch.setattr("getpass.getpass", lambda _: "new_test_key")
     monkeypatch.setattr("builtins.print", lambda *args, **kwargs: None)
 
     credential = manager.prompt_for_credential("NEW_API_KEY")
@@ -83,8 +83,9 @@ def test_missing_credential_raises_error(temp_config, monkeypatch):
     """Test that missing credential raises ValueError."""
     manager = CredentialManager(config_dir=temp_config.parent)
 
-    # Mock empty user input
-    monkeypatch.setattr("builtins.input", lambda _: "")
+    # Mock empty getpass input
+    monkeypatch.setattr("getpass.getpass", lambda _: "")
+    monkeypatch.setattr("builtins.print", lambda *args, **kwargs: None)
 
     with pytest.raises(ValueError) as exc_info:
         manager.prompt_for_credential("NON_EXISTENT_KEY")

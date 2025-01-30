@@ -23,9 +23,13 @@ def cli_operator(mock_model):
     credential_manager = MagicMock()
     credential_manager.get_credential = MagicMock(return_value="test_key")
 
+    config_manager = MagicMock()
+    config_manager.get_config_value = MagicMock(return_value="test_value")
+
     operator = CliOperator(
         credential_manager=credential_manager,
         model_instance=mock_model,
+        config_manager=config_manager,
     )
 
     operator._get_input_with_history = MagicMock(return_value="noop")
@@ -587,9 +591,13 @@ def test_cli_operator_init(mock_model):
     credential_manager = MagicMock()
     credential_manager.get_credential = MagicMock(return_value="test_key")
 
+    config_manager = MagicMock()
+    config_manager.get_config_value = MagicMock(return_value="test_value")
+
     operator = CliOperator(
         credential_manager=credential_manager,
         model_instance=mock_model,
+        config_manager=config_manager,
     )
 
     assert operator.model == mock_model
