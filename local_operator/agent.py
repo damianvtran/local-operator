@@ -651,7 +651,16 @@ class CliOperator:
     Attributes:
         model: The configured ChatOpenAI or ChatOllama instance
         executor: LocalCodeExecutor instance for handling code execution
+        config_manager: ConfigManager instance for managing configuration
+        credential_manager: CredentialManager instance for managing credentials
+        executor_is_processing: Whether the executor is processing a response
     """
+
+    credential_manager: CredentialManager
+    config_manager: ConfigManager
+    model: Union[ChatOpenAI, ChatOllama, ChatAnthropic]
+    executor: LocalCodeExecutor
+    executor_is_processing: bool
 
     def __init__(
         self,
@@ -669,6 +678,7 @@ class CliOperator:
         self.config_manager = config_manager
         self.model = model_instance
         self.executor = LocalCodeExecutor(self.model)
+        self.executor_is_processing = False
 
         self._load_input_history()
         self._setup_interrupt_handler()
@@ -677,8 +687,9 @@ class CliOperator:
         """Set up the interrupt handler for Ctrl+C."""
 
         def handle_interrupt(signum, frame):
-            if self.executor.interrupted:
-                # Pass through SIGINT if already interrupted
+            if self.executor.interrupted or not self.executor_is_processing:
+                # Pass through SIGINT if already interrupted or the
+                # executor is not processing a response
                 signal.default_int_handler(signum, frame)
             self.executor.interrupted = True
             print(
@@ -862,6 +873,7 @@ class CliOperator:
         self._setup_prompt()
 
         while True:
+            self.executor_is_processing = False
 
             prompt = f"You ({os.getcwd()}): > "
             user_input = self._get_input_with_history(prompt)
@@ -878,6 +890,7 @@ class CliOperator:
 
             response = None
             self.executor.reset_step_counter()
+            self.executor_is_processing = True
 
             while (
                 not self._agent_is_done(response)
