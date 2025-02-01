@@ -1,11 +1,8 @@
 """
 Main entry point for the Local Operator CLI application.
 
-This script initializes and runs the DeepSeekCLI interface, which provides:
-- Interactive chat with AI assistant
-- Safe execution of Python code blocks
-- Context-aware conversation history
-- Built-in safety checks for code execution
+This script initializes the DeepSeekCLI interface for interactive chat or,
+when the "serve" subcommand is used, starts up the FastAPI server to handle HTTP requests.
 
 The application uses asyncio for asynchronous operation and includes
 error handling for graceful failure.
@@ -21,6 +18,8 @@ import asyncio
 import os
 import traceback
 from pathlib import Path
+
+import uvicorn
 
 from local_operator.agent import CliOperator
 from local_operator.config import ConfigManager
@@ -85,6 +84,21 @@ def build_cli_parser() -> argparse.ArgumentParser:
     config_subparsers = config_parser.add_subparsers(dest="config_command")
     config_subparsers.add_parser("create", help="Create a new configuration file")
 
+    # Serve command to start the API server
+    serve_parser = subparsers.add_parser("serve", help="Start the FastAPI server")
+    serve_parser.add_argument(
+        "--host",
+        type=str,
+        default="0.0.0.0",
+        help="Host address for the server (default: 0.0.0.0)",
+    )
+    serve_parser.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        help="Port for the server (default: 8080)",
+    )
+
     return parser
 
 
@@ -102,6 +116,15 @@ def config_create_command() -> int:
     return 0
 
 
+def serve_command(host: str, port: int) -> int:
+    """
+    Start the FastAPI server using uvicorn.
+    """
+    print(f"Starting server at http://{host}:{port}")
+    uvicorn.run("local_operator.server:app", host=host, port=port)
+    return 0
+
+
 def main() -> int:
     try:
         parser = build_cli_parser()
@@ -114,6 +137,9 @@ def main() -> int:
                 return config_create_command()
             else:
                 parser.error(f"Invalid config command: {args.config_command}")
+        elif args.subcommand == "serve":
+            # Use the provided host and port options for serving the API.
+            return serve_command(args.host, args.port)
 
         os.environ["LOCAL_OPERATOR_DEBUG"] = "true" if args.debug else "false"
 

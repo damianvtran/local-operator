@@ -17,6 +17,8 @@ setup(
         "python-dotenv>=1.0.1",
         "pydantic>=2.10.6",
         "tiktoken>=0.8.0",
+        "uvicorn>=0.22.0",
+        "fastapi>=0.115.8",
     ],
     python_requires=">=3.12",
     extras_require={

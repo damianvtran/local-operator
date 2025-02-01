@@ -48,6 +48,80 @@ class ConversationRole(Enum):
     ASSISTANT = "assistant"
 
 
+def get_installed_packages_str() -> str:
+    """Get installed packages for the system prompt context."""
+
+    # Filter to show only commonly used packages and require that the model
+    # check for any other packages as needed.
+    key_packages = {
+        "numpy",
+        "pandas",
+        "torch",
+        "tensorflow",
+        "scikit-learn",
+        "matplotlib",
+        "seaborn",
+        "requests",
+        "pillow",
+        "pip",
+        "setuptools",
+        "wheel",
+        "langchain",
+        "plotly",
+        "scipy",
+        "statsmodels",
+        "tqdm",
+    }
+
+    installed_packages = [dist.metadata["Name"] for dist in importlib.metadata.distributions()]
+
+    # Filter and sort with priority for key packages
+    filtered_packages = sorted(
+        (pkg for pkg in installed_packages if pkg.lower() in key_packages),
+        key=lambda x: (x.lower() not in key_packages, x.lower()),
+    )
+
+    # Add count of non-critical packages
+    other_count = len(installed_packages) - len(filtered_packages)
+    package_str = ", ".join(filtered_packages[:15])  # Show first 15 matches
+    if other_count > 0:
+        package_str += f" + {other_count} others"
+
+    return package_str
+
+
+def create_system_prompt() -> str:
+    """Create the system prompt for the agent."""
+
+    base_system_prompt = BaseSystemPrompt
+    user_system_prompt = Path.home() / ".local-operator" / "system_prompt.md"
+    if user_system_prompt.exists():
+        user_system_prompt = user_system_prompt.read_text()
+    else:
+        user_system_prompt = ""
+
+    system_details = {
+        "os": platform.system(),
+        "release": platform.release(),
+        "version": platform.version(),
+        "architecture": platform.machine(),
+        "machine": platform.machine(),
+        "processor": platform.processor(),
+        "home_directory": os.path.expanduser("~"),
+    }
+    system_details_str = "\n".join(f"{key}: {value}" for key, value in system_details.items())
+
+    installed_packages_str = get_installed_packages_str()
+
+    base_system_prompt = (
+        base_system_prompt.replace("{{system_details_str}}", system_details_str)
+        .replace("{{installed_packages_str}}", installed_packages_str)
+        .replace("{{user_system_prompt}}", user_system_prompt)
+    )
+
+    return base_system_prompt
+
+
 class LocalCodeExecutor:
     context: Dict[str, Any]
     conversation_history: List[Dict[str, str]]
@@ -750,83 +824,6 @@ class CliOperator:
 
         return "[BYE]" in response.content.strip().splitlines()[-1].strip()
 
-    def _get_installed_packages(self) -> str:
-        """Get installed packages for the system prompt context."""
-
-        # Filter to show only commonly used packages and require that the model
-        # check for any other packages as needed.
-        key_packages = {
-            "numpy",
-            "pandas",
-            "torch",
-            "tensorflow",
-            "scikit-learn",
-            "matplotlib",
-            "seaborn",
-            "requests",
-            "pillow",
-            "pip",
-            "setuptools",
-            "wheel",
-            "langchain",
-            "plotly",
-            "scipy",
-            "statsmodels",
-            "tqdm",
-        }
-
-        installed_packages = [dist.metadata["Name"] for dist in importlib.metadata.distributions()]
-
-        # Filter and sort with priority for key packages
-        filtered_packages = sorted(
-            (pkg for pkg in installed_packages if pkg.lower() in key_packages),
-            key=lambda x: (x.lower() not in key_packages, x.lower()),
-        )
-
-        # Add count of non-critical packages
-        other_count = len(installed_packages) - len(filtered_packages)
-        package_str = ", ".join(filtered_packages[:15])  # Show first 15 matches
-        if other_count > 0:
-            package_str += f" + {other_count} others"
-
-        return package_str
-
-    def _setup_prompt(self) -> None:
-        """Setup the prompt for the agent."""
-
-        base_system_prompt = BaseSystemPrompt
-        user_system_prompt = Path.home() / ".local-operator" / "system_prompt.md"
-        if user_system_prompt.exists():
-            user_system_prompt = user_system_prompt.read_text()
-        else:
-            user_system_prompt = ""
-
-        system_details = {
-            "os": platform.system(),
-            "release": platform.release(),
-            "version": platform.version(),
-            "architecture": platform.machine(),
-            "machine": platform.machine(),
-            "processor": platform.processor(),
-            "home_directory": os.path.expanduser("~"),
-        }
-        system_details_str = "\n".join(f"{key}: {value}" for key, value in system_details.items())
-
-        installed_packages_str = self._get_installed_packages()
-
-        base_system_prompt = (
-            base_system_prompt.replace("{{system_details_str}}", system_details_str)
-            .replace("{{installed_packages_str}}", installed_packages_str)
-            .replace("{{user_system_prompt}}", user_system_prompt)
-        )
-
-        self.executor.conversation_history = [
-            {
-                "role": ConversationRole.SYSTEM.value,
-                "content": base_system_prompt,
-            }
-        ]
-
     def _print_banner(self) -> None:
         """Print the banner for the chat CLI."""
         debug_indicator = (
@@ -870,7 +867,13 @@ class CliOperator:
     async def chat(self) -> None:
         """Run the interactive chat interface with code execution capabilities."""
         self._print_banner()
-        self._setup_prompt()
+
+        self.executor.conversation_history = [
+            {
+                "role": ConversationRole.SYSTEM.value,
+                "content": create_system_prompt(),
+            }
+        ]
 
         while True:
             self.executor_is_processing = False
