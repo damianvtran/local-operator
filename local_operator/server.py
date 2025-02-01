@@ -181,6 +181,26 @@ def create_executor(request_hosting: str, request_model: str) -> LocalCodeExecut
     summary="Process chat request",
     description="Accepts a prompt and optional context/configuration, returns the model response "
     "and conversation history.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "example": {
+                            "summary": "Example Request",
+                            "value": {
+                                "prompt": "Print 'Hello, world!'",
+                                "hosting": "openai",
+                                "model": "gpt-4o",
+                                "context": [],
+                                "options": {"temperature": 0.7, "top_p": 0.9},
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 async def chat_endpoint(request: ChatRequest):
     """
@@ -216,13 +236,15 @@ async def chat_endpoint(request: ChatRequest):
             {"role": ConversationRole.USER.value, "content": request.prompt}
         )
 
+        executor.conversation_history = conversation_history
+
         # Configure model options if provided
         if request.options:
             executor.model.temperature = request.options.temperature or executor.model.temperature
             executor.model.top_p = request.options.top_p or executor.model.top_p
             # Add other options as supported by the model
 
-        response = await executor.invoke_model(conversation_history)
+        response = await executor.invoke_model(executor.conversation_history)
         response_content = (
             response.content if isinstance(response.content, str) else str(response.content)
         )
@@ -230,7 +252,9 @@ async def chat_endpoint(request: ChatRequest):
 
         # Calculate token stats using tiktoken
         tokenizer = encoding_for_model(request.model)
-        prompt_tokens = sum(len(tokenizer.encode(msg["content"])) for msg in conversation_history)
+        prompt_tokens = sum(
+            len(tokenizer.encode(msg["content"])) for msg in executor.conversation_history
+        )
         completion_tokens = len(tokenizer.encode(response_content))
         total_tokens = prompt_tokens + completion_tokens
 
@@ -238,7 +262,7 @@ async def chat_endpoint(request: ChatRequest):
             response=response_content,
             context=[
                 ChatMessage(role=msg["role"], content=msg["content"])
-                for msg in conversation_history
+                for msg in executor.conversation_history
             ],
             stats=ChatStats(
                 total_tokens=total_tokens,
