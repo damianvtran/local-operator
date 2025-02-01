@@ -98,6 +98,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=8080,
         help="Port for the server (default: 8080)",
     )
+    serve_parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="Enable hot reload for the server",
+    )
 
     return parser
 
@@ -116,12 +121,12 @@ def config_create_command() -> int:
     return 0
 
 
-def serve_command(host: str, port: int) -> int:
+def serve_command(host: str, port: int, reload: bool) -> int:
     """
     Start the FastAPI server using uvicorn.
     """
     print(f"Starting server at http://{host}:{port}")
-    uvicorn.run("local_operator.server:app", host=host, port=port)
+    uvicorn.run("local_operator.server:app", host=host, port=port, reload=reload)
     return 0
 
 
@@ -129,6 +134,8 @@ def main() -> int:
     try:
         parser = build_cli_parser()
         args = parser.parse_args()
+
+        os.environ["LOCAL_OPERATOR_DEBUG"] = "true" if args.debug else "false"
 
         if args.subcommand == "credential":
             return credential_command(args)
@@ -138,10 +145,8 @@ def main() -> int:
             else:
                 parser.error(f"Invalid config command: {args.config_command}")
         elif args.subcommand == "serve":
-            # Use the provided host and port options for serving the API.
-            return serve_command(args.host, args.port)
-
-        os.environ["LOCAL_OPERATOR_DEBUG"] = "true" if args.debug else "false"
+            # Use the provided host, port, and reload options for serving the API.
+            return serve_command(args.host, args.port, args.reload)
 
         config_dir = Path.home() / ".local-operator"
 

@@ -33,7 +33,7 @@ The Local Operator provides a command-line interface where you can:
 
 ## Setup
 
-To run the operator CLI with a 3rd party cloud-hosted LLM model, you need to have an API key.  You can get one from OpenAI, DeepSeek, Anthropic, or other providers.
+To run Local Operator with a 3rd party cloud-hosted LLM model, you need to have an API key.  You can get one from OpenAI, DeepSeek, Anthropic, or other providers.
 
 Once you have the API key, install the operator CLI with the following command:
 
@@ -43,7 +43,7 @@ pip install local-operator
 
 If you would like to run with a local Ollama model, you will need to install Ollama first from [here](https://ollama.ai/download), and fetch a model using `ollama pull`.  Make sure that the ollama server is running with `ollama serve`.
 
-## Usage
+## Usage (CLI)
 
 Run the operator CLI with the following command:
 
@@ -72,6 +72,18 @@ This will run the operator starting in the current working directory.  It will p
 Quit by typing `exit` or `quit`.
 
 Run `local-operator --help` for more information about parameters and configuration.
+
+## Usage (Server)
+
+To run the operator as a server, use the following command:
+
+```bash
+local-operator serve
+```
+
+This will start the FastAPI server app and host at `http://localhost:8080` by default with uvicorn.  You can change the host and port by using the `--host` and `--port` arguments.  
+
+For development, use the `--reload` argument to enable hot reloading.
 
 ## Configuration
 
