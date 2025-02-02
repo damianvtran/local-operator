@@ -15,6 +15,7 @@ body:
       label: Brief Summary
       description: Provide a short summary of the bug.
       placeholder: "App crashes when executing command XYZ"
+    validations:
       required: true
   - type: textarea
     id: steps
@@ -34,6 +35,7 @@ body:
       label: Expected Behavior
       description: Describe what you expected to happen.
       placeholder: "The application should complete the task successfully."
+    validations:
       required: true
   - type: textarea
     id: actual_behavior
@@ -75,7 +77,6 @@ body:
           value: openai
         - label: Other
           value: other
-      placeholder: "Select an option"
   - type: textarea
     id: error_logs
     attributes:
