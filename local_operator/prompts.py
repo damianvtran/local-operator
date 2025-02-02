@@ -53,7 +53,9 @@ AGENT: The task is now complete.
 [DONE]
 
 Additional information from the user:
+<user_system_prompt>
 {{user_system_prompt}}
+</user_system_prompt>
 
 
 **Critical Constraints:**
