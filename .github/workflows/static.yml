@@ -73,6 +73,7 @@ jobs:
   pip-audit:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: pypa/gh-action-pip-audit@v1.0.0
         with:
           inputs: requirements.txt
