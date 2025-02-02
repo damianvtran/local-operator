@@ -151,10 +151,10 @@ class ConfigManager:
             # Check if config version is older than current version
             config_version = config_dict.get("version", "0.0.0")
             current_version = version("local-operator")
-            if config_version < current_version:
+            if config_version > current_version:
                 print(
                     f"\n\033[1;33mWarning: Your config file version ({config_version}) "
-                    f"is older than the current version ({current_version}). "
+                    f"is newer than the current version ({current_version}). "
                     "Please upgrade to ensure compatibility.\033[0m"
                 )
 
