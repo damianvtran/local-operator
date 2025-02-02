@@ -64,11 +64,11 @@ def test_config_manager_initialization(temp_config_dir):
 @patch("local_operator.config.version")
 def test_config_manager_version_warning(mock_version, temp_config_dir, capsys):
     """Test ConfigManager warns about old config versions."""
-    mock_version.return_value = "2.0.0"
+    mock_version.return_value = "1.0.0"
 
     # Create config file with old version
     test_config = {
-        "version": "1.0.0",
+        "version": "2.0.0",
         "metadata": {
             "created_at": "",
             "last_modified": "",
@@ -83,7 +83,7 @@ def test_config_manager_version_warning(mock_version, temp_config_dir, capsys):
     ConfigManager(temp_config_dir)
     captured = capsys.readouterr()
     assert (
-        "Warning: Your config file version (1.0.0) is older than the current version (2.0.0)"
+        "Warning: Your config file version (2.0.0) is newer than the current version (1.0.0)"
         in captured.out
     )
 
