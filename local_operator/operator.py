@@ -324,7 +324,27 @@ class Operator:
             ):
                 break
 
+        if os.environ.get("LOCAL_OPERATOR_DEBUG") == "true":
+            self.print_conversation_history()
+
         return response
+
+    def print_conversation_history(self) -> None:
+        """Print the conversation history for debugging."""
+        tokenizer = encoding_for_model("gpt-4o")
+        total_tokens = sum(
+            len(tokenizer.encode(entry["content"])) for entry in self.executor.conversation_history
+        )
+
+        print("\n\033[1;35m╭─ Debug: Conversation History ───────────────────────\033[0m")
+        print(f"\033[1;35m│ Total tokens: {total_tokens}\033[0m")
+        for i, entry in enumerate(self.executor.conversation_history, 1):
+            role = entry["role"]
+            content = entry["content"]
+            print(f"\033[1;35m│ {i}. {role.capitalize()}:\033[0m")
+            for line in content.split("\n"):
+                print(f"\033[1;35m│   {line}\033[0m")
+        print("\033[1;35m╰──────────────────────────────────────────────────\033[0m\n")
 
     async def chat(self) -> None:
         """Run the interactive chat interface with code execution capabilities.
@@ -368,23 +388,6 @@ class Operator:
                 break
 
             response = await self.handle_user_input(user_input)
-
-            if os.environ.get("LOCAL_OPERATOR_DEBUG") == "true":
-                tokenizer = encoding_for_model("gpt-4o")
-                total_tokens = sum(
-                    len(tokenizer.encode(entry["content"]))
-                    for entry in self.executor.conversation_history
-                )
-
-                print("\n\033[1;35m╭─ Debug: Conversation History ───────────────────────\033[0m")
-                print(f"\033[1;35m│ Total tokens: {total_tokens}\033[0m")
-                for i, entry in enumerate(self.executor.conversation_history, 1):
-                    role = entry["role"]
-                    content = entry["content"]
-                    print(f"\033[1;35m│ {i}. {role.capitalize()}:\033[0m")
-                    for line in content.split("\n"):
-                        print(f"\033[1;35m│   {line}\033[0m")
-                print("\033[1;35m╰──────────────────────────────────────────────────\033[0m\n")
 
             # Check if the last line of the response contains "[BYE]" to exit
             if self._agent_should_exit(response):
