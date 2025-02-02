@@ -21,10 +21,11 @@ from pathlib import Path
 
 import uvicorn
 
-from local_operator.cli_operator import CliOperator
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
+from local_operator.executor import LocalCodeExecutor
 from local_operator.model import configure_model
+from local_operator.operator import Operator, OperatorType
 
 CLI_DESCRIPTION = """
     Local Operator - An environment for agentic AI models to perform tasks on the local device.
@@ -169,10 +170,14 @@ def main() -> int:
             print(error_msg)
             return -1
 
-        operator = CliOperator(
+        executor = LocalCodeExecutor(model_instance)
+
+        operator = Operator(
+            executor=executor,
             credential_manager=credential_manager,
             config_manager=config_manager,
             model_instance=model_instance,
+            type=OperatorType.CLI,
         )
 
         # Start the async chat interface

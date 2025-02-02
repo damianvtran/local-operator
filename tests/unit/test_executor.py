@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from local_operator.cli_operator import CliOperator, ConversationRole, LocalCodeExecutor
+from local_operator.operator import LocalCodeExecutor, Operator, OperatorType
 
 
 @pytest.fixture
@@ -19,17 +19,19 @@ def executor(mock_model):
 
 
 @pytest.fixture
-def cli_operator(mock_model):
+def cli_operator(mock_model, executor):
     credential_manager = MagicMock()
     credential_manager.get_credential = MagicMock(return_value="test_key")
 
     config_manager = MagicMock()
     config_manager.get_config_value = MagicMock(return_value="test_value")
 
-    operator = CliOperator(
+    operator = Operator(
+        executor=executor,
         credential_manager=credential_manager,
         model_instance=mock_model,
         config_manager=config_manager,
+        type=OperatorType.CLI,
     )
 
     operator._get_input_with_history = MagicMock(return_value="noop")
@@ -651,3 +653,19 @@ async def test_summarize_old_steps(mock_model):
             f"{test_case['name']}: Expected conversation history to match "
             f"but got {executor.conversation_history}"
         )
+
+
+@pytest.mark.asyncio
+async def test_summarize_old_steps_all_detail(executor):
+    executor.detail_conversation_length = -1
+    executor.conversation_history = [
+        {"role": "system", "content": "system prompt"},
+        {"role": "user", "content": "user msg"},
+    ]
+
+    await executor._summarize_old_steps()
+
+    assert executor.conversation_history == [
+        {"role": "system", "content": "system prompt"},
+        {"role": "user", "content": "user msg"},
+    ]

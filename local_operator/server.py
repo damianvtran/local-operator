@@ -15,11 +15,16 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from tiktoken import encoding_for_model
 
-from local_operator.cli_operator import ConversationRole, create_system_prompt
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
 from local_operator.model import configure_model
+from local_operator.operator import (
+    ConversationRole,
+    Operator,
+    OperatorType,
+    create_system_prompt,
+)
 
 logger = logging.getLogger("local_operator.server")
 
@@ -147,7 +152,7 @@ app = FastAPI(
 )
 
 
-def create_executor(request_hosting: str, request_model: str) -> LocalCodeExecutor:
+def create_operator(request_hosting: str, request_model: str) -> Operator:
     """Create a LocalCodeExecutor for a single chat request using the app state managers
     and the hosting/model provided in the request."""
     credential_manager = getattr(app.state, "credential_manager", None)
@@ -167,8 +172,19 @@ def create_executor(request_hosting: str, request_model: str) -> LocalCodeExecut
     if not model_instance:
         raise ValueError("No model instance configured")
 
-    return LocalCodeExecutor(
-        model=model_instance, max_conversation_history=100, detail_conversation_length=10
+    executor = LocalCodeExecutor(
+        model=model_instance,
+        max_conversation_history=100,
+        detail_conversation_length=10,
+        can_prompt_user=False,
+    )
+
+    return Operator(
+        executor=executor,
+        credential_manager=credential_manager,
+        model_instance=executor.model,
+        config_manager=config_manager,
+        type=OperatorType.SERVER,
     )
 
 
@@ -214,45 +230,52 @@ async def chat_endpoint(request: ChatRequest):
     """
     try:
         # Create a new executor for this request using the provided hosting and model
-        executor = create_executor(request.hosting, request.model)
+        operator = create_operator(request.hosting, request.model)
 
-        system_prompt = create_system_prompt()
+        if request.context and len(request.context) > 0:
+            operator.executor.conversation_history = [
+                {"role": msg.role, "content": msg.content} for msg in request.context
+            ]
 
-        # Build conversation history
-        conversation_history = [
-            {
-                "role": ConversationRole.SYSTEM.value,
-                "content": system_prompt,
-            }
-        ]
-
-        if request.context:
-            conversation_history.extend(
-                [{"role": msg.role, "content": msg.content} for msg in request.context]
-            )
+        if request.context and len(request.context) > 0:
+            # Override the default system prompt with the provided context
+            conversation_history = [
+                {"role": msg.role, "content": msg.content} for msg in request.context
+            ]
+        else:
+            system_prompt = create_system_prompt()
+            conversation_history = [
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": system_prompt,
+                }
+            ]
 
         conversation_history.append(
             {"role": ConversationRole.USER.value, "content": request.prompt}
         )
 
-        executor.conversation_history = conversation_history
+        operator.executor.conversation_history = conversation_history
 
         # Configure model options if provided
         if request.options:
-            executor.model.temperature = request.options.temperature or executor.model.temperature
-            executor.model.top_p = request.options.top_p or executor.model.top_p
-            # Add other options as supported by the model
+            operator.model.temperature = (
+                request.options.temperature or operator.executor.model.temperature
+            )
+            operator.model.top_p = request.options.top_p or operator.executor.model.top_p
 
-        response = await executor.invoke_model(executor.conversation_history)
-        response_content = (
-            response.content if isinstance(response.content, str) else str(response.content)
-        )
-        await executor.process_response(response_content)
+        response = await operator.handle_user_input(request.prompt)
+        if response is not None:
+            response_content = (
+                response.content if isinstance(response.content, str) else str(response.content)
+            )
+        else:
+            response_content = ""
 
         # Calculate token stats using tiktoken
         tokenizer = encoding_for_model(request.model)
         prompt_tokens = sum(
-            len(tokenizer.encode(msg["content"])) for msg in executor.conversation_history
+            len(tokenizer.encode(msg["content"])) for msg in operator.executor.conversation_history
         )
         completion_tokens = len(tokenizer.encode(response_content))
         total_tokens = prompt_tokens + completion_tokens
@@ -261,7 +284,7 @@ async def chat_endpoint(request: ChatRequest):
             response=response_content,
             context=[
                 ChatMessage(role=msg["role"], content=msg["content"])
-                for msg in executor.conversation_history
+                for msg in operator.executor.conversation_history
             ],
             stats=ChatStats(
                 total_tokens=total_tokens,
