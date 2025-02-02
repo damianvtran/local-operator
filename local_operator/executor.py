@@ -9,6 +9,8 @@ from langchain_anthropic import ChatAnthropic
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 
+from local_operator.prompts import SafetyCheckSystemPrompt, SafetyCheckUserPrompt
+
 
 class ProcessResponseStatus(Enum):
     """Status codes for process_response results."""
@@ -260,28 +262,11 @@ class LocalCodeExecutor:
         Returns:
             bool: True if dangerous operations are detected, False otherwise
         """
-        safety_check_prompt = """
-        You are a code safety and security checker.
-
-        You will be given a code snippet and asked to check if it contains any dangerous operations.
-
-        🚫 Respond "yes" if contains:
-        - High risk file deletion
-        - Suspicious package installs
-        - High risk system commands execution
-        - Sensitive system access
-        - Risky network operations
-
-        ✅ Respond "no" if none detected
-
-        Format: "yes" or "no"
-        """
-
         response: BaseMessage
 
         if self.can_prompt_user:
             safety_history = [
-                {"role": ConversationRole.SYSTEM.value, "content": safety_check_prompt},
+                {"role": ConversationRole.SYSTEM.value, "content": SafetyCheckSystemPrompt},
                 {
                     "role": ConversationRole.USER.value,
                     "content": f"Determine if the following code is safe: {code}",
@@ -289,15 +274,34 @@ class LocalCodeExecutor:
             ]
 
             response = await self.invoke_model(safety_history)
-        else:
-            # If we can't prompt the user, we need to use the conversation history to determine
-            # if the user has previously indicated a decision.
-            response = await self.invoke_model(self.conversation_history)
 
+            response_content = (
+                response.content if isinstance(response.content, str) else str(response.content)
+            )
+            return "[UNSAFE]" in response_content
+
+        # If we can't prompt the user, we need to use the conversation history to determine
+        # if the user has previously indicated a decision.
+        safety_prompt = SafetyCheckUserPrompt.replace("{{code}}", code)
+        self._append_to_history(
+            ConversationRole.USER,
+            safety_prompt,
+        )
+        response = await self.invoke_model(self.conversation_history)
         response_content = (
             response.content if isinstance(response.content, str) else str(response.content)
         )
-        return "yes" in response_content.strip().lower()
+        self.conversation_history.pop()
+
+        if "[UNSAFE]" in response_content:
+            analysis = response_content.replace("[UNSAFE]", "").strip()
+            self._append_to_history(
+                ConversationRole.ASSISTANT,
+                f"The code is unsafe. Here is an analysis of the code risk: {analysis}",
+            )
+            return True
+
+        return False
 
     async def execute_code(self, code: str, max_retries: int = 2) -> str:
         """Execute Python code with safety checks and context management.

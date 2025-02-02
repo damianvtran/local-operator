@@ -291,7 +291,7 @@ def test_extract_code_blocks(executor):
 
 @pytest.mark.asyncio
 async def test_check_code_safety_safe(executor, mock_model):
-    mock_model.ainvoke.return_value.content = "no"
+    mock_model.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
     code = "print('hello')"
     result = await executor.check_code_safety(code)
     assert result is False
@@ -301,7 +301,9 @@ async def test_check_code_safety_safe(executor, mock_model):
 @pytest.mark.asyncio
 async def test_check_code_safety_unsafe(executor, mock_model):
     # Test the default path when can_prompt_user is True
-    mock_model.ainvoke.return_value.content = "yes"
+    mock_model.ainvoke.return_value.content = (
+        "The code is unsafe because it deletes important files\n\n[UNSAFE]"
+    )
     code = "import os; os.remove('important_file.txt')"
     result = await executor.check_code_safety(code)
     assert result is True
@@ -312,7 +314,9 @@ async def test_check_code_safety_unsafe(executor, mock_model):
 async def test_check_code_safety_unsafe_without_prompt(executor, mock_model):
     # Test the branch when can_prompt_user is False
     executor.can_prompt_user = False
-    mock_model.ainvoke.return_value.content = "yes"
+    mock_model.ainvoke.return_value.content = (
+        "The code is unsafe because it deletes important files\n\n[UNSAFE]"
+    )
     code = "import os; os.remove('important_file.txt')"
     result = await executor.check_code_safety(code)
     assert result is True
@@ -322,7 +326,7 @@ async def test_check_code_safety_unsafe_without_prompt(executor, mock_model):
 
 @pytest.mark.asyncio
 async def test_execute_code_success(executor, mock_model):
-    mock_model.ainvoke.return_value.content = "no"  # Safety check passes
+    mock_model.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
     code = "print('hello')"
 
     with patch("sys.stdout", new_callable=io.StringIO):
@@ -333,7 +337,7 @@ async def test_execute_code_success(executor, mock_model):
 
 @pytest.mark.asyncio
 async def test_execute_code_no_output(executor, mock_model):
-    mock_model.ainvoke.return_value.content = "no"  # Safety check passes
+    mock_model.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
     code = "x = 1 + 1"  # Code that produces no output
 
     with patch("sys.stdout", new_callable=io.StringIO):
@@ -345,7 +349,9 @@ async def test_execute_code_no_output(executor, mock_model):
 @pytest.mark.asyncio
 async def test_execute_code_safety_no_prompt(executor, mock_model):
     executor.can_prompt_user = False
-    mock_model.ainvoke.return_value.content = "yes"  # Safety check fails
+    mock_model.ainvoke.return_value.content = (
+        "The code is unsafe because it deletes important files\n\n[UNSAFE]"
+    )
     code = "import os; os.remove('file.txt')"  # Potentially dangerous code
 
     with patch("sys.stdout", new_callable=io.StringIO):
@@ -362,7 +368,9 @@ async def test_execute_code_safety_no_prompt(executor, mock_model):
 @pytest.mark.asyncio
 async def test_execute_code_safety_with_prompt(executor, mock_model):
     # Default can_prompt_user is True
-    mock_model.ainvoke.return_value.content = "yes"  # Safety check fails
+    mock_model.ainvoke.return_value.content = (
+        "The code is unsafe because it deletes important files\n\n[UNSAFE]"
+    )
     code = "import os; os.remove('file.txt')"  # Potentially dangerous code
 
     with (
@@ -382,7 +390,7 @@ async def test_execute_code_safety_with_prompt(executor, mock_model):
 @pytest.mark.asyncio
 async def test_execute_code_safety_with_prompt_approved(executor, mock_model):
     # Default can_prompt_user is True
-    mock_model.ainvoke.return_value.content = "yes"  # Safety check fails
+    mock_model.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
     code = "x = 1 + 1"
 
     with (
@@ -403,7 +411,7 @@ async def test_process_response(executor, mock_model):
     print('hello world')
     ```
     """
-    mock_model.ainvoke.return_value.content = "no"
+    mock_model.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
 
     with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
         await executor.process_response(response)
