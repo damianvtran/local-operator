@@ -133,7 +133,7 @@ class ChatResponse(BaseModel):
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI, hosting: str = "openai", model: str = "gpt-4o"):
+async def lifespan(app: FastAPI):
     # Initialize on startup by setting up the credential and config managers
     config_dir = Path.home() / ".local-operator"
     app.state.credential_manager = CredentialManager(config_dir=config_dir)
@@ -148,7 +148,7 @@ app = FastAPI(
     title="Local Operator API",
     description="REST API interface for Local Operator agent",
     version=version("local-operator"),
-    lifespan=lambda app: lifespan(app, hosting="openai", model="gpt-4o"),
+    lifespan=lifespan,
 )
 
 
