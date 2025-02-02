@@ -1,21 +1,9 @@
-<style>
-  @media (prefers-color-scheme: dark) {
-    .operator-light { display: none; }
-    .operator-dark { display: block; }
-  }
-  @media (prefers-color-scheme: light) {
-    .operator-dark { display: none; }
-    .operator-light { display: block; }
-  }
-</style>
-<div class="operator-icon">
-  <object class="operator-dark" data="./static/local-operator-icon-2-dark-clear.png" type="image/png">
-    <img alt="Shows a white Local Operator Logo in dark mode (fallback)" src="https://raw.githubusercontent.com/damianvtran/local-operator/main/static/local-operator-icon-2-dark-clear.png">
-  </object>
-  <object class="operator-light" data="./static/local-operator-icon-2-light-clear.png" type="image/png">
-    <img alt="Shows a black Local Operator Logo in light mode (fallback)" src="https://raw.githubusercontent.com/damianvtran/local-operator/main/static/local-operator-icon-2-light-clear.png">
-  </object>
-</div>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./static/local-operator-icon-2-dark-clear.png">
+  <source media="(prefers-color-scheme: light)" srcset="./static/local-operator-icon-2-light-clear.png">
+  <img alt="Shows a black Local Operator Logo in light color mode and a white one in dark color mode."
+       src="./static/local-operator-icon-2-light-clear.png">
+</picture>
 
 <h1 align="center">Local Operator: On-device Agentic Task Execution</h1>
 
