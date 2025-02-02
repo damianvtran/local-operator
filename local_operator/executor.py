@@ -38,6 +38,16 @@ class ConversationRole(Enum):
     ASSISTANT = "assistant"
 
 
+class ConfirmSafetyResult(Enum):
+    """Result of the safety check."""
+
+    SAFE = "safe"  # Code is safe, no further action needed
+    UNSAFE = "unsafe"  # Code is unsafe, execution should be cancelled
+    CONVERSATION_CONFIRM = (
+        "conversation_confirm"  # Safety needs to be confirmed in further conversation with the user
+    )
+
+
 class LocalCodeExecutor:
     context: Dict[str, Any]
     conversation_history: List[Dict[str, str]]
@@ -297,8 +307,11 @@ class LocalCodeExecutor:
             str: Execution result message or error message
         """
         # First check code safety
-        if await self._check_and_confirm_safety(code):
+        safety_result = await self._check_and_confirm_safety(code)
+        if safety_result == ConfirmSafetyResult.UNSAFE:
             return "Code execution canceled by user"
+        elif safety_result == ConfirmSafetyResult.CONVERSATION_CONFIRM:
+            return "Code execution requires further confirmation from the user"
 
         # Try initial execution
         try:
@@ -306,22 +319,26 @@ class LocalCodeExecutor:
         except Exception as initial_error:
             return await self._handle_execution_error(initial_error, max_retries)
 
-    async def _check_and_confirm_safety(self, code: str) -> bool:
+    async def _check_and_confirm_safety(self, code: str) -> ConfirmSafetyResult:
         """Check code safety and get user confirmation if needed.
 
-        Returns True if execution should be cancelled."""
+        Returns:
+            ConfirmSafetyResult: Result of the safety check
+        """
         if await self.check_code_safety(code):
             if self.can_prompt_user:
                 confirm = input(
                     "Warning: Potentially dangerous operation detected. Proceed? (y/n): "
                 )
-                if confirm.lower() != "y":
-                    msg = (
-                        "I've identified that this is a dangerous operation. "
-                        "Let's stop this task for now, I will provide further instructions shortly."
-                    )
-                    self._append_to_history(ConversationRole.USER, msg)
-                    return True
+                if confirm.lower() == "y":
+                    return ConfirmSafetyResult.SAFE
+
+                msg = (
+                    "I've identified that this is a dangerous operation. "
+                    "Let's stop this task for now, I will provide further instructions shortly."
+                )
+                self._append_to_history(ConversationRole.USER, msg)
+                return ConfirmSafetyResult.UNSAFE
             else:
                 # If we can't prompt the user, we need to add our question to the conversation
                 # history and end the task, waiting for the user's next input to determine
@@ -332,8 +349,8 @@ class LocalCodeExecutor:
                     "Do you want me to proceed, find another way, or stop this task?"
                 )
                 self._append_to_history(ConversationRole.ASSISTANT, msg)
-                return False
-        return False
+                return ConfirmSafetyResult.CONVERSATION_CONFIRM
+        return ConfirmSafetyResult.SAFE
 
     async def _execute_with_output(self, code: str) -> str:
         """Execute code and capture stdout/stderr output.
