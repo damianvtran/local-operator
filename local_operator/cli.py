@@ -21,14 +21,13 @@ from pathlib import Path
 
 import uvicorn
 
-from local_operator.agent import CliOperator
+from local_operator.cli_operator import CliOperator
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.model import configure_model
 
 CLI_DESCRIPTION = """
-    Local Operator CLI - An intelligent command-line environment for agentic
-    AI models to perform tasks on the local device.
+    Local Operator - An environment for agentic AI models to perform tasks on the local device.
 
     Supports multiple hosting platforms including DeepSeek, OpenAI, Anthropic, Ollama, Kimi
     and Alibaba. Features include interactive chat, safe code execution,
