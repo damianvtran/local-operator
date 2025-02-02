@@ -29,6 +29,7 @@ setup(
             "pyright",
             "pytest",
             "pytest-asyncio",
+            "pip-audit",
         ],
     },
     long_description=open("README.md").read(),
