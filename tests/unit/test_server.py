@@ -3,7 +3,7 @@ from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from local_operator import server as srv
-from local_operator.agent import ConversationRole
+from local_operator.cli_operator import ConversationRole
 from local_operator.server import ChatMessage, ChatRequest, app
 
 

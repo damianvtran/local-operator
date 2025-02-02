@@ -15,13 +15,10 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from tiktoken import encoding_for_model
 
-from local_operator.agent import (
-    ConversationRole,
-    LocalCodeExecutor,
-    create_system_prompt,
-)
+from local_operator.cli_operator import ConversationRole, create_system_prompt
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
+from local_operator.executor import LocalCodeExecutor
 from local_operator.model import configure_model
 
 logger = logging.getLogger("local_operator.server")
@@ -219,11 +216,13 @@ async def chat_endpoint(request: ChatRequest):
         # Create a new executor for this request using the provided hosting and model
         executor = create_executor(request.hosting, request.model)
 
+        system_prompt = create_system_prompt()
+
         # Build conversation history
         conversation_history = [
             {
                 "role": ConversationRole.SYSTEM.value,
-                "content": create_system_prompt(),
+                "content": system_prompt,
             }
         ]
 
