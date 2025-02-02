@@ -52,6 +52,9 @@ Step 4:
 AGENT: The task is now complete.
 [DONE]
 
+Additional information from the user:
+{{user_system_prompt}}
+
 
 **Critical Constraints:**
 - No combined steps or assumptions

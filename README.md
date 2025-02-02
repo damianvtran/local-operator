@@ -15,6 +15,7 @@ Artificial intelligence tools like these should be open and freely available to 
 ## Key Features
 
 - **Interactive CLI Interface**: Chat with an AI assistant that can execute Python code locally
+- **Server Mode**: Run the operator as a FastAPI server to interact with the agent through a web interface
 - **Code Safety Verification**: Built-in safety checks analyze code for potentially dangerous operations
 - **Contextual Execution**: Maintains execution context between code blocks
 - **Conversation History**: Tracks the full interaction history for context-aware responses
