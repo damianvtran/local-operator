@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from local_operator.agent import CliOperator, ConversationRole, LocalCodeExecutor
+from local_operator.operator import LocalCodeExecutor, Operator, OperatorType
 
 
 @pytest.fixture
@@ -19,17 +19,19 @@ def executor(mock_model):
 
 
 @pytest.fixture
-def cli_operator(mock_model):
+def cli_operator(mock_model, executor):
     credential_manager = MagicMock()
     credential_manager.get_credential = MagicMock(return_value="test_key")
 
     config_manager = MagicMock()
     config_manager.get_config_value = MagicMock(return_value="test_value")
 
-    operator = CliOperator(
+    operator = Operator(
+        executor=executor,
         credential_manager=credential_manager,
         model_instance=mock_model,
         config_manager=config_manager,
+        type=OperatorType.CLI,
     )
 
     operator._get_input_with_history = MagicMock(return_value="noop")
@@ -298,11 +300,24 @@ async def test_check_code_safety_safe(executor, mock_model):
 
 @pytest.mark.asyncio
 async def test_check_code_safety_unsafe(executor, mock_model):
+    # Test the default path when can_prompt_user is True
     mock_model.ainvoke.return_value.content = "yes"
     code = "import os; os.remove('important_file.txt')"
     result = await executor.check_code_safety(code)
     assert result is True
     mock_model.ainvoke.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_check_code_safety_unsafe_without_prompt(executor, mock_model):
+    # Test the branch when can_prompt_user is False
+    executor.can_prompt_user = False
+    mock_model.ainvoke.return_value.content = "yes"
+    code = "import os; os.remove('important_file.txt')"
+    result = await executor.check_code_safety(code)
+    assert result is True
+    mock_model.ainvoke.assert_called_once()
+    mock_model.ainvoke.assert_called_with(executor.conversation_history)
 
 
 @pytest.mark.asyncio
@@ -325,6 +340,59 @@ async def test_execute_code_no_output(executor, mock_model):
         result = await executor.execute_code(code)
         assert "✓ Code Execution Complete" in result
         assert "[No output]" in result
+
+
+@pytest.mark.asyncio
+async def test_execute_code_safety_no_prompt(executor, mock_model):
+    executor.can_prompt_user = False
+    mock_model.ainvoke.return_value.content = "yes"  # Safety check fails
+    code = "import os; os.remove('file.txt')"  # Potentially dangerous code
+
+    with patch("sys.stdout", new_callable=io.StringIO):
+        result = await executor.execute_code(code)
+
+        # Should not cancel execution but add warning to conversation history
+        assert "requires further confirmation" in result
+        assert len(executor.conversation_history) > 0
+        last_message = executor.conversation_history[-1]
+        assert last_message["role"] == "assistant"
+        assert "potentially dangerous operation" in last_message["content"]
+
+
+@pytest.mark.asyncio
+async def test_execute_code_safety_with_prompt(executor, mock_model):
+    # Default can_prompt_user is True
+    mock_model.ainvoke.return_value.content = "yes"  # Safety check fails
+    code = "import os; os.remove('file.txt')"  # Potentially dangerous code
+
+    with (
+        patch("sys.stdout", new_callable=io.StringIO),
+        patch("builtins.input", return_value="n"),
+    ):  # User responds "n" to safety prompt
+        result = await executor.execute_code(code)
+
+        # Should cancel execution when user declines
+        assert "Code execution canceled by user" in result
+        assert len(executor.conversation_history) > 0
+        last_message = executor.conversation_history[-1]
+        assert last_message["role"] == "user"
+        assert "dangerous operation" in last_message["content"]
+
+
+@pytest.mark.asyncio
+async def test_execute_code_safety_with_prompt_approved(executor, mock_model):
+    # Default can_prompt_user is True
+    mock_model.ainvoke.return_value.content = "yes"  # Safety check fails
+    code = "x = 1 + 1"
+
+    with (
+        patch("sys.stdout", new_callable=io.StringIO),
+        patch("builtins.input", return_value="y"),  # User responds "y" to safety prompt
+    ):
+        result = await executor.execute_code(code)
+
+        # Should proceed with execution when user approves
+        assert "Code Execution Complete" in result
 
 
 @pytest.mark.asyncio
@@ -587,66 +655,17 @@ async def test_summarize_old_steps(mock_model):
         )
 
 
-def test_cli_operator_init(mock_model):
-    credential_manager = MagicMock()
-    credential_manager.get_credential = MagicMock(return_value="test_key")
-
-    config_manager = MagicMock()
-    config_manager.get_config_value = MagicMock(return_value="test_value")
-
-    operator = CliOperator(
-        credential_manager=credential_manager,
-        model_instance=mock_model,
-        config_manager=config_manager,
-    )
-
-    assert operator.model == mock_model
-    assert operator.credential_manager == credential_manager
-    assert operator.executor is not None
-
-
 @pytest.mark.asyncio
-async def test_cli_operator_chat(cli_operator, mock_model):
-    mock_model.ainvoke.return_value.content = "[DONE]"
-    cli_operator._agent_should_exit = MagicMock(return_value=True)
-
-    with patch("builtins.input", return_value="exit"):
-        await cli_operator.chat()
-
-        assert cli_operator.executor.conversation_history[-1]["content"] == "[DONE]"
-
-
-def test_agent_is_done(cli_operator):
-    test_cases = [
-        {"name": "DONE keyword", "content": "Some output\n[DONE]", "expected": True},
-        {"name": "ASK keyword", "content": "Some output\n[ASK]", "expected": False},
-        {"name": "No special keyword", "content": "Some output\nregular text", "expected": False},
+async def test_summarize_old_steps_all_detail(executor):
+    executor.detail_conversation_length = -1
+    executor.conversation_history = [
+        {"role": "system", "content": "system prompt"},
+        {"role": "user", "content": "user msg"},
     ]
 
-    for test_case in test_cases:
-        mock_response = MagicMock()
-        mock_response.content = test_case["content"]
-        assert (
-            cli_operator._agent_is_done(mock_response) == test_case["expected"]
-        ), f"Failed test case: {test_case['name']}"
+    await executor._summarize_old_steps()
 
-
-def test_agent_requires_user_input(cli_operator):
-    test_cases = [
-        {"name": "ASK keyword", "content": "Some output\n[ASK]", "expected": True},
-        {"name": "DONE keyword", "content": "Some output\n[DONE]", "expected": False},
-        {"name": "No special keyword", "content": "Some output\nregular text", "expected": False},
+    assert executor.conversation_history == [
+        {"role": "system", "content": "system prompt"},
+        {"role": "user", "content": "user msg"},
     ]
-
-    for test_case in test_cases:
-        mock_response = MagicMock()
-        mock_response.content = test_case["content"]
-        assert (
-            cli_operator._agent_requires_user_input(mock_response) == test_case["expected"]
-        ), f"Failed test case: {test_case['name']}"
-
-
-def test_agent_should_exit(cli_operator):
-    mock_response = MagicMock()
-    mock_response.content = "Some output\n[BYE]"
-    assert cli_operator._agent_should_exit(mock_response) is True
