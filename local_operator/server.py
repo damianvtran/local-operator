@@ -251,10 +251,6 @@ async def chat_endpoint(request: ChatRequest):
                 }
             ]
 
-        conversation_history.append(
-            {"role": ConversationRole.USER.value, "content": request.prompt}
-        )
-
         operator.executor.conversation_history = conversation_history
 
         # Configure model options if provided
