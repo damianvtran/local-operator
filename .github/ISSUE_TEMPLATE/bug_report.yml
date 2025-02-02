@@ -9,7 +9,7 @@ body:
     attributes:
       value: |
         Thank you for reporting a bug in Local Operator. Please provide as much detail as possible so we can reproduce and address the issue.
-  - type: input
+  - type: textarea
     id: summary
     attributes:
       label: Brief Summary
