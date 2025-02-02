@@ -298,11 +298,24 @@ async def test_check_code_safety_safe(executor, mock_model):
 
 @pytest.mark.asyncio
 async def test_check_code_safety_unsafe(executor, mock_model):
+    # Test the default path when can_prompt_user is True
     mock_model.ainvoke.return_value.content = "yes"
     code = "import os; os.remove('important_file.txt')"
     result = await executor.check_code_safety(code)
     assert result is True
     mock_model.ainvoke.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_check_code_safety_unsafe_without_prompt(executor, mock_model):
+    # Test the branch when can_prompt_user is False
+    executor.can_prompt_user = False
+    mock_model.ainvoke.return_value.content = "yes"
+    code = "import os; os.remove('important_file.txt')"
+    result = await executor.check_code_safety(code)
+    assert result is True
+    mock_model.ainvoke.assert_called_once()
+    mock_model.ainvoke.assert_called_with(executor.conversation_history)
 
 
 @pytest.mark.asyncio
@@ -325,6 +338,59 @@ async def test_execute_code_no_output(executor, mock_model):
         result = await executor.execute_code(code)
         assert "✓ Code Execution Complete" in result
         assert "[No output]" in result
+
+
+@pytest.mark.asyncio
+async def test_execute_code_safety_no_prompt(executor, mock_model):
+    executor.can_prompt_user = False
+    mock_model.ainvoke.return_value.content = "yes"  # Safety check fails
+    code = "import os; os.remove('file.txt')"  # Potentially dangerous code
+
+    with patch("sys.stdout", new_callable=io.StringIO):
+        result = await executor.execute_code(code)
+
+        # Should not cancel execution but add warning to conversation history
+        assert "requires further confirmation" in result
+        assert len(executor.conversation_history) > 0
+        last_message = executor.conversation_history[-1]
+        assert last_message["role"] == "assistant"
+        assert "potentially dangerous operation" in last_message["content"]
+
+
+@pytest.mark.asyncio
+async def test_execute_code_safety_with_prompt(executor, mock_model):
+    # Default can_prompt_user is True
+    mock_model.ainvoke.return_value.content = "yes"  # Safety check fails
+    code = "import os; os.remove('file.txt')"  # Potentially dangerous code
+
+    with (
+        patch("sys.stdout", new_callable=io.StringIO),
+        patch("builtins.input", return_value="n"),
+    ):  # User responds "n" to safety prompt
+        result = await executor.execute_code(code)
+
+        # Should cancel execution when user declines
+        assert "Code execution canceled by user" in result
+        assert len(executor.conversation_history) > 0
+        last_message = executor.conversation_history[-1]
+        assert last_message["role"] == "user"
+        assert "dangerous operation" in last_message["content"]
+
+
+@pytest.mark.asyncio
+async def test_execute_code_safety_with_prompt_approved(executor, mock_model):
+    # Default can_prompt_user is True
+    mock_model.ainvoke.return_value.content = "yes"  # Safety check fails
+    code = "x = 1 + 1"
+
+    with (
+        patch("sys.stdout", new_callable=io.StringIO),
+        patch("builtins.input", return_value="y"),  # User responds "y" to safety prompt
+    ):
+        result = await executor.execute_code(code)
+
+        # Should proceed with execution when user approves
+        assert "Code Execution Complete" in result
 
 
 @pytest.mark.asyncio
