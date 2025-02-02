@@ -1,0 +1,84 @@
+name: "🐞 Bug Report"
+description: "🚨 Report a bug in Local Operator."
+title: "[🐛 BUG] "
+labels:
+  - bug
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug in Local Operator. Please provide as much detail as possible so we can reproduce and address the issue.
+  - type: input
+    id: summary
+    attributes:
+      label: Brief Summary
+      description: Provide a short summary of the bug.
+      placeholder: "App crashes when executing command XYZ"
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: |
+        Please list the steps to reproduce the bug. Include any relevant command line instructions or contextual details.
+      placeholder: |
+        1. Do this...
+        2. Then do that...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected Behavior
+      description: Describe what you expected to happen.
+      placeholder: "The application should complete the task successfully."
+      required: true
+  - type: textarea
+    id: actual_behavior
+    attributes:
+      label: Actual Behavior
+      description: Describe what actually happened.
+      placeholder: "The application crashes with a stack trace or error message."
+    validations:
+      required: true
+  - type: input
+    id: local_operator_version
+    attributes:
+      label: Local Operator Version
+      description: Specify the version of Local Operator you are using.
+      placeholder: "e.g., 0.1.1"
+  - type: input
+    id: python_version
+    attributes:
+      label: Python Version
+      description: Specify your Python version.
+      placeholder: "e.g., 3.12.0"
+  - type: input
+    id: operating_system
+    attributes:
+      label: Operating System
+      description: Specify your operating system.
+      placeholder: "e.g., macOS, Ubuntu, Windows"
+  - type: dropdown
+    id: hosting_platform
+    attributes:
+      label: Hosting Platform
+      description: Select the hosting platform in use.
+      options:
+        - label: DeepSeek
+          value: deepseek
+        - label: Ollama
+          value: ollama
+        - label: OpenAI
+          value: openai
+        - label: Other
+          value: other
+      placeholder: "Select an option"
+  - type: textarea
+    id: error_logs
+    attributes:
+      label: Error Logs (if applicable)
+      description: Paste any error logs or screenshots that might help diagnose the issue.
+      placeholder: "Optional: include error messages or stack traces"
