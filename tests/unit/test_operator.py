@@ -3,7 +3,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from local_operator.cli_operator import CliOperator, ConversationRole, LocalCodeExecutor
+from local_operator.operator import (
+    ConversationRole,
+    LocalCodeExecutor,
+    Operator,
+    OperatorType,
+)
 
 
 @pytest.fixture
@@ -19,17 +24,19 @@ def executor(mock_model):
 
 
 @pytest.fixture
-def cli_operator(mock_model):
+def cli_operator(mock_model, executor):
     credential_manager = MagicMock()
     credential_manager.get_credential = MagicMock(return_value="test_key")
 
     config_manager = MagicMock()
     config_manager.get_config_value = MagicMock(return_value="test_value")
 
-    operator = CliOperator(
+    operator = Operator(
+        executor=executor,
         credential_manager=credential_manager,
         model_instance=mock_model,
         config_manager=config_manager,
+        type=OperatorType.CLI,
     )
 
     operator._get_input_with_history = MagicMock(return_value="noop")
@@ -37,17 +44,19 @@ def cli_operator(mock_model):
     return operator
 
 
-def test_cli_operator_init(mock_model):
+def test_cli_operator_init(mock_model, executor):
     credential_manager = MagicMock()
     credential_manager.get_credential = MagicMock(return_value="test_key")
 
     config_manager = MagicMock()
     config_manager.get_config_value = MagicMock(return_value="test_value")
 
-    operator = CliOperator(
+    operator = Operator(
+        executor=executor,
         credential_manager=credential_manager,
         model_instance=mock_model,
         config_manager=config_manager,
+        type=OperatorType.CLI,
     )
 
     assert operator.model == mock_model

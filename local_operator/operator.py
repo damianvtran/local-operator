@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Union
 
 from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import BaseMessage
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 from tiktoken import encoding_for_model
@@ -44,6 +45,11 @@ class ConversationRole(Enum):
     SYSTEM = "system"
     USER = "user"
     ASSISTANT = "assistant"
+
+
+class OperatorType(Enum):
+    CLI = "cli"
+    SERVER = "server"
 
 
 def get_installed_packages_str() -> str:
@@ -120,8 +126,8 @@ def create_system_prompt() -> str:
     return base_system_prompt
 
 
-class CliOperator:
-    """A command-line interface for interacting with language models.
+class Operator:
+    """Environment manager for interacting with language models.
 
     Attributes:
         model: The configured ChatOpenAI or ChatOllama instance
@@ -136,12 +142,15 @@ class CliOperator:
     model: Union[ChatOpenAI, ChatOllama, ChatAnthropic]
     executor: LocalCodeExecutor
     executor_is_processing: bool
+    type: OperatorType
 
     def __init__(
         self,
+        executor: LocalCodeExecutor,
         credential_manager: CredentialManager,
         model_instance: Union[ChatOpenAI, ChatOllama, ChatAnthropic],
         config_manager: ConfigManager,
+        type: OperatorType,
     ):
         """Initialize the CLI by loading credentials or prompting for them.
 
@@ -152,11 +161,13 @@ class CliOperator:
         self.credential_manager = credential_manager
         self.config_manager = config_manager
         self.model = model_instance
-        self.executor = LocalCodeExecutor(self.model)
+        self.executor = executor
         self.executor_is_processing = False
+        self.type = type
 
-        self._load_input_history()
-        self._setup_interrupt_handler()
+        if self.type == OperatorType.CLI:
+            self._load_input_history()
+            self._setup_interrupt_handler()
 
     def _setup_interrupt_handler(self) -> None:
         """Set up the interrupt handler for Ctrl+C."""
@@ -265,8 +276,76 @@ class CliOperator:
             print(f"\033[1;36m│\033[0m Detail Length: {detail_len}")
             print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
 
+    async def handle_user_input(self, user_input: str) -> BaseMessage | None:
+        """Process user input and generate agent responses.
+
+        This method handles the core interaction loop between the user and agent:
+        1. Adds user input to conversation history
+        2. Resets agent state for new interaction
+        3. Repeatedly generates and processes agent responses until:
+           - Agent indicates completion
+           - Agent requires more user input
+           - User interrupts execution
+           - Code execution is cancelled
+
+        Args:
+            user_input: The text input provided by the user
+
+        Raises:
+            ValueError: If the model is not properly initialized
+        """
+        self.executor.conversation_history.append(
+            {"role": ConversationRole.USER.value, "content": user_input}
+        )
+
+        response = None
+        self.executor.reset_step_counter()
+        self.executor_is_processing = True
+
+        while (
+            not self._agent_is_done(response)
+            and not self._agent_requires_user_input(response)
+            and not self.executor.interrupted
+        ):
+            if self.model is None:
+                raise ValueError("Model is not initialized")
+
+            response = await self.executor.invoke_model(self.executor.conversation_history)
+
+            response_content = (
+                response.content if isinstance(response.content, str) else str(response.content)
+            )
+            result = await self.executor.process_response(response_content)
+
+            # Break out of the agent flow if the user cancels the code execution
+            if (
+                result.status == ProcessResponseStatus.CANCELLED
+                or result.status == ProcessResponseStatus.INTERRUPTED
+            ):
+                break
+
+        return response
+
     async def chat(self) -> None:
-        """Run the interactive chat interface with code execution capabilities."""
+        """Run the interactive chat interface with code execution capabilities.
+
+        This method implements the main chat loop that:
+        1. Displays a command prompt showing the current working directory
+        2. Accepts user input with command history support
+        3. Processes input through the language model
+        4. Executes any generated code
+        5. Displays debug information if enabled
+        6. Handles special commands like 'exit'/'quit'
+        7. Continues until explicitly terminated or [BYE] received
+
+        The chat maintains conversation history and system context between interactions.
+        Debug mode can be enabled by setting LOCAL_OPERATOR_DEBUG=true environment variable.
+
+        Special keywords in model responses:
+        - [ASK]: Model needs additional user input
+        - [DONE]: Model has completed its task
+        - [BYE]: Gracefully exit the chat session
+        """
         self._print_banner()
 
         self.executor.conversation_history = [
@@ -288,35 +367,7 @@ class CliOperator:
             if user_input.lower() == "exit" or user_input.lower() == "quit":
                 break
 
-            self.executor.conversation_history.append(
-                {"role": ConversationRole.USER.value, "content": user_input}
-            )
-
-            response = None
-            self.executor.reset_step_counter()
-            self.executor_is_processing = True
-
-            while (
-                not self._agent_is_done(response)
-                and not self._agent_requires_user_input(response)
-                and not self.executor.interrupted
-            ):
-                if self.model is None:
-                    raise ValueError("Model is not initialized")
-
-                response = await self.executor.invoke_model(self.executor.conversation_history)
-
-                response_content = (
-                    response.content if isinstance(response.content, str) else str(response.content)
-                )
-                result = await self.executor.process_response(response_content)
-
-                # Break out of the agent flow if the user cancels the code execution
-                if (
-                    result.status == ProcessResponseStatus.CANCELLED
-                    or result.status == ProcessResponseStatus.INTERRUPTED
-                ):
-                    break
+            response = await self.handle_user_input(user_input)
 
             if os.environ.get("LOCAL_OPERATOR_DEBUG") == "true":
                 tokenizer = encoding_for_model("gpt-4o")
@@ -343,7 +394,7 @@ class CliOperator:
             if response and self._agent_requires_user_input(response):
                 response_content = (
                     response.content if isinstance(response.content, str) else str(response.content)
-                ).replace("ASK", "")
+                ).replace("[ASK]", "")
                 print("\n\033[1;36m╭─ Agent Question Requires Input ────────────────\033[0m")
                 print(f"\033[1;36m│\033[0m {response_content}")
                 print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")

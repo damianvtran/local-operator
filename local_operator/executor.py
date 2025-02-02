@@ -91,7 +91,7 @@ class LocalCodeExecutor:
                 the conversation history.  This doesn't include the system prompt.
             detail_conversation_length: The number of messages to keep in full detail in the
                 conversation history.  Every step before this except the system prompt will be
-                summarized.
+                summarized.  Set to -1 to keep all messages in full detail.
             can_prompt_user: Informs the executor about whether the end user has access to the
             terminal (True), or is consuming the service from some remote source where they
             cannot respond via the terminal (False).
@@ -135,6 +135,9 @@ class LocalCodeExecutor:
         """Summarize old conversation steps beyond the detail conversation length.
         Only summarizes steps that haven't been summarized yet."""
         if len(self.conversation_history) <= 1:  # Just system prompt or empty
+            return
+
+        if self.detail_conversation_length == -1:
             return
 
         # Calculate which messages need summarizing
