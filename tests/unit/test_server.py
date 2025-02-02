@@ -65,11 +65,13 @@ async def test_chat_success(dummy_executor):
     # Override create_operator to return a DummyOperator with our dummy executor.
     srv.create_operator = lambda hosting, model: DummyOperator(dummy_executor)
 
+    test_prompt = "Hello, how are you?"
+
     # Use an empty context to trigger insertion of the system prompt by the server.
     payload = {
         "hosting": "openai",
         "model": "gpt-4o",
-        "prompt": "Hello, how are you?",
+        "prompt": test_prompt,
         "context": [],
     }
 
@@ -86,11 +88,17 @@ async def test_chat_success(dummy_executor):
     assert data.get("response") == "dummy operator response"
     conversation = data.get("context")
     assert isinstance(conversation, list)
-    # The conversation should include the system prompt and the user's message.
+
+    # Count occurrences of the test prompt in the conversation
+    prompt_count = sum(1 for msg in conversation if msg.get("content") == test_prompt)
+    assert prompt_count == 1, "Test prompt should appear exactly once in conversation"
+
+    # Verify expected roles are present
     roles = [msg.get("role") for msg in conversation]
     assert ConversationRole.SYSTEM.value in roles
     assert ConversationRole.USER.value in roles
     assert ConversationRole.ASSISTANT.value in roles
+
     # Verify token stats are present.
     stats = data.get("stats")
     assert stats is not None

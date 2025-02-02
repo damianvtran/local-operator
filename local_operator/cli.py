@@ -46,7 +46,16 @@ def build_cli_parser() -> argparse.ArgumentParser:
     Returns:
         argparse.ArgumentParser: The CLI argument parser
     """
-    parser = argparse.ArgumentParser(description=CLI_DESCRIPTION)
+    # Create parent parser with common arguments
+    parent_parser = argparse.ArgumentParser(add_help=False)
+    parent_parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode for verbose output",
+    )
+
+    # Main parser
+    parser = argparse.ArgumentParser(description=CLI_DESCRIPTION, parents=[parent_parser])
 
     parser.add_argument(
         "--hosting",
@@ -60,16 +69,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Model to use (e.g., deepseek-chat, gpt-4o, qwen2.5:14b, "
         "claude-3-5-sonnet-20240620, moonshot-v1-32k, qwen-plus)",
     )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable debug mode for verbose output",
-    )
     subparsers = parser.add_subparsers(dest="subcommand")
 
     # Credential command
     credential_parser = subparsers.add_parser(
-        "credential", help="Manage API keys and credentials for different hosting platforms"
+        "credential",
+        help="Manage API keys and credentials for different hosting platforms",
+        parents=[parent_parser],
     )
     credential_parser.add_argument(
         "--key",
@@ -80,12 +86,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
 
     # Config command
-    config_parser = subparsers.add_parser("config", help="Manage configuration settings")
+    config_parser = subparsers.add_parser(
+        "config", help="Manage configuration settings", parents=[parent_parser]
+    )
     config_subparsers = config_parser.add_subparsers(dest="config_command")
-    config_subparsers.add_parser("create", help="Create a new configuration file")
+    config_subparsers.add_parser(
+        "create", help="Create a new configuration file", parents=[parent_parser]
+    )
 
     # Serve command to start the API server
-    serve_parser = subparsers.add_parser("serve", help="Start the FastAPI server")
+    serve_parser = subparsers.add_parser(
+        "serve", help="Start the FastAPI server", parents=[parent_parser]
+    )
     serve_parser.add_argument(
         "--host",
         type=str,
