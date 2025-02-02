@@ -25,6 +25,15 @@ dependencies = [
     "tiktoken",
     "uvicorn",
     "fastapi",
+    # Constraints
+    "certifi>=2024.7.4",
+    "configobj>=5.0.9",
+    "cryptography>=43.0.1",
+    "idna>=3.7",
+    "jinja2>=3.1.5",
+    "requests>=2.32.0",
+    "twisted>=24.7.0rc1",
+    "urllib3>=2.2.2",
 ]
 requires-python = ">=3.12"
 

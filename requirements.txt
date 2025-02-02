@@ -1,15 +1,27 @@
 langchain_openai==0.3.2
 pydantic==2.10.6
 python-dotenv==1.0.1
-flake8==7.1.0
-black==24.4.2
-isort==5.13.2
-pyright==1.1.368
 langchain-ollama==0.2.2
-pytest==8.3.4
-pytest-asyncio==0.25.2
 langchain==0.3.14
 langchain-anthropic==0.3.3
 tiktoken==0.8.0
 uvicorn==0.22.0
 fastapi==0.115.8
+
+# Dev
+flake8==7.1.0
+black==24.4.2
+isort==5.13.2
+pyright==1.1.368
+pytest==8.3.4
+pytest-asyncio==0.25.2
+
+# Constraints
+certifi>=2024.7.4
+configobj>=5.0.9
+cryptography>=43.0.1
+idna>=3.7
+jinja2>=3.1.5
+requests>=2.32.0
+twisted>=24.7.0rc1
+urllib3>=2.2.2
