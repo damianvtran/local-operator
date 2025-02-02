@@ -11,3 +11,5 @@ pytest-asyncio==0.25.2
 langchain==0.3.14
 langchain-anthropic==0.3.3
 tiktoken==0.8.0
+uvicorn==0.22.0
+fastapi==0.115.8
