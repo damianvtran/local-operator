@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import os
 import traceback
+from importlib.metadata import version
 from pathlib import Path
 
 import uvicorn
@@ -57,6 +58,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # Main parser
     parser = argparse.ArgumentParser(description=CLI_DESCRIPTION, parents=[parent_parser])
 
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"v{version('local-operator')}",
+        help="Show program's version number and exit",
+    )
     parser.add_argument(
         "--hosting",
         type=str,
