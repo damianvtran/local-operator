@@ -33,6 +33,8 @@ The Local Operator provides a command-line interface where you can:
 4. View execution results and error messages
 5. Maintain context between code executions
 
+Visit the [Local Operator website](https://local-operator.com) for visualizations and information about the project.
+
 ## Setup
 
 To run Local Operator with a 3rd party cloud-hosted LLM model, you need to have an API key.  You can get one from OpenAI, DeepSeek, Anthropic, or other providers.
