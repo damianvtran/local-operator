@@ -187,8 +187,9 @@ class LocalCodeExecutor:
             while nested_count > 0 and pos < len(text):
                 if (
                     text[pos:].startswith("```")
-                    and not text[pos:].startswith("```\n")
-                    and not pos + 3 == len(text)
+                    and len(text[pos + 3 :].strip()) > 0
+                    and not text[pos + 3].isspace()
+                    and not pos + 3 >= len(text)
                 ):
                     nested_count += 1
                     pos += 9
@@ -215,7 +216,6 @@ class LocalCodeExecutor:
                         or trimmed_line.startswith("<<<<<<<")
                         or trimmed_line.startswith(">>>>>>>")
                         or trimmed_line.startswith("=======")
-                        or trimmed_line.startswith("```")
                     ):
                         is_comment = False
                         break
