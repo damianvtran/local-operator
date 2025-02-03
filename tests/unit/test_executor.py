@@ -86,6 +86,36 @@ def test_extract_code_blocks(executor):
             "expected_count": 0,
         },
         {
+            "name": "Starts with code block",
+            "input": """```python
+            import os
+            os.chdir(os.path.expanduser("~/local-operator-site"))
+            print(f"Current working directory is now: {os.getcwd()}")
+            ```
+            [DONE]""",
+            "expected_blocks": [
+                "import os\n"
+                '            os.chdir(os.path.expanduser("~/local-operator-site"))\n'
+                '            print(f"Current working directory is now: {os.getcwd()}")'
+            ],
+            "expected_count": 1,
+        },
+        {
+            "name": "Starts with code block, space at terminator",
+            "input": """```python
+            import os
+            os.chdir(os.path.expanduser("~/local-operator-site"))
+            print(f"Current working directory is now: {os.getcwd()}")
+            ```\t
+            [DONE]""",
+            "expected_blocks": [
+                "import os\n"
+                '            os.chdir(os.path.expanduser("~/local-operator-site"))\n'
+                '            print(f"Current working directory is now: {os.getcwd()}")'
+            ],
+            "expected_count": 1,
+        },
+        {
             "name": "Only commented block",
             "input": """
             # ```python
