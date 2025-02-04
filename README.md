@@ -45,6 +45,12 @@ Once you have the API key, install the operator CLI with the following command:
 pip install local-operator
 ```
 
+Then, install the playwright browsers with the following command:
+
+```bash
+playwright install
+```
+
 If you would like to run with a local Ollama model, you will need to install Ollama first from [here](https://ollama.ai/download), and fetch a model using `ollama pull`.  Make sure that the ollama server is running with `ollama serve`.
 
 ## Usage (CLI)
