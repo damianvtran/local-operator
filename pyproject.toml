@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.1.2"
+version = "0.1.3"
 description = "A Python-based agent for local command execution"
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damianvtran@gmail.com" }]
@@ -25,6 +25,7 @@ dependencies = [
     "tiktoken",
     "uvicorn",
     "fastapi",
+    "playwright",
     # Constraints
     "certifi>=2024.7.4",
     "configobj>=5.0.9",
