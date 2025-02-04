@@ -405,12 +405,39 @@ class LocalCodeExecutor:
             Exception: Any exceptions raised during code execution
         """
         old_stdin = sys.stdin
-
         try:
             # Redirect stdin to /dev/null to ignore input requests
             with open(os.devnull) as devnull:
                 sys.stdin = devnull
-                exec(code, self.context)
+                # Extract any async code
+                if "async def" in code or "await" in code:
+                    # Create an async function from the code
+                    async_code = "async def __temp_async_fn():\n" + "\n".join(
+                        f"    {line}" for line in code.split("\n")
+                    )
+                    # Add code to get and run the coroutine
+                    async_code += "\n__temp_coro = __temp_async_fn()"
+
+                    try:
+                        # Execute the async function definition
+                        exec(async_code, self.context)
+                        # Run the coroutine
+                        await self.context["__temp_coro"]
+                    finally:
+                        # Clean up even if there was an error
+                        if "__temp_async_fn" in self.context:
+                            del self.context["__temp_async_fn"]
+                        if "__temp_coro" in self.context:
+                            # Ensure coroutine is awaited even if there was an error
+                            if not self.context["__temp_coro"].done():
+                                try:
+                                    await self.context["__temp_coro"]
+                                except Exception:
+                                    pass  # Ignore errors from cleanup await
+                            del self.context["__temp_coro"]
+                else:
+                    # Regular synchronous code
+                    exec(code, self.context)
         except Exception as e:
             raise e
         finally:
