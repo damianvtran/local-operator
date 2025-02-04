@@ -52,7 +52,20 @@ Step 4:
 AGENT: The task is now complete.
 [DONE]
 
-Additional information from the user:
+**Tool Use:**
+You have the following functions available to your environment
+<tools_list>
+{{tools_str}}
+</tools_list>
+To use them, you must import them in your code from the local_operator.tools module.
+
+For async functions, remember to use the `await` keyword.  You are already running in
+an asyncio event loop, do not call `asyncio.run()`.
+
+You have access to playwright.  Use the async version of the function because of
+the system running your code in an asyncio event loop.  Do not call `asyncio.run()`.
+
+**Additional information from the user:**
 <user_system_prompt>
 {{user_system_prompt}}
 </user_system_prompt>

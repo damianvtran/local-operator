@@ -1,10 +1,12 @@
 import importlib.metadata
+import inspect
 import os
 import platform
 import readline
 import signal
 from enum import Enum
 from pathlib import Path
+from types import ModuleType
 from typing import Union
 
 from langchain_anthropic import ChatAnthropic
@@ -13,6 +15,7 @@ from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 from tiktoken import encoding_for_model
 
+import local_operator.tools as tools
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
@@ -94,7 +97,54 @@ def get_installed_packages_str() -> str:
     return package_str
 
 
-def create_system_prompt() -> str:
+def get_tools_str(tools_module: ModuleType | None = None) -> str:
+    """Get formatted string describing available tool functions.
+
+    Args:
+        tools_module: Optional module containing tool functions to document
+
+    Returns:
+        Formatted string describing the tools, or empty string if no tools module provided
+    """
+    if not tools_module:
+        return ""
+
+    tools_list: list[str] = []
+    for name in dir(tools_module):
+        if not name.startswith("_"):
+            tool = getattr(tools_module, name)
+            if callable(tool):
+                doc = tool.__doc__ or "No description available"
+                # Get first line of docstring
+                doc = doc.split("\n")[0].strip()
+
+                sig = inspect.signature(tool)
+                args = []
+                for p in sig.parameters.values():
+                    arg_type = (
+                        p.annotation.__name__
+                        if hasattr(p.annotation, "__name__")
+                        else str(p.annotation)
+                    )
+                    args.append(f"{p.name}: {arg_type}")
+
+                return_type = (
+                    sig.return_annotation.__name__
+                    if hasattr(sig.return_annotation, "__name__")
+                    else str(sig.return_annotation)
+                )
+
+                # Check if function is async
+                is_async = inspect.iscoroutinefunction(tool)
+                async_prefix = "async " if is_async else ""
+
+                tools_list.append(
+                    f"- {async_prefix}{name}({', '.join(args)}) -> {return_type}: {doc}"
+                )
+    return "\n".join(tools_list)
+
+
+def create_system_prompt(tools_module: ModuleType | None = None) -> str:
     """Create the system prompt for the agent."""
 
     base_system_prompt = BaseSystemPrompt
@@ -122,6 +172,9 @@ def create_system_prompt() -> str:
         .replace("{{installed_packages_str}}", installed_packages_str)
         .replace("{{user_system_prompt}}", user_system_prompt)
     )
+
+    tools_str = get_tools_str(tools_module)
+    base_system_prompt = base_system_prompt.replace("{{tools_str}}", tools_str)
 
     return base_system_prompt
 
@@ -371,7 +424,7 @@ class Operator:
         self.executor.conversation_history = [
             {
                 "role": ConversationRole.SYSTEM.value,
-                "content": create_system_prompt(),
+                "content": create_system_prompt(tools),
             }
         ]
 
