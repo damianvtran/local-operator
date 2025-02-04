@@ -19,11 +19,21 @@ def temp_config():
         os.environ.update(initial_env)
 
 
+# Skip tests that check file permissions when not on a POSIX system.
+(
+    pytest.skip("Skipping file permission tests on non-POSIX systems", allow_module_level=True)
+    if os.name != "posix"
+    else None
+)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="File permission tests only run on Unix")
 def test_credential_manager_initialization(temp_config):
     """Test that CredentialManager initializes correctly with a config file."""
     manager = CredentialManager(config_dir=temp_config.parent)
 
     assert manager.config_file.exists()
+    # The file permissions check should only run on POSIX systems.
     assert manager.config_file.stat().st_mode & 0o777 == 0o600
     assert manager.config_dir == temp_config.parent
 
@@ -39,6 +49,7 @@ def test_get_credential(temp_config):
     assert credential == "test_key"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="File permission tests only run on Unix")
 def test_set_credential_existing(temp_config):
     """Test setting a credential in the config file."""
     with open(temp_config, "w") as f:
@@ -61,6 +72,7 @@ def test_set_credential_new(temp_config):
     assert credential == "new_test_key"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="File permission tests only run on Unix")
 def test_prompt_for_credential(temp_config, monkeypatch):
     """Test prompting for and saving a new credential."""
     manager = CredentialManager(config_dir=temp_config.parent)
@@ -92,8 +104,51 @@ def test_missing_credential_raises_error(temp_config, monkeypatch):
     assert "is required for this step" in str(exc_info.value)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="File permission tests only run on Unix")
 def test_config_file_permissions(temp_config):
     """Test that config file has correct permissions."""
     manager = CredentialManager(config_dir=temp_config.parent)
 
     assert manager.config_file.stat().st_mode & 0o777 == 0o600
+
+
+# Windows-specific tests
+@pytest.mark.skipif(os.name != "nt", reason="Windows-specific tests")
+def test_windows_credential_manager_initialization(temp_config):
+    """Test that CredentialManager initializes correctly on Windows."""
+    manager = CredentialManager(config_dir=temp_config.parent)
+
+    assert manager.config_file.exists()
+    assert manager.config_dir == temp_config.parent
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-specific tests")
+def test_windows_set_credential_existing(temp_config):
+    """Test setting a credential in the config file on Windows."""
+    with open(temp_config, "w") as f:
+        f.write("DEEPSEEK_API_KEY=test_key\n")
+
+    manager = CredentialManager(config_dir=temp_config.parent)
+    manager._ensure_config_exists()
+
+    manager.set_credential("DEEPSEEK_API_KEY", "new_test_key")
+    credential = manager.get_credential("DEEPSEEK_API_KEY")
+    assert credential == "new_test_key"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-specific tests")
+def test_windows_prompt_for_credential(temp_config, monkeypatch):
+    """Test prompting for and saving a new credential on Windows."""
+    manager = CredentialManager(config_dir=temp_config.parent)
+
+    # Mock getpass and print statements
+    monkeypatch.setattr("getpass.getpass", lambda _: "new_test_key")
+    monkeypatch.setattr("builtins.print", lambda *args, **kwargs: None)
+
+    credential = manager.prompt_for_credential("NEW_API_KEY")
+    assert credential == "new_test_key"
+
+    # Verify the key was saved to the config file
+    with open(temp_config, "r") as f:
+        content = f.read()
+    assert "NEW_API_KEY=new_test_key" in content
