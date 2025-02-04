@@ -8,3 +8,5 @@ dist/
 *.egg-info/
 .pytest_cache/
 .vscode/
+.coverage
+htmlcov/
