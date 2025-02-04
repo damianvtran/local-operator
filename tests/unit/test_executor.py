@@ -1,9 +1,15 @@
 import io
+import textwrap
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from local_operator.operator import LocalCodeExecutor, Operator, OperatorType
+
+
+# Helper function to normalize code blocks.
+def normalize_code_block(code: str) -> str:
+    return textwrap.dedent(code).strip()
 
 
 @pytest.fixture
@@ -39,8 +45,9 @@ def cli_operator(mock_model, executor):
     return operator
 
 
-def test_extract_code_blocks(executor):
-    test_cases = [
+@pytest.mark.parametrize(
+    "case",
+    [
         {
             "name": "Multiple code blocks",
             "input": """
@@ -52,7 +59,7 @@ def test_extract_code_blocks(executor):
             ```python
             x = 1 + 1
             ```
-            """,
+        """,
             "expected_blocks": ["print('hello')", "x = 1 + 1"],
             "expected_count": 2,
         },
@@ -68,11 +75,14 @@ def test_extract_code_blocks(executor):
             total = calculate_sum(5, 3)
             print(f"The sum is: {total}")
             ```
-            """,
+        """,
             "expected_blocks": [
-                "def calculate_sum(a, b):\n                result = a + b\n"
-                "                return result\n\n            total = calculate_sum(5, 3)\n"
-                '            print(f"The sum is: {total}")'
+                """def calculate_sum(a, b):
+                result = a + b
+                return result
+
+            total = calculate_sum(5, 3)
+            print(f"The sum is: {total}")"""
             ],
             "expected_count": 1,
         },
@@ -81,7 +91,7 @@ def test_extract_code_blocks(executor):
             "input": """
             No code blocks here
             Just plain text
-            """,
+        """,
             "expected_blocks": [],
             "expected_count": 0,
         },
@@ -94,9 +104,9 @@ def test_extract_code_blocks(executor):
             ```
             [DONE]""",
             "expected_blocks": [
-                "import os\n"
-                '            os.chdir(os.path.expanduser("~/local-operator-site"))\n'
-                '            print(f"Current working directory is now: {os.getcwd()}")'
+                """import os
+            os.chdir(os.path.expanduser("~/local-operator-site"))
+            print(f"Current working directory is now: {os.getcwd()}")"""
             ],
             "expected_count": 1,
         },
@@ -109,9 +119,9 @@ def test_extract_code_blocks(executor):
             ```\t
             [DONE]""",
             "expected_blocks": [
-                "import os\n"
-                '            os.chdir(os.path.expanduser("~/local-operator-site"))\n'
-                '            print(f"Current working directory is now: {os.getcwd()}")'
+                """import os
+            os.chdir(os.path.expanduser("~/local-operator-site"))
+            print(f"Current working directory is now: {os.getcwd()}")"""
             ],
             "expected_count": 1,
         },
@@ -304,19 +314,25 @@ def test_extract_code_blocks(executor):
             "expected_blocks": ['def final_function():\n                return "last block"'],
             "expected_count": 1,
         },
-    ]
+    ],
+)
+def test_extract_code_blocks(executor, case):
+    result = executor.extract_code_blocks(case["input"])
+    error_msg = (
+        f"Test case '{case['name']}' failed: "
+        f"expected {case['expected_count']} code blocks but got {len(result)}"
+    )
+    assert len(result) == case["expected_count"], error_msg
 
-    for case in test_cases:
-        result = executor.extract_code_blocks(case["input"])
-        assert len(result) == case["expected_count"], (
-            f"Test case '{case['name']}' failed: "
-            f"expected {case['expected_count']} code blocks but got {len(result)}"
+    for expected, actual in zip(case["expected_blocks"], result):
+        norm_expected = normalize_code_block(expected)
+        norm_actual = normalize_code_block(actual)
+        error_msg = (
+            f"Test case '{case['name']}' failed:\n"
+            f"Expected:\n{norm_expected}\n"
+            f"Actual:\n{norm_actual}"
         )
-        for expected, actual in zip(case["expected_blocks"], result):
-            assert expected in actual.strip(), (
-                f"Test case '{case['name']}' failed: "
-                f"expected code block '{expected}' not found in actual result '{actual.strip()}'"
-            )
+        assert norm_expected == norm_actual, error_msg
 
 
 @pytest.mark.asyncio
