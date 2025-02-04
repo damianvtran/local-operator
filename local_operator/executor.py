@@ -428,12 +428,11 @@ class LocalCodeExecutor:
                         if "__temp_async_fn" in self.context:
                             del self.context["__temp_async_fn"]
                         if "__temp_coro" in self.context:
-                            # Ensure coroutine is awaited even if there was an error
-                            if not self.context["__temp_coro"].done():
-                                try:
-                                    await self.context["__temp_coro"]
-                                except Exception:
-                                    pass  # Ignore errors from cleanup await
+                            try:
+                                # Just try to await any remaining coroutine
+                                await self.context["__temp_coro"]
+                            except Exception:
+                                pass  # Ignore errors from cleanup await
                             del self.context["__temp_coro"]
                 else:
                     # Regular synchronous code
