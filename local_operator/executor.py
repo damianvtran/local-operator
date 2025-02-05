@@ -239,46 +239,81 @@ class LocalCodeExecutor:
 
         return blocks
 
-    async def invoke_model(self, messages: List[Dict[str, str]]) -> BaseMessage:
-        """Invoke the language model with a list of messages."""
-        if isinstance(self.model, ChatAnthropic):
-            # Anthropic models expect a single message, so combine the conversation history
-            combined_message = ""
-            for msg in messages:
-                role_prefix = (
-                    "Human: "
-                    if msg["role"] == ConversationRole.USER.value
-                    else (
-                        "Assistant: "
-                        if msg["role"] == ConversationRole.ASSISTANT.value
-                        else "System: "
-                    )
-                )
-                combined_message += f"{role_prefix}{msg['content']}\n\n"
-            combined_message = combined_message.strip()
-            return await self.model.ainvoke(combined_message)
-        elif isinstance(self.model, ChatOpenAI) and (
-            self.model.model_name.lower().startswith("o1")
-            or self.model.model_name.lower().startswith("o3")
-        ):
-            # OpenAI reasoning models (o1 and o3) expect a combined prompt
-            # for chain-of-thought reasoning.
-            combined_message = ""
-            for msg in messages:
-                role_prefix = (
-                    "User: "
-                    if msg["role"] == ConversationRole.USER.value
-                    else (
-                        "Assistant: "
-                        if msg["role"] == ConversationRole.ASSISTANT.value
-                        else "System: "
-                    )
-                )
-                combined_message += f"{role_prefix}{msg['content']}\n\n"
-            combined_message = combined_message.strip()
-            return await self.model.ainvoke(combined_message)
+    async def invoke_model(
+        self, messages: List[Dict[str, str]], max_attempts: int = 3
+    ) -> BaseMessage:
+        """Invoke the language model with a list of messages.
+
+        This method handles invoking different types of language models with appropriate formatting:
+        - For Anthropic models: Combines messages into a single string with role prefixes
+        - For OpenAI reasoning models (o1/o3): Combines messages for chain-of-thought reasoning
+        - For other models: Passes messages directly
+
+        Args:
+            messages: List of message dictionaries containing 'role' and 'content' keys
+            max_attempts: Maximum number of retry attempts on failure (default: 3)
+
+        Returns:
+            BaseMessage: The model's response message
+
+        Raises:
+            Exception: If all retry attempts fail or model invocation fails
+        """
+        attempt = 0
+        last_error: Exception | None = None
+
+        while attempt < max_attempts:
+            try:
+                if isinstance(self.model, ChatAnthropic):
+                    # Anthropic models expect a single message, so combine the conversation history
+                    combined_message = ""
+                    for msg in messages:
+                        role_prefix = (
+                            "Human: "
+                            if msg["role"] == ConversationRole.USER.value
+                            else (
+                                "Assistant: "
+                                if msg["role"] == ConversationRole.ASSISTANT.value
+                                else "System: "
+                            )
+                        )
+                        combined_message += f"{role_prefix}{msg['content']}\n\n"
+                    combined_message = combined_message.strip()
+                    return await self.model.ainvoke(combined_message)
+                elif isinstance(self.model, ChatOpenAI) and (
+                    self.model.model_name.lower().startswith("o1")
+                    or self.model.model_name.lower().startswith("o3")
+                ):
+                    # OpenAI reasoning models (o1 and o3) expect a combined prompt
+                    # for chain-of-thought reasoning.
+                    combined_message = ""
+                    for msg in messages:
+                        role_prefix = (
+                            "User: "
+                            if msg["role"] == ConversationRole.USER.value
+                            else (
+                                "Assistant: "
+                                if msg["role"] == ConversationRole.ASSISTANT.value
+                                else "System: "
+                            )
+                        )
+                        combined_message += f"{role_prefix}{msg['content']}\n\n"
+                    combined_message = combined_message.strip()
+                    return await self.model.ainvoke(combined_message)
+                else:
+                    return await self.model.ainvoke(messages)
+            except Exception as e:
+                last_error = e
+                attempt += 1
+                if attempt < max_attempts:
+                    await asyncio.sleep(1)  # Add a small delay between retries
+                continue
+
+        # If we've exhausted all attempts, raise the last error
+        if last_error:
+            raise last_error
         else:
-            return await self.model.ainvoke(messages)
+            raise Exception("Failed to invoke model")
 
     async def check_code_safety(self, code: str) -> bool:
         """Analyze code for potentially dangerous operations using the language model.

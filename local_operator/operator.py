@@ -10,6 +10,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
+from pydantic import ValidationError
 from tiktoken import encoding_for_model
 
 import local_operator.tools as tools
@@ -224,7 +225,20 @@ class Operator:
             response_content = (
                 response.content if isinstance(response.content, str) else str(response.content)
             )
-            response_json = self._process_json_response(response_content)
+
+            try:
+                response_json = self._process_json_response(response_content)
+            except ValidationError:
+                self.executor.conversation_history.append(
+                    {
+                        "role": ConversationRole.SYSTEM.value,
+                        "content": "Invalid JSON response.  Please try again and "
+                        "generate a valid JSON response that exactly matches the JSON "
+                        "schema.",
+                    }
+                )
+                continue
+
             result = await self.executor.process_response(response_json)
 
             # Break out of the agent flow if the user cancels the code execution
