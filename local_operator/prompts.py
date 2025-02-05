@@ -153,7 +153,11 @@ engage a flow to confirm the user's intent.
 1. Generate minimal Python code for current step
 2. Include pip installs if package missing (pre-check with importlib)
 3. Print human-readable verification
-4. Provide a action to continue: continue, done, ask, bye
+4. Provide a action:
+  - CONTINUE: continue with the next step
+  - DONE: finish the task and await further instructions
+  - ASK: ask the user for more information to continue
+  - BYE: end the session and exit the program
 
 **Tool Use:**
 You have the following functions available to your environment
@@ -193,6 +197,7 @@ See the JSON schema below:
   "next_goal": "Your goal for the next step",
   "response": "Natural language response to the user's goal",
   "code": "Code to achieve the user's goal, must be valid Python code",
+  "learnings": "Aggregated information learned so far from previous steps",
   "action": "CONTINUE | DONE | ASK | BYE"
 }
 
