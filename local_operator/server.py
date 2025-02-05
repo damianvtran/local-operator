@@ -19,12 +19,8 @@ from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
 from local_operator.model import configure_model
-from local_operator.operator import (
-    ConversationRole,
-    Operator,
-    OperatorType,
-    create_system_prompt,
-)
+from local_operator.operator import ConversationRole, Operator, OperatorType
+from local_operator.prompts import create_system_prompt
 
 logger = logging.getLogger("local_operator.server")
 
