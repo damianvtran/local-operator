@@ -563,58 +563,71 @@ class LocalCodeExecutor:
         Args:
             response (str): The model's response containing potential code blocks
         """
-        spinner_task = asyncio.create_task(spinner("Agent is working"))
-        try:
-            if self.interrupted:
-                print_task_interrupted()
-                self.interrupted = False
-                return ProcessResponseOutput(
-                    status=ProcessResponseStatus.INTERRUPTED,
-                    message="Task interrupted by user",
-                )
-
-            formatted_response = format_agent_output(response)
-            print_agent_response(self.step_counter, formatted_response)
-
-            self._append_to_history(ConversationRole.ASSISTANT, response)
-            code_blocks = self.extract_code_blocks(response)
-            if code_blocks:
-                print_execution_section(ExecutionSection.HEADER, step=self.step_counter)
-                for code in code_blocks:
-                    print_execution_section(ExecutionSection.CODE, content=code)
-                    result = await self.execute_code(code)
-
-                    if "code execution cancelled by user" in result:
-                        return ProcessResponseOutput(
-                            status=ProcessResponseStatus.CANCELLED,
-                            message="Code execution cancelled by user",
-                        )
-
-                    print_execution_section(ExecutionSection.RESULT, content=result)
-                    self.context["last_code_result"] = result
-                print_execution_section(ExecutionSection.FOOTER)
-
-                self._append_to_history(
-                    ConversationRole.SYSTEM,
-                    f"Current working directory: {os.getcwd()}",
-                    should_summarize="False",
-                )
-
-                self.step_counter += 1
-
-            # Summarize old steps to reduce token usage
-            await self._summarize_old_steps()
-
+        # Phase 1: Check for interruption
+        if self.interrupted:
+            print_task_interrupted()
+            self.interrupted = False
             return ProcessResponseOutput(
-                status=ProcessResponseStatus.SUCCESS,
-                message="Code execution complete",
+                status=ProcessResponseStatus.INTERRUPTED,
+                message="Task interrupted by user",
             )
+
+        # Phase 2: Display agent response
+        formatted_response = format_agent_output(response)
+        print_agent_response(self.step_counter, formatted_response)
+        self._append_to_history(ConversationRole.ASSISTANT, response)
+
+        # Extract code blocks from the agent response
+        code_blocks = self.extract_code_blocks(response)
+        if code_blocks:
+            print_execution_section(ExecutionSection.HEADER, step=self.step_counter)
+            for code in code_blocks:
+                print_execution_section(ExecutionSection.CODE, content=code)
+
+                # Phase 3: Execute the code block
+                spinner_task = asyncio.create_task(spinner("Executing code"))
+                try:
+                    result = await self.execute_code(code)
+                finally:
+                    spinner_task.cancel()
+                    try:
+                        await spinner_task
+                    except asyncio.CancelledError:
+                        pass
+
+                if "code execution cancelled by user" in result:
+                    return ProcessResponseOutput(
+                        status=ProcessResponseStatus.CANCELLED,
+                        message="Code execution cancelled by user",
+                    )
+
+                print_execution_section(ExecutionSection.RESULT, content=result)
+                self.context["last_code_result"] = result
+
+            print_execution_section(ExecutionSection.FOOTER)
+            self._append_to_history(
+                ConversationRole.SYSTEM,
+                f"Current working directory: {os.getcwd()}",
+                should_summarize="False",
+            )
+            self.step_counter += 1
+
+        # Phase 4: Summarize old conversation steps
+        spinner_task = asyncio.create_task(spinner("Summarizing conversation"))
+        try:
+            await self._summarize_old_steps()
         finally:
+            print("\n")  # New line for next spinner
             spinner_task.cancel()
             try:
                 await spinner_task
             except asyncio.CancelledError:
                 pass
+
+        return ProcessResponseOutput(
+            status=ProcessResponseStatus.SUCCESS,
+            message="Code execution complete",
+        )
 
     def _limit_conversation_history(self) -> None:
         """Limit the conversation history to the maximum number of messages."""

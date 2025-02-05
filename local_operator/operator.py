@@ -1,3 +1,4 @@
+import asyncio
 import os
 import readline
 import signal
@@ -13,7 +14,7 @@ from tiktoken import encoding_for_model
 
 import local_operator.tools as tools
 from local_operator.config import ConfigManager
-from local_operator.console import print_cli_banner
+from local_operator.console import print_cli_banner, spinner
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
 from local_operator.model import ChatMock
@@ -197,7 +198,15 @@ class Operator:
             if self.model is None:
                 raise ValueError("Model is not initialized")
 
-            response = await self.executor.invoke_model(self.executor.conversation_history)
+            spinner_task = asyncio.create_task(spinner("Generating response"))
+            try:
+                response = await self.executor.invoke_model(self.executor.conversation_history)
+            finally:
+                spinner_task.cancel()
+                try:
+                    await spinner_task
+                except asyncio.CancelledError:
+                    pass
 
             response_content = (
                 response.content if isinstance(response.content, str) else str(response.content)
