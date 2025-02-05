@@ -1,3 +1,4 @@
+import asyncio
 import io
 import os
 import sys
@@ -9,6 +10,18 @@ from langchain_anthropic import ChatAnthropic
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 
+from local_operator.console import (
+    ExecutionSection,
+    format_agent_output,
+    format_error_output,
+    format_success_output,
+    log_error_and_retry_message,
+    log_retry_error,
+    print_agent_response,
+    print_execution_section,
+    print_task_interrupted,
+    spinner,
+)
 from local_operator.model import ChatMock
 from local_operator.prompts import SafetyCheckSystemPrompt, SafetyCheckUserPrompt
 from local_operator.types import ConversationRole
@@ -393,7 +406,7 @@ class LocalCodeExecutor:
         try:
             await self._run_code(code)
             output, error_output = self._capture_and_record_output(new_stdout, new_stderr)
-            return self._format_success_output((output, error_output))
+            return format_success_output((output, error_output))
         except Exception as e:
             output, error_output = self._capture_and_record_output(new_stdout, new_stderr)
             error_msg = (
@@ -482,23 +495,6 @@ class LocalCodeExecutor:
 
         return output, error_output
 
-    def _format_success_output(self, output: tuple[str, str]) -> str:
-        """Format successful execution output with ANSI color codes.
-
-        Args:
-            output (tuple[str, str]): Tuple containing (stdout output, stderr output)
-
-        Returns:
-            str: Formatted string with colored success message and execution output
-        """
-        stdout, stderr = output
-        return (
-            "\n\033[1;32m✓ Code Execution Complete\033[0m\n"
-            "\033[1;34m╞══════════════════════════════════════════╡\n"
-            f"\033[1;36m│ Output:\033[0m\n{stdout}\n"
-            f"\033[1;36m│ Error Output:\033[0m\n{stderr}"
-        )
-
     async def _handle_execution_error(self, initial_error: Exception, max_retries: int) -> str:
         """Handle code execution errors with retry logic.
 
@@ -511,7 +507,7 @@ class LocalCodeExecutor:
             str: Final execution output or formatted error message
         """
         self._record_initial_error(initial_error)
-        self._log_error_and_retry_message(initial_error)
+        log_error_and_retry_message(initial_error)
 
         for attempt in range(max_retries):
             try:
@@ -520,9 +516,9 @@ class LocalCodeExecutor:
                     return await self._execute_with_output(new_code[0])
             except Exception as retry_error:
                 self._record_retry_error(retry_error, attempt)
-                self._log_retry_error(retry_error, attempt, max_retries)
+                log_retry_error(retry_error, attempt, max_retries)
 
-        return self._format_error_output(initial_error, max_retries)
+        return format_error_output(initial_error, max_retries)
 
     def _record_initial_error(self, error: Exception) -> None:
         """Record the initial execution error in conversation history.
@@ -549,33 +545,6 @@ class LocalCodeExecutor:
         )
         self._append_to_history(ConversationRole.USER, msg)
 
-    def _log_error_and_retry_message(self, error: Exception) -> None:
-        """Print formatted error message and retry notification.
-
-        Args:
-            error (Exception): The error to display
-        """
-        print("\n\033[1;31m✗ Error during execution:\033[0m")
-        print("\033[1;34m╞══════════════════════════════════════════╡")
-        print(f"\033[1;36m│ Error:\033[0m\n{str(error)}")
-        print("\033[1;34m╞══════════════════════════════════════════╡")
-        print("\033[1;36m│ Attempting to fix the error...\033[0m")
-        print("\033[1;34m╰══════════════════════════════════════════╯\033[0m")
-
-    def _log_retry_error(self, error: Exception, attempt: int, max_retries: int) -> None:
-        """Print formatted retry error message.
-
-        Args:
-            error (Exception): The error that occurred during retry
-            attempt (int): Current retry attempt number
-            max_retries (int): Maximum number of retry attempts
-        """
-        print(f"\n\033[1;31m✗ Error during execution (attempt {attempt + 1}):\033[0m")
-        print("\033[1;34m╞══════════════════════════════════════════╡")
-        print(f"\033[1;36m│ Error:\033[0m\n{str(error)}")
-        if attempt < max_retries - 1:
-            print("\033[1;36m│\033[0m \033[1;33mAnother attempt will be made...\033[0m")
-
     async def _get_corrected_code(self) -> List[str]:
         """Get corrected code from the language model.
 
@@ -588,103 +557,64 @@ class LocalCodeExecutor:
         )
         return self.extract_code_blocks(response_content)
 
-    def _format_error_output(self, error: Exception, max_retries: int) -> str:
-        """Format error output message with ANSI color codes.
-
-        Args:
-            error (Exception): The error to format
-            max_retries (int): Number of retry attempts made
-
-        Returns:
-            str: Formatted error message string
-        """
-        return (
-            f"\n\033[1;31m✗ Code Execution Failed after {max_retries} attempts\033[0m\n"
-            f"\033[1;34m╞══════════════════════════════════════════╡\n"
-            f"\033[1;36m│ Error:\033[0m\n{str(error)}"
-        )
-
-    def _format_agent_output(self, text: str) -> str:
-        """Format agent output with colored sidebar and indentation.
-
-        Args:
-            text (str): Raw agent output text
-
-        Returns:
-            str: Formatted text with colored sidebar and control tags removed
-        """
-        # Add colored sidebar to each line and remove control tags
-        lines = [f"\033[1;36m│\033[0m {line}" for line in text.split("\n")]
-        output = "\n".join(lines)
-        output = output.replace("[ASK]", "").replace("[DONE]", "").replace("[BYE]", "").strip()
-
-        # Remove trailing empty lines
-        lines = [line for line in output.split("\n") if line.strip()]
-
-        return "\n".join(lines)
-
     async def process_response(self, response: str) -> ProcessResponseOutput:
         """Process model response, extracting and executing any code blocks.
 
         Args:
             response (str): The model's response containing potential code blocks
         """
-        if self.interrupted:
-            print("\n\033[1;33m╭─ Task Interrupted ────────────────────────────\033[0m")
-            print("\033[1;33m│ User requested to stop current task\033[0m")
-            print("\033[1;33m╰──────────────────────────────────────────────────\033[0m\n")
-            self.interrupted = False
+        spinner_task = asyncio.create_task(spinner("Agent is working"))
+        try:
+            if self.interrupted:
+                print_task_interrupted()
+                self.interrupted = False
+                return ProcessResponseOutput(
+                    status=ProcessResponseStatus.INTERRUPTED,
+                    message="Task interrupted by user",
+                )
+
+            formatted_response = format_agent_output(response)
+            print_agent_response(self.step_counter, formatted_response)
+
+            self._append_to_history(ConversationRole.ASSISTANT, response)
+            code_blocks = self.extract_code_blocks(response)
+            if code_blocks:
+                print_execution_section(ExecutionSection.HEADER, step=self.step_counter)
+                for code in code_blocks:
+                    print_execution_section(ExecutionSection.CODE, content=code)
+                    result = await self.execute_code(code)
+
+                    if "code execution cancelled by user" in result:
+                        return ProcessResponseOutput(
+                            status=ProcessResponseStatus.CANCELLED,
+                            message="Code execution cancelled by user",
+                        )
+
+                    print_execution_section(ExecutionSection.RESULT, content=result)
+                    self.context["last_code_result"] = result
+                print_execution_section(ExecutionSection.FOOTER)
+
+                self._append_to_history(
+                    ConversationRole.SYSTEM,
+                    f"Current working directory: {os.getcwd()}",
+                    should_summarize="False",
+                )
+
+                self.step_counter += 1
+
+            # Summarize old steps to reduce token usage
+            await self._summarize_old_steps()
+
             return ProcessResponseOutput(
-                status=ProcessResponseStatus.INTERRUPTED,
-                message="Task interrupted by user",
+                status=ProcessResponseStatus.SUCCESS,
+                message="Code execution complete",
             )
-
-        formatted_response = self._format_agent_output(response)
-        print(
-            f"\n\033[1;36m╭─ Agent Response (Step {self.step_counter}) "
-            f"───────────────────────\033[0m"
-        )
-        print(formatted_response)
-        print("\033[1;36m╰──────────────────────────────────────────────────\033[0m")
-
-        self._append_to_history(ConversationRole.ASSISTANT, response)
-
-        code_blocks = self.extract_code_blocks(response)
-        if code_blocks:
-            print(
-                f"\n\033[1;36m╭─ Executing Code Blocks (Step {self.step_counter}) "
-                f"───────────────\033[0m"
-            )
-            for code in code_blocks:
-                print("\n\033[1;36m│ Executing:\033[0m\n{}".format(code))
-                result = await self.execute_code(code)
-
-                if "code execution cancelled by user" in result:
-                    return ProcessResponseOutput(
-                        status=ProcessResponseStatus.CANCELLED,
-                        message="Code execution cancelled by user",
-                    )
-
-                print("\033[1;36m│ Result:\033[0m {}".format(result))
-
-                self.context["last_code_result"] = result
-            print("\033[1;36m╰──────────────────────────────────────────────────\033[0m")
-
-            self._append_to_history(
-                ConversationRole.SYSTEM,
-                f"Current working directory: {os.getcwd()}",
-                should_summarize="False",
-            )
-
-            self.step_counter += 1
-
-        # Summarize old steps to reduce token usage
-        await self._summarize_old_steps()
-
-        return ProcessResponseOutput(
-            status=ProcessResponseStatus.SUCCESS,
-            message="Code execution complete",
-        )
+        finally:
+            spinner_task.cancel()
+            try:
+                await spinner_task
+            except asyncio.CancelledError:
+                pass
 
     def _limit_conversation_history(self) -> None:
         """Limit the conversation history to the maximum number of messages."""
