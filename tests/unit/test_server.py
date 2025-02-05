@@ -42,6 +42,7 @@ class DummyOperator:
             response="dummy operator response",
             code="",
             action="DONE",
+            learnings="",
         )
 
         self.executor.conversation_history.append({"role": "user", "content": prompt})

@@ -36,3 +36,4 @@ class ResponseJsonSchema(BaseModel):
     response: str
     code: str
     action: str
+    learnings: str

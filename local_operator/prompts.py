@@ -155,7 +155,8 @@ engage a flow to confirm the user's intent.
 3. Print human-readable verification
 4. Provide a action:
   - CONTINUE: continue with the next step
-  - DONE: finish the task and await further instructions
+  - CHECK: perform tests to verify that the previous steps were successful
+  - DONE: the task is finished or cancelled by the user, awaiting further instructions
   - ASK: ask the user for more information to continue
   - BYE: end the session and exit the program
 
@@ -198,7 +199,7 @@ See the JSON schema below:
   "response": "Natural language response to the user's goal",
   "code": "Code to achieve the user's goal, must be valid Python code",
   "learnings": "Aggregated information learned so far from previous steps",
-  "action": "CONTINUE | DONE | ASK | BYE"
+  "action": "CONTINUE | CHECK | DONE | ASK | BYE"
 }
 
 Follow the JSON schema exactly.  Do not include any other text or characters in your
