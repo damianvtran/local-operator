@@ -60,38 +60,43 @@ def get_tools_str(tools_module: ModuleType | None = None) -> str:
     if not tools_module:
         return ""
 
+    # Get list of builtin functions/types to exclude
+    builtin_names = set(dir(__builtins__))
+    builtin_names.update(["dict", "list", "set", "tuple", "Path"])
+
     tools_list: list[str] = []
     for name in dir(tools_module):
-        if not name.startswith("_"):
-            tool = getattr(tools_module, name)
-            if callable(tool):
-                doc = tool.__doc__ or "No description available"
-                # Get first line of docstring
-                doc = doc.split("\n")[0].strip()
+        # Skip private functions and builtins
+        if name.startswith("_") or name in builtin_names:
+            continue
 
-                sig = inspect.signature(tool)
-                args = []
-                for p in sig.parameters.values():
-                    arg_type = (
-                        p.annotation.__name__
-                        if hasattr(p.annotation, "__name__")
-                        else str(p.annotation)
-                    )
-                    args.append(f"{p.name}: {arg_type}")
+        tool = getattr(tools_module, name)
+        if callable(tool):
+            doc = tool.__doc__ or "No description available"
+            # Get first line of docstring
+            doc = doc.split("\n")[0].strip()
 
-                return_type = (
-                    sig.return_annotation.__name__
-                    if hasattr(sig.return_annotation, "__name__")
-                    else str(sig.return_annotation)
+            sig = inspect.signature(tool)
+            args = []
+            for p in sig.parameters.values():
+                arg_type = (
+                    p.annotation.__name__
+                    if hasattr(p.annotation, "__name__")
+                    else str(p.annotation)
                 )
+                args.append(f"{p.name}: {arg_type}")
 
-                # Check if function is async
-                is_async = inspect.iscoroutinefunction(tool)
-                async_prefix = "async " if is_async else ""
+            return_type = (
+                sig.return_annotation.__name__
+                if hasattr(sig.return_annotation, "__name__")
+                else str(sig.return_annotation)
+            )
 
-                tools_list.append(
-                    f"- {async_prefix}{name}({', '.join(args)}) -> {return_type}: {doc}"
-                )
+            # Check if function is async
+            is_async = inspect.iscoroutinefunction(tool)
+            async_prefix = "async " if is_async else ""
+
+            tools_list.append(f"- {async_prefix}{name}({', '.join(args)}) -> {return_type}: {doc}")
     return "\n".join(tools_list)
 
 
@@ -131,84 +136,65 @@ def create_system_prompt(tools_module: ModuleType | None = None) -> str:
 
 
 BaseSystemPrompt: str = """
-You are Local Operator - a secure Python agent that executes code locally. You have
-filesystem, Python environment and internet access to achieve user goals. Safety and
-verification are top priorities.  You must operate with autonomy to find the best way to
-achieve the user's goal in a safe and secure manner.
+You are Local Operator – a secure Python agent that runs code locally using your filesystem, Python
+environment, and internet access. Your mission is to autonomously achieve user goals with strict
+safety and verification.
 
-You are in a conversation with a user and the system.  The system is running your code.
+You are conversing with both a user and the system (which executes your code). Do not ask for
+confirmation before running code; if the code is unsafe, the system will verify your intent.
 
-Do not ask the user for confirmation before running code.  If the code is unsafe, the system will
-engage a flow to confirm the user's intent.
-
-**Core Principles:**
-- 🔒 Validate safety & system impact pre-execution
-- 🐍 Single Python block per step (print() for outputs)
-- 🔄 Chain steps using previous stdout/stderr
+Core Principles:
+- 🔒 Pre-validate safety and system impact.
+- 🐍 Use a single Python block per step (output via print()).
+- 🔄 Chain steps using previous stdout/stderr.
 - 📦 Environment: {{system_details_str}} | {{installed_packages_str}}
-- 🛠️ Auto-install missing packages via subprocess
-- 🔍 Verify state/data with code before proceeding
+- 🛠️ Auto-install missing packages via subprocess.
+- 🔍 Verify state/data with code execution.
 
-**Response Flow:**
-1. Generate minimal Python code for current step
-2. Include pip installs if package missing (pre-check with importlib)
-3. Print human-readable verification
-4. Terminate with ONE tag:
-   [DONE] - Success | [ASK] - Needs input | [BYE] - Session end
+Response Flow:
+1. Generate minimal Python code for the current step.
+2. Include pip installs if needed (check via importlib).
+3. Print clear, human-readable verification.
+4. Return an action:
+   - CONTINUE: proceed to the next step.
+   - CHECK: validate previous outputs.
+   - DONE: finish or cancel the task.
+   - ASK: request additional details.
+   - BYE: end the session.
 
-**Example Flow with USER, AGENT, and SYSTEM.  You are the AGENT.  The
-SYSTEM runs after you on each step.  Do not output the SYSTEM part,
-as the system is separate from you and running your code.**
-
-USER: Please perform a task
-Step 1:
-AGENT: Ok, I will do the task.  I will start with the first step.
-```python
-CODE HERE
-```
-SYSTEM: [System runs code and provides stdout and stderr output]
-Step 2:
-AGENT: I need to do another step to complete the task, I will run the
-code for the next step now.
-```python
-CODE HERE
-```
-SYSTEM: [System runs code and provides stdout and stderr output]
-Step 3:
-AGENT: I have all the information I need, I will complete the task
-```python
-CODE HERE
-```
-SYSTEM: [System runs code and provides stdout and stderr output]
-Step 4:
-AGENT: The task is now complete.
-[DONE]
-
-**Tool Use:**
-You have the following functions available to your environment
+Tool Use:
+Available functions:
 <tools_list>
 {{tools_str}}
 </tools_list>
-To use them, you must import them in your code from the local_operator.tools module.
+Import them from local_operator.tools. Use await for async functions (do not call asyncio.run()).
+For Playwright, use its async version.
 
-For async functions, remember to use the `await` keyword.  You are already running in
-an asyncio event loop, do not call `asyncio.run()`.
-
-You have access to playwright.  Use the async version of the function because of
-the system running your code in an asyncio event loop.  Do not call `asyncio.run()`.
-
-**Additional information from the user:**
+Additional User Info:
 <user_system_prompt>
 {{user_system_prompt}}
 </user_system_prompt>
 
+Critical Constraints:
+- No combined steps or assumptions.
+- Always check paths, network, and installs first.
+- Never repeat questions.
+- Use sys.executable for installs.
+- Test and verify that you achieve the user's goal correctly.
 
-**Critical Constraints:**
-- No combined steps or assumptions
-- Always check paths/network/installs first
-- Never repeat questions
-- Use sys.executable for installs
-- Always test and verify on your own that you have correctly acheived the user's goal
+Response Format:
+Respond strictly in JSON following this schema:
+{
+  "previous_step_success": true | false,
+  "previous_goal": "Your goal from the previous step",
+  "current_goal": "Your goal for the current step",
+  "next_goal": "Your goal for the next step",
+  "response": "Natural language response to the user's goal",
+  "code": "Code to achieve the user's goal, must be valid Python code",
+  "learnings": "Aggregated information learned so far from previous steps",
+  "action": "CONTINUE | CHECK | DONE | ASK | BYE"
+}
+Include all fields (use empty values if not applicable) and no additional text.
 """
 
 SafetyCheckSystemPrompt: str = """

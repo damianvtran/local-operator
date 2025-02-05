@@ -6,19 +6,42 @@ from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
-from local_operator.types import ConversationRole
+from local_operator.types import ConversationRole, ResponseJsonSchema
 
 USER_MOCK_RESPONSES = {
-    "hello": "Hello! I am the test model.",
-    "print hello world": """Sure, I will execute a simple Python script to print "Hello World".
-```python
-print("Hello World")
-```
-""",
+    "hello": ResponseJsonSchema(
+        previous_step_success=True,
+        previous_goal="",
+        current_goal="Greet the user",
+        next_goal="",
+        response="Hello! I am the test model.",
+        code="",
+        action="DONE",
+        learnings="",
+    ),
+    "print hello world": ResponseJsonSchema(
+        previous_step_success=True,
+        previous_goal="",
+        current_goal="Print Hello World",
+        next_goal="",
+        response='Sure, I will execute a simple Python script to print "Hello World".',
+        code='print("Hello World")',
+        action="CONTINUE",
+        learnings="",
+    ),
 }
 
 SYSTEM_MOCK_RESPONSES = {
-    "Hello World": "I have printed 'Hello World' to the console. [DONE]",
+    "Hello World": ResponseJsonSchema(
+        previous_step_success=True,
+        previous_goal="Print Hello World",
+        current_goal="Complete task",
+        next_goal="",
+        response="I have printed 'Hello World' to the console.",
+        code="",
+        action="DONE",
+        learnings="",
+    )
 }
 
 
@@ -84,12 +107,15 @@ class ChatMock:
         if user_message_index > code_execution_response_index:
             if user_message_lower in USER_MOCK_RESPONSES:
                 response = USER_MOCK_RESPONSES[user_message_lower]
-                return BaseMessage(content=response, type=ConversationRole.ASSISTANT.value)
+                return BaseMessage(
+                    content=response.model_dump_json(),
+                    type=ConversationRole.ASSISTANT.value,
+                )
         else:
             for response in SYSTEM_MOCK_RESPONSES:
                 if response in code_execution_response:
                     return BaseMessage(
-                        content=SYSTEM_MOCK_RESPONSES[response],
+                        content=SYSTEM_MOCK_RESPONSES[response].model_dump_json(),
                         type=ConversationRole.ASSISTANT.value,
                     )
 

@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from local_operator.operator import LocalCodeExecutor, Operator, OperatorType
+from local_operator.types import ResponseJsonSchema
 
 
 # Helper function to normalize code blocks.
@@ -451,12 +452,16 @@ async def test_execute_code_safety_with_prompt_approved(executor, mock_model):
 
 @pytest.mark.asyncio
 async def test_process_response(executor, mock_model):
-    response = """
-    Here's some code:
-    ```python
-    print('hello world')
-    ```
-    """
+    response = ResponseJsonSchema(
+        previous_step_success=True,
+        previous_goal="",
+        current_goal="Print hello world",
+        next_goal="",
+        response="Here's some code:",
+        code="print('hello world')",
+        action="CONTINUE",
+        learnings="",
+    )
     mock_model.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
 
     with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:

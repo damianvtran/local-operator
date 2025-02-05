@@ -10,6 +10,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
+from pydantic import ValidationError
 from tiktoken import encoding_for_model
 
 import local_operator.tools as tools
@@ -19,6 +20,7 @@ from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
 from local_operator.model import ChatMock
 from local_operator.prompts import create_system_prompt
+from local_operator.types import ResponseJsonSchema
 
 
 class ProcessResponseStatus(Enum):
@@ -141,30 +143,41 @@ class Operator:
         except KeyboardInterrupt:
             return "exit"
 
-    def _agent_is_done(self, response) -> bool:
+    def _agent_is_done(self, response: ResponseJsonSchema | None) -> bool:
         """Check if the agent has completed its task."""
         if response is None:
             return False
 
-        return "[DONE]" in response.content.strip().splitlines()[
-            -1
-        ].strip() or self._agent_should_exit(response)
+        return response.action == "DONE" or self._agent_should_exit(response)
 
-    def _agent_requires_user_input(self, response) -> bool:
+    def _agent_requires_user_input(self, response: ResponseJsonSchema | None) -> bool:
         """Check if the agent requires user input."""
         if response is None:
             return False
 
-        return "[ASK]" in response.content.strip().splitlines()[-1].strip()
+        return response.action == "ASK"
 
-    def _agent_should_exit(self, response) -> bool:
+    def _agent_should_exit(self, response: ResponseJsonSchema | None) -> bool:
         """Check if the agent should exit."""
         if response is None:
             return False
 
-        return "[BYE]" in response.content.strip().splitlines()[-1].strip()
+        return response.action == "BYE"
 
-    async def handle_user_input(self, user_input: str) -> BaseMessage | None:
+    def _process_json_response(self, response_str: str) -> ResponseJsonSchema:
+        """Process the JSON response from the model."""
+        response_content = response_str
+        if response_content.startswith("```json"):
+            response_content = response_content[7:]
+        if response_content.endswith("```"):
+            response_content = response_content[:-3]
+
+        # Validate the JSON response
+        response_json = ResponseJsonSchema.model_validate_json(response_content)
+
+        return response_json
+
+    async def handle_user_input(self, user_input: str) -> ResponseJsonSchema | None:
         """Process user input and generate agent responses.
 
         This method handles the core interaction loop between the user and agent:
@@ -186,13 +199,14 @@ class Operator:
             {"role": ConversationRole.USER.value, "content": user_input}
         )
 
-        response = None
+        response_json: ResponseJsonSchema | None = None
+        response: BaseMessage | None = None
         self.executor.reset_step_counter()
         self.executor_is_processing = True
 
         while (
-            not self._agent_is_done(response)
-            and not self._agent_requires_user_input(response)
+            not self._agent_is_done(response_json)
+            and not self._agent_requires_user_input(response_json)
             and not self.executor.interrupted
         ):
             if self.model is None:
@@ -211,7 +225,21 @@ class Operator:
             response_content = (
                 response.content if isinstance(response.content, str) else str(response.content)
             )
-            result = await self.executor.process_response(response_content)
+
+            try:
+                response_json = self._process_json_response(response_content)
+            except ValidationError:
+                self.executor.conversation_history.append(
+                    {
+                        "role": ConversationRole.SYSTEM.value,
+                        "content": "Invalid JSON response.  Please try again and "
+                        "generate a valid JSON response that exactly matches the JSON "
+                        "schema.",
+                    }
+                )
+                continue
+
+            result = await self.executor.process_response(response_json)
 
             # Break out of the agent flow if the user cancels the code execution
             if (
@@ -223,7 +251,7 @@ class Operator:
         if os.environ.get("LOCAL_OPERATOR_DEBUG") == "true":
             self.print_conversation_history()
 
-        return response
+        return response_json
 
     def print_conversation_history(self) -> None:
         """Print the conversation history for debugging."""
@@ -283,17 +311,15 @@ class Operator:
             if user_input.lower() == "exit" or user_input.lower() == "quit":
                 break
 
-            response = await self.handle_user_input(user_input)
+            response_json = await self.handle_user_input(user_input)
 
             # Check if the last line of the response contains "[BYE]" to exit
-            if self._agent_should_exit(response):
+            if self._agent_should_exit(response_json):
                 break
 
             # Print the last assistant message if the agent is asking for user input
-            if response and self._agent_requires_user_input(response):
-                response_content = (
-                    response.content if isinstance(response.content, str) else str(response.content)
-                ).replace("[ASK]", "")
+            if response_json and self._agent_requires_user_input(response_json):
+                response_content = response_json.response
                 print("\n\033[1;36m╭─ Agent Question Requires Input ────────────────\033[0m")
                 print(f"\033[1;36m│\033[0m {response_content}")
                 print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
