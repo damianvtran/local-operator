@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from local_operator.operator import LocalCodeExecutor, Operator, OperatorType
+from local_operator.types import ResponseJsonSchema
 
 
 @pytest.fixture
@@ -60,46 +61,148 @@ def test_cli_operator_init(mock_model, executor):
 
 @pytest.mark.asyncio
 async def test_cli_operator_chat(cli_operator, mock_model):
-    mock_model.ainvoke.return_value.content = "[DONE]"
+    mock_response = ResponseJsonSchema(
+        previous_step_success=True,
+        previous_goal="",
+        current_goal="",
+        next_goal="",
+        response="I'm done",
+        code="",
+        action="DONE",
+        learnings="",
+    )
+    mock_model.ainvoke.return_value.content = mock_response.model_dump_json()
     cli_operator._agent_should_exit = MagicMock(return_value=True)
 
     with patch("builtins.input", return_value="exit"):
         await cli_operator.chat()
 
-        assert cli_operator.executor.conversation_history[-1]["content"] == "[DONE]"
+        assert (
+            cli_operator.executor.conversation_history[-1]["content"]
+            == mock_response.model_dump_json()
+        )
 
 
 def test_agent_is_done(cli_operator):
     test_cases = [
-        {"name": "DONE keyword", "content": "Some output\n[DONE]", "expected": True},
-        {"name": "ASK keyword", "content": "Some output\n[ASK]", "expected": False},
-        {"name": "No special keyword", "content": "Some output\nregular text", "expected": False},
+        {"name": "None response", "response": None, "expected": False},
+        {
+            "name": "DONE action",
+            "response": ResponseJsonSchema(
+                previous_step_success=True,
+                previous_goal="",
+                current_goal="",
+                next_goal="",
+                response="",
+                code="",
+                action="DONE",
+                learnings="",
+            ),
+            "expected": True,
+        },
+        {
+            "name": "Other action",
+            "response": ResponseJsonSchema(
+                previous_step_success=True,
+                previous_goal="",
+                current_goal="",
+                next_goal="",
+                response="",
+                code="",
+                action="CONTINUE",
+                learnings="",
+            ),
+            "expected": False,
+        },
     ]
 
     for test_case in test_cases:
-        mock_response = MagicMock()
-        mock_response.content = test_case["content"]
+        cli_operator._agent_should_exit = MagicMock(return_value=False)
         assert (
-            cli_operator._agent_is_done(mock_response) == test_case["expected"]
+            cli_operator._agent_is_done(test_case["response"]) == test_case["expected"]
         ), f"Failed test case: {test_case['name']}"
+
+        # Test with agent_should_exit returning True
+        if test_case["response"] is not None:
+            cli_operator._agent_should_exit = MagicMock(return_value=True)
+            assert (
+                cli_operator._agent_is_done(test_case["response"]) is True
+            ), f"Failed test case: {test_case['name']} with agent_should_exit=True"
 
 
 def test_agent_requires_user_input(cli_operator):
     test_cases = [
-        {"name": "ASK keyword", "content": "Some output\n[ASK]", "expected": True},
-        {"name": "DONE keyword", "content": "Some output\n[DONE]", "expected": False},
-        {"name": "No special keyword", "content": "Some output\nregular text", "expected": False},
+        {"name": "None response", "response": None, "expected": False},
+        {
+            "name": "ASK action",
+            "response": ResponseJsonSchema(
+                previous_step_success=True,
+                previous_goal="",
+                current_goal="",
+                next_goal="",
+                response="",
+                code="",
+                action="ASK",
+                learnings="",
+            ),
+            "expected": True,
+        },
+        {
+            "name": "Other action",
+            "response": ResponseJsonSchema(
+                previous_step_success=True,
+                previous_goal="",
+                current_goal="",
+                next_goal="",
+                response="",
+                code="",
+                action="CONTINUE",
+                learnings="",
+            ),
+            "expected": False,
+        },
     ]
 
     for test_case in test_cases:
-        mock_response = MagicMock()
-        mock_response.content = test_case["content"]
         assert (
-            cli_operator._agent_requires_user_input(mock_response) == test_case["expected"]
+            cli_operator._agent_requires_user_input(test_case["response"]) == test_case["expected"]
         ), f"Failed test case: {test_case['name']}"
 
 
 def test_agent_should_exit(cli_operator):
-    mock_response = MagicMock()
-    mock_response.content = "Some output\n[BYE]"
-    assert cli_operator._agent_should_exit(mock_response) is True
+    test_cases = [
+        {"name": "None response", "response": None, "expected": False},
+        {
+            "name": "BYE action",
+            "response": ResponseJsonSchema(
+                previous_step_success=True,
+                previous_goal="",
+                current_goal="",
+                next_goal="",
+                response="",
+                code="",
+                action="BYE",
+                learnings="",
+            ),
+            "expected": True,
+        },
+        {
+            "name": "Other action",
+            "response": ResponseJsonSchema(
+                previous_step_success=True,
+                previous_goal="",
+                current_goal="",
+                next_goal="",
+                response="",
+                code="",
+                action="CONTINUE",
+                learnings="",
+            ),
+            "expected": False,
+        },
+    ]
+
+    for test_case in test_cases:
+        assert (
+            cli_operator._agent_should_exit(test_case["response"]) == test_case["expected"]
+        ), f"Failed test case: {test_case['name']}"
