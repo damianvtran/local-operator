@@ -19,6 +19,7 @@ import local_operator.tools as tools
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
+from local_operator.model import ChatMock
 from local_operator.prompts import BaseSystemPrompt
 
 
@@ -192,7 +193,7 @@ class Operator:
 
     credential_manager: CredentialManager
     config_manager: ConfigManager
-    model: Union[ChatOpenAI, ChatOllama, ChatAnthropic]
+    model: Union[ChatOpenAI, ChatOllama, ChatAnthropic, ChatMock]
     executor: LocalCodeExecutor
     executor_is_processing: bool
     type: OperatorType
@@ -201,7 +202,7 @@ class Operator:
         self,
         executor: LocalCodeExecutor,
         credential_manager: CredentialManager,
-        model_instance: Union[ChatOpenAI, ChatOllama, ChatAnthropic],
+        model_instance: Union[ChatOpenAI, ChatOllama, ChatAnthropic, ChatMock],
         config_manager: ConfigManager,
         type: OperatorType,
     ):
