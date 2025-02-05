@@ -60,38 +60,43 @@ def get_tools_str(tools_module: ModuleType | None = None) -> str:
     if not tools_module:
         return ""
 
+    # Get list of builtin functions/types to exclude
+    builtin_names = set(dir(__builtins__))
+    builtin_names.update(["dict", "list", "set", "tuple", "Path"])
+
     tools_list: list[str] = []
     for name in dir(tools_module):
-        if not name.startswith("_"):
-            tool = getattr(tools_module, name)
-            if callable(tool):
-                doc = tool.__doc__ or "No description available"
-                # Get first line of docstring
-                doc = doc.split("\n")[0].strip()
+        # Skip private functions and builtins
+        if name.startswith("_") or name in builtin_names:
+            continue
 
-                sig = inspect.signature(tool)
-                args = []
-                for p in sig.parameters.values():
-                    arg_type = (
-                        p.annotation.__name__
-                        if hasattr(p.annotation, "__name__")
-                        else str(p.annotation)
-                    )
-                    args.append(f"{p.name}: {arg_type}")
+        tool = getattr(tools_module, name)
+        if callable(tool):
+            doc = tool.__doc__ or "No description available"
+            # Get first line of docstring
+            doc = doc.split("\n")[0].strip()
 
-                return_type = (
-                    sig.return_annotation.__name__
-                    if hasattr(sig.return_annotation, "__name__")
-                    else str(sig.return_annotation)
+            sig = inspect.signature(tool)
+            args = []
+            for p in sig.parameters.values():
+                arg_type = (
+                    p.annotation.__name__
+                    if hasattr(p.annotation, "__name__")
+                    else str(p.annotation)
                 )
+                args.append(f"{p.name}: {arg_type}")
 
-                # Check if function is async
-                is_async = inspect.iscoroutinefunction(tool)
-                async_prefix = "async " if is_async else ""
+            return_type = (
+                sig.return_annotation.__name__
+                if hasattr(sig.return_annotation, "__name__")
+                else str(sig.return_annotation)
+            )
 
-                tools_list.append(
-                    f"- {async_prefix}{name}({', '.join(args)}) -> {return_type}: {doc}"
-                )
+            # Check if function is async
+            is_async = inspect.iscoroutinefunction(tool)
+            async_prefix = "async " if is_async else ""
+
+            tools_list.append(f"- {async_prefix}{name}({', '.join(args)}) -> {return_type}: {doc}")
     return "\n".join(tools_list)
 
 
