@@ -155,9 +155,16 @@ def configure_model(
         api_key = credential_manager.get_credential("OPENAI_API_KEY")
         if not api_key:
             api_key = credential_manager.prompt_for_credential("OPENAI_API_KEY")
+
+        temperature = 0.3
+
+        # The o models only support temperature 1.0
+        if model.startswith("o1") or model.startswith("o3"):
+            temperature = 1.0
+
         return ChatOpenAI(
             api_key=SecretStr(api_key),
-            temperature=0.3,
+            temperature=temperature,
             model=model,
         )
     elif hosting == "anthropic":

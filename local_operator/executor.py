@@ -242,8 +242,26 @@ class LocalCodeExecutor:
                     )
                 )
                 combined_message += f"{role_prefix}{msg['content']}\n\n"
-
-            # Remove trailing newlines and invoke the model
+            combined_message = combined_message.strip()
+            return await self.model.ainvoke(combined_message)
+        elif isinstance(self.model, ChatOpenAI) and (
+            self.model.model_name.lower().startswith("o1")
+            or self.model.model_name.lower().startswith("o3")
+        ):
+            # OpenAI reasoning models (o1 and o3) expect a combined prompt
+            # for chain-of-thought reasoning.
+            combined_message = ""
+            for msg in messages:
+                role_prefix = (
+                    "User: "
+                    if msg["role"] == ConversationRole.USER.value
+                    else (
+                        "Assistant: "
+                        if msg["role"] == ConversationRole.ASSISTANT.value
+                        else "System: "
+                    )
+                )
+                combined_message += f"{role_prefix}{msg['content']}\n\n"
             combined_message = combined_message.strip()
             return await self.model.ainvoke(combined_message)
         else:
