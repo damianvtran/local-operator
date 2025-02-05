@@ -17,6 +17,7 @@ from tiktoken import encoding_for_model
 
 import local_operator.tools as tools
 from local_operator.config import ConfigManager
+from local_operator.console import print_cli_banner
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
 from local_operator.model import ChatMock
@@ -290,46 +291,6 @@ class Operator:
 
         return "[BYE]" in response.content.strip().splitlines()[-1].strip()
 
-    def _print_banner(self) -> None:
-        """Print the banner for the chat CLI."""
-        debug_indicator = (
-            " [DEBUG MODE]" if os.getenv("LOCAL_OPERATOR_DEBUG", "false").lower() == "true" else ""
-        )
-
-        print("\033[1;36m╭──────────────────────────────────────────────────╮\033[0m")
-        print(f"\033[1;36m│ Local Executor Agent CLI{debug_indicator:<25}│\033[0m")
-        print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
-        print("\033[1;36m│ You are interacting with a helpful CLI agent     │\033[0m")
-        print("\033[1;36m│ that can execute tasks locally on your device    │\033[0m")
-        print("\033[1;36m│ by running Python code.                          │\033[0m")
-        print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
-        hosting = self.config_manager.get_config_value("hosting")
-        model = self.config_manager.get_config_value("model_name")
-        if hosting:
-            hosting_text = f"Using hosting: {hosting}"
-            padding = 49 - len(hosting_text)
-            print(f"\033[1;36m│ {hosting_text}{' ' * padding}│\033[0m")
-        if model:
-            model_text = f"Using model: {model}"
-            padding = 49 - len(model_text)
-            print(f"\033[1;36m│ {model_text}{' ' * padding}│\033[0m")
-        if hosting or model:
-            print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
-        print("\033[1;36m│ Type 'exit' or 'quit' to quit                    │\033[0m")
-        print("\033[1;36m│ Press Ctrl+C to interrupt current task           │\033[0m")
-        print("\033[1;36m╰──────────────────────────────────────────────────╯\033[0m\n")
-
-        # Print configuration options
-        if os.getenv("LOCAL_OPERATOR_DEBUG", "false").lower() == "true":
-            print("\033[1;36m╭─ Configuration ────────────────────────────────\033[0m")
-            print(f"\033[1;36m│\033[0m Hosting: {self.config_manager.get_config_value('hosting')}")
-            print(f"\033[1;36m│\033[0m Model: {self.config_manager.get_config_value('model_name')}")
-            conv_len = self.config_manager.get_config_value("conversation_length")
-            detail_len = self.config_manager.get_config_value("detail_length")
-            print(f"\033[1;36m│\033[0m Conversation Length: {conv_len}")
-            print(f"\033[1;36m│\033[0m Detail Length: {detail_len}")
-            print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
-
     async def handle_user_input(self, user_input: str) -> BaseMessage | None:
         """Process user input and generate agent responses.
 
@@ -420,7 +381,7 @@ class Operator:
         - [DONE]: Model has completed its task
         - [BYE]: Gracefully exit the chat session
         """
-        self._print_banner()
+        print_cli_banner(self.config_manager)
 
         self.executor.conversation_history = [
             {
