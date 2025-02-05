@@ -9,7 +9,9 @@ from langchain_anthropic import ChatAnthropic
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 
+from local_operator.model import ChatMock
 from local_operator.prompts import SafetyCheckSystemPrompt, SafetyCheckUserPrompt
+from local_operator.types import ConversationRole
 
 
 class ProcessResponseStatus(Enum):
@@ -34,12 +36,6 @@ class ProcessResponseOutput:
         self.message = message
 
 
-class ConversationRole(Enum):
-    SYSTEM = "system"
-    USER = "user"
-    ASSISTANT = "assistant"
-
-
 class ConfirmSafetyResult(Enum):
     """Result of the safety check."""
 
@@ -53,7 +49,7 @@ class ConfirmSafetyResult(Enum):
 class LocalCodeExecutor:
     context: Dict[str, Any]
     conversation_history: List[Dict[str, str]]
-    model: ChatOpenAI | ChatOllama | ChatAnthropic
+    model: ChatOpenAI | ChatOllama | ChatAnthropic | ChatMock
     step_counter: int
     max_conversation_history: int
     detail_conversation_length: int
@@ -80,7 +76,7 @@ class LocalCodeExecutor:
 
     def __init__(
         self,
-        model: ChatOpenAI | ChatOllama | ChatAnthropic,
+        model: ChatOpenAI | ChatOllama | ChatAnthropic | ChatMock,
         max_conversation_history: int = 100,
         detail_conversation_length: int = 10,
         can_prompt_user: bool = True,
