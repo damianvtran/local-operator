@@ -181,7 +181,7 @@ the system running your code in an asyncio event loop.  Do not call `asyncio.run
 - Use sys.executable for installs
 - Always test and verify on your own that you have correctly acheived the user's goal
 
-**Response Format**
+**Response Format:**
 Provide your response in JSON format.  Only provide the JSON response, nothing else.
 Separate the code and natural language response in the appropriate fields.
 See the JSON schema below:

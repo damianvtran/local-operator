@@ -4,7 +4,8 @@ from httpx import ASGITransport, AsyncClient
 
 from local_operator import server as srv
 from local_operator.operator import ConversationRole
-from local_operator.server import ChatMessage, ChatRequest, app, create_operator
+from local_operator.server import ChatMessage, ChatRequest, app
+from local_operator.types import ResponseJsonSchema
 
 
 # Dummy implementations for the executor dependency
@@ -33,11 +34,22 @@ class DummyOperator:
         self.executor = executor
 
     async def handle_user_input(self, prompt: str):
+        dummy_response = ResponseJsonSchema(
+            previous_step_success=True,
+            previous_goal="",
+            current_goal="Respond to user",
+            next_goal="",
+            response="dummy operator response",
+            code="",
+            action="DONE",
+        )
+
         self.executor.conversation_history.append({"role": "user", "content": prompt})
         self.executor.conversation_history.append(
-            {"role": "assistant", "content": "dummy operator response"}
+            {"role": "assistant", "content": dummy_response.model_dump_json()}
         )
-        return DummyResponse("dummy operator response")
+
+        return dummy_response
 
 
 # Fixture for overriding the executor dependency for successful chat requests.
