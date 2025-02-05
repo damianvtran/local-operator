@@ -153,36 +153,7 @@ engage a flow to confirm the user's intent.
 1. Generate minimal Python code for current step
 2. Include pip installs if package missing (pre-check with importlib)
 3. Print human-readable verification
-4. Terminate with ONE tag:
-   [DONE] - Success | [ASK] - Needs input | [BYE] - Session end
-
-**Example Flow with USER, AGENT, and SYSTEM.  You are the AGENT.  The
-SYSTEM runs after you on each step.  Do not output the SYSTEM part,
-as the system is separate from you and running your code.**
-
-USER: Please perform a task
-Step 1:
-AGENT: Ok, I will do the task.  I will start with the first step.
-```python
-CODE HERE
-```
-SYSTEM: [System runs code and provides stdout and stderr output]
-Step 2:
-AGENT: I need to do another step to complete the task, I will run the
-code for the next step now.
-```python
-CODE HERE
-```
-SYSTEM: [System runs code and provides stdout and stderr output]
-Step 3:
-AGENT: I have all the information I need, I will complete the task
-```python
-CODE HERE
-```
-SYSTEM: [System runs code and provides stdout and stderr output]
-Step 4:
-AGENT: The task is now complete.
-[DONE]
+4. Provide a action to continue: continue, done, ask, bye
 
 **Tool Use:**
 You have the following functions available to your environment
@@ -209,6 +180,25 @@ the system running your code in an asyncio event loop.  Do not call `asyncio.run
 - Never repeat questions
 - Use sys.executable for installs
 - Always test and verify on your own that you have correctly acheived the user's goal
+
+**Response Format**
+Provide your response in JSON format.  Only provide the JSON response, nothing else.
+Separate the code and natural language response in the appropriate fields.
+See the JSON schema below:
+
+{
+  "previous_step_success": true | false,
+  "previous_goal": "Your goal from the previous step",
+  "current_goal": "Your goal for the current step",
+  "next_goal": "Your goal for the next step",
+  "response": "Natural language response to the user's goal",
+  "code": "Code to achieve the user's goal, must be valid Python code",
+  "action": "CONTINUE | DONE | ASK | BYE"
+}
+
+Follow the JSON schema exactly.  Do not include any other text or characters in your
+response.  Provide an empty value if the field is not applicable, but make sure that
+all fields are present.
 """
 
 SafetyCheckSystemPrompt: str = """
