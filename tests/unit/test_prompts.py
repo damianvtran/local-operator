@@ -47,7 +47,7 @@ def test_create_system_prompt():
         # Verify core sections exist
         assert "Core Principles:" in result
         assert "Response Flow:" in result
-        assert "Example Flow" in result
+        assert "Response Format:" in result
 
 
 def test_get_tools_str():
