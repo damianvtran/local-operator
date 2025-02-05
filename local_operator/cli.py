@@ -11,6 +11,7 @@ Example Usage:
     python main.py --hosting deepseek --model deepseek-chat
     python main.py --hosting openai --model gpt-4
     python main.py --hosting ollama --model llama2
+    python main.py exec "write a hello world program" --hosting ollama --model llama2
 """
 
 import argparse
@@ -26,7 +27,12 @@ from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
 from local_operator.model import configure_model
-from local_operator.operator import Operator, OperatorType
+from local_operator.operator import (
+    ConversationRole,
+    Operator,
+    OperatorType,
+    create_system_prompt,
+)
 
 CLI_DESCRIPTION = """
     Local Operator - An environment for agentic AI models to perform tasks on the local device.
@@ -67,14 +73,15 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--hosting",
         type=str,
-        choices=["deepseek", "openai", "anthropic", "ollama", "kimi", "alibaba"],
-        help="Hosting platform to use (deepseek, openai, anthropic, ollama, kimi, or alibaba)",
+        choices=["deepseek", "openai", "anthropic", "ollama", "kimi", "alibaba", "test"],
+        help="Hosting platform to use (deepseek, openai, anthropic, ollama, kimi, alibaba, "
+        "or test)",
     )
     parser.add_argument(
         "--model",
         type=str,
         help="Model to use (e.g., deepseek-chat, gpt-4o, qwen2.5:14b, "
-        "claude-3-5-sonnet-20240620, moonshot-v1-32k, qwen-plus)",
+        "claude-3-5-sonnet-20240620, moonshot-v1-32k, qwen-plus, test-model)",
     )
     subparsers = parser.add_subparsers(dest="subcommand")
 
@@ -121,6 +128,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--reload",
         action="store_true",
         help="Enable hot reload for the server",
+    )
+
+    # Exec command for single execution mode
+    exec_parser = subparsers.add_parser(
+        "exec",
+        help="Execute a single command without starting interactive mode",
+        parents=[parent_parser],
+    )
+    exec_parser.add_argument(
+        "command",
+        type=str,
+        help="The command to execute",
     )
 
     return parser
@@ -199,8 +218,18 @@ def main() -> int:
             type=OperatorType.CLI,
         )
 
-        # Start the async chat interface
-        asyncio.run(operator.chat())
+        # Start the async chat interface or execute single command
+        if args.subcommand == "exec":
+            system_prompt = create_system_prompt()
+            operator.executor.conversation_history = [
+                {"role": ConversationRole.SYSTEM.value, "content": system_prompt}
+            ]
+            message = asyncio.run(operator.handle_user_input(args.command))
+            if message:
+                print(message.content)
+            return 0
+        else:
+            asyncio.run(operator.chat())
 
         return 0
     except Exception as e:
