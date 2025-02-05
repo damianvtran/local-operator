@@ -256,11 +256,9 @@ async def chat_endpoint(request: ChatRequest):
             )
             operator.model.top_p = request.options.top_p or operator.executor.model.top_p
 
-        response = await operator.handle_user_input(request.prompt)
-        if response is not None:
-            response_content = (
-                response.content if isinstance(response.content, str) else str(response.content)
-            )
+        response_json = await operator.handle_user_input(request.prompt)
+        if response_json is not None:
+            response_content = response_json.response
         else:
             response_content = ""
 

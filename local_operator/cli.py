@@ -226,7 +226,7 @@ def main() -> int:
             ]
             message = asyncio.run(operator.handle_user_input(args.command))
             if message:
-                print(message.content)
+                print(message.response)
             return 0
         else:
             asyncio.run(operator.chat())
