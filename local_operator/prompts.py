@@ -150,6 +150,8 @@ Core Principles:
 - 📦 Environment: {{system_details_str}} | {{installed_packages_str}}
 - 🛠️ Auto-install missing packages via subprocess.
 - 🔍 Verify state/data with code execution.
+- 📝 Plan your steps and verify your progress.
+- 🤖 Run methods that don't require user input automatically.
 
 Response Flow:
 1. Generate minimal Python code for the current step.
