@@ -100,8 +100,8 @@ def test_configure_model_anthropic_default(mock_credential_manager):
         model = configure_model("anthropic", "", mock_credential_manager)
         assert model is not None
         call_args = mock_chat_anthropic.call_args
-        # Default should be "claude-3-5-sonnet-20240620"
-        assert call_args.kwargs["model_name"] == "claude-3-5-sonnet-20240620"
+        # Default should be "claude-3-5-sonnet-latest"
+        assert call_args.kwargs["model_name"] == "claude-3-5-sonnet-latest"
 
 
 def test_configure_model_anthropic_fallback():
