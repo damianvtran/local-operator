@@ -251,9 +251,9 @@ async def chat_endpoint(request: ChatRequest):
 
         # Configure model options if provided
         if request.options:
-            operator.model.temperature = (
-                request.options.temperature or operator.executor.model.temperature
-            )
+            temperature = request.options.temperature or operator.executor.model.temperature
+            if temperature is not None:
+                operator.model.temperature = temperature
             operator.model.top_p = request.options.top_p or operator.executor.model.top_p
 
         response_json = await operator.handle_user_input(request.prompt)

@@ -9,11 +9,17 @@ class ConversationRole(Enum):
     """Enum representing the different roles in a conversation with an AI model.
 
     Used to track who sent each message in the conversation history.
+    Maps to the standard roles used by LangChain message types.
     """
 
     SYSTEM = "system"  # System prompts that define the AI's behavior
     USER = "user"  # Messages from the human user
     ASSISTANT = "assistant"  # Responses from the AI assistant
+    HUMAN = "human"  # Alias for USER, supported by some LangChain models
+    AI = "ai"  # Alias for ASSISTANT, supported by some LangChain models
+    FUNCTION = "function"  # Function call messages in LangChain
+    TOOL = "tool"  # Tool/plugin response messages in LangChain
+    CHAT = "chat"  # Generic chat messages in LangChain
 
 
 class ResponseJsonSchema(BaseModel):

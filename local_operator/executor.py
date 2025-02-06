@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 
 from langchain.schema import BaseMessage
 from langchain_anthropic import ChatAnthropic
-from langchain_ollama import ChatOllama
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
 from local_operator.console import (
@@ -22,7 +22,7 @@ from local_operator.console import (
     print_task_interrupted,
     spinner,
 )
-from local_operator.model import ChatMock
+from local_operator.model import ModelType
 from local_operator.prompts import SafetyCheckSystemPrompt, SafetyCheckUserPrompt
 from local_operator.types import ConversationRole, ResponseJsonSchema
 
@@ -62,7 +62,7 @@ class ConfirmSafetyResult(Enum):
 class LocalCodeExecutor:
     context: Dict[str, Any]
     conversation_history: List[Dict[str, str]]
-    model: ChatOpenAI | ChatOllama | ChatAnthropic | ChatMock
+    model: ModelType
     step_counter: int
     max_conversation_history: int
     detail_conversation_length: int
@@ -89,7 +89,7 @@ class LocalCodeExecutor:
 
     def __init__(
         self,
-        model: ChatOpenAI | ChatOllama | ChatAnthropic | ChatMock,
+        model: ModelType,
         max_conversation_history: int = 100,
         detail_conversation_length: int = 10,
         can_prompt_user: bool = True,
@@ -247,6 +247,7 @@ class LocalCodeExecutor:
         This method handles invoking different types of language models with appropriate formatting:
         - For Anthropic models: Combines messages into a single string with role prefixes
         - For OpenAI reasoning models (o1/o3): Combines messages for chain-of-thought reasoning
+        - For Google Gemini models: Converts system messages to human messages
         - For other models: Passes messages directly
 
         Args:
@@ -300,6 +301,12 @@ class LocalCodeExecutor:
                         combined_message += f"{role_prefix}{msg['content']}\n\n"
                     combined_message = combined_message.strip()
                     return await self.model.ainvoke(combined_message)
+                elif isinstance(self.model, ChatGoogleGenerativeAI):
+                    # Convert system messages to human messages for Google Gemini
+                    for msg in messages[1:]:
+                        if msg["role"] == ConversationRole.SYSTEM.value:
+                            msg["role"] = ConversationRole.USER.value
+                    return await self.model.ainvoke(messages)
                 else:
                     return await self.model.ainvoke(messages)
             except Exception as e:
