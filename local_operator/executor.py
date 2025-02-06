@@ -59,6 +59,32 @@ class ConfirmSafetyResult(Enum):
     )
 
 
+def process_json_response(response_str: str) -> ResponseJsonSchema:
+    """Process and validate a JSON response string from the language model.
+
+    Args:
+        response_str (str): Raw response string from the model, which may be wrapped in
+            markdown-style JSON code block delimiters (```json).
+
+    Returns:
+        ResponseJsonSchema: Validated response object containing the model's output.
+            See ResponseJsonSchema class for the expected schema.
+
+    Raises:
+        ValidationError: If the JSON response does not match the expected schema.
+    """
+    response_content = response_str
+    if response_content.startswith("```json"):
+        response_content = response_content[7:]
+    if response_content.endswith("```"):
+        response_content = response_content[:-3]
+
+    # Validate the JSON response
+    response_json = ResponseJsonSchema.model_validate_json(response_content)
+
+    return response_json
+
+
 class LocalCodeExecutor:
     context: Dict[str, Any]
     conversation_history: List[Dict[str, str]]
@@ -556,7 +582,7 @@ class LocalCodeExecutor:
             try:
                 new_code = await self._get_corrected_code()
                 if new_code:
-                    return await self._execute_with_output(new_code[0])
+                    return await self._execute_with_output(new_code)
             except Exception as retry_error:
                 self._record_retry_error(retry_error, attempt)
                 log_retry_error(retry_error, attempt, max_retries)
@@ -583,22 +609,24 @@ class LocalCodeExecutor:
             attempt (int): The current retry attempt number
         """
         msg = (
-            f"The code execution failed with error: {str(error)}. "
+            f"The code execution failed with error (attempt {attempt + 1}): {str(error)}. "
             "Please review and make corrections to the code to fix this error and try again."
         )
         self._append_to_history(ConversationRole.USER, msg)
 
-    async def _get_corrected_code(self) -> List[str]:
+    async def _get_corrected_code(self) -> str:
         """Get corrected code from the language model.
 
         Returns:
-            List[str]: List of extracted code blocks from model response
+            str: Code from model response
         """
         response = await self.invoke_model(self.conversation_history)
         response_content = (
             response.content if isinstance(response.content, str) else str(response.content)
         )
-        return self.extract_code_blocks(response_content)
+
+        response_json = process_json_response(response_content)
+        return response_json.code
 
     async def process_response(self, response: ResponseJsonSchema) -> ProcessResponseOutput:
         """Process model response, extracting and executing any code blocks.

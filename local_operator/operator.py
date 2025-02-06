@@ -13,7 +13,7 @@ import local_operator.tools as tools
 from local_operator.config import ConfigManager
 from local_operator.console import print_cli_banner, spinner
 from local_operator.credentials import CredentialManager
-from local_operator.executor import LocalCodeExecutor
+from local_operator.executor import LocalCodeExecutor, process_json_response
 from local_operator.model import ModelType
 from local_operator.prompts import create_system_prompt
 from local_operator.types import ResponseJsonSchema
@@ -160,19 +160,6 @@ class Operator:
 
         return response.action == "BYE"
 
-    def _process_json_response(self, response_str: str) -> ResponseJsonSchema:
-        """Process the JSON response from the model."""
-        response_content = response_str
-        if response_content.startswith("```json"):
-            response_content = response_content[7:]
-        if response_content.endswith("```"):
-            response_content = response_content[:-3]
-
-        # Validate the JSON response
-        response_json = ResponseJsonSchema.model_validate_json(response_content)
-
-        return response_json
-
     async def handle_user_input(self, user_input: str) -> ResponseJsonSchema | None:
         """Process user input and generate agent responses.
 
@@ -223,7 +210,7 @@ class Operator:
             )
 
             try:
-                response_json = self._process_json_response(response_content)
+                response_json = process_json_response(response_content)
             except ValidationError:
                 self.executor.conversation_history.append(
                     {
