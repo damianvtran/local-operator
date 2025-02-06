@@ -181,6 +181,8 @@ Critical Constraints:
 - Never repeat questions.
 - Use sys.executable for installs.
 - Test and verify that you achieve the user's goal correctly.
+- System code execution printing to console consumes tokens.  Do not print more than
+  10000 tokens at once in the code output.
 
 Response Format:
 Respond strictly in JSON following this schema:

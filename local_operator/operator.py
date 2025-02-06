@@ -4,12 +4,8 @@ import readline
 import signal
 from enum import Enum
 from pathlib import Path
-from typing import Union
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage
-from langchain_ollama import ChatOllama
-from langchain_openai import ChatOpenAI
 from pydantic import ValidationError
 from tiktoken import encoding_for_model
 
@@ -18,7 +14,7 @@ from local_operator.config import ConfigManager
 from local_operator.console import print_cli_banner, spinner
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
-from local_operator.model import ChatMock
+from local_operator.model import ModelType
 from local_operator.prompts import create_system_prompt
 from local_operator.types import ResponseJsonSchema
 
@@ -69,7 +65,7 @@ class Operator:
 
     credential_manager: CredentialManager
     config_manager: ConfigManager
-    model: Union[ChatOpenAI, ChatOllama, ChatAnthropic, ChatMock]
+    model: ModelType
     executor: LocalCodeExecutor
     executor_is_processing: bool
     type: OperatorType
@@ -78,7 +74,7 @@ class Operator:
         self,
         executor: LocalCodeExecutor,
         credential_manager: CredentialManager,
-        model_instance: Union[ChatOpenAI, ChatOllama, ChatAnthropic, ChatMock],
+        model_instance: ModelType,
         config_manager: ConfigManager,
         type: OperatorType,
     ):

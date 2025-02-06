@@ -4,6 +4,7 @@ import pytest
 from pydantic import SecretStr
 
 from local_operator.credentials import CredentialManager
+from local_operator.mocks import ChatNoop
 from local_operator.model import configure_model
 
 
@@ -46,7 +47,7 @@ def test_configure_model_ollama(mock_credential_manager):
 
 def test_configure_model_noop(mock_credential_manager):
     model = configure_model("noop", "noop", mock_credential_manager)
-    assert model is None
+    assert isinstance(model, ChatNoop)
 
 
 def test_configure_model_invalid_hosting(mock_credential_manager):
