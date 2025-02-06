@@ -187,6 +187,7 @@ Critical Constraints:
 Response Format:
 Respond strictly in JSON following this schema:
 {
+  "plan": "Set of goals to achieve the user's goal",
   "previous_step_success": true | false,
   "previous_goal": "Your goal from the previous step",
   "current_goal": "Your goal for the current step",
