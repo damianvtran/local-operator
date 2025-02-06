@@ -4,6 +4,7 @@ python-dotenv==1.0.1
 langchain-ollama==0.2.2
 langchain==0.3.14
 langchain-anthropic==0.3.3
+langchain-google-genai==2.0.8
 tiktoken==0.8.0
 uvicorn==0.22.0
 fastapi==0.115.8
@@ -13,7 +14,7 @@ playwright==1.49.1
 flake8==7.1.0
 black==24.4.2
 isort==5.13.2
-pyright==1.1.368
+pyright>=1.1.393
 pytest==8.3.4
 pytest-asyncio==0.25.2
 

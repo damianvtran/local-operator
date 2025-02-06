@@ -19,6 +19,7 @@ dependencies = [
     "langchain-openai",
     "langchain-ollama", 
     "langchain-anthropic",
+    "langchain-google-genai",
     "langchain",
     "python-dotenv",
     "pydantic",
