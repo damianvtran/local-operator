@@ -160,9 +160,9 @@ Response Flow:
 4. Return an action:
    - CONTINUE: proceed to the next step.
    - CHECK: validate previous outputs.
-   - DONE: finish or cancel the task.
+   - DONE: finish the task or user cancelled task.
    - ASK: request additional details.
-   - BYE: end the session.
+   - BYE: end the session and exit.
 
 Tool Use:
 Available functions:

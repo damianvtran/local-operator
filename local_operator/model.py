@@ -62,7 +62,7 @@ def configure_model(hosting: str, model: str, credential_manager) -> ModelType:
         )
     elif hosting == "anthropic":
         if not model:
-            model = "claude-3-5-sonnet-20240620"
+            model = "claude-3-5-sonnet-latest"
 
         api_key = credential_manager.get_credential("ANTHROPIC_API_KEY")
         if not api_key:

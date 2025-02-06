@@ -411,7 +411,8 @@ class LocalCodeExecutor:
 
                 msg = (
                     "I've identified that this is a dangerous operation. "
-                    "Let's stop this task for now, I will provide further instructions shortly."
+                    "Let's stop this task for now, I will provide further instructions shortly. "
+                    "Action DONE."
                 )
                 self._append_to_history(ConversationRole.USER, msg)
                 return ConfirmSafetyResult.UNSAFE
