@@ -33,6 +33,8 @@ class ResponseJsonSchema(BaseModel):
         response (str): Natural language response explaining the actions being taken
         code (str): Python code to be executed to achieve the current goal
         action (str): Action to take next - one of: CONTINUE, DONE, ASK, BYE
+        learnings (str): Learnings from the current step
+        plan (str): Plan for the next step
     """
 
     previous_step_success: bool
@@ -43,3 +45,4 @@ class ResponseJsonSchema(BaseModel):
     code: str
     action: str
     learnings: str
+    plan: str

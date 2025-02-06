@@ -43,6 +43,7 @@ class DummyOperator:
             code="",
             action="DONE",
             learnings="",
+            plan="",
         )
 
         self.executor.conversation_history.append({"role": "user", "content": prompt})

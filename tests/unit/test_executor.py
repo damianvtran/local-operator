@@ -461,6 +461,7 @@ async def test_process_response(executor, mock_model):
         code="print('hello world')",
         action="CONTINUE",
         learnings="",
+        plan="",
     )
     mock_model.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
 

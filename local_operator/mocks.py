@@ -14,6 +14,7 @@ USER_MOCK_RESPONSES = {
         code="",
         action="DONE",
         learnings="",
+        plan="",
     ),
     "print hello world": ResponseJsonSchema(
         previous_step_success=True,
@@ -24,6 +25,7 @@ USER_MOCK_RESPONSES = {
         code='print("Hello World")',
         action="CONTINUE",
         learnings="",
+        plan="",
     ),
 }
 
@@ -37,6 +39,7 @@ SYSTEM_MOCK_RESPONSES = {
         code="",
         action="DONE",
         learnings="",
+        plan="",
     )
 }
 
