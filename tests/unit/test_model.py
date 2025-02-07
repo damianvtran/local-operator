@@ -195,3 +195,54 @@ def test_configure_model_ollama_missing_model(mock_credential_manager):
     with pytest.raises(ValueError) as exc_info:
         configure_model("ollama", "", mock_credential_manager)
     assert "Model is required for ollama hosting" in str(exc_info.value)
+
+
+def test_configure_model_google_default(mock_credential_manager):
+    # Test that for google hosting, when no model is provided, the default
+    # becomes "gemini-2.0-flash"
+    with patch(
+        "local_operator.model.ChatGoogleGenerativeAI", return_value=MagicMock()
+    ) as mock_chat_google:
+        model = configure_model("google", "", mock_credential_manager)
+        assert model is not None
+        call_args = mock_chat_google.call_args
+        assert call_args.kwargs["model"] == "gemini-2.0-flash"
+
+
+def test_configure_model_google_fallback():
+    # Test fallback for google hosting when the initial API key is missing
+    credential_manager = MagicMock(spec=CredentialManager)
+    credential_manager.get_credential = MagicMock(return_value=None)
+    credential_manager.prompt_for_credential = MagicMock(return_value="fallback_google_key")
+    with patch(
+        "local_operator.model.ChatGoogleGenerativeAI", return_value=MagicMock()
+    ) as mock_chat_google:
+        model = configure_model("google", "custom-google-model", credential_manager)
+        assert model is not None
+        call_args = mock_chat_google.call_args
+        assert call_args.kwargs["api_key"] == SecretStr("fallback_google_key")
+        assert call_args.kwargs["model"] == "custom-google-model"
+
+
+def test_configure_model_mistral_default(mock_credential_manager):
+    # Test that for mistral hosting, when no model is provided, the default
+    # becomes "mistral-large-latest"
+    with patch("local_operator.model.ChatOpenAI", return_value=MagicMock()) as mock_chat_openai:
+        model = configure_model("mistral", "", mock_credential_manager)
+        assert model is not None
+        call_args = mock_chat_openai.call_args
+        assert call_args.kwargs["model"] == "mistral-large-latest"
+        assert call_args.kwargs["base_url"] == "https://api.mistral.ai/v1"
+
+
+def test_configure_model_mistral_fallback():
+    # Test fallback for mistral hosting when the initial API key is missing
+    credential_manager = MagicMock(spec=CredentialManager)
+    credential_manager.get_credential = MagicMock(return_value=None)
+    credential_manager.prompt_for_credential = MagicMock(return_value="fallback_mistral_key")
+    with patch("local_operator.model.ChatOpenAI", return_value=MagicMock()) as mock_chat_openai:
+        model = configure_model("mistral", "custom-mistral-model", credential_manager)
+        assert model is not None
+        call_args = mock_chat_openai.call_args
+        assert call_args.kwargs["api_key"] == SecretStr("fallback_mistral_key")
+        assert call_args.kwargs["model"] == "custom-mistral-model"
