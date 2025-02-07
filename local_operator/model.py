@@ -115,6 +115,20 @@ def configure_model(hosting: str, model: str, credential_manager) -> ModelType:
             temperature=0.3,
             model=model,
         )
+    elif hosting == "mistral":
+        if not model:
+            model = "mistral-large-latest"
+
+        api_key = credential_manager.get_credential("MISTRAL_API_KEY")
+        if not api_key:
+            api_key = credential_manager.prompt_for_credential("MISTRAL_API_KEY")
+
+        return ChatOpenAI(
+            api_key=SecretStr(api_key),
+            temperature=0.3,
+            model=model,
+            base_url="https://api.mistral.ai/v1",
+        )
     elif hosting == "ollama":
         if not model:
             raise ValueError("Model is required for ollama hosting")
