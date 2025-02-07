@@ -3,6 +3,7 @@ import textwrap
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from openai import APIError
 
 from local_operator.operator import LocalCodeExecutor, Operator, OperatorType
 from local_operator.types import ResponseJsonSchema
@@ -729,3 +730,79 @@ async def test_summarize_old_steps_all_detail(executor):
         {"role": "system", "content": "system prompt"},
         {"role": "user", "content": "user msg"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_invoke_model_api_error(executor):
+    mock_request = MagicMock()
+    with patch("asyncio.sleep", AsyncMock(return_value=None)):
+        executor.model.ainvoke.side_effect = APIError(
+            message="API Error",
+            request=mock_request,
+            body={"code": "error_code", "type": "error_type"},
+        )
+
+        with pytest.raises(APIError) as exc_info:
+            await executor.invoke_model([{"role": "user", "content": "test"}])
+
+        assert str(exc_info.value) == "API Error"
+        assert exc_info.value.code == "error_code"
+        assert exc_info.value.type == "error_type"
+
+
+@pytest.mark.asyncio
+async def test_invoke_model_rate_limit(executor):
+    mock_request = MagicMock()
+    executor.model.ainvoke.side_effect = APIError(
+        message="Rate limit exceeded",
+        request=mock_request,
+        body={"code": "rate_limit_exceeded", "type": "rate_limit_error"},
+    )
+
+    with patch("asyncio.sleep", AsyncMock(return_value=None)):
+        with pytest.raises(APIError) as exc_info:
+            await executor.invoke_model([{"role": "user", "content": "test"}])
+
+    assert str(exc_info.value) == "Rate limit exceeded"
+    assert exc_info.value.code == "rate_limit_exceeded"
+    assert exc_info.value.type == "rate_limit_error"
+
+
+@pytest.mark.asyncio
+async def test_invoke_model_context_length(executor):
+    mock_request = MagicMock()
+    executor.model.ainvoke.side_effect = APIError(
+        message="Maximum context length exceeded",
+        request=mock_request,
+        body={"code": "context_length_exceeded", "type": "invalid_request_error"},
+    )
+
+    with patch("asyncio.sleep", AsyncMock(return_value=None)):
+        with pytest.raises(APIError) as exc_info:
+            await executor.invoke_model([{"role": "user", "content": "test"}])
+
+    assert str(exc_info.value) == "Maximum context length exceeded"
+    assert exc_info.value.code == "context_length_exceeded"
+    assert exc_info.value.type == "invalid_request_error"
+
+
+@pytest.mark.asyncio
+async def test_invoke_model_general_exception(executor):
+    executor.model.ainvoke.side_effect = Exception("Unexpected error")
+
+    with patch("asyncio.sleep", AsyncMock(return_value=None)):
+        with pytest.raises(Exception) as exc_info:
+            await executor.invoke_model([{"role": "user", "content": "test"}])
+
+    assert str(exc_info.value) == "Unexpected error"
+
+
+@pytest.mark.asyncio
+async def test_invoke_model_timeout(executor):
+    executor.model.ainvoke.side_effect = TimeoutError("Request timed out")
+
+    with patch("asyncio.sleep", AsyncMock(return_value=None)):
+        with pytest.raises(TimeoutError) as exc_info:
+            await executor.invoke_model([{"role": "user", "content": "test"}])
+
+    assert str(exc_info.value) == "Request timed out"
