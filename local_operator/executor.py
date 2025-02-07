@@ -327,8 +327,12 @@ class LocalCodeExecutor:
                         combined_message += f"{role_prefix}{msg['content']}\n\n"
                     combined_message = combined_message.strip()
                     return await self.model.ainvoke(combined_message)
-                elif isinstance(self.model, ChatGoogleGenerativeAI):
+                elif isinstance(self.model, ChatGoogleGenerativeAI) or (
+                    isinstance(self.model, ChatOpenAI)
+                    and self.model.model_name.lower().startswith("mistral")
+                ):
                     # Convert system messages to human messages for Google Gemini
+                    # or Mistral models.
                     for msg in messages[1:]:
                         if msg["role"] == ConversationRole.SYSTEM.value:
                             msg["role"] = ConversationRole.USER.value
