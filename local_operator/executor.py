@@ -266,7 +266,7 @@ class LocalCodeExecutor:
         return blocks
 
     async def invoke_model(
-        self, messages: List[Dict[str, str]], max_attempts: int = 3
+        self, messages: List[Dict[str, str]], max_attempts: int = 5
     ) -> BaseMessage:
         """Invoke the language model with a list of messages.
 
@@ -278,7 +278,7 @@ class LocalCodeExecutor:
 
         Args:
             messages: List of message dictionaries containing 'role' and 'content' keys
-            max_attempts: Maximum number of retry attempts on failure (default: 3)
+            max_attempts: Maximum number of retry attempts on failure (default: 5)
 
         Returns:
             BaseMessage: The model's response message
@@ -288,6 +288,7 @@ class LocalCodeExecutor:
         """
         attempt = 0
         last_error: Exception | None = None
+        base_delay = 1  # Base delay in seconds
 
         while attempt < max_attempts:
             try:
@@ -343,7 +344,8 @@ class LocalCodeExecutor:
                 last_error = e
                 attempt += 1
                 if attempt < max_attempts:
-                    await asyncio.sleep(1)  # Add a small delay between retries
+                    delay = base_delay * (2 ** (attempt - 1))  # Exponential backoff
+                    await asyncio.sleep(delay)  # Wait with exponential backoff
                 continue
 
         # If we've exhausted all attempts, raise the last error
