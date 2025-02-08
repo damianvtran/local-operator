@@ -24,6 +24,7 @@ from local_operator.console import (
 )
 from local_operator.model import ModelType
 from local_operator.prompts import SafetyCheckSystemPrompt, SafetyCheckUserPrompt
+from local_operator.rag import EmbeddingManager
 from local_operator.types import ConversationRole, ResponseJsonSchema
 
 
@@ -94,6 +95,7 @@ class LocalCodeExecutor:
     detail_conversation_length: int
     interrupted: bool
     can_prompt_user: bool
+    rag_manager: EmbeddingManager | None
 
     """A class to handle local Python code execution with safety checks and context management.
 
@@ -111,6 +113,8 @@ class LocalCodeExecutor:
         can_prompt_user (bool): Informs the executor about whether the end user has access to the
             terminal (True), or is consuming the service from some remote source where they
             cannot respond via the terminal (False).
+        rag_manager (EmbeddingManager | None): The RAG manager to use for information
+        retrieval.
     """
 
     def __init__(
@@ -119,6 +123,7 @@ class LocalCodeExecutor:
         max_conversation_history: int = 100,
         detail_conversation_length: int = 10,
         can_prompt_user: bool = True,
+        rag_manager: EmbeddingManager | None = None,
     ):
         """Initialize the LocalCodeExecutor with a language model.
 
@@ -141,6 +146,7 @@ class LocalCodeExecutor:
         self.can_prompt_user = can_prompt_user
         self.reset_step_counter()
         self.interrupted = False
+        self.rag_manager = rag_manager
 
     def reset_step_counter(self):
         """Reset the step counter."""
@@ -195,75 +201,6 @@ class LocalCodeExecutor:
             summary = await self._summarize_conversation_step(msg)
             msg["content"] = summary
             msg["summarized"] = "True"
-
-    def extract_code_blocks(self, text: str) -> List[str]:
-        """Extract Python code blocks from text using markdown-style syntax.
-        Handles nested code blocks by matching outermost ```python enclosures.
-
-        Args:
-            text (str): The text containing potential code blocks
-
-        Returns:
-            list: A list of extracted code blocks as strings
-        """
-        blocks = []
-        current_pos = 0
-
-        while True:
-            # Find start of next ```python block
-            start = text.find("```python", current_pos)
-            if start == -1:
-                break
-
-            # Find matching end block by counting nested blocks
-            nested_count = 1
-            pos = start + 9  # Length of ```python
-
-            while nested_count > 0 and pos < len(text):
-                if (
-                    text[pos:].startswith("```")
-                    and len(text[pos + 3 :].strip()) > 0
-                    and not text[pos + 3].isspace()
-                    and not pos + 3 >= len(text)
-                ):
-                    nested_count += 1
-                    pos += 9
-                elif text[pos:].startswith("```"):
-                    nested_count -= 1
-                    pos += 3
-                else:
-                    pos += 1
-
-            if nested_count == 0:
-                # Extract the block content between the outermost delimiters
-                block = text[start + 9 : pos - 3].strip()
-
-                # Validate block is not just comments/diffs
-                is_comment = True
-                for line in block.split("\n"):
-                    trimmed_line = line.strip()
-                    if not (
-                        trimmed_line.startswith("//")
-                        or trimmed_line.startswith("/*")
-                        or trimmed_line.startswith("#")
-                        or trimmed_line.startswith("+")
-                        or trimmed_line.startswith("-")
-                        or trimmed_line.startswith("<<<<<<<")
-                        or trimmed_line.startswith(">>>>>>>")
-                        or trimmed_line.startswith("=======")
-                    ):
-                        is_comment = False
-                        break
-
-                if not is_comment:
-                    blocks.append(block)
-
-                current_pos = pos
-            else:
-                # No matching end found, move past this start marker
-                current_pos = start + 9
-
-        return blocks
 
     async def invoke_model(
         self, messages: List[Dict[str, str]], max_attempts: int = 3

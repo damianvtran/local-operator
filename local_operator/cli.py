@@ -33,6 +33,7 @@ from local_operator.operator import (
     OperatorType,
     create_system_prompt,
 )
+from local_operator.rag import EmbeddingManager
 
 CLI_DESCRIPTION = """
     Local Operator - An environment for agentic AI models to perform tasks on the local device.
@@ -202,6 +203,7 @@ def main() -> int:
 
         config_manager = ConfigManager(config_dir)
         credential_manager = CredentialManager(config_dir)
+        rag_manager = EmbeddingManager(config_dir / "rag")
 
         # Override config with CLI args where provided
         config_manager.update_config_from_args(args)
@@ -220,7 +222,7 @@ def main() -> int:
             print(error_msg)
             return -1
 
-        executor = LocalCodeExecutor(model_instance)
+        executor = LocalCodeExecutor(model_instance, rag_manager=rag_manager)
 
         operator = Operator(
             executor=executor,
