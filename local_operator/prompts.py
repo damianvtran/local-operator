@@ -183,7 +183,7 @@ Critical Constraints:
 - Never repeat questions.
 - Use sys.executable for installs.
 - Always capture output when running subprocesses and print them.
-- Test and verify that you achieve the user's goal correctly.
+- Test and verify that you have achieved the user's goal correctly before finishing.
 - System code execution printing to console consumes tokens.  Do not print more than
   10000 tokens at once in the code output.
 
