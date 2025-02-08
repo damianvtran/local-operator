@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
 
-from local_operator.tools import _get_git_ignored_files, index_current_directory
+from local_operator.tools import _get_git_ignored_files, get_current_directory_info
 
 
 @pytest.fixture
@@ -68,11 +68,11 @@ def test_get_git_ignored_files_no_repo():
     assert ignored == set()
 
 
-def test_index_current_directory(mock_file_system):
+def test_get_current_directory_info(mock_file_system):
     """Test indexing directory with various file types when no .gitignore is present"""
     # Simulate a non-git environment by having .gitignore not found.
     with patch("builtins.open", side_effect=FileNotFoundError()):
-        index = index_current_directory()
+        index = get_current_directory_info()
 
     assert len(index) == 2  # Root and subdir
 
@@ -106,7 +106,7 @@ def test_index_current_directory_with_git_ignored(mock_file_system):
             ],
         ),
     ):
-        index = index_current_directory()
+        index = get_current_directory_info()
 
     # Verify ignored files are not included
     all_files = []
@@ -117,11 +117,11 @@ def test_index_current_directory_with_git_ignored(mock_file_system):
     assert "ignored2.txt" not in all_files
 
 
-def test_index_empty_directory(tmp_path, monkeypatch):
+def test_get_current_directory_info_empty_directory(tmp_path, monkeypatch):
     """Test indexing an empty directory returns an empty dictionary."""
     # Change the current working directory to a new, empty temporary directory.
     monkeypatch.chdir(tmp_path)
     # Simulate no .gitignore file present.
     with patch("builtins.open", side_effect=FileNotFoundError()):
-        index = index_current_directory()
+        index = get_current_directory_info()
     assert index == {}

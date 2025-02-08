@@ -56,9 +56,10 @@ def _should_ignore_file(file_path: str) -> bool:
     return False
 
 
-def index_current_directory() -> Dict[str, List[Tuple[str, str, int]]]:
-    """Index the current directory showing files and their metadata.
-    If in a git repo, only shows unignored files. If not in a git repo, shows all files.
+def get_current_directory_info() -> Dict[str, List[Tuple[str, str, int]]]:
+    """Walk over the current directory and return a dictionary of files and their
+    metadata.  If in a git repo, only shows unignored files. If not in a git repo,
+    shows all files.
 
     Returns:
         Dict mapping directory paths to lists of (filename, file_type, size_bytes) tuples.
