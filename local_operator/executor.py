@@ -9,6 +9,7 @@ from langchain.schema import BaseMessage
 from langchain_openai import ChatOpenAI
 from tiktoken import encoding_for_model
 
+from local_operator import tools
 from local_operator.console import (
     ExecutionSection,
     format_agent_output,
@@ -22,8 +23,20 @@ from local_operator.console import (
     spinner,
 )
 from local_operator.model import ModelType
-from local_operator.prompts import SafetyCheckSystemPrompt, SafetyCheckUserPrompt
+from local_operator.prompts import (
+    SafetyCheckSystemPrompt,
+    SafetyCheckUserPrompt,
+    create_system_prompt,
+)
 from local_operator.types import ConversationRole, ResponseJsonSchema
+
+
+class ExecutorInitError(Exception):
+    """Raised when the executor fails to initialize properly."""
+
+    def __init__(self, message: str = "Failed to initialize executor"):
+        self.message = message
+        super().__init__(self.message)
 
 
 class ProcessResponseStatus(Enum):
@@ -236,6 +249,23 @@ class LocalCodeExecutor:
     def get_session_token_usage(self) -> int:
         """Get the total token count for the current session."""
         return self.total_tokens
+
+    def initialize_conversation_history(
+        self, conversation_history: List[Dict[str, str]] = []
+    ) -> None:
+        """Initialize the conversation history."""
+        if len(self.conversation_history) != 0:
+            raise ExecutorInitError("Conversation history already initialized")
+
+        if len(conversation_history) == 0:
+            self.conversation_history = [
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": create_system_prompt(tools),
+                }
+            ]
+        else:
+            self.conversation_history = conversation_history
 
     def extract_code_blocks(self, text: str) -> List[str]:
         """Extract Python code blocks from text using markdown-style syntax.

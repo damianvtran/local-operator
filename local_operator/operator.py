@@ -13,7 +13,11 @@ from local_operator.agents import AgentMetadata, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.console import print_cli_banner, spinner
 from local_operator.credentials import CredentialManager
-from local_operator.executor import LocalCodeExecutor, process_json_response
+from local_operator.executor import (
+    ExecutorInitError,
+    LocalCodeExecutor,
+    process_json_response,
+)
 from local_operator.model import ModelType
 from local_operator.prompts import create_system_prompt
 from local_operator.types import ResponseJsonSchema
@@ -310,13 +314,11 @@ class Operator:
         """
         print_cli_banner(self.config_manager, self.current_agent, self.training_mode)
 
-        if len(self.executor.conversation_history) == 0:
-            self.executor.conversation_history = [
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": create_system_prompt(tools),
-                }
-            ]
+        try:
+            self.executor.initialize_conversation_history()
+        except ExecutorInitError:
+            # Conversation history already initialized
+            pass
 
         while True:
             self.executor_is_processing = False
