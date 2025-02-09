@@ -138,7 +138,6 @@ class LocalCodeExecutor:
             terminal (True), or is consuming the service from some remote source where they
             cannot respond via the terminal (False).
         """
-        self.context = {}
         self.conversation_history = []
         self.model = model
         self.max_conversation_history = max_conversation_history
@@ -147,6 +146,10 @@ class LocalCodeExecutor:
         self.reset_step_counter()
         self.interrupted = False
         self.rag_manager = rag_manager
+
+        self.context = {
+            "rag_manager": rag_manager,
+        }
 
     def reset_step_counter(self):
         """Reset the step counter."""

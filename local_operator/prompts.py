@@ -172,6 +172,14 @@ Available functions:
 Import them from local_operator.tools. Use await for async functions (do not call asyncio.run()).
 For Playwright, use its async version.
 
+Knowledge Base:
+You have access to a knowledge base that allows you to store and retrieve information.
+You can use the `local_operator.tools.add_info_to_knowledge_base` function to add
+information to the knowledge base.
+You can use the `local_operator.tools.query_knowledge_base` function to search the
+knowledge base for information.
+rag_manager is in the context of execution for the system that is executing your code.
+
 Additional User Info:
 <user_system_prompt>
 {{user_system_prompt}}
