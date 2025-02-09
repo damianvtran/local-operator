@@ -292,6 +292,7 @@ def agents_create_command(name: str, agent_registry: AgentRegistry) -> int:
     print(f"\033[1;32m│ Name: {agent.name}\033[0m")
     print(f"\033[1;32m│ ID: {agent.id}\033[0m")
     print(f"\033[1;32m│ Created: {agent.created_date}\033[0m")
+    print(f"\033[1;32m│ Version: {agent.version}\033[0m")
     print("\033[1;32m╰──────────────────────────────────────────────────\033[0m\n")
     return 0
 
@@ -376,6 +377,7 @@ def main() -> int:
                 print(f"\033[1;32m│ Name: {agent.name}\033[0m")
                 print(f"\033[1;32m│ ID: {agent.id}\033[0m")
                 print(f"\033[1;32m│ Created: {agent.created_date}\033[0m")
+                print(f"\033[1;32m│ Version: {agent.version}\033[0m")
                 print("\033[1;32m╰──────────────────────────────────────────────────\033[0m\n")
 
         if agent:
