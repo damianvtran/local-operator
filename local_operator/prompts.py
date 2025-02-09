@@ -52,10 +52,13 @@ def get_tools_str(tools_module: ModuleType | None = None) -> str:
     """Get formatted string describing available tool functions.
 
     Args:
-        tools_module: Optional module containing tool functions to document
+        tools_module (ModuleType | None, optional): Module containing tool functions to document.
+            Defaults to None.
 
     Returns:
-        Formatted string describing the tools, or empty string if no tools module provided
+        str: Formatted string describing the tools, with each tool on a new line in the format:
+            "- [async] function_name(arg1: type = default, ...) -> return_type: description"
+            Returns empty string if no tools module provided.
     """
     if not tools_module:
         return ""
@@ -84,7 +87,14 @@ def get_tools_str(tools_module: ModuleType | None = None) -> str:
                     if hasattr(p.annotation, "__name__")
                     else str(p.annotation)
                 )
-                args.append(f"{p.name}: {arg_type}")
+                # Include default value if one exists
+                if p.default is not inspect.Parameter.empty:
+                    default_val = p.default
+                    if isinstance(default_val, str):
+                        default_val = f'"{default_val}"'
+                    args.append(f"{p.name}: {arg_type} = {default_val}")
+                else:
+                    args.append(f"{p.name}: {arg_type}")
 
             return_type = (
                 sig.return_annotation.__name__

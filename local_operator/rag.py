@@ -202,29 +202,34 @@ class EmbeddingManager:
         except Exception as e:
             raise RAGException(f"Failed to process large text: {str(e)}")
 
-    def query_insight(self, query: str, k: int = 5) -> List[InsightResult]:
+    def query_insight(
+        self, query: str, k: int = 5, max_distance: float = 1.5
+    ) -> List[InsightResult]:
         """Retrieves the most similar insights to a given query.
 
         This method encodes the query text, performs a k-nearest neighbor search
         in the FAISS index, and returns the most similar insights along with their
-        distance scores.
+        distance scores. Results are filtered by a maximum distance threshold.
 
         Args:
             query (str): The text query to search for
             k (int, optional): Number of results to return. Defaults to 5.
+            max_distance (float, optional): Maximum distance threshold for results.
+                Higher distances indicate less relevance. Defaults to 1.5.
 
         Returns:
             list[InsightResult]: List of InsightResult objects containing retrieved
-            insights and their distances
+            insights and their distances. Returns empty list if no insights found.
 
         Raises:
-            RAGException: If there are issues with query processing or search
             ValueError: If query is empty or k is invalid
         """
         if not query or not isinstance(query, str):
             raise ValueError("Query must be a non-empty string")
         if k <= 0:
             raise ValueError("k must be positive")
+        if max_distance <= 0:
+            raise ValueError("max_distance must be positive")
 
         try:
             query_embedding = self.model.encode(query, show_progress_bar=False)
@@ -235,12 +240,12 @@ class EmbeddingManager:
 
             results = []
             for dist, idx in zip(distances[0], labels[0]):
-                if idx < len(self.metadata) and idx != -1:
+                if idx < len(self.metadata) and idx != -1 and dist <= max_distance:
                     results.append(InsightResult(insight=self.metadata[idx], distance=float(dist)))
 
             return results
-        except Exception as e:
-            raise RAGException(f"Failed to query insights: {str(e)}")
+        except Exception:
+            return []
 
     def save(self) -> None:
         """Persists the current state of the RAG system to disk.

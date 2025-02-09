@@ -151,7 +151,9 @@ def add_info_to_knowledge_base(rag_manager: EmbeddingManager, info: str) -> None
     rag_manager.save()
 
 
-def query_knowledge_base(rag_manager: EmbeddingManager, query: str, num_results: int = 5) -> str:
+def query_knowledge_base(
+    rag_manager: EmbeddingManager, query: str, num_results: int = 5, max_distance: float = 1.5
+) -> str:
     """
     Query the knowledge base and return the results as a string which
     can be printed to the console.
@@ -160,8 +162,9 @@ def query_knowledge_base(rag_manager: EmbeddingManager, query: str, num_results:
         rag_manager: The RAG manager instance
         query: The query string to search for
         num_results: The number of results to return
+        max_distance: The maximum distance for results
     Returns:
         str: A string containing the matching insights, one per line
     """
-    results = rag_manager.query_insight(query, num_results)
+    results = rag_manager.query_insight(query, num_results, max_distance)
     return "\n".join(result.insight for result in results)
