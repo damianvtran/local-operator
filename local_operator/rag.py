@@ -116,15 +116,17 @@ class EmbeddingManager:
     def add_large_text(self, text: str, chunk_size: int = 512, overlap: int = 128) -> None:
         """Adds a large text document by breaking it into smaller overlapping chunks.
 
-        This method splits a large text into smaller, semantically meaningful chunks
-        with some overlap to maintain context across boundaries. Each chunk is then
-        added as a separate insight. Code blocks are preserved intact.
+        This method splits a large text into semantically meaningful chunks by analyzing
+        various contextual cues such as punctuation, paragraph breaks, and code block boundaries.
+        It uses a sliding window approach to ensure overlapping content between chunks, preserving
+        the context across boundaries. Code blocks (denoted by triple backticks) are
+        preserved intact.
 
         Args:
             text (str): The large text document to add
-            chunk_size (int, optional): Target size of each chunk in characters. Defaults to 100.
+            chunk_size (int, optional): Target size of each chunk in characters. Defaults to 512.
             overlap (int, optional): Number of overlapping characters between chunks.
-            Defaults to 20.
+            Defaults to 128.
 
         Raises:
             RAGException: If there are issues processing or adding the text
@@ -136,16 +138,55 @@ class EmbeddingManager:
             raise ValueError("Invalid chunk_size or overlap parameters")
 
         try:
-            # Use the sentence transformer's built-in text splitter
-            chunks = self.model.tokenize([text])["input_ids"][0]
-            chunks = self.model.tokenizer.batch_decode(
-                [chunks[i : i + chunk_size] for i in range(0, len(chunks), chunk_size - overlap)],
-                skip_special_tokens=True,
-            )
+            import re
 
-            # Add all non-empty chunks as insights
+            # Pattern to detect code blocks delimited by triple backticks.
+            code_block_pattern = r"(```[\s\S]*?```)"
+            parts = re.split(code_block_pattern, text)
+            segments = []
+            # Use multiple contextual delimiters: punctuation marks and paragraph breaks.
+            context_split_pattern = r"(?<=[.?!:;])\s+(?=[A-Z])|\n{2,}"
+            for part in parts:
+                if part.startswith("```") and part.endswith("```"):
+                    segments.append(part.strip())
+                else:
+                    subsegments = re.split(context_split_pattern, part)
+                    segments.extend([seg.strip() for seg in subsegments if seg.strip()])
+
+            # Assemble segments into chunks using a sliding window that preserves
+            # contextual overlap.
+            chunks = []
+            current_chunk = []
+            current_size = 0
+            for seg in segments:
+                seg_length = len(seg)
+                # If adding this segment would exceed the chunk size and we already have
+                # some segments, finalize current chunk.
+                if current_chunk and current_size + seg_length + 1 > chunk_size:
+                    chunk_text = " ".join(current_chunk).strip()
+                    if chunk_text:
+                        chunks.append(chunk_text)
+                    # Compute the overlap from the tail of the current chunk.
+                    overlap_segments = []
+                    overlap_size = 0
+                    for s in reversed(current_chunk):
+                        if overlap_size + len(s) <= overlap:
+                            overlap_segments.insert(0, s)
+                            overlap_size += len(s)
+                        else:
+                            break
+                    current_chunk = overlap_segments
+                    current_size = sum(len(s) for s in current_chunk)
+                current_chunk.append(seg)
+                current_size += seg_length + (1 if len(current_chunk) > 1 else 0)
+            if current_chunk:
+                chunk_text = " ".join(current_chunk).strip()
+                if chunk_text:
+                    chunks.append(chunk_text)
+
+            # Add all non-empty chunks as insights.
             for chunk in chunks:
-                if chunk.strip():
+                if chunk:
                     self.add_insight(chunk)
 
         except Exception as e:

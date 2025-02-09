@@ -141,17 +141,66 @@ def test_max_distance_filtering(embedding_manager, query, insights, max_distance
 
 
 def test_add_large_text_basic(embedding_manager):
-    text = """
-    This is a large text document. It contains multiple sentences.
-    Here is another sentence. And one more for good measure.
-    """
+    text = (
+        "This is a large text document. It contains multiple sentences. "
+        "Here is another sentence. And one more for good measure."
+    )
     embedding_manager.add_large_text(text, chunk_size=100, overlap=20)
 
-    # Query should return relevant chunks
-    results = embedding_manager.query_insight("multiple sentences")
-    assert len(results) == 1
-    assert "multiple sentences" in results[0].insight
-    assert "another sentence" in results[0].insight
+    # Query the embedding manager for chunks containing "multiple sentences"
+    results = embedding_manager.query_insight("multiple sentences", max_distance=1.0)
+    assert len(results) == 1, f"Expected exactly 1 result, but found {len(results)}."
+    insight_chunk = results[0].insight
+    assert (
+        "multiple sentences" in insight_chunk
+    ), "Chunk does not contain expected text 'multiple sentences'."
+    assert (
+        "another sentence" in insight_chunk
+    ), "Chunk does not contain expected text 'another sentence'."
+
+
+def test_add_large_text_code_block_chunking(embedding_manager):
+    """
+    Test that multiple code blocks in a large text input are preserved intact when chunked.
+    """
+    text = (
+        "Here is a description of the functionality. "
+        "```python\n"
+        "def add(a, b):\n"
+        "    return a + b\n"
+        "```\n"
+        "This should determine how code blocks are handled. "
+        "```javascript\n"
+        "function subtract(a, b) {\n"
+        "    return a - b;\n"
+        "}\n"
+        "```\n"
+        "End of code blocks."
+    )
+    # Use a small chunk size to force splitting and to check that code blocks stay intact.
+    embedding_manager.add_large_text(text, chunk_size=80, overlap=20)
+
+    # Find a chunk that contains the Python code block marker.
+    python_chunk = next(
+        (chunk for chunk in embedding_manager.metadata if "```python" in chunk), None
+    )
+    assert python_chunk is not None, "Python code block was not preserved in any chunk"
+    # Verify that the Python code block content remains intact.
+    assert (
+        "def add(a, b):" in python_chunk
+    ), "Python code block content missing the function definition"
+    assert "return a + b" in python_chunk, "Python code block content missing the return statement"
+
+    # Find a chunk that contains the JavaScript code block marker.
+    js_chunk = next(
+        (chunk for chunk in embedding_manager.metadata if "```javascript" in chunk), None
+    )
+    assert js_chunk is not None, "JavaScript code block was not preserved in any chunk"
+    # Verify that the JavaScript code block content remains intact.
+    assert (
+        "function subtract(a, b)" in js_chunk
+    ), "JavaScript code block missing the function definition"
+    assert "return a - b" in js_chunk, "JavaScript code block missing the return statement"
 
 
 def test_add_large_text_chunking(embedding_manager):
@@ -204,6 +253,46 @@ def test_add_large_text_chunking(embedding_manager):
     assert len(spanning_results) >= 1
     assert any(
         "databases" in r.insight.lower() and "flexibility" in r.insight.lower()
+        for r in spanning_results
+    )
+
+
+def test_add_large_text_lorem_ipsum(embedding_manager):
+    # Test with a long Lorem Ipsum text to verify chunking behavior
+    text = (
+        "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor "
+        "incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis "
+        "nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. "
+        "Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore "
+        "eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt "
+        "in culpa qui officia deserunt mollit anim id est laborum. Sed ut perspiciatis "
+        "unde omnis iste natus error sit voluptatem accusantium doloremque laudantium, "
+        "totam rem aperiam, eaque ipsa quae ab illo inventore veritatis et quasi architecto "
+        "beatae vitae dicta sunt explicabo. Nemo enim ipsam voluptatem quia voluptas sit "
+        "aspernatur aut odit aut fugit, sed quia consequuntur magni dolores eos qui ratione "
+        "voluptatem sequi nesciunt. Neque porro quisquam est, qui dolorem ipsum quia dolor "
+        "sit amet, consectetur, adipisci velit."
+    )
+
+    # Use small chunk size to test chunking
+    embedding_manager.add_large_text(text, chunk_size=100, overlap=50)
+
+    assert len(embedding_manager.metadata) >= 5  # Should create multiple chunks
+
+    # Test finding content from different parts of the text
+    start_results = embedding_manager.query_insight("Lorem ipsum dolor sit amet", k=3)
+    assert len(start_results) >= 1
+    assert any("lorem ipsum" in r.insight.lower() for r in start_results)
+
+    middle_results = embedding_manager.query_insight("voluptatem accusantium doloremque", k=3)
+    assert len(middle_results) >= 1
+    assert any("voluptatem" in r.insight.lower() for r in middle_results)
+
+    # Test finding content that might span chunk boundaries
+    spanning_results = embedding_manager.query_insight("dolor sit amet consectetur", k=3)
+    assert len(spanning_results) >= 1
+    assert any(
+        "dolor" in r.insight.lower() and "consectetur" in r.insight.lower()
         for r in spanning_results
     )
 
