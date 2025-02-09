@@ -229,9 +229,15 @@ def main() -> int:
             print(error_msg)
             return -1
 
+        # Get conversation history if agent name provided
+        conversation_history = []
+        if args.agent_name:
+            conversation_history = agent_registry.load_agent_conversation(args.agent_name)
+
         executor = LocalCodeExecutor(
             model_instance,
             detail_conversation_length=config_manager.get_config_value("detail_length", 10),
+            conversation_history=conversation_history,
         )
 
         # Get agent if name provided
