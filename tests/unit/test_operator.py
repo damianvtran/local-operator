@@ -37,6 +37,7 @@ def cli_operator(mock_model, executor):
         type=OperatorType.CLI,
         agent_registry=agent_registry,
         current_agent=None,
+        training_mode=False,
     )
 
     operator._get_input_with_history = MagicMock(return_value="noop")
@@ -62,6 +63,7 @@ def test_cli_operator_init(mock_model, executor):
         type=OperatorType.CLI,
         agent_registry=agent_registry,
         current_agent=None,
+        training_mode=False,
     )
 
     assert operator.model == mock_model
