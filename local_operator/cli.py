@@ -253,7 +253,13 @@ def init_config(args: argparse.Namespace, config_dir: Path):
         print(error_msg)
         return None
 
-    executor = LocalCodeExecutor(model_instance, rag_manager=rag_manager)
+    executor = LocalCodeExecutor(
+        model_instance,
+        detail_conversation_length=config_manager.get_config_value(
+            "detail_conversation_length", 10
+        ),
+        rag_manager=rag_manager,
+    )
 
     operator = Operator(
         executor=executor,

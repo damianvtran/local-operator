@@ -175,22 +175,31 @@ class Operator:
         if not self.executor.rag_manager:
             return None
 
-        # First generate a RAG query from the user input
-        rag_query_prompt = {
-            "role": ConversationRole.SYSTEM.value,
-            "content": "Given the user's input, generate a concise search query that "
-            "captures the key concepts to find relevant information from the RAG index. "
-            "Focus on technical terms and core ideas.",
-        }
-
         # Get last 5 history records for context, excluding the first record
-        recent_history = self.executor.conversation_history[-5:][1:]
-        recent_history.append(rag_query_prompt)
+        rag_history = [
+            {
+                "role": ConversationRole.SYSTEM.value,
+                "content": "You are a search query generator that generates a search "
+                "query to look up relevant information from the RAG index.  Focus on "
+                "technical terms and core ideas.  Only include the search query, "
+                "do not include any other text.  The following messages are the "
+                "conversation history to help you generate the search query.\n\n"
+                "CONVERSATION BEGIN",
+            },
+        ]
+        rag_history.extend(self.executor.conversation_history[-5:][1:])
+        rag_history.append(
+            {
+                "role": ConversationRole.USER.value,
+                "content": "CONVERSATION END\n\nPlease generate a search query to look up the most"
+                "relevant information.",
+            }
+        )
 
         if self.model is None:
             raise ValueError("Model is not initialized")
 
-        rag_query_response = await self.executor.invoke_model(recent_history)
+        rag_query_response = await self.executor.invoke_model(rag_history)
         rag_query = (
             rag_query_response.content
             if isinstance(rag_query_response.content, str)
@@ -201,17 +210,17 @@ class Operator:
         insights = self.executor.rag_manager.query_insight(
             rag_query,
             k=self.config_manager.get_config_value("rag_k", 3),
-            max_distance=self.config_manager.get_config_value("rag_max_distance", 1.5),
+            max_distance=self.config_manager.get_config_value("rag_max_distance", 1.0),
         )
 
         if len(insights) == 0:
             return None
 
-        return f"""
-        Here are some relevant insights from the RAG system:
+        return f"""Based on the RAG lookup "{rag_query}", here are some potentially
+        relevant insights:
         {("\n".join([insight.insight for insight in insights]))}
-        If the user's question is related to any of the insights, you should use them
-        to inform your response.
+        Please review them and if the user's question is related to any of the insights,
+        you should use them to inform your response.
         """
 
     async def handle_user_input(self, user_input: str) -> ResponseJsonSchema | None:
