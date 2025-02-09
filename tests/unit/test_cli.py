@@ -110,7 +110,7 @@ def test_main_success():
         patch("local_operator.cli.asyncio.run") as mock_asyncio_run,
     ):
         mock_config_manager = mock_config_manager_cls.return_value
-        mock_config_manager.get_config_value.side_effect = [True, "deepseek", "deepseek-chat"]
+        mock_config_manager.get_config_value.side_effect = [True, "deepseek", "deepseek-chat", 10]
 
         # Test interactive chat mode
         with patch("sys.argv", ["program", "--hosting", "deepseek"]):
