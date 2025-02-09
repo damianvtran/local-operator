@@ -72,7 +72,7 @@ class AgentRegistry:
                 except Exception as e:
                     raise Exception(f"Invalid agent metadata: {str(e)}")
 
-    def create_agent(self, agent_edit_metadata: AgentEditMetadata) -> None:
+    def create_agent(self, agent_edit_metadata: AgentEditMetadata) -> AgentMetadata:
         """
         Create a new agent with the provided metadata and initialize its conversation history.
 
@@ -81,6 +81,9 @@ class AgentRegistry:
 
         Args:
             agent_edit_metadata (AgentEditMetadata): The metadata for the new agent, including name
+
+        Returns:
+            AgentMetadata: The metadata of the newly created agent
 
         Raises:
             ValueError: If an agent with the provided name already exists
@@ -125,6 +128,8 @@ class AgentRegistry:
             if self.agents_file.exists():
                 self.agents_file.unlink()
             raise Exception(f"Failed to create conversation file: {str(e)}")
+
+        return agent_metadata
 
     def edit_agent(self, agent_id: str, updated_metadata: AgentEditMetadata) -> None:
         """
@@ -189,6 +194,39 @@ class AgentRegistry:
                 conversation_file.unlink()
             except Exception as e:
                 raise Exception(f"Failed to delete conversation file: {str(e)}")
+
+    def clone_agent(self, agent_id: str, new_name: str) -> AgentMetadata:
+        """
+        Clone an existing agent with a new name, copying over its conversation history.
+
+        Args:
+            agent_id (str): The unique identifier of the agent to clone
+            new_name (str): The name for the new cloned agent
+
+        Returns:
+            AgentMetadata: The metadata of the newly created agent clone
+
+        Raises:
+            KeyError: If the source agent_id does not exist
+            ValueError: If an agent with new_name already exists
+            Exception: If there is an error during the cloning process
+        """
+        # Check if source agent exists
+        if agent_id not in self._agents:
+            raise KeyError(f"Source agent with id {agent_id} not found")
+
+        # Create new agent with the provided name
+        new_agent = self.create_agent(AgentEditMetadata(name=new_name))
+
+        # Copy conversation history from source agent
+        source_conversation = self.load_agent_conversation(agent_id)
+        try:
+            self.save_agent_conversation(new_agent.id, source_conversation)
+            return new_agent
+        except Exception as e:
+            # Clean up if conversation copy fails
+            self.delete_agent(new_agent.id)
+            raise Exception(f"Failed to copy conversation history: {str(e)}")
 
     def get_agent(self, agent_id: str) -> AgentMetadata:
         """
