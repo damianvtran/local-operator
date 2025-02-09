@@ -97,8 +97,6 @@ DEFAULT_CONFIG = Config(
             "hosting": "",
             "model_name": "",
             "rag_enabled": True,
-            "rag_k": 3,
-            "rag_max_distance": 1.5,
         },
     }
 )

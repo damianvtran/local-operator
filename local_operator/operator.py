@@ -192,7 +192,8 @@ class Operator:
             {
                 "role": ConversationRole.USER.value,
                 "content": "CONVERSATION END\n\nPlease generate a search query to look up the most"
-                "relevant information.",
+                "relevant information.  Pay attention to the most recent message in the "
+                "conversation history as it is more relevant to the user's question.",
             }
         )
 
