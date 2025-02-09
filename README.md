@@ -83,6 +83,16 @@ Quit by typing `exit` or `quit`.
 
 Run `local-operator --help` for more information about parameters and configuration.
 
+## Usage (Single Execution Mode)
+
+The operator can be run in a single execution mode where it will execute a single task and then exit.  This is useful for running the operator in a non-interactive way such as in a script.
+
+```bash
+local-operator exec "Make a new file called test.txt and write Hello World in it"
+```
+
+This will execute the task and then exit with a code 0 if successful, or a non-zero code if there was an error.
+
 ## Usage (Server)
 
 To run the operator as a server, use the following command:
@@ -94,6 +104,47 @@ local-operator serve
 This will start the FastAPI server app and host at `http://localhost:8080` by default with uvicorn.  You can change the host and port by using the `--host` and `--port` arguments.  
 
 For development, use the `--reload` argument to enable hot reloading.
+
+## Usage (Agents)
+
+The agents mode is helpful for passing on knowledge between agents and between runs.  It is also useful for creating reusable agentic experiences learned through conversation with the user.
+
+The agents CLI command can be used to create, edit, and delete agents.  Agents are
+metadata and persistence for conversation history.  They are an easy way to create replicable conversation experiences based on "training" through conversation with the user.
+
+To create a new agent, use the following command:
+
+```bash
+local-operator agents create "My Agent"
+```
+
+This will create a new agent with the name "My Agent" and a default conversation history.  The agent will be saved in the `~/.local-operator/agents` directory.
+
+To list all agents, use the following command:
+
+```bash
+local-operator agents list
+```
+
+To delete an agent, use the following command:
+
+```bash
+local-operator agents delete "My Agent"
+```
+
+You can then apply an agent in any of the execution modes by using the `--agent` argument to invoke that agent by name.
+
+For example:
+
+```bash
+local-operator --agent "My Agent"
+```
+
+or
+
+```bash
+local-operator --agent "My Agent" exec "Make a new file called test.txt and write Hello World in it"
+```
 
 ## Configuration
 
