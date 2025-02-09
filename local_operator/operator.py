@@ -308,7 +308,7 @@ class Operator:
         - [DONE]: Model has completed its task
         - [BYE]: Gracefully exit the chat session
         """
-        print_cli_banner(self.config_manager)
+        print_cli_banner(self.config_manager, self.current_agent, self.training_mode)
 
         self.executor.conversation_history = [
             {
