@@ -1,8 +1,11 @@
+from typing import Dict, List
+
 import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from local_operator import server as srv
+from local_operator.executor import ExecutorInitError
 from local_operator.operator import ConversationRole
 from local_operator.server import ChatMessage, ChatRequest, app
 from local_operator.types import ResponseJsonSchema
@@ -26,6 +29,17 @@ class DummyExecutor:
     async def process_response(self, response_content: str):
         # Dummy processing; does nothing extra.
         return "processed successfully"
+
+    def initialize_conversation_history(self, conversation_history: List[Dict[str, str]] = []):
+        if len(self.conversation_history) != 0:
+            raise ExecutorInitError("Conversation history already initialized")
+
+        if len(conversation_history) == 0:
+            self.conversation_history = [
+                {"role": ConversationRole.SYSTEM.value, "content": "System prompt"}
+            ]
+        else:
+            self.conversation_history = conversation_history
 
 
 # Dummy Operator using a dummy executor
