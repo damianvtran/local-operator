@@ -6,9 +6,8 @@ from enum import Enum
 from typing import Any, Dict, List
 
 from langchain.schema import BaseMessage
-from langchain_anthropic import ChatAnthropic
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
+from tiktoken import encoding_for_model
 
 from local_operator.console import (
     ExecutionSection,
@@ -94,6 +93,7 @@ class LocalCodeExecutor:
     detail_conversation_length: int
     interrupted: bool
     can_prompt_user: bool
+    total_tokens: int
 
     """A class to handle local Python code execution with safety checks and context management.
 
@@ -111,6 +111,7 @@ class LocalCodeExecutor:
         can_prompt_user (bool): Informs the executor about whether the end user has access to the
             terminal (True), or is consuming the service from some remote source where they
             cannot respond via the terminal (False).
+        total_tokens (int): Running count of total tokens consumed by model invocations
     """
 
     def __init__(
@@ -139,6 +140,7 @@ class LocalCodeExecutor:
         self.max_conversation_history = max_conversation_history
         self.detail_conversation_length = detail_conversation_length
         self.can_prompt_user = can_prompt_user
+        self.total_tokens = 0
         self.reset_step_counter()
         self.interrupted = False
 
@@ -195,6 +197,43 @@ class LocalCodeExecutor:
             summary = await self._summarize_conversation_step(msg)
             msg["content"] = summary
             msg["summarized"] = "True"
+
+    def get_model_name(self) -> str:
+        """Get the name of the model being used.
+
+        Returns:
+            str: The lowercase name of the model. For OpenAI models, returns the model_name
+                attribute. For other models, returns the string representation of the model.
+        """
+        if isinstance(self.model, ChatOpenAI):
+            return self.model.model_name.lower()
+        else:
+            return str(self.model.model).lower()
+
+    def get_invoke_token_count(self, messages: List[Dict[str, str]]) -> int:
+        """Calculate the total number of tokens in a list of conversation messages.
+
+        Uses the appropriate tokenizer for the current model to count tokens. Falls back
+        to the GPT-4 tokenizer if the model-specific tokenizer is not available.
+
+        Args:
+            messages: List of conversation message dictionaries, each containing a "content" key
+                with the message text.
+
+        Returns:
+            int: Total number of tokens across all messages.
+        """
+        tokenizer = None
+        try:
+            tokenizer = encoding_for_model(self.get_model_name())
+        except Exception:
+            tokenizer = encoding_for_model("gpt-4o")
+
+        return sum(len(tokenizer.encode(entry["content"])) for entry in messages)
+
+    def get_session_token_usage(self) -> int:
+        """Get the total token count for the current session."""
+        return self.total_tokens
 
     def extract_code_blocks(self, text: str) -> List[str]:
         """Extract Python code blocks from text using markdown-style syntax.
@@ -292,11 +331,7 @@ class LocalCodeExecutor:
 
         while attempt < max_attempts:
             try:
-                model_name = ""
-                if isinstance(self.model, ChatOpenAI):
-                    model_name = self.model.model_name.lower()
-                else:
-                    model_name = str(self.model.model).lower()
+                model_name = self.get_model_name()
 
                 if "claude" in model_name:
                     # Anthropic models expect a single message, so combine the conversation history
@@ -313,33 +348,40 @@ class LocalCodeExecutor:
                         )
                         combined_message += f"{role_prefix}{msg['content']}\n\n"
                     combined_message = combined_message.strip()
-                    return await self.model.ainvoke(combined_message)
-                elif "o1" in model_name or "o3" in model_name:
-                    # OpenAI reasoning models (o1 and o3) expect a combined prompt
-                    # for chain-of-thought reasoning.
-                    combined_message = ""
-                    for msg in messages:
-                        role_prefix = (
-                            "User: "
-                            if msg["role"] == ConversationRole.USER.value
-                            else (
-                                "Assistant: "
-                                if msg["role"] == ConversationRole.ASSISTANT.value
-                                else "System: "
-                            )
-                        )
-                        combined_message += f"{role_prefix}{msg['content']}\n\n"
-                    combined_message = combined_message.strip()
-                    return await self.model.ainvoke(combined_message)
-                elif "gemini" in model_name or "mistral" in model_name:
-                    # Convert system messages to human messages for Google Gemini
-                    # or Mistral models.
-                    for msg in messages[1:]:
-                        if msg["role"] == ConversationRole.SYSTEM.value:
-                            msg["role"] = ConversationRole.USER.value
-                    return await self.model.ainvoke(messages)
+                    response = await self.model.ainvoke(combined_message)
                 else:
-                    return await self.model.ainvoke(messages)
+                    if "o1" in model_name or "o3" in model_name:
+                        # OpenAI reasoning models (o1 and o3) expect a combined prompt
+                        # for chain-of-thought reasoning.
+                        combined_message = ""
+                        for msg in messages:
+                            role_prefix = (
+                                "User: "
+                                if msg["role"] == ConversationRole.USER.value
+                                else (
+                                    "Assistant: "
+                                    if msg["role"] == ConversationRole.ASSISTANT.value
+                                    else "System: "
+                                )
+                            )
+                            combined_message += f"{role_prefix}{msg['content']}\n\n"
+                        combined_message = combined_message.strip()
+                        response = await self.model.ainvoke(combined_message)
+                    elif "gemini" in model_name or "mistral" in model_name:
+                        # Convert system messages to human messages for Google Gemini
+                        # or Mistral models.
+                        for msg in messages[1:]:
+                            if msg["role"] == ConversationRole.SYSTEM.value:
+                                msg["role"] = ConversationRole.USER.value
+                        response = await self.model.ainvoke(messages)
+                    else:
+                        response = await self.model.ainvoke(messages)
+
+                # Update the total token count
+                self.total_tokens += self.get_invoke_token_count(messages)
+
+                return response
+
             except Exception as e:
                 last_error = e
                 attempt += 1

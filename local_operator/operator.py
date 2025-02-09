@@ -238,13 +238,11 @@ class Operator:
 
     def print_conversation_history(self) -> None:
         """Print the conversation history for debugging."""
-        tokenizer = encoding_for_model("gpt-4o")
-        total_tokens = sum(
-            len(tokenizer.encode(entry["content"])) for entry in self.executor.conversation_history
-        )
+        total_tokens = self.executor.get_invoke_token_count(self.executor.conversation_history)
 
         print("\n\033[1;35m╭─ Debug: Conversation History ───────────────────────\033[0m")
-        print(f"\033[1;35m│ Total tokens: {total_tokens}\033[0m")
+        print(f"\033[1;35m│ Message tokens: {total_tokens}                       \033[0m")
+        print(f"\033[1;35m│ Session tokens: {self.executor.get_session_token_usage()}\033[0m")
         for i, entry in enumerate(self.executor.conversation_history, 1):
             role = entry["role"]
             content = entry["content"]
