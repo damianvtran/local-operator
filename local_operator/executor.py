@@ -3,6 +3,7 @@ import io
 import os
 import sys
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List
 
 from langchain.schema import BaseMessage
@@ -838,3 +839,23 @@ class LocalCodeExecutor:
 
         response = await self.invoke_model(summary_history)
         return response.content if isinstance(response.content, str) else str(response.content)
+
+    def get_conversation_working_directory(self) -> Path | None:
+        """Get the working directory from the conversation history.
+
+        Searches through the conversation history in reverse order to find the most recent
+        system message containing a working directory specification. This is used to maintain
+        context about which directory the conversation is operating in.
+
+        Returns:
+            Path | None: The working directory path extracted from the most recent system
+                        message that specifies it, or None if no working directory is found
+                        in any system message.
+        """
+        for msg in reversed(self.conversation_history):
+            if msg["role"] == ConversationRole.SYSTEM.value:
+                content = msg["content"]
+                lower_content = content.lower()
+                if lower_content.startswith("current working directory:"):
+                    return Path(lower_content.split("current working directory:", 1)[1].strip())
+        return None
