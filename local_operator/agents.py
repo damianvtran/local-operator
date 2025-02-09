@@ -1,6 +1,7 @@
 import json
 import uuid
 from datetime import datetime, timezone
+from importlib.metadata import version
 from pathlib import Path
 from typing import Dict, List
 
@@ -15,6 +16,7 @@ class AgentMetadata(BaseModel):
     id: str = Field(..., description="Unique identifier for the agent")
     name: str = Field(..., description="Agent's name")
     created_date: datetime = Field(..., description="The date when the agent was created")
+    version: str = Field(..., description="The version of the agent")
 
 
 class AgentEditMetadata(BaseModel):
@@ -23,6 +25,24 @@ class AgentEditMetadata(BaseModel):
     """
 
     name: str | None = Field(None, description="Agent's name")
+
+
+class AgentConversation(BaseModel):
+    """
+    Pydantic model representing an agent's conversation history.
+
+    This model stores both the version of the conversation format and the actual
+    conversation history as a list of message dictionaries. Each message in the
+    conversation history contains a 'role' (e.g. 'USER' or 'ASSISTANT') and 'content'.
+
+    Attributes:
+        version (str): The version of the conversation format/schema
+        conversation (List[Dict[str, str]]): List of conversation messages, where each
+            message is a dictionary with 'role' and 'content' keys
+    """
+
+    version: str = Field(..., description="The version of the conversation")
+    conversation: List[Dict[str, str]] = Field(..., description="The conversation history")
 
 
 class AgentRegistry:
@@ -56,7 +76,7 @@ class AgentRegistry:
     def _load_agents_metadata(self) -> None:
         """
         Load agents' metadata from the agents.json file into memory.
-        Only metadata such as 'id', 'name', and 'created_date' is stored.
+        Only metadata such as 'id', 'name', 'created_date', and 'version' is stored.
 
         Raises:
             Exception: If there is an error loading or parsing the agents metadata file
@@ -102,6 +122,7 @@ class AgentRegistry:
             id=str(uuid.uuid4()),
             name=agent_edit_metadata.name,
             created_date=datetime.now(timezone.utc),
+            version=version("local-operator"),
         )
 
         # Add to in-memory agents
@@ -288,8 +309,13 @@ class AgentRegistry:
         if conversation_file.exists():
             try:
                 with conversation_file.open("r", encoding="utf-8") as f:
-                    conversation = json.load(f)
-                return conversation
+                    raw_data = json.load(f)
+
+                    try:
+                        conversation_data = AgentConversation.model_validate(raw_data)
+                        return conversation_data.conversation
+                    except Exception as e:
+                        raise Exception(f"Failed to load conversation: {str(e)}")
             except Exception:
                 # Return an empty conversation if the file is unreadable.
                 return []
@@ -307,10 +333,17 @@ class AgentRegistry:
             conversation (List[Dict[str, str]]): The conversation history to save, with each message
                 containing 'role' (matching ConversationRole enum values) and 'content' fields.
         """
+        agent = self.get_agent(agent_id)
+
         conversation_file = self.config_dir / f"{agent_id}_conversation.json"
+        conversation_data = AgentConversation(
+            version=agent.version,
+            conversation=conversation,
+        )
+
         try:
             with conversation_file.open("w", encoding="utf-8") as f:
-                json.dump(conversation, f, indent=2, ensure_ascii=False)
+                json.dump(conversation_data.model_dump(), f, indent=2, ensure_ascii=False)
         except Exception as e:
             # In a production scenario, consider logging this exception
             raise e

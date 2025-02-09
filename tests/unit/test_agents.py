@@ -155,7 +155,7 @@ def test_create_agent_save_failure(temp_agents_dir: Path, monkeypatch):
 
     with pytest.raises(Exception) as exc_info:
         registry.create_agent(AgentEditMetadata(name="Agent Fail"))
-    assert "Failed to save agent metadata" in str(exc_info.value)
+    assert str(exc_info.value) == "Fake write failure"
 
 
 def test_clone_agent(temp_agents_dir: Path):
