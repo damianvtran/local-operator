@@ -3,8 +3,8 @@ import os
 from pathlib import Path
 from typing import List
 
-import faiss
 import numpy as np
+from faiss import IndexFlatL2, read_index, write_index
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 
@@ -52,7 +52,7 @@ class EmbeddingManager:
     metadata_path: Path
     embedding_dim: int
     model: SentenceTransformer
-    index: faiss.Index
+    index: IndexFlatL2
     metadata: list[str]
 
     def __init__(
@@ -75,7 +75,7 @@ class EmbeddingManager:
             # Load existing index and metadata if available; otherwise, create new ones.
             if os.path.exists(self.index_path) and os.path.exists(self.metadata_path):
                 try:
-                    self.index = faiss.read_index(str(self.index_path))
+                    self.index = read_index(str(self.index_path))
                     self.metadata = []
                     with open(self.metadata_path, "r") as f:
                         for line in f:
@@ -84,7 +84,7 @@ class EmbeddingManager:
                 except (RuntimeError, json.JSONDecodeError, IOError) as e:
                     raise RAGException(f"Failed to load existing index/metadata: {str(e)}")
             else:
-                self.index = faiss.IndexFlatL2(self.embedding_dim)
+                self.index = IndexFlatL2(self.embedding_dim)
                 self.metadata = []  # List to store insights (as plain text).
                 self.save()  # Creates the initial index and metadata file.
         except Exception as e:
@@ -252,7 +252,7 @@ class EmbeddingManager:
             RAGException: If there are issues saving the index or metadata
         """
         try:
-            faiss.write_index(self.index, str(self.index_path))
+            write_index(self.index, str(self.index_path))
             with open(self.metadata_path, "w") as f:
                 for insight in self.metadata:
                     f.write(json.dumps({"text": insight}) + "\n")
