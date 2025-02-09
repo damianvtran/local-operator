@@ -9,6 +9,8 @@ tiktoken==0.8.0
 uvicorn==0.22.0
 fastapi==0.115.8
 playwright==1.49.1
+faiss-cpu==1.10.0
+sentence-transformers==3.4.1
 
 # Dev
 flake8==7.1.0
