@@ -193,3 +193,21 @@ def test_clone_agent_duplicate_name(temp_agents_dir: Path):
 
     with pytest.raises(ValueError):
         registry.clone_agent(source_agent.id, "Existing")
+
+
+def test_get_agent_by_name(temp_agents_dir: Path):
+    registry = AgentRegistry(temp_agents_dir)
+
+    # Create a test agent
+    agent_name = "Test Agent"
+    agent = registry.create_agent(AgentEditMetadata(name=agent_name))
+
+    # Test finding existing agent
+    found_agent = registry.get_agent_by_name(agent_name)
+    assert found_agent is not None
+    assert found_agent.id == agent.id
+    assert found_agent.name == agent_name
+
+    # Test finding non-existent agent
+    not_found = registry.get_agent_by_name("Non Existent")
+    assert not_found is None
