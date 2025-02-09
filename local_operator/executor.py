@@ -585,6 +585,9 @@ class LocalCodeExecutor:
         )
 
         response_json = process_json_response(response_content)
+
+        self._append_to_history(ConversationRole.ASSISTANT, response_json.model_dump_json())
+
         return response_json.code
 
     async def process_response(self, response: ResponseJsonSchema) -> ProcessResponseOutput:

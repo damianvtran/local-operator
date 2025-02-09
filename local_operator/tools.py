@@ -166,5 +166,5 @@ def query_knowledge_base(
     Returns:
         str: A string containing the matching insights, one per line
     """
-    results = rag_manager.query_insight(query, num_results, max_distance)
+    results = rag_manager.query_insight(query, k=num_results, max_distance=max_distance)
     return "\n".join(result.insight for result in results)

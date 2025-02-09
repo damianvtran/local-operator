@@ -17,6 +17,7 @@ Example Usage:
 import argparse
 import asyncio
 import os
+import shutil
 import traceback
 from importlib.metadata import version
 from pathlib import Path
@@ -121,6 +122,17 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "create", help="Create a new configuration file", parents=[parent_parser]
     )
 
+    # Knowledge command
+    knowledge_parser = subparsers.add_parser(
+        "knowledge", help="Manage knowledge base", parents=[parent_parser]
+    )
+    knowledge_subparsers = knowledge_parser.add_subparsers(dest="knowledge_command")
+    knowledge_subparsers.add_parser(
+        "clear",
+        help="Clear the knowledge base by deleting the /rag directory",
+        parents=[parent_parser],
+    )
+
     # Serve command to start the API server
     serve_parser = subparsers.add_parser(
         "serve", help="Start the FastAPI server", parents=[parent_parser]
@@ -181,6 +193,21 @@ def serve_command(host: str, port: int, reload: bool) -> int:
     return 0
 
 
+def knowledge_clear_command() -> int:
+    """Clear the knowledge base by deleting the /rag directory."""
+    rag_dir = Path.home() / ".local-operator" / "rag"
+    if rag_dir.exists():
+        try:
+            shutil.rmtree(rag_dir)
+            print("Knowledge base cleared successfully")
+        except Exception as e:
+            print(f"Error clearing knowledge base: {e}")
+            return -1
+    else:
+        print("Knowledge base is already empty")
+    return 0
+
+
 def main() -> int:
     try:
         parser = build_cli_parser()
@@ -195,6 +222,11 @@ def main() -> int:
                 return config_create_command()
             else:
                 parser.error(f"Invalid config command: {args.config_command}")
+        elif args.subcommand == "knowledge":
+            if args.knowledge_command == "clear":
+                return knowledge_clear_command()
+            else:
+                parser.error(f"Invalid knowledge command: {args.knowledge_command}")
         elif args.subcommand == "serve":
             # Use the provided host, port, and reload options for serving the API.
             return serve_command(args.host, args.port, args.reload)

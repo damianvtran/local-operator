@@ -82,7 +82,6 @@ def test_best_insight_among_multiple(embedding_manager, query, haystack, needle)
 @pytest.mark.parametrize(
     "query, insights, max_distance, expected_count",
     [
-        # Very different topics should be filtered out
         (
             "Tell me about quantum physics",
             [
@@ -90,10 +89,9 @@ def test_best_insight_among_multiple(embedding_manager, query, haystack, needle)
                 "Soccer is played with 11 players per team",
                 "The Eiffel Tower is in Paris, France",
             ],
-            1.5,  # Standard max distance
-            0,  # None should match quantum physics
+            1.5,
+            0,
         ),
-        # Some related, some unrelated content
         (
             "How do computers work?",
             [
@@ -102,17 +100,15 @@ def test_best_insight_among_multiple(embedding_manager, query, haystack, needle)
                 "Giraffes have long necks",
                 "Lions hunt in packs",
             ],
-            1.5,  # Increased max distance to catch both computer-related insights
-            2,  # Only computer-related insights should match
+            1.5,
+            2,
         ),
-        # Testing with empty results at very strict threshold
         (
             "artificial intelligence",
             ["Machine learning models process data", "Neural networks are inspired by brains"],
-            0.1,  # Very strict max distance
-            0,  # Even related content should be filtered at this threshold
+            0.1,
+            0,
         ),
-        # Testing with technical vs non-technical matches
         (
             "programming languages syntax",
             [
@@ -121,8 +117,8 @@ def test_best_insight_among_multiple(embedding_manager, query, haystack, needle)
                 "Natural languages evolve over time",
                 "Birds migrate south for winter",
             ],
-            1.5,  # Increased max_distance to catch both programming insights
-            2,  # Only programming-related insights should match
+            1.5,
+            2,
         ),
     ],
 )
