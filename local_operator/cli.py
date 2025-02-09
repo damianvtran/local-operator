@@ -68,7 +68,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         " agent will be used which does not persist its session.",
     )
     parent_parser.add_argument(
-        "--training",
+        "--train",
         action="store_true",
         help="Enable training mode for the operator.  The agent's conversation history will be"
         " saved to the agent's directory after each completed task.  This allows the agent to"
@@ -136,6 +136,19 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "create", help="Create a new configuration file", parents=[parent_parser]
     )
 
+    # Agents command
+    agents_parser = subparsers.add_parser("agents", help="Manage agents", parents=[parent_parser])
+    agents_subparsers = agents_parser.add_subparsers(dest="agents_command")
+    agents_subparsers.add_parser("list", help="List all agents", parents=[parent_parser])
+    delete_parser = agents_subparsers.add_parser(
+        "delete", help="Delete an agent by name", parents=[parent_parser]
+    )
+    delete_parser.add_argument(
+        "name",
+        type=str,
+        help="Name of the agent to delete",
+    )
+
     # Serve command to start the API server
     serve_parser = subparsers.add_parser(
         "serve", help="Start the FastAPI server", parents=[parent_parser]
@@ -196,6 +209,39 @@ def serve_command(host: str, port: int, reload: bool) -> int:
     return 0
 
 
+def agents_list_command() -> int:
+    """List all agents."""
+    agent_registry = AgentRegistry(Path.home() / ".local-operator")
+    agents = agent_registry.list_agents()
+    if not agents:
+        print("\n\033[1;33mNo agents found.\033[0m")
+        return 0
+
+    print("\n\033[1;32m╭─ Agents ────────────────────────────────────\033[0m")
+    for agent in agents:
+        print(f"\033[1;32m│ Name: {agent.name}\033[0m")
+        print(f"\033[1;32m│ ID: {agent.id}\033[0m")
+        print(f"\033[1;32m│ Created: {agent.created_date}\033[0m")
+        print("\033[1;32m│\033[0m")
+    print("\033[1;32m╰──────────────────────────────────────────────\033[0m")
+    return 0
+
+
+def agents_delete_command(name: str) -> int:
+    """Delete an agent by name."""
+    agent_registry = AgentRegistry(Path.home() / ".local-operator")
+    agents = agent_registry.list_agents()
+    matching_agents = [a for a in agents if a.name == name]
+    if not matching_agents:
+        print(f"\n\033[1;31mError: No agent found with name: {name}\033[0m")
+        return -1
+
+    agent = matching_agents[0]
+    agent_registry.delete_agent(agent.id)
+    print(f"\n\033[1;32mSuccessfully deleted agent: {name}\033[0m")
+    return 0
+
+
 def main() -> int:
     try:
         parser = build_cli_parser()
@@ -210,6 +256,13 @@ def main() -> int:
                 return config_create_command()
             else:
                 parser.error(f"Invalid config command: {args.config_command}")
+        elif args.subcommand == "agents":
+            if args.agents_command == "list":
+                return agents_list_command()
+            elif args.agents_command == "delete":
+                return agents_delete_command(args.name)
+            else:
+                parser.error(f"Invalid agents command: {args.agents_command}")
         elif args.subcommand == "serve":
             # Use the provided host, port, and reload options for serving the API.
             return serve_command(args.host, args.port, args.reload)
@@ -268,7 +321,7 @@ def main() -> int:
                 agent = matching_agents[0]
 
         training_mode = False
-        if args.training:
+        if args.train:
             training_mode = True
 
         operator = Operator(
