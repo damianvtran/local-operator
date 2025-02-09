@@ -232,11 +232,8 @@ def serve_command(host: str, port: int, reload: bool) -> int:
     return 0
 
 
-def agents_list_command(args: argparse.Namespace) -> int:
+def agents_list_command(args: argparse.Namespace, agent_registry: AgentRegistry) -> int:
     """List all agents."""
-    config_dir = Path.home() / ".local-operator"
-    agents_dir = config_dir / "agents"
-    agent_registry = AgentRegistry(agents_dir)
     agents = agent_registry.list_agents()
     if not agents:
         print("\n\033[1;33mNo agents found.\033[0m")
@@ -276,11 +273,8 @@ def agents_list_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def agents_create_command(name: str) -> int:
+def agents_create_command(name: str, agent_registry: AgentRegistry) -> int:
     """Create a new agent with the given name."""
-    config_dir = Path.home() / ".local-operator"
-    agents_dir = config_dir / "agents"
-    agent_registry = AgentRegistry(agents_dir)
 
     # If name not provided, prompt user for input
     if not name:
@@ -302,11 +296,8 @@ def agents_create_command(name: str) -> int:
     return 0
 
 
-def agents_delete_command(name: str) -> int:
+def agents_delete_command(name: str, agent_registry: AgentRegistry) -> int:
     """Delete an agent by name."""
-    config_dir = Path.home() / ".local-operator"
-    agents_dir = config_dir / "agents"
-    agent_registry = AgentRegistry(agents_dir)
     agents = agent_registry.list_agents()
     matching_agents = [a for a in agents if a.name == name]
     if not matching_agents:
@@ -326,6 +317,9 @@ def main() -> int:
 
         os.environ["LOCAL_OPERATOR_DEBUG"] = "true" if args.debug else "false"
 
+        config_dir = Path.home() / ".local-operator"
+        agents_dir = config_dir / "agents"
+
         if args.subcommand == "credential":
             return credential_command(args)
         elif args.subcommand == "config":
@@ -334,20 +328,18 @@ def main() -> int:
             else:
                 parser.error(f"Invalid config command: {args.config_command}")
         elif args.subcommand == "agents":
+            agent_registry = AgentRegistry(agents_dir)
             if args.agents_command == "list":
-                return agents_list_command(args)
+                return agents_list_command(args, agent_registry)
             elif args.agents_command == "create":
-                return agents_create_command(args.name)
+                return agents_create_command(args.name, agent_registry)
             elif args.agents_command == "delete":
-                return agents_delete_command(args.name)
+                return agents_delete_command(args.name, agent_registry)
             else:
                 parser.error(f"Invalid agents command: {args.agents_command}")
         elif args.subcommand == "serve":
             # Use the provided host, port, and reload options for serving the API.
             return serve_command(args.host, args.port, args.reload)
-
-        config_dir = Path.home() / ".local-operator"
-        agents_dir = config_dir / "agents"
 
         config_manager = ConfigManager(config_dir)
         credential_manager = CredentialManager(config_dir)

@@ -116,6 +116,7 @@ def test_print_cli_banner_with_agent(monkeypatch, mock_config_manager):
         id="test-agent-id",
         name="Test Agent",
         created_date=datetime.now(),
+        version="1.0.0",
     )
 
     print_cli_banner(mock_config_manager, current_agent=agent, training_mode=False)
@@ -141,6 +142,7 @@ def test_print_cli_banner_with_agent_and_training(monkeypatch, mock_config_manag
         id="test-agent-id",
         name="Test Agent",
         created_date=datetime.now(),
+        version="1.0.0",
     )
 
     print_cli_banner(mock_config_manager, current_agent=agent, training_mode=True)
