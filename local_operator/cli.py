@@ -370,17 +370,6 @@ def main() -> int:
             print(error_msg)
             return -1
 
-        # Get conversation history if agent name provided
-        conversation_history = []
-        if args.agent_name:
-            conversation_history = agent_registry.load_agent_conversation(args.agent_name)
-
-        executor = LocalCodeExecutor(
-            model_instance,
-            detail_conversation_length=config_manager.get_config_value("detail_length", 10),
-            conversation_history=conversation_history,
-        )
-
         # Get agent if name provided
         agent = None
         if args.agent_name:
@@ -400,9 +389,21 @@ def main() -> int:
             else:
                 agent = matching_agents[0]
 
+        if agent:
+            # Get conversation history if agent name provided
+            conversation_history = agent_registry.load_agent_conversation(agent.id)
+        else:
+            conversation_history = []
+
         training_mode = False
         if args.train:
             training_mode = True
+
+        executor = LocalCodeExecutor(
+            model_instance,
+            detail_conversation_length=config_manager.get_config_value("detail_length", 10),
+            conversation_history=conversation_history,
+        )
 
         operator = Operator(
             executor=executor,
