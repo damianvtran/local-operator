@@ -15,7 +15,7 @@ def temp_dir(tmp_path):
 # Fixture to create an instance of EmbeddingManager using the temporary directory
 @pytest.fixture
 def embedding_manager(temp_dir):
-    return EmbeddingManager(file_path=temp_dir)
+    return EmbeddingManager(file_path=temp_dir, model_name="all-MiniLM-L6-v2")
 
 
 # Helper function to normalize code blocks.
@@ -77,6 +77,71 @@ def test_best_insight_among_multiple(embedding_manager, query, haystack, needle)
     assert results, "No results returned"
     best_result = results[0]
     assert best_result.insight == needle, f"Expected '{needle}', but got '{best_result.insight}'"
+
+
+@pytest.mark.parametrize(
+    "query, insights, max_distance, expected_count",
+    [
+        # Very different topics should be filtered out
+        (
+            "Tell me about quantum physics",
+            [
+                "Baking cookies requires flour, sugar and butter",
+                "Soccer is played with 11 players per team",
+                "The Eiffel Tower is in Paris, France",
+            ],
+            1.5,  # Standard max distance
+            0,  # None should match quantum physics
+        ),
+        # Some related, some unrelated content
+        (
+            "How do computers work?",
+            [
+                "CPUs process instructions using logic gates",
+                "Memory stores data temporarily",
+                "Giraffes have long necks",
+                "Lions hunt in packs",
+            ],
+            1.5,  # Increased max distance to catch both computer-related insights
+            2,  # Only computer-related insights should match
+        ),
+        # Testing with empty results at very strict threshold
+        (
+            "artificial intelligence",
+            ["Machine learning models process data", "Neural networks are inspired by brains"],
+            0.1,  # Very strict max distance
+            0,  # Even related content should be filtered at this threshold
+        ),
+        # Testing with technical vs non-technical matches
+        (
+            "programming languages syntax",
+            [
+                "Python uses indentation for blocks",
+                "Java requires semicolons",
+                "Natural languages evolve over time",
+                "Birds migrate south for winter",
+            ],
+            1.5,  # Increased max_distance to catch both programming insights
+            2,  # Only programming-related insights should match
+        ),
+    ],
+)
+def test_max_distance_filtering(embedding_manager, query, insights, max_distance, expected_count):
+    # Add all test insights
+    for insight in insights:
+        embedding_manager.add_insight(insight)
+
+    # Query with specified max_distance
+    results = embedding_manager.query_insight(query, max_distance=max_distance)
+
+    # Verify we get expected number of results
+    assert (
+        len(results) == expected_count
+    ), f"Expected {expected_count} results but got {len(results)}"
+
+    # Verify all returned results are within max_distance
+    for result in results:
+        assert result.distance <= max_distance
 
 
 def test_add_large_text_basic(embedding_manager):
