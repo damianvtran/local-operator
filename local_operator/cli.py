@@ -23,7 +23,7 @@ from pathlib import Path
 
 import uvicorn
 
-from local_operator.agents import AgentRegistry
+from local_operator.agents import AgentEditMetadata, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
@@ -66,6 +66,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=str,
         help="Name of the agent to use for this session.  If not provided, the default"
         " agent will be used which does not persist its session.",
+    )
+    parent_parser.add_argument(
+        "--training",
+        action="store_true",
+        help="Enable training mode for the operator.  The agent's conversation history will be"
+        " saved to the agent's directory after each completed task.  This allows the agent to"
+        " learn from its experiences and improve its performance over time.  Omit this flag to"
+        " have the agent not store the conversation history, thus resetting it after each session.",
     )
 
     # Main parser
@@ -246,9 +254,22 @@ def main() -> int:
             agents = agent_registry.list_agents()
             matching_agents = [a for a in agents if a.name == args.agent_name]
             if not matching_agents:
-                print(f"\n\033[1;31mError: No agent found with name: {args.agent_name}\033[0m")
-                return -1
-            agent = matching_agents[0]
+                print(
+                    f"\n\033[1;33mNo agent found with name: {args.agent_name}. "
+                    f"Creating new agent...\033[0m"
+                )
+                agent = agent_registry.create_agent(AgentEditMetadata(name=args.agent_name))
+                print("\n\033[1;32m╭─ Created New Agent ───────────────────────────\033[0m")
+                print(f"\033[1;32m│ Name: {agent.name}\033[0m")
+                print(f"\033[1;32m│ ID: {agent.id}\033[0m")
+                print(f"\033[1;32m│ Created: {agent.created_date}\033[0m")
+                print("\033[1;32m╰──────────────────────────────────────────────────\033[0m\n")
+            else:
+                agent = matching_agents[0]
+
+        training_mode = False
+        if args.training:
+            training_mode = True
 
         operator = Operator(
             executor=executor,
@@ -258,6 +279,7 @@ def main() -> int:
             type=OperatorType.CLI,
             agent_registry=agent_registry,
             current_agent=agent,
+            training_mode=training_mode,
         )
 
         # Start the async chat interface or execute single command

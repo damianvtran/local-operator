@@ -62,6 +62,12 @@ class Operator:
         credential_manager: CredentialManager instance for managing credentials
         executor_is_processing: Whether the executor is processing a response
         agent_registry: AgentRegistry instance for managing agents
+        current_agent: The current agent to use for this session
+        training_mode: Whether the operator is in training mode.  If True, the operator will save
+        the conversation history to the agent's directory after each completed task.  This
+        allows the agent to learn from its experiences and improve its performance over time.
+        Omit this flag to have the agent not store the conversation history, thus resetting it
+        after each session.
     """
 
     credential_manager: CredentialManager
@@ -72,6 +78,7 @@ class Operator:
     type: OperatorType
     agent_registry: AgentRegistry
     current_agent: AgentMetadata | None
+    training_mode: bool
 
     def __init__(
         self,
@@ -82,6 +89,7 @@ class Operator:
         type: OperatorType,
         agent_registry: AgentRegistry,
         current_agent: AgentMetadata | None,
+        training_mode: bool,
     ):
         """Initialize the Operator with required components.
 
@@ -93,6 +101,12 @@ class Operator:
             type (OperatorType): Type of operator (CLI or Server)
             agent_registry (AgentRegistry): Registry for managing AI agents
             current_agent (AgentMetadata | None): The current agent to use for this session
+            training_mode (bool): Whether the operator is in training mode.
+                If True, the operator will save the conversation history to the agent's directory
+                after each completed task. This allows the agent to learn from its experiences
+                and improve its performance over time.
+                Omit this flag to have the agent not store the conversation history, thus
+                resetting it after each session.
 
         The Operator class serves as the main interface for interacting with language models,
         managing configuration, credentials, and code execution. It handles both CLI and
@@ -106,6 +120,7 @@ class Operator:
         self.type = type
         self.agent_registry = agent_registry
         self.current_agent = current_agent
+        self.training_mode = training_mode
 
         if self.type == OperatorType.CLI:
             self._load_input_history()
@@ -247,8 +262,8 @@ class Operator:
             ):
                 break
 
-        # Save the conversation history if an agent is being used
-        if self.current_agent:
+        # Save the conversation history if an agent is being used and training mode is enabled
+        if self.training_mode and self.current_agent:
             self.agent_registry.save_agent_conversation(
                 self.current_agent.id, self.executor.conversation_history
             )
