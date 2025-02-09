@@ -223,9 +223,7 @@ def main() -> int:
 
         executor = LocalCodeExecutor(
             model_instance,
-            detail_conversation_length=config_manager.get_config_value(
-                "detail_conversation_length", 10
-            ),
+            detail_conversation_length=config_manager.get_config_value("detail_length", 10),
         )
 
         operator = Operator(
