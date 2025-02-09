@@ -247,6 +247,12 @@ class Operator:
             ):
                 break
 
+        # Save the conversation history if an agent is being used
+        if self.current_agent:
+            self.agent_registry.save_agent_conversation(
+                self.current_agent.id, self.executor.conversation_history
+            )
+
         if os.environ.get("LOCAL_OPERATOR_DEBUG") == "true":
             self.print_conversation_history()
 
