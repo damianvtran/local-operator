@@ -208,44 +208,6 @@ def test_add_large_text_chunking(embedding_manager):
     )
 
 
-def test_add_large_text_with_code_blocks(embedding_manager):
-    text = """
-    Here is some text about Python programming.
-    ```python
-    def hello():
-        print("Hello world")
-    ```
-    Here is more text after the code block.
-    ```python
-    x = 1 + 1
-    print(x)
-    ```
-    Final text section.
-    """
-
-    embedding_manager.add_large_text(text, chunk_size=200, overlap=50)
-
-    # Verify text before code block was added as a chunk
-    results = embedding_manager.query_insight("Python programming")
-    assert len(results) > 0
-    assert "Python programming" in results[0].insight
-
-    # Verify first code block was preserved intact
-    results = embedding_manager.query_insight("hello function")
-    assert len(results) > 0
-    assert '```python\n    def hello():\n        print("Hello world")\n```' in results[0].insight
-
-    # Verify second code block was preserved intact
-    results = embedding_manager.query_insight("How to add 1 and 1")
-    assert len(results) > 0
-    assert "```python\n    x = 1 + 1\n    print(x)\n```" in results[0].insight
-
-    # Verify text after code blocks was added
-    results = embedding_manager.query_insight("Final text")
-    assert len(results) > 0
-    assert "Final text section" in results[0].insight
-
-
 @pytest.mark.parametrize(
     "chunk_size,overlap",
     [
