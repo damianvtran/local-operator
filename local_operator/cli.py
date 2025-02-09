@@ -221,7 +221,12 @@ def main() -> int:
             print(error_msg)
             return -1
 
-        executor = LocalCodeExecutor(model_instance)
+        executor = LocalCodeExecutor(
+            model_instance,
+            detail_conversation_length=config_manager.get_config_value(
+                "detail_conversation_length", 10
+            ),
+        )
 
         operator = Operator(
             executor=executor,

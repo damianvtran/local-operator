@@ -107,7 +107,7 @@ def test_main_success():
     ):
 
         mock_config_manager = mock_config_manager_cls.return_value
-        mock_config_manager.get_config_value.side_effect = ["deepseek", "deepseek-chat"]
+        mock_config_manager.get_config_value.side_effect = ["deepseek", "deepseek-chat", 10]
 
         with patch("sys.argv", ["program", "--hosting", "deepseek"]):
             result = main()
