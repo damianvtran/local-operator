@@ -1,9 +1,13 @@
-from pathlib import Path
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from local_operator.agents import AgentMetadata
 from local_operator.cli import (
+    agents_create_command,
+    agents_delete_command,
+    agents_list_command,
     build_cli_parser,
     config_create_command,
     credential_command,
@@ -137,3 +141,67 @@ def test_main_exception():
         with patch("sys.argv", ["program"]):
             result = main()
             assert result == -1
+
+
+def test_agents_list_command_no_agents():
+    with patch("local_operator.cli.AgentRegistry") as mock_registry:
+        mock_registry.return_value.list_agents.return_value = []
+        args = MagicMock()
+        result = agents_list_command(args)
+        assert result == 0
+
+
+def test_agents_list_command_with_agents():
+    mock_agents = [
+        AgentMetadata(id="1", name="Agent1", created_date=datetime.now()),
+        AgentMetadata(id="2", name="Agent2", created_date=datetime.now()),
+    ]
+
+    with patch("local_operator.cli.AgentRegistry") as mock_registry:
+        mock_registry.return_value.list_agents.return_value = mock_agents
+        args = MagicMock()
+        args.page = 1
+        args.perpage = 10
+
+        result = agents_list_command(args)
+        assert result == 0
+
+
+def test_agents_create_command_with_name():
+    mock_agent = AgentMetadata(id="test-id", name="TestAgent", created_date=datetime.now())
+
+    with patch("local_operator.cli.AgentRegistry") as mock_registry:
+        mock_registry.return_value.create_agent.return_value = mock_agent
+        result = agents_create_command("TestAgent")
+        assert result == 0
+        mock_registry.return_value.create_agent.assert_called_once()
+
+
+def test_agents_create_command_empty_name():
+    with patch("builtins.input", return_value=""):
+        result = agents_create_command("")
+        assert result == -1
+
+
+def test_agents_create_command_keyboard_interrupt():
+    with patch("builtins.input", side_effect=KeyboardInterrupt):
+        result = agents_create_command("")
+        assert result == -1
+
+
+def test_agents_delete_command_success():
+    mock_agent = AgentMetadata(id="test-id", name="TestAgent", created_date=datetime.now())
+
+    with patch("local_operator.cli.AgentRegistry") as mock_registry:
+        mock_registry.return_value.list_agents.return_value = [mock_agent]
+        result = agents_delete_command("TestAgent")
+        assert result == 0
+        mock_registry.return_value.delete_agent.assert_called_once_with("test-id")
+
+
+def test_agents_delete_command_not_found():
+    with patch("local_operator.cli.AgentRegistry") as mock_registry:
+        mock_registry.return_value.list_agents.return_value = []
+        result = agents_delete_command("NonExistentAgent")
+        assert result == -1
+        mock_registry.return_value.delete_agent.assert_not_called()

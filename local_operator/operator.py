@@ -7,9 +7,9 @@ from pathlib import Path
 
 from langchain_core.messages import BaseMessage
 from pydantic import ValidationError
-from tiktoken import encoding_for_model
 
 import local_operator.tools as tools
+from local_operator.agents import AgentMetadata, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.console import print_cli_banner, spinner
 from local_operator.credentials import CredentialManager
@@ -61,6 +61,13 @@ class Operator:
         config_manager: ConfigManager instance for managing configuration
         credential_manager: CredentialManager instance for managing credentials
         executor_is_processing: Whether the executor is processing a response
+        agent_registry: AgentRegistry instance for managing agents
+        current_agent: The current agent to use for this session
+        training_mode: Whether the operator is in training mode.  If True, the operator will save
+        the conversation history to the agent's directory after each completed task.  This
+        allows the agent to learn from its experiences and improve its performance over time.
+        Omit this flag to have the agent not store the conversation history, thus resetting it
+        after each session.
     """
 
     credential_manager: CredentialManager
@@ -69,6 +76,9 @@ class Operator:
     executor: LocalCodeExecutor
     executor_is_processing: bool
     type: OperatorType
+    agent_registry: AgentRegistry
+    current_agent: AgentMetadata | None
+    training_mode: bool
 
     def __init__(
         self,
@@ -77,12 +87,30 @@ class Operator:
         model_instance: ModelType,
         config_manager: ConfigManager,
         type: OperatorType,
+        agent_registry: AgentRegistry,
+        current_agent: AgentMetadata | None,
+        training_mode: bool,
     ):
-        """Initialize the CLI by loading credentials or prompting for them.
+        """Initialize the Operator with required components.
 
         Args:
-            hosting (str): Hosting platform (deepseek, openai, or ollama)
-            model (str): Model name to use
+            executor (LocalCodeExecutor): Executor instance for handling code execution
+            credential_manager (CredentialManager): Manager for handling credentials
+            model_instance (ModelType): The configured language model instance
+            config_manager (ConfigManager): Manager for handling configuration
+            type (OperatorType): Type of operator (CLI or Server)
+            agent_registry (AgentRegistry): Registry for managing AI agents
+            current_agent (AgentMetadata | None): The current agent to use for this session
+            training_mode (bool): Whether the operator is in training mode.
+                If True, the operator will save the conversation history to the agent's directory
+                after each completed task. This allows the agent to learn from its experiences
+                and improve its performance over time.
+                Omit this flag to have the agent not store the conversation history, thus
+                resetting it after each session.
+
+        The Operator class serves as the main interface for interacting with language models,
+        managing configuration, credentials, and code execution. It handles both CLI and
+        server-based operation modes.
         """
         self.credential_manager = credential_manager
         self.config_manager = config_manager
@@ -90,6 +118,9 @@ class Operator:
         self.executor = executor
         self.executor_is_processing = False
         self.type = type
+        self.agent_registry = agent_registry
+        self.current_agent = current_agent
+        self.training_mode = training_mode
 
         if self.type == OperatorType.CLI:
             self._load_input_history()
@@ -231,6 +262,12 @@ class Operator:
             ):
                 break
 
+        # Save the conversation history if an agent is being used and training mode is enabled
+        if self.training_mode and self.current_agent:
+            self.agent_registry.save_agent_conversation(
+                self.current_agent.id, self.executor.conversation_history
+            )
+
         if os.environ.get("LOCAL_OPERATOR_DEBUG") == "true":
             self.print_conversation_history()
 
@@ -271,14 +308,15 @@ class Operator:
         - [DONE]: Model has completed its task
         - [BYE]: Gracefully exit the chat session
         """
-        print_cli_banner(self.config_manager)
+        print_cli_banner(self.config_manager, self.current_agent, self.training_mode)
 
-        self.executor.conversation_history = [
-            {
-                "role": ConversationRole.SYSTEM.value,
-                "content": create_system_prompt(tools),
-            }
-        ]
+        if len(self.executor.conversation_history) == 0:
+            self.executor.conversation_history = [
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": create_system_prompt(tools),
+                }
+            ]
 
         while True:
             self.executor_is_processing = False

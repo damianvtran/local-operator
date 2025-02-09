@@ -120,6 +120,7 @@ class LocalCodeExecutor:
         max_conversation_history: int = 100,
         detail_conversation_length: int = 10,
         can_prompt_user: bool = True,
+        conversation_history: List[Dict[str, str]] = [],
     ):
         """Initialize the LocalCodeExecutor with a language model.
 
@@ -131,11 +132,12 @@ class LocalCodeExecutor:
                 conversation history.  Every step before this except the system prompt will be
                 summarized.  Set to -1 to keep all messages in full detail.
             can_prompt_user: Informs the executor about whether the end user has access to the
-            terminal (True), or is consuming the service from some remote source where they
-            cannot respond via the terminal (False).
+                terminal (True), or is consuming the service from some remote source where they
+                cannot respond via the terminal (False).
+            conversation_history: A list of message dictionaries tracking the conversation.
         """
         self.context = {}
-        self.conversation_history = []
+        self.conversation_history = conversation_history
         self.model = model
         self.max_conversation_history = max_conversation_history
         self.detail_conversation_length = detail_conversation_length

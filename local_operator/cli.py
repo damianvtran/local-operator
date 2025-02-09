@@ -16,6 +16,7 @@ Example Usage:
 
 import argparse
 import asyncio
+import math
 import os
 import traceback
 from importlib.metadata import version
@@ -23,6 +24,7 @@ from pathlib import Path
 
 import uvicorn
 
+from local_operator.agents import AgentEditMetadata, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
@@ -59,6 +61,20 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--debug",
         action="store_true",
         help="Enable debug mode for verbose output",
+    )
+    parent_parser.add_argument(
+        "--agent-name",
+        type=str,
+        help="Name of the agent to use for this session.  If not provided, the default"
+        " agent will be used which does not persist its session.",
+    )
+    parent_parser.add_argument(
+        "--train",
+        action="store_true",
+        help="Enable training mode for the operator.  The agent's conversation history will be"
+        " saved to the agent's directory after each completed task.  This allows the agent to"
+        " learn from its experiences and improve its performance over time.  Omit this flag to"
+        " have the agent not store the conversation history, thus resetting it after each session.",
     )
 
     # Main parser
@@ -121,6 +137,41 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "create", help="Create a new configuration file", parents=[parent_parser]
     )
 
+    # Agents command
+    agents_parser = subparsers.add_parser("agents", help="Manage agents", parents=[parent_parser])
+    agents_subparsers = agents_parser.add_subparsers(dest="agents_command")
+    list_parser = agents_subparsers.add_parser(
+        "list", help="List all agents", parents=[parent_parser]
+    )
+    list_parser.add_argument(
+        "--page",
+        type=int,
+        default=1,
+        help="Page number to display (default: 1)",
+    )
+    list_parser.add_argument(
+        "--perpage",
+        type=int,
+        default=10,
+        help="Number of agents per page (default: 10)",
+    )
+    create_parser = agents_subparsers.add_parser(
+        "create", help="Create a new agent", parents=[parent_parser]
+    )
+    create_parser.add_argument(
+        "name",
+        type=str,
+        help="Name of the agent to create",
+    )
+    delete_parser = agents_subparsers.add_parser(
+        "delete", help="Delete an agent by name", parents=[parent_parser]
+    )
+    delete_parser.add_argument(
+        "name",
+        type=str,
+        help="Name of the agent to delete",
+    )
+
     # Serve command to start the API server
     serve_parser = subparsers.add_parser(
         "serve", help="Start the FastAPI server", parents=[parent_parser]
@@ -181,6 +232,93 @@ def serve_command(host: str, port: int, reload: bool) -> int:
     return 0
 
 
+def agents_list_command(args: argparse.Namespace) -> int:
+    """List all agents."""
+    config_dir = Path.home() / ".local-operator"
+    agents_dir = config_dir / "agents"
+    agent_registry = AgentRegistry(agents_dir)
+    agents = agent_registry.list_agents()
+    if not agents:
+        print("\n\033[1;33mNo agents found.\033[0m")
+        return 0
+
+    # Get pagination arguments
+    page = getattr(args, "page", 1)
+    per_page = getattr(args, "perpage", 10)
+
+    # Calculate pagination
+    total_agents = len(agents)
+    total_pages = math.ceil(total_agents / per_page)
+    start_idx = (page - 1) * per_page
+    end_idx = min(start_idx + per_page, total_agents)
+
+    # Get agents for current page
+    page_agents = agents[start_idx:end_idx]
+
+    print("\n\033[1;32m╭─ Agents ────────────────────────────────────\033[0m")
+    for i, agent in enumerate(page_agents):
+        is_last = i == len(page_agents) - 1
+        branch = "└──" if is_last else "├──"
+        print(f"\033[1;32m│ {branch} Agent {start_idx + i + 1}\033[0m")
+        left_bar = "│ │" if not is_last else "│ "
+        print(f"\033[1;32m{left_bar}   • Name: {agent.name}\033[0m")
+        print(f"\033[1;32m{left_bar}   • ID: {agent.id}\033[0m")
+        print(f"\033[1;32m{left_bar}   • Created: {agent.created_date}\033[0m")
+        if not is_last:
+            print("\033[1;32m│ │\033[0m")
+
+    # Print pagination info
+    print("\033[1;32m│\033[0m")
+    print(f"\033[1;32m│ Page {page} of {total_pages} (Total agents: {total_agents})\033[0m")
+    if page < total_pages:
+        print(f"\033[1;32m│ Use --page {page + 1} to see next page\033[0m")
+    print("\033[1;32m╰──────────────────────────────────────────────\033[0m")
+    return 0
+
+
+def agents_create_command(name: str) -> int:
+    """Create a new agent with the given name."""
+    config_dir = Path.home() / ".local-operator"
+    agents_dir = config_dir / "agents"
+    agent_registry = AgentRegistry(agents_dir)
+
+    # If name not provided, prompt user for input
+    if not name:
+        try:
+            name = input("\033[1;36mEnter name for new agent: \033[0m").strip()
+            if not name:
+                print("\n\033[1;31mError: Agent name cannot be empty\033[0m")
+                return -1
+        except (KeyboardInterrupt, EOFError):
+            print("\n\033[1;31mAgent creation cancelled\033[0m")
+            return -1
+
+    agent = agent_registry.create_agent(AgentEditMetadata(name=name))
+    print("\n\033[1;32m╭─ Created New Agent ───────────────────────────\033[0m")
+    print(f"\033[1;32m│ Name: {agent.name}\033[0m")
+    print(f"\033[1;32m│ ID: {agent.id}\033[0m")
+    print(f"\033[1;32m│ Created: {agent.created_date}\033[0m")
+    print("\033[1;32m╰──────────────────────────────────────────────────\033[0m\n")
+    return 0
+
+
+def agents_delete_command(name: str) -> int:
+    """Delete an agent by name."""
+    config_dir = Path.home() / ".local-operator"
+    agents_dir = config_dir / "agents"
+    agent_registry = AgentRegistry(agents_dir)
+    agents = agent_registry.list_agents()
+    matching_agents = [a for a in agents if a.name == name]
+    if not matching_agents:
+        print(f"\n\033[1;31mError: No agent found with name: {name}\033[0m")
+        return -1
+
+    agent = matching_agents[0]
+    agent_registry.delete_agent(agent.id)
+    print(f"\n\033[1;32mSuccessfully deleted agent: {name}\033[0m")
+    return 0
+
+
 def main() -> int:
     try:
         parser = build_cli_parser()
@@ -195,14 +333,25 @@ def main() -> int:
                 return config_create_command()
             else:
                 parser.error(f"Invalid config command: {args.config_command}")
+        elif args.subcommand == "agents":
+            if args.agents_command == "list":
+                return agents_list_command(args)
+            elif args.agents_command == "create":
+                return agents_create_command(args.name)
+            elif args.agents_command == "delete":
+                return agents_delete_command(args.name)
+            else:
+                parser.error(f"Invalid agents command: {args.agents_command}")
         elif args.subcommand == "serve":
             # Use the provided host, port, and reload options for serving the API.
             return serve_command(args.host, args.port, args.reload)
 
         config_dir = Path.home() / ".local-operator"
+        agents_dir = config_dir / "agents"
 
         config_manager = ConfigManager(config_dir)
         credential_manager = CredentialManager(config_dir)
+        agent_registry = AgentRegistry(agents_dir)
 
         # Override config with CLI args where provided
         config_manager.update_config_from_args(args)
@@ -221,9 +370,36 @@ def main() -> int:
             print(error_msg)
             return -1
 
+        # Get agent if name provided
+        agent = None
+        if args.agent_name:
+            agent = agent_registry.get_agent_by_name(args.agent_name)
+            if not agent:
+                print(
+                    f"\n\033[1;33mNo agent found with name: {args.agent_name}. "
+                    f"Creating new agent...\033[0m"
+                )
+                agent = agent_registry.create_agent(AgentEditMetadata(name=args.agent_name))
+                print("\n\033[1;32m╭─ Created New Agent ───────────────────────────\033[0m")
+                print(f"\033[1;32m│ Name: {agent.name}\033[0m")
+                print(f"\033[1;32m│ ID: {agent.id}\033[0m")
+                print(f"\033[1;32m│ Created: {agent.created_date}\033[0m")
+                print("\033[1;32m╰──────────────────────────────────────────────────\033[0m\n")
+
+        if agent:
+            # Get conversation history if agent name provided
+            conversation_history = agent_registry.load_agent_conversation(agent.id)
+        else:
+            conversation_history = []
+
+        training_mode = False
+        if args.train:
+            training_mode = True
+
         executor = LocalCodeExecutor(
             model_instance,
             detail_conversation_length=config_manager.get_config_value("detail_length", 10),
+            conversation_history=conversation_history,
         )
 
         operator = Operator(
@@ -232,6 +408,9 @@ def main() -> int:
             config_manager=config_manager,
             model_instance=model_instance,
             type=OperatorType.CLI,
+            agent_registry=agent_registry,
+            current_agent=agent,
+            training_mode=training_mode,
         )
 
         # Start the async chat interface or execute single command

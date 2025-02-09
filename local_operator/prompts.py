@@ -176,6 +176,7 @@ Additional User Info:
 <user_system_prompt>
 {{user_system_prompt}}
 </user_system_prompt>
+⚠️ Pay close attention to the user's information and use it to help you achieve the user's goal.
 
 Critical Constraints:
 - No combined steps or assumptions.
