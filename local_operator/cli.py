@@ -25,7 +25,6 @@ from pathlib import Path
 import uvicorn
 
 from local_operator.config import ConfigManager
-from local_operator.console import spinner
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
 from local_operator.model import configure_model
