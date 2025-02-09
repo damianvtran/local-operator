@@ -67,7 +67,7 @@ class EmbeddingManager:
         try:
             os.makedirs(file_path, exist_ok=True)
             self.index_path = file_path / "rag_index.index"
-            self.metadata_path = file_path / "rag_metadata.json"
+            self.metadata_path = file_path / "rag_metadata.jsonl"
 
             self.embedding_dim = embedding_dim
             self.model = SentenceTransformer(model_name)
@@ -76,8 +76,11 @@ class EmbeddingManager:
             if os.path.exists(self.index_path) and os.path.exists(self.metadata_path):
                 try:
                     self.index = faiss.read_index(str(self.index_path))
+                    self.metadata = []
                     with open(self.metadata_path, "r") as f:
-                        self.metadata = json.load(f)
+                        for line in f:
+                            if line.strip():
+                                self.metadata.append(json.loads(line)["text"])
                 except (RuntimeError, json.JSONDecodeError, IOError) as e:
                     raise RAGException(f"Failed to load existing index/metadata: {str(e)}")
             else:
@@ -92,7 +95,7 @@ class EmbeddingManager:
 
         This method encodes the provided text insight into an embedding vector,
         adds it to the FAISS index, stores the original text in metadata,
-        and persists the changes to disk.
+        and persists the changes to disk. Duplicate insights are not added.
 
         Args:
             insight (str): The text insight to add to the system
@@ -103,6 +106,10 @@ class EmbeddingManager:
         """
         if not insight or not isinstance(insight, str):
             raise ValueError("Insight must be a non-empty string")
+
+        # Skip if this exact insight already exists
+        if insight in self.metadata:
+            return
 
         try:
             embedding = self.model.encode(insight, show_progress_bar=False)
@@ -247,6 +254,7 @@ class EmbeddingManager:
         try:
             faiss.write_index(self.index, str(self.index_path))
             with open(self.metadata_path, "w") as f:
-                json.dump(self.metadata, f)
+                for insight in self.metadata:
+                    f.write(json.dumps({"text": insight}) + "\n")
         except Exception as e:
             raise RAGException(f"Failed to save RAG system state: {str(e)}")

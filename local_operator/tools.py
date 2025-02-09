@@ -141,7 +141,8 @@ async def browse_single_url(url: str) -> str:
 
 
 def add_info_to_knowledge_base(rag_manager: EmbeddingManager, info: str) -> None:
-    """Add information to the knowledge base and save the manager.
+    """Add information to the knowledge base and save the manager.  Use this to store
+    large amounts of information that shouldn't be printed to the console.
 
     Args:
         rag_manager: The RAG manager instance
@@ -152,7 +153,7 @@ def add_info_to_knowledge_base(rag_manager: EmbeddingManager, info: str) -> None
 
 
 def query_knowledge_base(
-    rag_manager: EmbeddingManager, query: str, num_results: int = 5, max_distance: float = 1.5
+    rag_manager: EmbeddingManager, query: str, num_results: int = 10, max_distance: float = 3.0
 ) -> str:
     """
     Query the knowledge base and return the results as a string which

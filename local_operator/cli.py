@@ -25,6 +25,7 @@ from pathlib import Path
 import uvicorn
 
 from local_operator.config import ConfigManager
+from local_operator.console import spinner
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
 from local_operator.model import configure_model
@@ -208,6 +209,67 @@ def knowledge_clear_command() -> int:
     return 0
 
 
+async def init_config(args: argparse.Namespace, config_dir: Path):
+    """
+    Initialize the configuration and create an Operator instance.
+
+    This function sets up all the necessary components for the Local Operator:
+    - Configures managers for config, credentials, and embeddings
+    - Updates configuration with CLI arguments
+    - Initializes the AI model
+    - Creates the code executor and operator
+
+    Args:
+        args: Command line arguments parsed by argparse
+        config_dir: Path to the configuration directory
+
+    Returns:
+        Operator: Configured operator instance if successful
+        None: If model initialization fails
+
+    Displays a spinner during initialization and handles cleanup on completion.
+    """
+    spinner_task = asyncio.create_task(spinner("Initializing"))
+    try:
+        config_manager = ConfigManager(config_dir)
+        credential_manager = CredentialManager(config_dir)
+        rag_manager = EmbeddingManager(config_dir / "rag")
+
+        # Override config with CLI args where provided
+        config_manager.update_config_from_args(args)
+
+        # Get final config values
+        hosting = config_manager.get_config_value("hosting")
+        model = config_manager.get_config_value("model_name")
+
+        model_instance = configure_model(hosting, model, credential_manager)
+
+        if not model_instance:
+            error_msg = (
+                f"\n\033[1;31mError: Model not found for hosting: "
+                f"{hosting} and model: {model}\033[0m"
+            )
+            print(error_msg)
+            return None
+
+        executor = LocalCodeExecutor(model_instance, rag_manager=rag_manager)
+
+        operator = Operator(
+            executor=executor,
+            credential_manager=credential_manager,
+            config_manager=config_manager,
+            model_instance=model_instance,
+            type=OperatorType.CLI,
+        )
+        return operator
+    finally:
+        spinner_task.cancel()
+        try:
+            await spinner_task
+        except asyncio.CancelledError:
+            pass
+
+
 def main() -> int:
     try:
         parser = build_cli_parser()
@@ -233,36 +295,9 @@ def main() -> int:
 
         config_dir = Path.home() / ".local-operator"
 
-        config_manager = ConfigManager(config_dir)
-        credential_manager = CredentialManager(config_dir)
-        rag_manager = EmbeddingManager(config_dir / "rag")
-
-        # Override config with CLI args where provided
-        config_manager.update_config_from_args(args)
-
-        # Get final config values
-        hosting = config_manager.get_config_value("hosting")
-        model = config_manager.get_config_value("model_name")
-
-        model_instance = configure_model(hosting, model, credential_manager)
-
-        if not model_instance:
-            error_msg = (
-                f"\n\033[1;31mError: Model not found for hosting: "
-                f"{hosting} and model: {model}\033[0m"
-            )
-            print(error_msg)
+        operator = asyncio.run(init_config(args, config_dir))
+        if operator is None:
             return -1
-
-        executor = LocalCodeExecutor(model_instance, rag_manager=rag_manager)
-
-        operator = Operator(
-            executor=executor,
-            credential_manager=credential_manager,
-            config_manager=config_manager,
-            model_instance=model_instance,
-            type=OperatorType.CLI,
-        )
 
         # Start the async chat interface or execute single command
         if args.subcommand == "exec":
