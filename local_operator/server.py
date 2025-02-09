@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from tiktoken import encoding_for_model
 
+from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
@@ -132,12 +133,15 @@ class ChatResponse(BaseModel):
 async def lifespan(app: FastAPI):
     # Initialize on startup by setting up the credential and config managers
     config_dir = Path.home() / ".local-operator"
+    agents_dir = config_dir / "agents"
     app.state.credential_manager = CredentialManager(config_dir=config_dir)
     app.state.config_manager = ConfigManager(config_dir=config_dir)
+    app.state.agent_registry = AgentRegistry(config_dir=agents_dir)
     yield
     # Clean up on shutdown
     app.state.credential_manager = None
     app.state.config_manager = None
+    app.state.agent_registry = None
 
 
 app = FastAPI(
@@ -153,7 +157,8 @@ def create_operator(request_hosting: str, request_model: str) -> Operator:
     and the hosting/model provided in the request."""
     credential_manager = getattr(app.state, "credential_manager", None)
     config_manager = getattr(app.state, "config_manager", None)
-    if credential_manager is None or config_manager is None:
+    agent_registry = getattr(app.state, "agent_registry", None)
+    if credential_manager is None or config_manager is None or agent_registry is None:
         raise HTTPException(status_code=500, detail="Server configuration not initialized")
 
     if not request_hosting:
@@ -181,6 +186,9 @@ def create_operator(request_hosting: str, request_model: str) -> Operator:
         model_instance=executor.model,
         config_manager=config_manager,
         type=OperatorType.SERVER,
+        agent_registry=agent_registry,
+        current_agent=None,
+        training_mode=False,
     )
 
 

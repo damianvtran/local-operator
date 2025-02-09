@@ -34,12 +34,18 @@ def cli_operator(mock_model, executor):
     config_manager = MagicMock()
     config_manager.get_config_value = MagicMock(return_value="test_value")
 
+    agent_registry = MagicMock()
+    agent_registry.list_agents = MagicMock(return_value=[])
+
     operator = Operator(
         executor=executor,
         credential_manager=credential_manager,
         model_instance=mock_model,
         config_manager=config_manager,
         type=OperatorType.CLI,
+        agent_registry=agent_registry,
+        current_agent=None,
+        training_mode=False,
     )
 
     operator._get_input_with_history = MagicMock(return_value="noop")
