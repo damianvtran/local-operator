@@ -23,6 +23,85 @@ def normalize_code_block(code: str) -> str:
     return textwrap.dedent(code).strip()
 
 
+def test_save_and_load(temp_dir):
+    # Create initial manager and add some insights
+    manager1 = EmbeddingManager(file_path=temp_dir)
+    test_insights = ["First test insight", "Second test insight", "Third test insight"]
+    for insight in test_insights:
+        manager1.add_insight(insight)
+
+    # Save state
+    manager1.save()
+
+    # Create new manager instance pointing to same files
+    manager2 = EmbeddingManager(file_path=temp_dir)
+
+    # Verify metadata was loaded correctly
+    assert manager2.metadata == test_insights
+
+    # Verify index was loaded correctly by checking dimensions and size
+    assert manager2.index.ntotal == len(test_insights)
+    assert manager2.index.d == manager1.index.d
+
+    # Verify queries return same results
+    query = "test insight"
+    results1 = manager1.query_insight(query)
+    results2 = manager2.query_insight(query)
+
+    assert len(results1) == len(results2)
+    for r1, r2 in zip(results1, results2):
+        assert r1.insight == r2.insight
+        assert abs(r1.distance - r2.distance) < 0.0001  # Allow for minor float differences
+
+
+def test_save_load_empty(temp_dir):
+    # Test saving and loading with no insights
+    manager1 = EmbeddingManager(file_path=temp_dir)
+    manager1.save()
+
+    manager2 = EmbeddingManager(file_path=temp_dir)
+    assert manager2.metadata == []
+    assert manager2.index.ntotal == 0
+
+
+def test_save_load_large_text(temp_dir):
+    manager1 = EmbeddingManager(file_path=temp_dir)
+
+    # Add a large text with code blocks
+    text = """
+    Here is a large text document.
+    It contains multiple paragraphs.
+
+    ```python
+    def example():
+        print("Hello world")
+    ```
+
+    And some more regular text.
+    With multiple sentences.
+    """
+
+    manager1.add_large_text(text)
+    manager1.save()
+
+    # Load in new manager
+    manager2 = EmbeddingManager(file_path=temp_dir)
+
+    # Both should have same number of chunks
+    assert len(manager2.metadata) == len(manager1.metadata)
+    assert manager2.index.ntotal == manager1.index.ntotal
+
+    # Query results should match
+    query = "python code example"
+    results1 = manager1.query_insight(query)
+    results2 = manager2.query_insight(query)
+
+    assert len(results1) == len(results2)
+    for r1, r2 in zip(results1, results2):
+        assert r1.insight == r2.insight
+        assert abs(r1.distance - r2.distance) < 0.0001
+
+
 def test_add_insight(embedding_manager):
     # Test adding an insight using the real transformer
     test_insight = "This is a test insight"
