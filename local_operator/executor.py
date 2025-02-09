@@ -274,10 +274,24 @@ class LocalCodeExecutor:
                 ):
                     # Convert system messages to human messages for Google Gemini
                     # or Mistral models.
-                    for msg in messages[1:]:
+                    formatted_messages = []
+                    for msg in messages:
                         if msg["role"] == ConversationRole.SYSTEM.value:
                             msg["role"] = ConversationRole.USER.value
-                    return await self.model.ainvoke(messages)
+                        formatted_messages.append(msg)
+
+                    # Ensure last message is from user for Mistral
+                    if (
+                        isinstance(self.model, ChatOpenAI)
+                        and self.model.model_name.lower().startswith("mistral")
+                        and formatted_messages[-1]["role"] == ConversationRole.ASSISTANT.value
+                    ):
+                        # Add an empty user message if last message is from assistant
+                        formatted_messages.append(
+                            {"role": ConversationRole.USER.value, "content": "Please continue."}
+                        )
+
+                    return await self.model.ainvoke(formatted_messages)
                 else:
                     return await self.model.ainvoke(messages)
             except Exception as e:

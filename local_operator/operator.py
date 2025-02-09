@@ -210,8 +210,8 @@ class Operator:
         # Query RAG with the generated search query
         insights = self.executor.rag_manager.query_insight(
             rag_query,
-            k=self.config_manager.get_config_value("rag_k", 3),
-            max_distance=self.config_manager.get_config_value("rag_max_distance", 1.0),
+            k=self.config_manager.get_config_value("rag_k", 5),
+            max_distance=self.config_manager.get_config_value("rag_max_distance", 1.5),
         )
 
         if len(insights) == 0:
