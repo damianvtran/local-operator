@@ -84,17 +84,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "alibaba",
             "google",
             "mistral",
+            "openrouter",
             "test",
         ],
         help="Hosting platform to use (deepseek, openai, anthropic, ollama, kimi, alibaba, "
-        "google, mistral, test)",
+        "google, mistral, test, openrouter)",
     )
     parser.add_argument(
         "--model",
         type=str,
         help="Model to use (e.g., deepseek-chat, gpt-4o, qwen2.5:14b, "
         "claude-3-5-sonnet-20240620, moonshot-v1-32k, qwen-plus, gemini-2.0-flash, "
-        "mistral-large-latest, test-model)",
+        "mistral-large-latest, test-model, deepseek/deepseek-chat)",
     )
     subparsers = parser.add_subparsers(dest="subcommand")
 
@@ -110,7 +111,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         required=True,
         help="Credential key to update (e.g., DEEPSEEK_API_KEY, "
         "OPENAI_API_KEY, ANTHROPIC_API_KEY, KIMI_API_KEY, ALIBABA_CLOUD_API_KEY, "
-        "GOOGLE_AI_STUDIO_API_KEY, MISTRAL_API_KEY)",
+        "GOOGLE_AI_STUDIO_API_KEY, MISTRAL_API_KEY, OPENROUTER_API_KEY)",
     )
 
     # Config command

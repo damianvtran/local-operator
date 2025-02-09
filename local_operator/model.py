@@ -60,6 +60,20 @@ def configure_model(hosting: str, model: str, credential_manager) -> ModelType:
             temperature=temperature,
             model=model,
         )
+    elif hosting == "openrouter":
+        if not model:
+            model = "deepseek/deepseek-chat"
+
+        api_key = credential_manager.get_credential("OPENROUTER_API_KEY")
+        if not api_key:
+            api_key = credential_manager.prompt_for_credential("OPENROUTER_API_KEY")
+
+        return ChatOpenAI(
+            api_key=SecretStr(api_key),
+            temperature=0.3,
+            model=model,
+            base_url="https://openrouter.ai/api/v1",
+        )
     elif hosting == "anthropic":
         if not model:
             model = "claude-3-5-sonnet-latest"
