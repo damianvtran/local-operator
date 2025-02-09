@@ -292,7 +292,13 @@ class LocalCodeExecutor:
 
         while attempt < max_attempts:
             try:
-                if isinstance(self.model, ChatAnthropic):
+                model_name = ""
+                if isinstance(self.model, ChatOpenAI):
+                    model_name = self.model.model_name.lower()
+                else:
+                    model_name = str(self.model.model).lower()
+
+                if "claude" in model_name:
                     # Anthropic models expect a single message, so combine the conversation history
                     combined_message = ""
                     for msg in messages:
@@ -308,10 +314,7 @@ class LocalCodeExecutor:
                         combined_message += f"{role_prefix}{msg['content']}\n\n"
                     combined_message = combined_message.strip()
                     return await self.model.ainvoke(combined_message)
-                elif isinstance(self.model, ChatOpenAI) and (
-                    self.model.model_name.lower().startswith("o1")
-                    or self.model.model_name.lower().startswith("o3")
-                ):
+                elif "o1" in model_name or "o3" in model_name:
                     # OpenAI reasoning models (o1 and o3) expect a combined prompt
                     # for chain-of-thought reasoning.
                     combined_message = ""
@@ -328,10 +331,7 @@ class LocalCodeExecutor:
                         combined_message += f"{role_prefix}{msg['content']}\n\n"
                     combined_message = combined_message.strip()
                     return await self.model.ainvoke(combined_message)
-                elif isinstance(self.model, ChatGoogleGenerativeAI) or (
-                    isinstance(self.model, ChatOpenAI)
-                    and self.model.model_name.lower().startswith("mistral")
-                ):
+                elif "gemini" in model_name or "mistral" in model_name:
                     # Convert system messages to human messages for Google Gemini
                     # or Mistral models.
                     for msg in messages[1:]:
