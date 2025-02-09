@@ -5,6 +5,8 @@ from typing import Dict, List, Set, Tuple
 
 import playwright.async_api as pw
 
+from local_operator.rag import EmbeddingManager, InsightResult
+
 
 def _get_git_ignored_files(gitignore_path: str) -> Set[str]:
     """Get list of files ignored by git from a .gitignore file.
@@ -136,3 +138,30 @@ async def browse_single_url(url: str) -> str:
             return content
     except Exception as e:
         raise RuntimeError(f"Failed to browse {url}: {str(e)}")
+
+
+def add_info_to_knowledge_base(rag_manager: EmbeddingManager, info: str) -> None:
+    """Add information to the knowledge base and save the manager.
+
+    Args:
+        rag_manager: The RAG manager instance
+        info: The information to add to the knowledge base
+    """
+    rag_manager.add_large_text(info)
+    rag_manager.save()
+
+
+def query_knowledge_base(rag_manager: EmbeddingManager, query: str, num_results: int = 5) -> str:
+    """
+    Query the knowledge base and return the results as a string which
+    can be printed to the console.
+
+    Args:
+        rag_manager: The RAG manager instance
+        query: The query string to search for
+        num_results: The number of results to return
+    Returns:
+        str: A string containing the matching insights, one per line
+    """
+    results = rag_manager.query_insight(query, num_results)
+    return "\n".join(result.insight for result in results)
