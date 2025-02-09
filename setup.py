@@ -21,6 +21,8 @@ setup(
         "uvicorn>=0.22.0",
         "fastapi>=0.115.8",
         "playwright>=1.49.1",
+        "faiss-cpu>=1.10.0",
+        "sentence-transformers>=3.4.1",
     ],
     python_requires=">=3.12",
     extras_require={
