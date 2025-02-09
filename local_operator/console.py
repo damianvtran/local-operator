@@ -4,6 +4,7 @@ import os
 import sys
 from enum import Enum
 
+from local_operator.agents import AgentMetadata
 from local_operator.config import ConfigManager
 
 
@@ -16,12 +17,13 @@ class ExecutionSection(Enum):
     FOOTER = "footer"
 
 
-def print_cli_banner(config_manager: ConfigManager) -> None:
+def print_cli_banner(
+    config_manager: ConfigManager, current_agent: AgentMetadata | None, training_mode: bool
+) -> None:
     """Print the banner for the chat CLI."""
     debug_indicator = (
         " [DEBUG MODE]" if os.getenv("LOCAL_OPERATOR_DEBUG", "false").lower() == "true" else ""
     )
-
     print("\033[1;36m╭──────────────────────────────────────────────────╮\033[0m")
     print(f"\033[1;36m│ Local Executor Agent CLI{debug_indicator:<25}│\033[0m")
     print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
@@ -29,6 +31,18 @@ def print_cli_banner(config_manager: ConfigManager) -> None:
     print("\033[1;36m│ that can execute tasks locally on your device    │\033[0m")
     print("\033[1;36m│ by running Python code.                          │\033[0m")
     print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
+    if current_agent:
+        agent_name = f"Current agent: {current_agent.name}"
+        padding = 49 - len(agent_name)
+        print(f"\033[1;36m│ {agent_name}{' ' * padding}│\033[0m")
+        agent_id = f"Agent ID: {current_agent.id}"
+        padding = 49 - len(agent_id)
+        print(f"\033[1;36m│ {agent_id}{' ' * padding}│\033[0m")
+        if training_mode:
+            training_text = "** Training Mode **"
+            padding = 49 - len(training_text)
+            print(f"\033[1;36m│ {training_text}{' ' * padding}│\033[0m")
+        print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
     hosting = config_manager.get_config_value("hosting")
     model = config_manager.get_config_value("model_name")
     if hosting:
