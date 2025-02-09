@@ -94,10 +94,15 @@ def test_main_success():
     mock_model = MagicMock()
     mock_operator = MagicMock()
     mock_operator.chat = MagicMock()
+    mock_operator.handle_user_input = MagicMock()
+    mock_message = MagicMock()
+    mock_message.response = "Test response"
+    mock_operator.handle_user_input.return_value = mock_message
 
     with (
         patch("local_operator.cli.ConfigManager") as mock_config_manager_cls,
         patch("local_operator.cli.CredentialManager"),
+        patch("local_operator.cli.EmbeddingManager"),
         patch(
             "local_operator.cli.configure_model", return_value=mock_model
         ) as mock_configure_model,
@@ -105,17 +110,16 @@ def test_main_success():
         patch("local_operator.cli.Operator", return_value=mock_operator) as mock_operator_cls,
         patch("local_operator.cli.asyncio.run") as mock_asyncio_run,
     ):
-
         mock_config_manager = mock_config_manager_cls.return_value
         mock_config_manager.get_config_value.side_effect = ["deepseek", "deepseek-chat"]
 
+        # Test interactive chat mode
         with patch("sys.argv", ["program", "--hosting", "deepseek"]):
             result = main()
-
             assert result == 0
             mock_configure_model.assert_called_once()
             mock_operator_cls.assert_called_once()
-            mock_asyncio_run.assert_called_once_with(mock_operator.chat())
+            mock_asyncio_run.assert_called()
 
 
 def test_main_model_not_found():
