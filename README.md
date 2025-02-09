@@ -105,7 +105,7 @@ This will start the FastAPI server app and host at `http://localhost:8080` by de
 
 For development, use the `--reload` argument to enable hot reloading.
 
-## Usage (Agents)
+## Usage (Agents) [BETA - 0.2.0bx]
 
 The agents mode is helpful for passing on knowledge between agents and between runs.  It is also useful for creating reusable agentic experiences learned through conversation with the user.
 
