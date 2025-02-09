@@ -237,25 +237,13 @@ async def chat_endpoint(request: ChatRequest):
         operator = create_operator(request.hosting, request.model)
 
         if request.context and len(request.context) > 0:
-            operator.executor.conversation_history = [
-                {"role": msg.role, "content": msg.content} for msg in request.context
-            ]
-
-        if request.context and len(request.context) > 0:
             # Override the default system prompt with the provided context
             conversation_history = [
                 {"role": msg.role, "content": msg.content} for msg in request.context
             ]
+            operator.executor.initialize_conversation_history(conversation_history)
         else:
-            system_prompt = create_system_prompt()
-            conversation_history = [
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": system_prompt,
-                }
-            ]
-
-        operator.executor.conversation_history = conversation_history
+            operator.executor.initialize_conversation_history()
 
         # Configure model options if provided
         if request.options:
