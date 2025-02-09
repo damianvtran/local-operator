@@ -230,7 +230,11 @@ def init_config(args: argparse.Namespace, config_dir: Path):
     """
     config_manager = ConfigManager(config_dir)
     credential_manager = CredentialManager(config_dir)
-    rag_manager = EmbeddingManager(config_dir / "rag")
+
+    if config_manager.get_config_value("rag_enabled", True):
+        rag_manager = EmbeddingManager(config_dir / "rag")
+    else:
+        rag_manager = None
 
     # Override config with CLI args where provided
     config_manager.update_config_from_args(args)
