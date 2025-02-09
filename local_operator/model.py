@@ -74,7 +74,7 @@ def configure_model(hosting: str, model: str, credential_manager) -> ModelType:
             model=model,
             base_url="https://openrouter.ai/api/v1",
             default_headers={
-                "HTTP-Referer": "https://github.com/damianvtran/local-operator",
+                "HTTP-Referer": "https://local-operator.com",
                 "X-Title": "Local Operator",
             },
         )
