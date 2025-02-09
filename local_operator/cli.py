@@ -159,7 +159,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "create", help="Create a new agent", parents=[parent_parser]
     )
     create_parser.add_argument(
-        "--name",
+        "name",
         type=str,
         help="Name of the agent to create",
     )
@@ -373,9 +373,8 @@ def main() -> int:
         # Get agent if name provided
         agent = None
         if args.agent_name:
-            agents = agent_registry.list_agents()
-            matching_agents = [a for a in agents if a.name == args.agent_name]
-            if not matching_agents:
+            agent = agent_registry.get_agent_by_name(args.agent_name)
+            if not agent:
                 print(
                     f"\n\033[1;33mNo agent found with name: {args.agent_name}. "
                     f"Creating new agent...\033[0m"
@@ -386,8 +385,6 @@ def main() -> int:
                 print(f"\033[1;32m│ ID: {agent.id}\033[0m")
                 print(f"\033[1;32m│ Created: {agent.created_date}\033[0m")
                 print("\033[1;32m╰──────────────────────────────────────────────────\033[0m\n")
-            else:
-                agent = matching_agents[0]
 
         if agent:
             # Get conversation history if agent name provided

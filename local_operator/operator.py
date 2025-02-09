@@ -310,12 +310,13 @@ class Operator:
         """
         print_cli_banner(self.config_manager, self.current_agent, self.training_mode)
 
-        self.executor.conversation_history = [
-            {
-                "role": ConversationRole.SYSTEM.value,
-                "content": create_system_prompt(tools),
-            }
-        ]
+        if len(self.executor.conversation_history) == 0:
+            self.executor.conversation_history = [
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": create_system_prompt(tools),
+                }
+            ]
 
         while True:
             self.executor_is_processing = False

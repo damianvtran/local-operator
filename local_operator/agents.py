@@ -245,6 +245,21 @@ class AgentRegistry:
             raise KeyError(f"Agent with id {agent_id} not found")
         return self._agents[agent_id]
 
+    def get_agent_by_name(self, name: str) -> AgentMetadata | None:
+        """
+        Get an agent's metadata by name.
+
+        Args:
+            name (str): The name of the agent to find.
+
+        Returns:
+            AgentMetadata | None: The agent's metadata if found, None otherwise.
+        """
+        for agent in self._agents.values():
+            if agent.name == name:
+                return agent
+        return None
+
     def list_agents(self) -> List[AgentMetadata]:
         """
         Retrieve a list of all agents' metadata stored in the registry.
