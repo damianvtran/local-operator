@@ -149,9 +149,63 @@ def test_add_large_text_basic(embedding_manager):
 
     # Query should return relevant chunks
     results = embedding_manager.query_insight("multiple sentences")
-    assert len(results) == 2
+    assert len(results) == 1
     assert "multiple sentences" in results[0].insight
-    assert "another sentence" in results[1].insight
+    assert "another sentence" in results[0].insight
+
+
+def test_add_large_text_chunking(embedding_manager):
+    # Create long text blocks without newlines to force mid-sentence chunking
+    text = (
+        "Section 1: This section talks about machine learning and artificial intelligence. "
+        "Deep learning models have revolutionized many fields including computer vision and NLP. "
+        "Neural networks can learn complex patterns from large amounts of data. "
+        "Section 2: Here we discuss database systems and data storage. "
+        "Relational databases use SQL for querying structured data. "
+        "NoSQL databases provide more flexibility for unstructured data storage. "
+        "Section 3: Software engineering best practices are important. "
+        "Code reviews help maintain quality and share knowledge. "
+        "Automated testing ensures reliability of software systems. "
+        "Section 4: Cloud computing has transformed infrastructure. "
+        "Services like AWS and Azure provide scalable solutions. "
+        "Containerization with Docker simplifies deployment."
+    )
+
+    # Use smaller chunk size to avoid splitting important phrases
+    embedding_manager.add_large_text(text, chunk_size=100, overlap=50)
+
+    assert len(embedding_manager.metadata) >= 2
+
+    # Test that we can find content from different sections
+    ml_results = embedding_manager.query_insight("machine learning neural networks", k=5)
+    assert len(ml_results) >= 1
+    assert any("machine learning" in r.insight.lower() for r in ml_results)
+    assert any("neural networks" in r.insight.lower() for r in ml_results)
+
+    db_results = embedding_manager.query_insight("database SQL NoSQL", k=5)
+    assert len(db_results) >= 1
+    assert any("sql" in r.insight.lower() for r in db_results)
+    assert any("nosql" in r.insight.lower() for r in db_results)
+
+    se_results = embedding_manager.query_insight(
+        "software engineering testing", k=5, max_distance=5
+    )
+    assert len(se_results) >= 1
+    assert any("engineering" in r.insight.lower() for r in se_results)
+    assert any("testing" in r.insight.lower() for r in se_results)
+
+    cloud_results = embedding_manager.query_insight("cloud computing AWS", k=5, max_distance=5)
+    assert len(cloud_results) >= 1
+    assert any("cloud computing" in r.insight.lower() for r in cloud_results)
+    assert any("aws" in r.insight.lower() for r in cloud_results)
+
+    # Verify that overlapping chunks allow finding content that spans chunk boundaries
+    spanning_results = embedding_manager.query_insight("databases provide flexibility", k=5)
+    assert len(spanning_results) >= 1
+    assert any(
+        "databases" in r.insight.lower() and "flexibility" in r.insight.lower()
+        for r in spanning_results
+    )
 
 
 def test_add_large_text_with_code_blocks(embedding_manager):

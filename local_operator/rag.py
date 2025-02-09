@@ -113,7 +113,7 @@ class EmbeddingManager:
         except Exception as e:
             raise RAGException(f"Failed to add insight: {str(e)}")
 
-    def add_large_text(self, text: str, chunk_size: int = 500, overlap: int = 50) -> None:
+    def add_large_text(self, text: str, chunk_size: int = 512, overlap: int = 128) -> None:
         """Adds a large text document by breaking it into smaller overlapping chunks.
 
         This method splits a large text into smaller, semantically meaningful chunks
@@ -122,9 +122,9 @@ class EmbeddingManager:
 
         Args:
             text (str): The large text document to add
-            chunk_size (int, optional): Target size of each chunk in characters. Defaults to 500.
+            chunk_size (int, optional): Target size of each chunk in characters. Defaults to 100.
             overlap (int, optional): Number of overlapping characters between chunks.
-            Defaults to 50.
+            Defaults to 20.
 
         Raises:
             RAGException: If there are issues processing or adding the text
@@ -136,65 +136,14 @@ class EmbeddingManager:
             raise ValueError("Invalid chunk_size or overlap parameters")
 
         try:
-            # Split text into chunks while preserving code blocks
-            chunks = []
-            current_chunk = ""
-            lines = text.split("\n")
-            in_code_block = False
-            code_block = []
-            code_block_language = ""
+            # Use the sentence transformer's built-in text splitter
+            chunks = self.model.tokenize([text])["input_ids"][0]
+            chunks = self.model.tokenizer.batch_decode(
+                [chunks[i : i + chunk_size] for i in range(0, len(chunks), chunk_size - overlap)],
+                skip_special_tokens=True,
+            )
 
-            for line in lines:
-                # Check for code block markers
-                if line.strip().startswith("```"):
-                    if not in_code_block:
-                        in_code_block = True
-                        # Extract language if specified
-                        code_block_language = line.strip()[3:].strip()
-                        # If we have content before code block, add it as a chunk
-                        if current_chunk.strip():
-                            chunks.append(current_chunk.strip())
-                            current_chunk = ""
-                        code_block = [f"```{code_block_language}"]
-                        continue
-                    else:
-                        in_code_block = False
-                        code_block.append("```")
-                        # Add complete code block as a chunk
-                        chunks.append("\n".join(code_block))
-                        code_block = []
-                        code_block_language = ""
-                        continue
-
-                # Handle content based on whether we're in a code block
-                if in_code_block:
-                    code_block.append(line)
-                else:
-                    # Regular text processing
-                    if len(current_chunk) + len(line) <= chunk_size:
-                        current_chunk += line + "\n"
-                    else:
-                        if current_chunk:
-                            chunks.append(current_chunk.strip())
-                        # Start new chunk with overlap
-                        if overlap > 0 and len(current_chunk) > overlap:
-                            # Keep last few lines that fit within overlap
-                            overlap_lines = current_chunk.split("\n")
-                            overlap_text = ""
-                            for ol in reversed(overlap_lines):
-                                if len(overlap_text) + len(ol) <= overlap:
-                                    overlap_text = ol + "\n" + overlap_text
-                                else:
-                                    break
-                            current_chunk = overlap_text + line + "\n"
-                        else:
-                            current_chunk = line + "\n"
-
-            # Add final chunk if it exists
-            if current_chunk.strip():
-                chunks.append(current_chunk.strip())
-
-            # Add all chunks as insights
+            # Add all non-empty chunks as insights
             for chunk in chunks:
                 if chunk.strip():
                     self.add_insight(chunk)
@@ -202,9 +151,7 @@ class EmbeddingManager:
         except Exception as e:
             raise RAGException(f"Failed to process large text: {str(e)}")
 
-    def query_insight(
-        self, query: str, k: int = 5, max_distance: float = 1.5
-    ) -> List[InsightResult]:
+    def query_insight(self, query: str, k: int = 5, max_distance: float = 5) -> List[InsightResult]:
         """Retrieves the most similar insights to a given query.
 
         This method encodes the query text, performs a k-nearest neighbor search
