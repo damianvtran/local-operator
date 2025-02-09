@@ -23,6 +23,7 @@ from pathlib import Path
 
 import uvicorn
 
+from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
@@ -59,6 +60,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--debug",
         action="store_true",
         help="Enable debug mode for verbose output",
+    )
+    parent_parser.add_argument(
+        "--agent-name",
+        type=str,
+        help="Name of the agent to use for this session.  If not provided, the default"
+        " agent will be used which does not persist its session.",
     )
 
     # Main parser
@@ -203,6 +210,7 @@ def main() -> int:
 
         config_manager = ConfigManager(config_dir)
         credential_manager = CredentialManager(config_dir)
+        agent_registry = AgentRegistry(config_dir)
 
         # Override config with CLI args where provided
         config_manager.update_config_from_args(args)
@@ -226,12 +234,24 @@ def main() -> int:
             detail_conversation_length=config_manager.get_config_value("detail_length", 10),
         )
 
+        # Get agent if name provided
+        agent = None
+        if args.agent_name:
+            agents = agent_registry.list_agents()
+            matching_agents = [a for a in agents if a.name == args.agent_name]
+            if not matching_agents:
+                print(f"\n\033[1;31mError: No agent found with name: {args.agent_name}\033[0m")
+                return -1
+            agent = matching_agents[0]
+
         operator = Operator(
             executor=executor,
             credential_manager=credential_manager,
             config_manager=config_manager,
             model_instance=model_instance,
             type=OperatorType.CLI,
+            agent_registry=agent_registry,
+            current_agent=agent,
         )
 
         # Start the async chat interface or execute single command

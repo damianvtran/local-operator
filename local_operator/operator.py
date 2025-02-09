@@ -7,9 +7,9 @@ from pathlib import Path
 
 from langchain_core.messages import BaseMessage
 from pydantic import ValidationError
-from tiktoken import encoding_for_model
 
 import local_operator.tools as tools
+from local_operator.agents import AgentMetadata, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.console import print_cli_banner, spinner
 from local_operator.credentials import CredentialManager
@@ -61,6 +61,7 @@ class Operator:
         config_manager: ConfigManager instance for managing configuration
         credential_manager: CredentialManager instance for managing credentials
         executor_is_processing: Whether the executor is processing a response
+        agent_registry: AgentRegistry instance for managing agents
     """
 
     credential_manager: CredentialManager
@@ -69,6 +70,8 @@ class Operator:
     executor: LocalCodeExecutor
     executor_is_processing: bool
     type: OperatorType
+    agent_registry: AgentRegistry
+    current_agent: AgentMetadata | None
 
     def __init__(
         self,
@@ -77,12 +80,23 @@ class Operator:
         model_instance: ModelType,
         config_manager: ConfigManager,
         type: OperatorType,
+        agent_registry: AgentRegistry,
+        current_agent: AgentMetadata | None,
     ):
-        """Initialize the CLI by loading credentials or prompting for them.
+        """Initialize the Operator with required components.
 
         Args:
-            hosting (str): Hosting platform (deepseek, openai, or ollama)
-            model (str): Model name to use
+            executor (LocalCodeExecutor): Executor instance for handling code execution
+            credential_manager (CredentialManager): Manager for handling credentials
+            model_instance (ModelType): The configured language model instance
+            config_manager (ConfigManager): Manager for handling configuration
+            type (OperatorType): Type of operator (CLI or Server)
+            agent_registry (AgentRegistry): Registry for managing AI agents
+            current_agent (AgentMetadata | None): The current agent to use for this session
+
+        The Operator class serves as the main interface for interacting with language models,
+        managing configuration, credentials, and code execution. It handles both CLI and
+        server-based operation modes.
         """
         self.credential_manager = credential_manager
         self.config_manager = config_manager
@@ -90,6 +104,8 @@ class Operator:
         self.executor = executor
         self.executor_is_processing = False
         self.type = type
+        self.agent_registry = agent_registry
+        self.current_agent = current_agent
 
         if self.type == OperatorType.CLI:
             self._load_input_history()
