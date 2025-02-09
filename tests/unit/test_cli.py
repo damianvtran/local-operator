@@ -1,4 +1,3 @@
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -111,7 +110,7 @@ def test_main_success():
         patch("local_operator.cli.asyncio.run") as mock_asyncio_run,
     ):
         mock_config_manager = mock_config_manager_cls.return_value
-        mock_config_manager.get_config_value.side_effect = ["deepseek", "deepseek-chat"]
+        mock_config_manager.get_config_value.side_effect = [True, "deepseek", "deepseek-chat"]
 
         # Test interactive chat mode
         with patch("sys.argv", ["program", "--hosting", "deepseek"]):

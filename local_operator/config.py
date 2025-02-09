@@ -24,6 +24,9 @@ class Config:
             detail_length (int): Maximum length of detailed conversation history
             hosting (str): AI model hosting provider
             model_name (str): Name of the AI model to use
+            rag_enabled (bool): Whether RAG is enabled
+            rag_k (int): Number of RAG results to return
+            rag_max_distance (float): Maximum distance for RAG results
     """
 
     version: str
@@ -93,6 +96,9 @@ DEFAULT_CONFIG = Config(
             "detail_length": 10,
             "hosting": "",
             "model_name": "",
+            "rag_enabled": True,
+            "rag_k": 3,
+            "rag_max_distance": 1.5,
         },
     }
 )

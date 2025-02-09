@@ -8,6 +8,9 @@ from faiss import IndexFlatL2, read_index, write_index
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 
+# Set tokenizers parallelism to false to avoid deadlocks after forking
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 
 class RAGException(Exception):
     """Base exception class for RAG-related errors."""

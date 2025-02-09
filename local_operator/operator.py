@@ -160,6 +160,60 @@ class Operator:
 
         return response.action == "BYE"
 
+    async def _get_rag_insights(self) -> str | None:
+        """Get relevant insights from the RAG system for the given user input.
+
+        Args:
+            user_input: The text input provided by the user
+
+        Returns:
+            str | None: Formatted string containing relevant insights, or None if RAG is not enabled
+
+        Raises:
+            ValueError: If the model is not initialized
+        """
+        if not self.executor.rag_manager:
+            return None
+
+        # First generate a RAG query from the user input
+        rag_query_prompt = {
+            "role": ConversationRole.SYSTEM.value,
+            "content": "Given the user's input, generate a concise search query that "
+            "captures the key concepts to find relevant information from the RAG index. "
+            "Focus on technical terms and core ideas.",
+        }
+
+        # Get last 5 history records for context, excluding the first record
+        recent_history = self.executor.conversation_history[-5:][1:]
+        recent_history.append(rag_query_prompt)
+
+        if self.model is None:
+            raise ValueError("Model is not initialized")
+
+        rag_query_response = await self.executor.invoke_model(recent_history)
+        rag_query = (
+            rag_query_response.content
+            if isinstance(rag_query_response.content, str)
+            else str(rag_query_response.content)
+        )
+
+        # Query RAG with the generated search query
+        insights = self.executor.rag_manager.query_insight(
+            rag_query,
+            k=self.config_manager.get_config_value("rag_k", 3),
+            max_distance=self.config_manager.get_config_value("rag_max_distance", 1.5),
+        )
+
+        if len(insights) == 0:
+            return None
+
+        return f"""
+        Here are some relevant insights from the RAG system:
+        {("\n".join([insight.insight for insight in insights]))}
+        If the user's question is related to any of the insights, you should use them
+        to inform your response.
+        """
+
     async def handle_user_input(self, user_input: str) -> ResponseJsonSchema | None:
         """Process user input and generate agent responses.
 
@@ -181,6 +235,13 @@ class Operator:
         self.executor.conversation_history.append(
             {"role": ConversationRole.USER.value, "content": user_input}
         )
+
+        # Do a retrieval of relevant insights from the RAG system if enabled
+        insights_response = await self._get_rag_insights()
+        if insights_response:
+            self.executor.conversation_history.append(
+                {"role": ConversationRole.SYSTEM.value, "content": insights_response}
+            )
 
         response_json: ResponseJsonSchema | None = None
         response: BaseMessage | None = None
