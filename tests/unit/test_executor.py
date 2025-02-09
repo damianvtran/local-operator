@@ -1,12 +1,13 @@
 import io
 import textwrap
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from openai import APIError
 
 from local_operator.operator import LocalCodeExecutor, Operator, OperatorType
-from local_operator.types import ResponseJsonSchema
+from local_operator.types import ConversationRole, ResponseJsonSchema
 
 
 # Helper function to normalize code blocks.
@@ -812,3 +813,111 @@ async def test_invoke_model_timeout(executor):
             await executor.invoke_model([{"role": "user", "content": "test"}])
 
     assert str(exc_info.value) == "Request timed out"
+
+
+@pytest.mark.parametrize(
+    "test_case",
+    [
+        {
+            "name": "No working directory",
+            "conversation": [
+                {"role": ConversationRole.SYSTEM.value, "content": "Some system message"},
+                {"role": ConversationRole.USER.value, "content": "Test message"},
+            ],
+            "expected": None,
+        },
+        {
+            "name": "Single working directory",
+            "conversation": [
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": "Current working directory: /test/path",
+                },
+                {"role": ConversationRole.USER.value, "content": "Test message"},
+            ],
+            "expected": Path("/test/path"),
+        },
+        {
+            "name": "Multiple working directories - returns most recent",
+            "conversation": [
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": "Current working directory: /old/path",
+                },
+                {"role": ConversationRole.USER.value, "content": "Test message"},
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": "Current working directory: /new/path",
+                },
+            ],
+            "expected": Path("/new/path"),
+        },
+        {
+            "name": "Case insensitive working directory",
+            "conversation": [
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": "CURRENT WORKING DIRECTORY: /test/path",
+                },
+                {"role": ConversationRole.USER.value, "content": "Test message"},
+            ],
+            "expected": Path("/test/path"),
+        },
+        {
+            "name": "Message with working directory but not at start",
+            "conversation": [
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": "Some text before Current working directory: /test/path",
+                },
+                {"role": ConversationRole.USER.value, "content": "Test message"},
+            ],
+            "expected": None,
+        },
+        {
+            "name": "Multiple entries - returns last in list",
+            "conversation": [
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": "Current working directory: /path/one",
+                },
+                {"role": ConversationRole.USER.value, "content": "Test message"},
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": "Current working directory: /path/two",
+                },
+                {"role": ConversationRole.USER.value, "content": "Another message"},
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": "Current working directory: /path/three",
+                },
+            ],
+            "expected": Path("/path/three"),
+        },
+        {
+            "name": "First entry with working directory",
+            "conversation": [
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": "Current working directory: /first/path",
+                },
+                {"role": ConversationRole.USER.value, "content": "Test message"},
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": "Some other system message",
+                },
+                {"role": ConversationRole.ASSISTANT.value, "content": "Response"},
+            ],
+            "expected": Path("/first/path"),
+        },
+        {
+            "name": "Empty conversation",
+            "conversation": [],
+            "expected": None,
+        },
+    ],
+)
+def test_get_conversation_working_directory(executor, test_case):
+    executor.conversation_history = test_case["conversation"]
+    result = executor.get_conversation_working_directory()
+    assert result == test_case["expected"]
