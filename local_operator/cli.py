@@ -251,7 +251,6 @@ def agents_list_command(args: argparse.Namespace, agent_registry: AgentRegistry)
 
     # Get agents for current page
     page_agents = agents[start_idx:end_idx]
-
     print("\n\033[1;32m╭─ Agents ────────────────────────────────────\033[0m")
     for i, agent in enumerate(page_agents):
         is_last = i == len(page_agents) - 1
@@ -261,6 +260,7 @@ def agents_list_command(args: argparse.Namespace, agent_registry: AgentRegistry)
         print(f"\033[1;32m{left_bar}   • Name: {agent.name}\033[0m")
         print(f"\033[1;32m{left_bar}   • ID: {agent.id}\033[0m")
         print(f"\033[1;32m{left_bar}   • Created: {agent.created_date}\033[0m")
+        print(f"\033[1;32m{left_bar}   • Version: {agent.version}\033[0m")
         if not is_last:
             print("\033[1;32m│ │\033[0m")
 
