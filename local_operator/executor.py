@@ -68,9 +68,20 @@ class ConfirmSafetyResult(Enum):
 
     SAFE = "safe"  # Code is safe, no further action needed
     UNSAFE = "unsafe"  # Code is unsafe, execution should be cancelled
+    OVERRIDE = "override"  # Code is unsafe, but a user security override allows it
     CONVERSATION_CONFIRM = (
         "conversation_confirm"  # Safety needs to be confirmed in further conversation with the user
     )
+
+
+def get_confirm_safety_result(response_content: str) -> ConfirmSafetyResult:
+    """Get the result of the safety check from the response content."""
+    if "[OVERRIDE]" in response_content:
+        return ConfirmSafetyResult.OVERRIDE
+    elif "[UNSAFE]" in response_content:
+        return ConfirmSafetyResult.UNSAFE
+    else:
+        return ConfirmSafetyResult.SAFE
 
 
 def process_json_response(response_str: str) -> ResponseJsonSchema:
@@ -445,14 +456,14 @@ class LocalCodeExecutor:
         else:
             raise Exception("Failed to invoke model")
 
-    async def check_code_safety(self, code: str) -> bool:
+    async def check_code_safety(self, code: str) -> ConfirmSafetyResult:
         """Analyze code for potentially dangerous operations using the language model.
 
         Args:
             code (str): The Python code to analyze
 
         Returns:
-            bool: True if dangerous operations are detected, False otherwise
+            ConfirmSafetyResult: Result of the safety check
         """
         response: BaseMessage
 
@@ -475,7 +486,7 @@ class LocalCodeExecutor:
             response_content = (
                 response.content if isinstance(response.content, str) else str(response.content)
             )
-            return "[UNSAFE]" in response_content
+            return get_confirm_safety_result(response_content)
 
         # If we can't prompt the user, we need to use the conversation history to determine
         # if the user has previously indicated a decision.
@@ -490,15 +501,17 @@ class LocalCodeExecutor:
         )
         self.conversation_history.pop()
 
-        if "[UNSAFE]" in response_content:
+        safety_result = get_confirm_safety_result(response_content)
+
+        if safety_result == ConfirmSafetyResult.UNSAFE:
             analysis = response_content.replace("[UNSAFE]", "").strip()
             self._append_to_history(
                 ConversationRole.ASSISTANT,
                 f"The code is unsafe. Here is an analysis of the code risk: {analysis}",
             )
-            return True
+            return ConfirmSafetyResult.UNSAFE
 
-        return False
+        return safety_result
 
     async def execute_code(self, code: str, max_retries: int = 2) -> str:
         """Execute Python code with safety checks and context management.
@@ -516,6 +529,11 @@ class LocalCodeExecutor:
             return "Code execution canceled by user"
         elif safety_result == ConfirmSafetyResult.CONVERSATION_CONFIRM:
             return "Code execution requires further confirmation from the user"
+        elif safety_result == ConfirmSafetyResult.OVERRIDE:
+            print(
+                "\033[1;33m⚠️  Warning: Code safety override applied based on user's security"
+                " prompt\033[0m"
+            )
 
         # Try initial execution
         try:
@@ -529,7 +547,9 @@ class LocalCodeExecutor:
         Returns:
             ConfirmSafetyResult: Result of the safety check
         """
-        if await self.check_code_safety(code):
+        safety_result = await self.check_code_safety(code)
+
+        if safety_result == ConfirmSafetyResult.UNSAFE:
             if self.can_prompt_user:
                 confirm = input(
                     "Warning: Potentially dangerous operation detected. Proceed? (y/n): "
@@ -555,7 +575,7 @@ class LocalCodeExecutor:
                 )
                 self._append_to_history(ConversationRole.ASSISTANT, msg)
                 return ConfirmSafetyResult.CONVERSATION_CONFIRM
-        return ConfirmSafetyResult.SAFE
+        return safety_result
 
     async def _execute_with_output(self, code: str) -> str:
         """Execute code and capture stdout/stderr output.
