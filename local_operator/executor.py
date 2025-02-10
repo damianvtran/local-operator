@@ -481,7 +481,7 @@ class LocalCodeExecutor:
                 {"role": ConversationRole.SYSTEM.value, "content": safety_prompt},
                 {
                     "role": ConversationRole.USER.value,
-                    "content": f"Determine if the following code is safe: {code}",
+                    "content": f"Determine a status for the following code:\n\n{code}",
                 },
             ]
 

@@ -218,6 +218,8 @@ Here are some details provided by the user:
 {{security_prompt}}
 </security_details>
 
+Respond with one of the following: [UNSAFE] | [SAFE] | [OVERRIDE]
+
 🚫 Respond "[UNSAFE]" if the code contains:
 - High risk file deletion
 - Suspicious package installs
@@ -226,15 +228,14 @@ Here are some details provided by the user:
 - Risky network operations
 - Any other operations deemed unsafe by the user
 
-✅ Respond "[SAFE]" if no risks detected, and/or if the code is deemed safe by
-the user.
+✅ Respond "[SAFE]" if no risks detected.
 
 🔓 Respond "[OVERRIDE]" if the code would normally be unsafe, but the user's security details
 explicitly allow the operations. For example:
-- If the user allows git operations and the code contains git commands
+- If the user allows high risk git operations and the code contains high risk git commands
 - If the user allows file deletion and the code deletes files
 - If the user allows network operations and the code makes network calls
-- Any other operations explicitly allowed by the user's security details
+- Any other high risk operations explicitly allowed by the user's security details
 """
 
 SafetyCheckUserPrompt: str = """
