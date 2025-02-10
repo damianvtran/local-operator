@@ -189,16 +189,18 @@ Critical Constraints:
   10000 tokens at once in the code output.
 
 Response Format:
-Respond strictly in JSON following this schema:
+Respond strictly in JSON following this schema with the fields in the following order.
+The order is important because each field will help you think through the long term
+goal as you write your response.
 {
-  "plan": "Set of goals to achieve the user's goal",
   "previous_step_success": true | false,
   "previous_goal": "Your goal from the previous step",
+  "learnings": "Aggregated information learned so far from previous steps",
   "current_goal": "Your goal for the current step",
+  "plan": "Long term plan of actions to achieve the user's goal beyond these goals",
   "next_goal": "Your goal for the next step",
   "response": "Natural language response to the user's goal",
   "code": "Code to achieve the user's goal, must be valid Python code",
-  "learnings": "Aggregated information learned so far from previous steps",
   "action": "CONTINUE | CHECK | DONE | ASK | BYE"
 }
 Include all fields (use empty values if not applicable) and no additional text.
