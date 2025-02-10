@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from openai import APIError
 
-from local_operator.executor import ConfirmSafetyResult
+from local_operator.executor import ConfirmSafetyResult, get_confirm_safety_result
 from local_operator.operator import LocalCodeExecutor, Operator, OperatorType
 from local_operator.types import ConversationRole, ResponseJsonSchema
 
@@ -485,6 +485,66 @@ async def test_execute_code_safety_with_override(executor, mock_model):
         assert "Code Execution Complete" in result
         output = mock_stdout.getvalue()
         assert "Code safety override applied" in output
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        {
+            "name": "Safe response",
+            "input": "The code looks safe to execute\n[SAFE]",
+            "expected": ConfirmSafetyResult.SAFE,
+        },
+        {
+            "name": "Unsafe response",
+            "input": "This code contains dangerous operations\n[UNSAFE]",
+            "expected": ConfirmSafetyResult.UNSAFE,
+        },
+        {
+            "name": "Override response",
+            "input": "Code is normally unsafe but allowed by security settings\n[OVERRIDE]",
+            "expected": ConfirmSafetyResult.OVERRIDE,
+        },
+        {
+            "name": "Default to safe",
+            "input": "Some response without any safety markers",
+            "expected": ConfirmSafetyResult.SAFE,
+        },
+        {
+            "name": "Empty string",
+            "input": "",
+            "expected": ConfirmSafetyResult.SAFE,
+        },
+        {
+            "name": "Just whitespace",
+            "input": "   \n  ",
+            "expected": ConfirmSafetyResult.SAFE,
+        },
+        {
+            "name": "None input",
+            "input": None,
+            "expected": ConfirmSafetyResult.SAFE,
+        },
+        {
+            "name": "Case insensitive SAFE",
+            "input": "[safe]",
+            "expected": ConfirmSafetyResult.SAFE,
+        },
+        {
+            "name": "Case insensitive UNSAFE",
+            "input": "[unsafe]",
+            "expected": ConfirmSafetyResult.UNSAFE,
+        },
+        {
+            "name": "Case insensitive OVERRIDE",
+            "input": "[override]",
+            "expected": ConfirmSafetyResult.OVERRIDE,
+        },
+    ],
+)
+def test_get_confirm_safety_result(case):
+    result = get_confirm_safety_result(case["input"])
+    assert result == case["expected"], f"Failed {case['name']}"
 
 
 @pytest.mark.asyncio
