@@ -76,9 +76,13 @@ class ConfirmSafetyResult(Enum):
 
 def get_confirm_safety_result(response_content: str) -> ConfirmSafetyResult:
     """Get the result of the safety check from the response content."""
-    if "[OVERRIDE]" in response_content:
+    if not response_content:
+        return ConfirmSafetyResult.SAFE
+
+    content_lower = response_content.lower()
+    if "[override]" in content_lower:
         return ConfirmSafetyResult.OVERRIDE
-    elif "[UNSAFE]" in response_content:
+    elif "[unsafe]" in content_lower:
         return ConfirmSafetyResult.UNSAFE
     else:
         return ConfirmSafetyResult.SAFE
