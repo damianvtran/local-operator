@@ -16,14 +16,14 @@ def temp_agents_dir(tmp_path: Path) -> Path:
 def test_create_agent_success(temp_agents_dir: Path):
     registry = AgentRegistry(temp_agents_dir)
     agent_name = "Test Agent"
-    edit_metadata = AgentEditFields(name=agent_name, security_prompt="")
+    edit_metadata = AgentEditFields(name=agent_name, security_prompt="test security prompt")
     agent = registry.create_agent(edit_metadata)
     agents = registry.list_agents()
     assert len(agents) == 1
     created_agent = agents[0]
     assert created_agent.name == agent_name
     assert created_agent.id == agent.id
-
+    assert created_agent.security_prompt == "test security prompt"
     # Verify that agents.json file is created
     agents_file = temp_agents_dir / "agents.json"
     assert agents_file.exists()
@@ -39,7 +39,7 @@ def test_create_agent_success(temp_agents_dir: Path):
 def test_create_agent_duplicate(temp_agents_dir: Path):
     registry = AgentRegistry(temp_agents_dir)
     agent_name = "Duplicate Agent"
-    edit_metadata = AgentEditFields(name=agent_name, security_prompt="")
+    edit_metadata = AgentEditFields(name=agent_name, security_prompt="test security prompt")
     registry.create_agent(edit_metadata)
     with pytest.raises(ValueError) as exc_info:
         # Attempt to create another agent with the same name
@@ -205,7 +205,9 @@ def test_create_agent_save_failure(temp_agents_dir: Path, monkeypatch):
 def test_clone_agent(temp_agents_dir: Path):
     registry = AgentRegistry(temp_agents_dir)
     source_name = "Source Agent"
-    source_agent = registry.create_agent(AgentEditFields(name=source_name, security_prompt=None))
+    source_agent = registry.create_agent(
+        AgentEditFields(name=source_name, security_prompt="test security prompt")
+    )
 
     # Add some conversation history to source agent
     conversation = [
@@ -218,6 +220,7 @@ def test_clone_agent(temp_agents_dir: Path):
     cloned_agent = registry.clone_agent(source_agent.id, "Cloned Agent")
     assert cloned_agent.name == "Cloned Agent"
     assert cloned_agent.id != source_agent.id
+    assert cloned_agent.security_prompt == "test security prompt"
 
     # Verify conversation was copied
     cloned_conversation = registry.load_agent_conversation(cloned_agent.id)
@@ -244,13 +247,16 @@ def test_get_agent_by_name(temp_agents_dir: Path):
 
     # Create a test agent
     agent_name = "Test Agent"
-    agent = registry.create_agent(AgentEditFields(name=agent_name, security_prompt=None))
+    agent = registry.create_agent(
+        AgentEditFields(name=agent_name, security_prompt="test security prompt")
+    )
 
     # Test finding existing agent
     found_agent = registry.get_agent_by_name(agent_name)
     assert found_agent is not None
     assert found_agent.id == agent.id
     assert found_agent.name == agent_name
+    assert found_agent.security_prompt == "test security prompt"
 
     # Test finding non-existent agent
     not_found = registry.get_agent_by_name("Non Existent")
