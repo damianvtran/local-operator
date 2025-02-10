@@ -103,6 +103,8 @@ local-operator serve
 
 This will start the FastAPI server app and host at `http://localhost:8080` by default with uvicorn.  You can change the host and port by using the `--host` and `--port` arguments.  
 
+To view the API documentation, navigate to `http://localhost:8080/docs` in your browser for Swagger UI or `http://localhost:8080/redoc` for ReDoc.
+
 For development, use the `--reload` argument to enable hot reloading.
 
 ## Usage (Agents)
