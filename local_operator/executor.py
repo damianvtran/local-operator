@@ -11,6 +11,7 @@ from langchain_openai import ChatOpenAI
 from tiktoken import encoding_for_model
 
 from local_operator import tools
+from local_operator.agents import AgentData
 from local_operator.console import (
     ExecutionSection,
     format_agent_output,
@@ -135,6 +136,7 @@ class LocalCodeExecutor:
         detail_conversation_length: int = 10,
         can_prompt_user: bool = True,
         conversation_history: List[Dict[str, str]] = [],
+        agent: AgentData | None = None,
     ):
         """Initialize the LocalCodeExecutor with a language model.
 
@@ -157,6 +159,7 @@ class LocalCodeExecutor:
         self.detail_conversation_length = detail_conversation_length
         self.can_prompt_user = can_prompt_user
         self.total_tokens = 0
+        self.agent = agent
         self.reset_step_counter()
         self.interrupted = False
 
@@ -454,8 +457,13 @@ class LocalCodeExecutor:
         response: BaseMessage
 
         if self.can_prompt_user:
+            agent_security_prompt = self.agent.security_prompt if self.agent else ""
+            safety_prompt = SafetyCheckSystemPrompt.replace(
+                "{{security_prompt}}", agent_security_prompt
+            )
+
             safety_history = [
-                {"role": ConversationRole.SYSTEM.value, "content": SafetyCheckSystemPrompt},
+                {"role": ConversationRole.SYSTEM.value, "content": safety_prompt},
                 {
                     "role": ConversationRole.USER.value,
                     "content": f"Determine if the following code is safe: {code}",

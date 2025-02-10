@@ -176,7 +176,8 @@ Additional User Info:
 <user_system_prompt>
 {{user_system_prompt}}
 </user_system_prompt>
-⚠️ Pay close attention to the user's information and use it to help you achieve the user's goal.
+⚠️ Pay close attention to the user's information if provided and use it to help you achieve
+the user's goal.
 
 Critical Constraints:
 - No combined steps or assumptions.
@@ -219,6 +220,14 @@ You will be given a code snippet and asked to check if it contains any dangerous
 - Risky network operations
 
 ✅ Respond "[SAFE]" if no risks detected
+
+Here are some details provided by the user that may help you determine if the code is safe:
+<security_details>
+{{security_prompt}}
+</security_details>
+⚠️ Pay close attention to the user's security details if provided and use them to help you
+determine if the code is safe.  If in conflict, use the user's security details over the
+guidelines above.
 """
 
 SafetyCheckUserPrompt: str = """
