@@ -24,7 +24,7 @@ from pathlib import Path
 
 import uvicorn
 
-from local_operator.agents import AgentEditMetadata, AgentRegistry
+from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
@@ -287,7 +287,7 @@ def agents_create_command(name: str, agent_registry: AgentRegistry) -> int:
             print("\n\033[1;31mAgent creation cancelled\033[0m")
             return -1
 
-    agent = agent_registry.create_agent(AgentEditMetadata(name=name))
+    agent = agent_registry.create_agent(AgentEditFields(name=name, security_prompt=None))
     print("\n\033[1;32m╭─ Created New Agent ───────────────────────────\033[0m")
     print(f"\033[1;32m│ Name: {agent.name}\033[0m")
     print(f"\033[1;32m│ ID: {agent.id}\033[0m")
@@ -372,7 +372,9 @@ def main() -> int:
                     f"\n\033[1;33mNo agent found with name: {args.agent_name}. "
                     f"Creating new agent...\033[0m"
                 )
-                agent = agent_registry.create_agent(AgentEditMetadata(name=args.agent_name))
+                agent = agent_registry.create_agent(
+                    AgentEditFields(name=args.agent_name, security_prompt=None)
+                )
                 print("\n\033[1;32m╭─ Created New Agent ───────────────────────────\033[0m")
                 print(f"\033[1;32m│ Name: {agent.name}\033[0m")
                 print(f"\033[1;32m│ ID: {agent.id}\033[0m")
@@ -394,6 +396,7 @@ def main() -> int:
             model_instance,
             detail_conversation_length=config_manager.get_config_value("detail_length", 10),
             conversation_history=conversation_history,
+            agent=agent,
         )
 
         operator = Operator(

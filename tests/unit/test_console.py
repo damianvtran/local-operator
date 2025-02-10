@@ -5,7 +5,7 @@ from datetime import datetime
 
 import pytest
 
-from local_operator.agents import AgentMetadata
+from local_operator.agents import AgentData
 from local_operator.console import (
     format_agent_output,
     format_error_output,
@@ -112,11 +112,12 @@ def test_print_cli_banner_with_agent(monkeypatch, mock_config_manager):
     monkeypatch.setattr(sys, "stdout", output)
 
     # Create mock agent metadata
-    agent = AgentMetadata(
+    agent = AgentData(
         id="test-agent-id",
         name="Test Agent",
         created_date=datetime.now(),
         version="1.0.0",
+        security_prompt="",
     )
 
     print_cli_banner(mock_config_manager, current_agent=agent, training_mode=False)
@@ -136,13 +137,15 @@ def test_print_cli_banner_with_agent(monkeypatch, mock_config_manager):
 def test_print_cli_banner_with_agent_and_training(monkeypatch, mock_config_manager):
     output = io.StringIO()
     monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setenv("LOCAL_OPERATOR_DEBUG", "true")
 
     # Create mock agent metadata
-    agent = AgentMetadata(
+    agent = AgentData(
         id="test-agent-id",
         name="Test Agent",
         created_date=datetime.now(),
         version="1.0.0",
+        security_prompt="Security prompt",
     )
 
     print_cli_banner(mock_config_manager, current_agent=agent, training_mode=True)
@@ -157,6 +160,7 @@ def test_print_cli_banner_with_agent_and_training(monkeypatch, mock_config_manag
     assert "Local Executor Agent CLI" in result
     assert "Using hosting: test-host" in result
     assert "Using model: test-model" in result
+    assert "Security prompt" in result
 
 
 @pytest.mark.asyncio

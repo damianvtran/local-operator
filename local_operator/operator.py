@@ -9,7 +9,7 @@ from langchain_core.messages import BaseMessage
 from pydantic import ValidationError
 
 import local_operator.tools as tools
-from local_operator.agents import AgentMetadata, AgentRegistry
+from local_operator.agents import AgentData, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.console import print_cli_banner, spinner
 from local_operator.credentials import CredentialManager
@@ -81,7 +81,7 @@ class Operator:
     executor_is_processing: bool
     type: OperatorType
     agent_registry: AgentRegistry
-    current_agent: AgentMetadata | None
+    current_agent: AgentData | None
     training_mode: bool
 
     def __init__(
@@ -92,7 +92,7 @@ class Operator:
         config_manager: ConfigManager,
         type: OperatorType,
         agent_registry: AgentRegistry,
-        current_agent: AgentMetadata | None,
+        current_agent: AgentData | None,
         training_mode: bool,
     ):
         """Initialize the Operator with required components.
@@ -104,7 +104,7 @@ class Operator:
             config_manager (ConfigManager): Manager for handling configuration
             type (OperatorType): Type of operator (CLI or Server)
             agent_registry (AgentRegistry): Registry for managing AI agents
-            current_agent (AgentMetadata | None): The current agent to use for this session
+            current_agent (AgentData | None): The current agent to use for this session
             training_mode (bool): Whether the operator is in training mode.
                 If True, the operator will save the conversation history to the agent's directory
                 after each completed task. This allows the agent to learn from its experiences
