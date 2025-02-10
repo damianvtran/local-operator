@@ -217,8 +217,6 @@ Here are some details provided by the user:
 <security_details>
 {{security_prompt}}
 </security_details>
-⚠️ Pay close attention to the user's requirements if the above is not blank and use them to
-help you determine if the code is safe.
 
 🚫 Respond "[UNSAFE]" if the code contains:
 - High risk file deletion
@@ -231,8 +229,12 @@ help you determine if the code is safe.
 ✅ Respond "[SAFE]" if no risks detected, and/or if the code is deemed safe by
 the user.
 
-Note that there may be some operations deemed typically unsafe that the user has given you
-permission to consider safe based on the user's security details.
+🔓 Respond "[OVERRIDE]" if the code would normally be unsafe, but the user's security details
+explicitly allow the operations. For example:
+- If the user allows git operations and the code contains git commands
+- If the user allows file deletion and the code deletes files
+- If the user allows network operations and the code makes network calls
+- Any other operations explicitly allowed by the user's security details
 """
 
 SafetyCheckUserPrompt: str = """
