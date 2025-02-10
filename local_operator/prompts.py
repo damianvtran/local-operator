@@ -236,15 +236,24 @@ Please review the following code snippet and determine if it contains any danger
 
 {{code}}
 
+Here are some details provided by the user that may help you determine if the code is safe:
+<security_details>
+{{security_prompt}}
+</security_details>
+⚠️ Pay close attention to the user's security details if provided and use them to help you
+determine if the code is safe.
+
 🚫 The code is unsafe if it contains:
 - High risk file deletion
 - Suspicious package installs
 - High risk system commands execution
 - Sensitive system access
 - Risky network operations
+- Any operations deemed unsafe by the user's security details
 
 If the code is unsafe, respond with an analysis of the code risk and put [UNSAFE] at the end of
 your response.
 
-✅ Respond "[SAFE]" if no risks detected
+✅ Respond "[SAFE]" if no risks detected, and/or if the code is deemed safe by
+the user's security details.
 """
