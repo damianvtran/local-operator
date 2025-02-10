@@ -471,8 +471,9 @@ class LocalCodeExecutor:
         """
         response: BaseMessage
 
+        agent_security_prompt = self.agent.security_prompt if self.agent else ""
+
         if self.can_prompt_user:
-            agent_security_prompt = self.agent.security_prompt if self.agent else ""
             safety_prompt = SafetyCheckSystemPrompt.replace(
                 "{{security_prompt}}", agent_security_prompt
             )
@@ -494,7 +495,9 @@ class LocalCodeExecutor:
 
         # If we can't prompt the user, we need to use the conversation history to determine
         # if the user has previously indicated a decision.
-        safety_prompt = SafetyCheckUserPrompt.replace("{{code}}", code)
+        safety_prompt = SafetyCheckUserPrompt.replace("{{code}}", code).replace(
+            "{{security_prompt}}", agent_security_prompt
+        )
         self._append_to_history(
             ConversationRole.USER,
             safety_prompt,
