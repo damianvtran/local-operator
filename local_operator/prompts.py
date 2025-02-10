@@ -247,8 +247,8 @@ Here are some details provided by the user that may help you determine if the co
 <security_details>
 {{security_prompt}}
 </security_details>
-⚠️ Pay close attention to the user's security details if provided and use them to help you
-determine if the code is safe.
+
+Respond with one of the following: [UNSAFE] | [SAFE] | [OVERRIDE]
 
 🚫 The code is unsafe if it contains:
 - High risk file deletion
@@ -261,6 +261,12 @@ determine if the code is safe.
 If the code is unsafe, respond with an analysis of the code risk and put [UNSAFE] at the end of
 your response.
 
-✅ Respond "[SAFE]" if no risks detected, and/or if the code is deemed safe by
-the user's security details.
+✅ Respond "[SAFE]" if no risks detected.
+
+🔓 Respond "[OVERRIDE]" if the code would normally be unsafe, but the user's security details
+explicitly allow the operations. For example:
+- If the user allows high risk git operations and the code contains high risk git commands
+- If the user allows file deletion and the code deletes files
+- If the user allows network operations and the code makes network calls
+- Any other high risk operations explicitly allowed by the user's security details
 """
