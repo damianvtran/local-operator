@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from local_operator.agents import AgentMetadata
+from local_operator.agents import AgentData
 from local_operator.cli import (
     agents_create_command,
     agents_delete_command,
@@ -109,8 +109,12 @@ def test_main_success():
     mock_operator = MagicMock()
     mock_operator.chat = MagicMock()
     mock_agent_registry = MagicMock()
-    mock_agent = AgentMetadata(
-        id="test-id", name="test-agent", created_date=datetime.now(), version="1.0.0"
+    mock_agent = AgentData(
+        id="test-id",
+        name="test-agent",
+        created_date=datetime.now(),
+        version="1.0.0",
+        security_prompt="",
     )
     mock_agent_registry.get_agent_by_name.return_value = mock_agent
     mock_agent_registry.load_agent_conversation.return_value = []
@@ -171,8 +175,12 @@ def test_agents_list_command_no_agents(mock_agent_registry):
 
 def test_agents_list_command_with_agents(mock_agent_registry):
     mock_agents = [
-        AgentMetadata(id="1", name="Agent1", created_date=datetime.now(), version="1.0.0"),
-        AgentMetadata(id="2", name="Agent2", created_date=datetime.now(), version="1.0.0"),
+        AgentData(
+            id="1", name="Agent1", created_date=datetime.now(), version="1.0.0", security_prompt=""
+        ),
+        AgentData(
+            id="2", name="Agent2", created_date=datetime.now(), version="1.0.0", security_prompt=""
+        ),
     ]
     mock_agent_registry.list_agents.return_value = mock_agents
     args = MagicMock()
@@ -184,8 +192,12 @@ def test_agents_list_command_with_agents(mock_agent_registry):
 
 
 def test_agents_create_command_with_name(mock_agent_registry):
-    mock_agent = AgentMetadata(
-        id="test-id", name="TestAgent", created_date=datetime.now(), version="1.0.0"
+    mock_agent = AgentData(
+        id="test-id",
+        name="TestAgent",
+        created_date=datetime.now(),
+        version="1.0.0",
+        security_prompt="",
     )
     mock_agent_registry.create_agent.return_value = mock_agent
     result = agents_create_command("TestAgent", mock_agent_registry)
@@ -206,8 +218,12 @@ def test_agents_create_command_keyboard_interrupt(mock_agent_registry):
 
 
 def test_agents_delete_command_success(mock_agent_registry):
-    mock_agent = AgentMetadata(
-        id="test-id", name="TestAgent", created_date=datetime.now(), version="1.0.0"
+    mock_agent = AgentData(
+        id="test-id",
+        name="TestAgent",
+        created_date=datetime.now(),
+        version="1.0.0",
+        security_prompt="",
     )
     mock_agent_registry.list_agents.return_value = [mock_agent]
     result = agents_delete_command("TestAgent", mock_agent_registry)

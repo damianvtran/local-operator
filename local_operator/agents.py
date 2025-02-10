@@ -3,12 +3,12 @@ import uuid
 from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
 
-class AgentMetadata(BaseModel):
+class AgentData(BaseModel):
     """
     Pydantic model representing an agent's metadata.
     """
@@ -17,14 +17,24 @@ class AgentMetadata(BaseModel):
     name: str = Field(..., description="Agent's name")
     created_date: datetime = Field(..., description="The date when the agent was created")
     version: str = Field(..., description="The version of the agent")
+    security_prompt: str = Field(
+        "",
+        description="The security prompt for the agent.  Allows a user to explicitly "
+        "specify the security context for the agent's code security checks.",
+    )
 
 
-class AgentEditMetadata(BaseModel):
+class AgentEditFields(BaseModel):
     """
     Pydantic model representing an agent's edit metadata.
     """
 
     name: str | None = Field(None, description="Agent's name")
+    security_prompt: str | None = Field(
+        None,
+        description="The security prompt for the agent.  Allows a user to explicitly "
+        "specify the security context for the agent's code security checks.",
+    )
 
 
 class AgentConversation(BaseModel):
@@ -56,7 +66,7 @@ class AgentRegistry:
 
     config_dir: Path
     agents_file: Path
-    _agents: Dict[str, AgentMetadata]
+    _agents: Dict[str, AgentData]
 
     def __init__(self, config_dir: Path) -> None:
         """
@@ -70,7 +80,7 @@ class AgentRegistry:
             self.config_dir.mkdir(parents=True, exist_ok=True)
 
         self.agents_file: Path = self.config_dir / "agents.json"
-        self._agents: Dict[str, AgentMetadata] = {}
+        self._agents: Dict[str, AgentData] = {}
         self._load_agents_metadata()
 
     def _load_agents_metadata(self) -> None:
@@ -87,12 +97,12 @@ class AgentRegistry:
             # Expect data to be a list of agent metadata dictionaries.
             for item in data:
                 try:
-                    agent = AgentMetadata.model_validate(item)
+                    agent = AgentData.model_validate(item)
                     self._agents[agent.id] = agent
                 except Exception as e:
                     raise Exception(f"Invalid agent metadata: {str(e)}")
 
-    def create_agent(self, agent_edit_metadata: AgentEditMetadata) -> AgentMetadata:
+    def create_agent(self, agent_edit_metadata: AgentEditFields) -> AgentData:
         """
         Create a new agent with the provided metadata and initialize its conversation history.
 
@@ -100,10 +110,10 @@ class AgentRegistry:
         sets it to the current UTC time.
 
         Args:
-            agent_edit_metadata (AgentEditMetadata): The metadata for the new agent, including name
+            agent_edit_metadata (AgentEditFields): The metadata for the new agent, including name
 
         Returns:
-            AgentMetadata: The metadata of the newly created agent
+            AgentData: The metadata of the newly created agent
 
         Raises:
             ValueError: If an agent with the provided name already exists
@@ -118,11 +128,12 @@ class AgentRegistry:
             if agent.name == agent_edit_metadata.name:
                 raise ValueError(f"Agent with name {agent_edit_metadata.name} already exists")
 
-        agent_metadata = AgentMetadata(
+        agent_metadata = AgentData(
             id=str(uuid.uuid4()),
-            name=agent_edit_metadata.name,
             created_date=datetime.now(timezone.utc),
             version=version("local-operator"),
+            name=agent_edit_metadata.name,
+            security_prompt=agent_edit_metadata.security_prompt or "",
         )
 
         # Add to in-memory agents
@@ -152,13 +163,13 @@ class AgentRegistry:
 
         return agent_metadata
 
-    def edit_agent(self, agent_id: str, updated_metadata: AgentEditMetadata) -> None:
+    def edit_agent(self, agent_id: str, updated_metadata: AgentEditFields) -> None:
         """
         Edit an existing agent's metadata.
 
         Args:
             agent_id (str): The unique identifier of the agent to edit
-            updated_metadata (AgentEditMetadata): The updated metadata for the agent
+            updated_metadata (AgentEditFields): The updated metadata for the agent
 
         Raises:
             KeyError: If the agent_id does not exist
@@ -169,9 +180,10 @@ class AgentRegistry:
 
         current_metadata = self._agents[agent_id]
 
-        # Update only the fields provided in AgentEditMetadata
-        if updated_metadata.name is not None:
-            current_metadata.name = updated_metadata.name
+        # Update all non-None fields from updated_metadata
+        for field, value in updated_metadata.model_dump(exclude_unset=True).items():
+            if value is not None:
+                setattr(current_metadata, field, value)
 
         # Save updated agents metadata to file
         agents_list = [agent.model_dump() for agent in self._agents.values()]
@@ -180,7 +192,7 @@ class AgentRegistry:
                 json.dump(agents_list, f, indent=2, default=str)
         except Exception as e:
             # Restore original metadata if save fails
-            self._agents[agent_id] = AgentMetadata.model_validate(agent_id)
+            self._agents[agent_id] = AgentData.model_validate(agent_id)
             raise Exception(f"Failed to save updated agent metadata: {str(e)}")
 
     def delete_agent(self, agent_id: str) -> None:
@@ -216,7 +228,7 @@ class AgentRegistry:
             except Exception as e:
                 raise Exception(f"Failed to delete conversation file: {str(e)}")
 
-    def clone_agent(self, agent_id: str, new_name: str) -> AgentMetadata:
+    def clone_agent(self, agent_id: str, new_name: str) -> AgentData:
         """
         Clone an existing agent with a new name, copying over its conversation history.
 
@@ -225,7 +237,7 @@ class AgentRegistry:
             new_name (str): The name for the new cloned agent
 
         Returns:
-            AgentMetadata: The metadata of the newly created agent clone
+            AgentData: The metadata of the newly created agent clone
 
         Raises:
             KeyError: If the source agent_id does not exist
@@ -236,8 +248,15 @@ class AgentRegistry:
         if agent_id not in self._agents:
             raise KeyError(f"Source agent with id {agent_id} not found")
 
-        # Create new agent with the provided name
-        new_agent = self.create_agent(AgentEditMetadata(name=new_name))
+        original_agent = self._agents[agent_id]
+
+        # Create new agent with all fields from original agent
+        new_agent = self.create_agent(
+            AgentEditFields(
+                name=new_name,
+                security_prompt=original_agent.security_prompt,
+            )
+        )
 
         # Copy conversation history from source agent
         source_conversation = self.load_agent_conversation(agent_id)
@@ -249,7 +268,7 @@ class AgentRegistry:
             self.delete_agent(new_agent.id)
             raise Exception(f"Failed to copy conversation history: {str(e)}")
 
-    def get_agent(self, agent_id: str) -> AgentMetadata:
+    def get_agent(self, agent_id: str) -> AgentData:
         """
         Get an agent's metadata by ID.
 
@@ -257,7 +276,7 @@ class AgentRegistry:
             agent_id (str): The unique identifier of the agent.
 
         Returns:
-            AgentMetadata: The agent's metadata.
+            AgentData: The agent's metadata.
 
         Raises:
             KeyError: If the agent_id does not exist
@@ -266,7 +285,7 @@ class AgentRegistry:
             raise KeyError(f"Agent with id {agent_id} not found")
         return self._agents[agent_id]
 
-    def get_agent_by_name(self, name: str) -> AgentMetadata | None:
+    def get_agent_by_name(self, name: str) -> AgentData | None:
         """
         Get an agent's metadata by name.
 
@@ -274,19 +293,19 @@ class AgentRegistry:
             name (str): The name of the agent to find.
 
         Returns:
-            AgentMetadata | None: The agent's metadata if found, None otherwise.
+            AgentData | None: The agent's metadata if found, None otherwise.
         """
         for agent in self._agents.values():
             if agent.name == name:
                 return agent
         return None
 
-    def list_agents(self) -> List[AgentMetadata]:
+    def list_agents(self) -> List[AgentData]:
         """
         Retrieve a list of all agents' metadata stored in the registry.
 
         Returns:
-            List[AgentMetadata]: A list of agent metadata objects.
+            List[AgentData]: A list of agent metadata objects.
         """
         return list(self._agents.values())
 
