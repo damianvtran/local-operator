@@ -17,13 +17,45 @@ class ExecutionSection(Enum):
     FOOTER = "footer"
 
 
+def wrap_text_to_width(text: str, max_width: int, first_line_prefix: str = "") -> list[str]:
+    """
+    Wrap text to a specified width, handling a prefix on the first line.
+
+    Args:
+        text (str): The text to wrap
+        max_width (int): Maximum width for each line
+        first_line_prefix (str): Prefix to add to first line, reducing its available width
+
+    Returns:
+        list[str]: List of wrapped lines
+    """
+    words = text.split()
+    lines = []
+    current_line = []
+    current_length = len(first_line_prefix) if first_line_prefix else 0
+
+    for word in words:
+        # +1 for the space between words
+        if current_length + len(word) + 1 <= max_width:
+            current_line.append(word)
+            current_length += len(word) + 1
+        else:
+            lines.append(" ".join(current_line))
+            current_line = [word]
+            current_length = len(word)
+
+    if current_line:
+        lines.append(" ".join(current_line))
+
+    return lines
+
+
 def print_cli_banner(
     config_manager: ConfigManager, current_agent: AgentData | None, training_mode: bool
 ) -> None:
+    debug_mode = os.getenv("LOCAL_OPERATOR_DEBUG", "false").lower() == "true"
     """Print the banner for the chat CLI."""
-    debug_indicator = (
-        " [DEBUG MODE]" if os.getenv("LOCAL_OPERATOR_DEBUG", "false").lower() == "true" else ""
-    )
+    debug_indicator = " [DEBUG MODE]" if debug_mode else ""
     print("\033[1;36m╭──────────────────────────────────────────────────╮\033[0m")
     print(f"\033[1;36m│ Local Executor Agent CLI{debug_indicator:<25}│\033[0m")
     print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
@@ -60,7 +92,7 @@ def print_cli_banner(
     print("\033[1;36m╰──────────────────────────────────────────────────╯\033[0m\n")
 
     # Print configuration options
-    if os.getenv("LOCAL_OPERATOR_DEBUG", "false").lower() == "true":
+    if debug_mode:
         print("\033[1;36m╭─ Configuration ────────────────────────────────\033[0m")
         print(f"\033[1;36m│\033[0m Hosting: {config_manager.get_config_value('hosting')}")
         print(f"\033[1;36m│\033[0m Model: {config_manager.get_config_value('model_name')}")
@@ -68,6 +100,17 @@ def print_cli_banner(
         detail_len = config_manager.get_config_value("detail_length")
         print(f"\033[1;36m│\033[0m Conversation Length: {conv_len}")
         print(f"\033[1;36m│\033[0m Detail Length: {detail_len}")
+        print(f"\033[1;36m│\033[0m Training Mode: {training_mode}")
+        if current_agent:
+            security_prompt = current_agent.security_prompt
+            lines = wrap_text_to_width(security_prompt, 49, "Security Prompt: ")
+
+            # Print first line with prefix
+            print(f"\033[1;36m│\033[0m Security Prompt: {lines[0]}")
+            # Print continuation lines indented to align with first line
+            for line in lines[1:]:
+                padding = " " * len("Security Prompt: ")
+                print(f"\033[1;36m│\033[0m {padding}{line}")
         print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
 
 
