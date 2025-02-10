@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.agents import AgentEditMetadata, AgentRegistry
+from local_operator.agents import AgentEditFields, AgentRegistry
 
 
 @pytest.fixture
@@ -16,7 +16,7 @@ def temp_agents_dir(tmp_path: Path) -> Path:
 def test_create_agent_success(temp_agents_dir: Path):
     registry = AgentRegistry(temp_agents_dir)
     agent_name = "Test Agent"
-    edit_metadata = AgentEditMetadata(name=agent_name)
+    edit_metadata = AgentEditFields(name=agent_name, security_prompt="")
     agent = registry.create_agent(edit_metadata)
     agents = registry.list_agents()
     assert len(agents) == 1
@@ -39,38 +39,78 @@ def test_create_agent_success(temp_agents_dir: Path):
 def test_create_agent_duplicate(temp_agents_dir: Path):
     registry = AgentRegistry(temp_agents_dir)
     agent_name = "Duplicate Agent"
-    edit_metadata = AgentEditMetadata(name=agent_name)
+    edit_metadata = AgentEditFields(name=agent_name, security_prompt="")
     registry.create_agent(edit_metadata)
     with pytest.raises(ValueError) as exc_info:
         # Attempt to create another agent with the same name
-        registry.create_agent(AgentEditMetadata(name=agent_name))
+        registry.create_agent(AgentEditFields(name=agent_name, security_prompt=""))
     assert f"Agent with name {agent_name} already exists" in str(exc_info.value)
 
 
-def test_edit_agent(temp_agents_dir: Path):
+@pytest.mark.parametrize(
+    "test_case",
+    [
+        {
+            "name": "name_only",
+            "original": AgentEditFields(name="Original Agent", security_prompt="original prompt"),
+            "update": AgentEditFields(name="Updated Agent", security_prompt=None),
+            "expected_name": "Updated Agent",
+            "expected_prompt": "original prompt",
+        },
+        {
+            "name": "security_only",
+            "original": AgentEditFields(name="Test Agent", security_prompt="original prompt"),
+            "update": AgentEditFields(name=None, security_prompt="New security prompt"),
+            "expected_name": "Test Agent",
+            "expected_prompt": "New security prompt",
+        },
+        {
+            "name": "both_fields",
+            "original": AgentEditFields(name="Original Agent", security_prompt="original prompt"),
+            "update": AgentEditFields(name="Updated Agent", security_prompt="New security prompt"),
+            "expected_name": "Updated Agent",
+            "expected_prompt": "New security prompt",
+        },
+        {
+            "name": "no_fields",
+            "original": AgentEditFields(name="Test Agent", security_prompt="original prompt"),
+            "update": AgentEditFields(name=None, security_prompt=None),
+            "expected_name": "Test Agent",
+            "expected_prompt": "original prompt",
+        },
+    ],
+)
+def test_edit_agent(temp_agents_dir: Path, test_case):
     registry = AgentRegistry(temp_agents_dir)
-    original_name = "Original Agent"
-    new_name = "Updated Agent"
-    edit_metadata = AgentEditMetadata(name=original_name)
-    agent = registry.create_agent(edit_metadata)
 
-    # Edit the agent's name and verify the update
-    registry.edit_agent(agent.id, AgentEditMetadata(name=new_name))
+    # Create initial agent
+    agent = registry.create_agent(test_case["original"])
+
+    # Edit the agent
+    registry.edit_agent(agent.id, test_case["update"])
+
+    # Verify updates
     updated_agent = registry.get_agent(agent.id)
-    assert updated_agent.name == new_name
+    assert updated_agent.name == test_case["expected_name"]
+    assert updated_agent.security_prompt == test_case["expected_prompt"]
 
     # Check that the agents.json file has updated data
     agents_file = temp_agents_dir / "agents.json"
     with agents_file.open("r", encoding="utf-8") as f:
         agents_data = json.load(f)
-    found = any(item["id"] == agent.id and item["name"] == new_name for item in agents_data)
+    found = any(
+        item["id"] == agent.id
+        and item["name"] == test_case["expected_name"]
+        and item["security_prompt"] == test_case["expected_prompt"]
+        for item in agents_data
+    )
     assert found
 
 
 def test_delete_agent(temp_agents_dir: Path):
     registry = AgentRegistry(temp_agents_dir)
     agent_name = "Agent to Delete"
-    agent = registry.create_agent(AgentEditMetadata(name=agent_name))
+    agent = registry.create_agent(AgentEditFields(name=agent_name, security_prompt=""))
 
     # Ensure conversation file exists before deletion
     conversation_file = temp_agents_dir / f"{agent.id}_conversation.json"
@@ -97,8 +137,8 @@ def test_list_agents(temp_agents_dir: Path):
     assert registry.list_agents() == []
 
     # Create two agents and verify the list
-    agent1 = registry.create_agent(AgentEditMetadata(name="Agent One"))
-    agent2 = registry.create_agent(AgentEditMetadata(name="Agent Two"))
+    agent1 = registry.create_agent(AgentEditFields(name="Agent One", security_prompt=""))
+    agent2 = registry.create_agent(AgentEditFields(name="Agent Two", security_prompt=""))
     agents = registry.list_agents()
     assert len(agents) == 2
     names = {agent.name for agent in agents}
@@ -110,7 +150,7 @@ def test_list_agents(temp_agents_dir: Path):
 def test_save_and_load_conversation(temp_agents_dir: Path):
     registry = AgentRegistry(temp_agents_dir)
     agent_name = "Agent Conversation"
-    agent = registry.create_agent(AgentEditMetadata(name=agent_name))
+    agent = registry.create_agent(AgentEditFields(name=agent_name, security_prompt=""))
 
     conversation = [
         {"role": "USER", "content": "Hello"},
@@ -123,7 +163,9 @@ def test_save_and_load_conversation(temp_agents_dir: Path):
 
 def test_load_nonexistent_conversation(temp_agents_dir: Path):
     registry = AgentRegistry(temp_agents_dir)
-    agent = registry.create_agent(AgentEditMetadata(name="Agent No Conversation"))
+    agent = registry.create_agent(
+        AgentEditFields(name="Agent No Conversation", security_prompt=None)
+    )
     conversation_file = temp_agents_dir / f"{agent.id}_conversation.json"
     # Remove the conversation file if it exists to simulate a missing file
     if conversation_file.exists():
@@ -135,7 +177,9 @@ def test_load_nonexistent_conversation(temp_agents_dir: Path):
 def test_edit_agent_not_found(temp_agents_dir: Path):
     registry = AgentRegistry(temp_agents_dir)
     with pytest.raises(KeyError):
-        registry.edit_agent("non-existent-id", AgentEditMetadata(name="New Name"))
+        registry.edit_agent(
+            "non-existent-id", AgentEditFields(name="New Name", security_prompt=None)
+        )
 
 
 def test_delete_agent_not_found(temp_agents_dir: Path):
@@ -154,14 +198,14 @@ def test_create_agent_save_failure(temp_agents_dir: Path, monkeypatch):
     monkeypatch.setattr(type(registry.agents_file), "open", fake_open)
 
     with pytest.raises(Exception) as exc_info:
-        registry.create_agent(AgentEditMetadata(name="Agent Fail"))
+        registry.create_agent(AgentEditFields(name="Agent Fail", security_prompt=None))
     assert str(exc_info.value) == "Fake write failure"
 
 
 def test_clone_agent(temp_agents_dir: Path):
     registry = AgentRegistry(temp_agents_dir)
     source_name = "Source Agent"
-    source_agent = registry.create_agent(AgentEditMetadata(name=source_name))
+    source_agent = registry.create_agent(AgentEditFields(name=source_name, security_prompt=None))
 
     # Add some conversation history to source agent
     conversation = [
@@ -188,8 +232,8 @@ def test_clone_agent_not_found(temp_agents_dir: Path):
 
 def test_clone_agent_duplicate_name(temp_agents_dir: Path):
     registry = AgentRegistry(temp_agents_dir)
-    source_agent = registry.create_agent(AgentEditMetadata(name="Source"))
-    registry.create_agent(AgentEditMetadata(name="Existing"))
+    source_agent = registry.create_agent(AgentEditFields(name="Source", security_prompt=None))
+    registry.create_agent(AgentEditFields(name="Existing", security_prompt=None))
 
     with pytest.raises(ValueError):
         registry.clone_agent(source_agent.id, "Existing")
@@ -200,7 +244,7 @@ def test_get_agent_by_name(temp_agents_dir: Path):
 
     # Create a test agent
     agent_name = "Test Agent"
-    agent = registry.create_agent(AgentEditMetadata(name=agent_name))
+    agent = registry.create_agent(AgentEditFields(name=agent_name, security_prompt=None))
 
     # Test finding existing agent
     found_agent = registry.get_agent_by_name(agent_name)

@@ -4,7 +4,7 @@ import os
 import sys
 from enum import Enum
 
-from local_operator.agents import AgentMetadata
+from local_operator.agents import AgentData
 from local_operator.config import ConfigManager
 
 
@@ -18,7 +18,7 @@ class ExecutionSection(Enum):
 
 
 def print_cli_banner(
-    config_manager: ConfigManager, current_agent: AgentMetadata | None, training_mode: bool
+    config_manager: ConfigManager, current_agent: AgentData | None, training_mode: bool
 ) -> None:
     """Print the banner for the chat CLI."""
     debug_indicator = (
