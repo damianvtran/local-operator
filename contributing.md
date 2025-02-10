@@ -7,12 +7,11 @@ Thank you for your interest in contributing to Local Operator! We welcome all co
 ### Prerequisites
 
 - Python 3.12+
-- [Poetry](https://python-poetry.org/) (recommended for dependency management)
-- Basic understanding of command-line interfaces
+- Dependencies in requirements.txt
 
 ### Development Setup
 
-1. **Fork** the repository on GitHub
+1. If you don't have contributor access, **Fork** the repository on GitHub
 2. **Clone** your forked repository:
 
    ```bash
@@ -55,7 +54,13 @@ We enforce consistent code style and quality checks:
   pyright
   ```
 
-Always run these tools before submitting a pull request.  They will also be run in the CI pipeline on any branches with the `dev-` prefix.
+- **Dependency Scanning**: Uses pip-audit
+
+  ```bash
+  pip-audit
+  ```
+
+Always run these tools before submitting a pull request.  They will also be run in the CI pipeline on any branches with the `dev-` prefix and on PRs merged to `main`.
 
 ## Testing
 
@@ -73,8 +78,8 @@ pytest
 
 Please follow the following steps to contribute:
 
-1. Create your fork of the repository
-2. Create a new branch for your changes
+1. For accounts without contributor access, create your fork of the repository
+2. Create a new branch for your changes with the `dev-` prefix
 
    ```bash
    git checkout -b dev-my-feature
@@ -100,6 +105,22 @@ Please follow the following steps to contribute:
    ```
 
 6. Create a Pull Request against the main branch of the upstream repository
+
+## Release Process
+
+Once approved and merged, maintainers will package changes into releases with the following procedure:
+
+1. Update the version in `pyproject.toml`
+2. Create a git tag with prefix `v` (for example `v0.2.0`)
+3. Push the tag to the upstream repository on the commit to release on `main`
+4. Create a release from the tag on GitHub with a concise release name and a description of the changes
+5. CD will trigger on release creation and package and upload the version in `pyproject.toml` to PyPI
+
+**For pre-release versions**:
+
+- Use the `ax` or `bx` suffix (for example `v0.2.0a1`)
+- Update the version in `pyproject.toml` on the `dev-` branch
+- Releases can be created by maintainers from the `dev-` branch if they are not ready to be merged to main
 
 ## Pull Request Checklist
 
