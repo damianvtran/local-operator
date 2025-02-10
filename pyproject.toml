@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.2.0b1"
+version = "0.2.0b2"
 description = "A Python-based agent for local command execution"
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damianvtran@gmail.com" }]
