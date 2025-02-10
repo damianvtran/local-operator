@@ -229,6 +229,9 @@ determine if the code is safe.
 
 ✅ Respond "[SAFE]" if no risks detected, and/or if the code is deemed safe by
 the user's security details.
+
+Note that there may be some operations deemed typically unsafe that the user has given you
+permission to consider safe based on the user's security details.
 """
 
 SafetyCheckUserPrompt: str = """
