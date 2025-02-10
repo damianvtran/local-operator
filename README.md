@@ -7,7 +7,7 @@
 
 <h1 align="center">Local Operator: On-device Agentic Task Execution</h1>
 
-**Local Operator** is a Python-based agent that runs locally on your device, enabling secure execution of commands through a conversational chat interface. The agent can plan a series of steps to achieve a user goal, and execute the code sequentially with self-correction to achieve the goal.  When run with local models, it provides a safe environment for running Python code while maintaining system security through built-in safety checks and user confirmation prompts.  It is also compatible with 3rd party cloud-hosted models such as those from OpenAI and DeepSeek.  
+**Local Operator** is an environment for agents to run Python code on-device, enabling secure execution of commands through a conversational chat interface. The agent can plan a series of steps to achieve a user goal, and execute the code sequentially with self-correction to achieve the goal.  When run with local models, it provides a safe environment for running Python code while maintaining system security through built-in safety checks and user confirmation prompts.  It is also compatible with 3rd party cloud-hosted models such as those from OpenAI and DeepSeek.  
 
 This repository is open source and free to use, with an MIT license.  Feel free to incorporate it into your own projects as needed.  Though, we would love to hear your feedback and any contributions to the project will greatly help the community!
 
