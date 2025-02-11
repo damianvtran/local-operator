@@ -538,7 +538,7 @@ class LocalCodeExecutor:
             return "Code execution requires further confirmation from the user"
         elif safety_result == ConfirmSafetyResult.OVERRIDE:
             print(
-                "\033[1;33m⚠️  Warning: Code safety override applied based on user's security"
+                "\n\033[1;33m⚠️  Warning: Code safety override applied based on user's security"
                 " prompt\033[0m"
             )
 
