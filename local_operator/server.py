@@ -341,16 +341,6 @@ async def chat_endpoint(request: ChatRequest):
         "model response and conversation history."
     ),
     openapi_extra={
-        "parameters": [
-            {
-                "name": "agent_id",
-                "in": "path",
-                "description": "The ID of the agent to be used for the chat",
-                "required": True,
-                "schema": {"type": "string"},
-                "example": "agent123",
-            }
-        ],
         "requestBody": {
             "content": {
                 "application/json": {
@@ -455,24 +445,6 @@ async def chat_with_agent(
     description="Retrieve a paginated list of agents with their details.",
     tags=["Agents"],
     openapi_extra={
-        "parameters": [
-            {
-                "name": "page",
-                "in": "query",
-                "description": "Page number for pagination",
-                "required": False,
-                "schema": {"type": "integer", "minimum": 1, "default": 1},
-                "example": 1,
-            },
-            {
-                "name": "per_page",
-                "in": "query",
-                "description": "Number of agents per page",
-                "required": False,
-                "schema": {"type": "integer", "minimum": 1, "default": 10},
-                "example": 10,
-            },
-        ],
         "responses": {
             "200": {
                 "description": "Agents list retrieved successfully",
@@ -610,16 +582,6 @@ async def create_agent(agent: AgentCreate = Body(...)):
     description="Retrieve details for an agent by its ID.",
     tags=["Agents"],
     openapi_extra={
-        "parameters": [
-            {
-                "name": "agent_id",
-                "in": "path",
-                "description": "The ID of the agent to retrieve",
-                "required": True,
-                "schema": {"type": "string"},
-                "example": "agent123",
-            }
-        ],
         "responses": {
             "200": {
                 "description": "Agent retrieved successfully",
@@ -676,16 +638,6 @@ async def get_agent(
     description="Update an existing agent with new details. Only provided fields will be updated.",
     tags=["Agents"],
     openapi_extra={
-        "parameters": [
-            {
-                "name": "agent_id",
-                "in": "path",
-                "description": "The ID of the agent to update",
-                "required": True,
-                "schema": {"type": "string"},
-                "example": "agent123",
-            }
-        ],
         "requestBody": {
             "content": {
                 "application/json": {
@@ -762,16 +714,6 @@ async def update_agent(
     description="Delete an existing agent by its ID.",
     tags=["Agents"],
     openapi_extra={
-        "parameters": [
-            {
-                "name": "agent_id",
-                "in": "path",
-                "description": "The ID of the agent to delete",
-                "required": True,
-                "schema": {"type": "string"},
-                "example": "agent123",
-            }
-        ],
         "responses": {
             "200": {
                 "description": "Agent deleted successfully",
