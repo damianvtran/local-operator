@@ -539,7 +539,7 @@ class LocalCodeExecutor:
         elif safety_result == ConfirmSafetyResult.OVERRIDE:
             print(
                 "\n\033[1;33m⚠️  Warning: Code safety override applied based on user's security"
-                " prompt\033[0m"
+                " prompt\033[0m\n"
             )
 
         # Try initial execution
