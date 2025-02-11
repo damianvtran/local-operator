@@ -363,6 +363,29 @@ async def test_update_agent_success(dummy_registry):
     assert result["description"] == "Updated Description"
 
 
+# Test for updating only name field
+@pytest.mark.asyncio
+async def test_update_agent_single_field(dummy_registry):
+    # Create a dummy agent
+    agent = dummy_registry.create_agent(name="Original Name", description="Original Description")
+    agent_id = agent["id"]
+
+    update_payload = {"name": "Updated Name Only"}
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.patch(f"/v1/agents/{agent_id}", json=update_payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("status") == 200
+    assert data.get("message") == "Agent updated successfully"
+    result = data.get("result")
+    assert result["id"] == agent_id
+    assert result["name"] == "Updated Name Only"
+    assert result["description"] == "Original Description"  # Description should remain unchanged
+
+
 # Test for agent update when agent is not found.
 @pytest.mark.asyncio
 async def test_update_agent_not_found(dummy_registry):
