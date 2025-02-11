@@ -307,7 +307,12 @@ async def chat_endpoint(request: ChatRequest):
             response_content = ""
 
         # Calculate token stats using tiktoken
-        tokenizer = encoding_for_model(request.model)
+        tokenizer = None
+        try:
+            tokenizer = encoding_for_model(request.model)
+        except Exception:
+            tokenizer = encoding_for_model("gpt-4o")
+
         prompt_tokens = sum(
             len(tokenizer.encode(msg["content"])) for msg in operator.executor.conversation_history
         )
@@ -412,7 +417,12 @@ async def chat_with_agent(
         response_content = response_json.response if response_json is not None else ""
 
         # Calculate token stats using tiktoken
-        tokenizer = encoding_for_model(request.model)
+        tokenizer = None
+        try:
+            tokenizer = encoding_for_model(request.model)
+        except Exception:
+            tokenizer = encoding_for_model("gpt-4o")
+
         prompt_tokens = sum(
             len(tokenizer.encode(msg["content"])) for msg in operator.executor.conversation_history
         )
