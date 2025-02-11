@@ -46,6 +46,7 @@ class DummyExecutor:
 class DummyOperator:
     def __init__(self, executor):
         self.executor = executor
+        self.current_agent = None
 
     async def handle_user_input(self, prompt: str):
         dummy_response = ResponseJsonSchema(
@@ -133,6 +134,108 @@ async def test_chat_success(dummy_executor):
     assert stats.get("total_tokens") > 0
     assert stats.get("prompt_tokens") > 0
     assert stats.get("completion_tokens") > 0
+
+
+# Test for successful /v1/chat/agents/{agent_id} endpoint response
+@pytest.mark.asyncio
+async def test_chat_with_agent_success(dummy_executor, dummy_registry):
+    original_create_operator = srv.create_operator
+    # Override create_operator to return a DummyOperator with our dummy executor
+    srv.create_operator = lambda hosting, model: DummyOperator(dummy_executor)
+
+    # Create a test agent
+    agent = dummy_registry.create_agent(name="Test Agent", description="Test Description")
+    agent_id = agent["id"]
+
+    test_prompt = "Hello agent, how are you?"
+    payload = {
+        "hosting": "openai",
+        "model": "gpt-4",
+        "prompt": test_prompt,
+        "context": [],
+    }
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.post(f"/v1/chat/agents/{agent_id}", json=payload)
+
+    srv.create_operator = original_create_operator
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data.get("response") == "dummy operator response"
+    conversation = data.get("context")
+    assert isinstance(conversation, list)
+
+    # Verify token stats
+    stats = data.get("stats")
+    assert stats is not None
+    assert stats.get("total_tokens") > 0
+    assert stats.get("prompt_tokens") > 0
+    assert stats.get("completion_tokens") > 0
+
+
+# Test chat with non-existent agent
+@pytest.mark.asyncio
+async def test_chat_with_nonexistent_agent(dummy_executor, dummy_registry):
+    original_create_operator = srv.create_operator
+    srv.create_operator = lambda hosting, model: DummyOperator(dummy_executor)
+
+    # Set up app state with registry
+    app.state.agent_registry = dummy_registry
+
+    payload = {
+        "hosting": "openai",
+        "model": "gpt-4",
+        "prompt": "Hello?",
+        "context": [],
+    }
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.post("/v1/chat/agents/nonexistent", json=payload)
+
+    srv.create_operator = original_create_operator
+
+    assert response.status_code == 404
+    data = response.json()
+    assert "Agent not found" in data.get("detail", "")
+
+
+# Test chat with agent when registry not initialized
+@pytest.mark.asyncio
+async def test_chat_with_agent_registry_not_initialized(dummy_executor):
+    original_create_operator = srv.create_operator
+    srv.create_operator = lambda hosting, model: DummyOperator(dummy_executor)
+
+    # Remove registry from app state
+    original_registry = getattr(app.state, "agent_registry", None)
+    if hasattr(app.state, "agent_registry"):
+        delattr(app.state, "agent_registry")
+
+    payload = {
+        "hosting": "openai",
+        "model": "gpt-4",
+        "prompt": "Hello?",
+        "context": [],
+    }
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.post("/v1/chat/agents/agent1", json=payload)
+
+        assert response.status_code == 500
+        data = response.json()
+        assert "Agent registry not initialized" in data.get("detail", "")
+
+    finally:
+        # Restore original registry
+        if original_registry is not None:
+            app.state.agent_registry = original_registry
+
+        srv.create_operator = original_create_operator
 
 
 # Test when the operator's chat method raises an exception (simulating an error during

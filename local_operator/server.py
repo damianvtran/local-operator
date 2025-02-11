@@ -441,6 +441,9 @@ async def chat_with_agent(
             ),
         )
 
+    except HTTPException:
+        # Re-raise HTTP exceptions to preserve their status code and detail
+        raise
     except Exception:
         logger.exception("Unexpected error while processing chat request with agent")
         raise HTTPException(status_code=500, detail="Internal Server Error")
