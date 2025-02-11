@@ -412,10 +412,7 @@ def main() -> int:
 
         # Start the async chat interface or execute single command
         if args.subcommand == "exec":
-            system_prompt = create_system_prompt()
-            operator.executor.conversation_history = [
-                {"role": ConversationRole.SYSTEM.value, "content": system_prompt}
-            ]
+            operator.executor.initialize_conversation_history()
             message = asyncio.run(operator.handle_user_input(args.command))
             if message:
                 print(message.response)
