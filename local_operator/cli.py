@@ -29,12 +29,7 @@ from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
 from local_operator.model import configure_model
-from local_operator.operator import (
-    ConversationRole,
-    Operator,
-    OperatorType,
-    create_system_prompt,
-)
+from local_operator.operator import Operator, OperatorType
 
 CLI_DESCRIPTION = """
     Local Operator - An environment for agentic AI models to perform tasks on the local device.
@@ -63,10 +58,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Enable debug mode for verbose output",
     )
     parent_parser.add_argument(
+        "--agent",
         "--agent-name",
         type=str,
         help="Name of the agent to use for this session.  If not provided, the default"
         " agent will be used which does not persist its session.",
+        dest="agent_name",
     )
     parent_parser.add_argument(
         "--train",
@@ -412,8 +409,7 @@ def main() -> int:
 
         # Start the async chat interface or execute single command
         if args.subcommand == "exec":
-            operator.executor.initialize_conversation_history()
-            message = asyncio.run(operator.handle_user_input(args.command))
+            message = asyncio.run(operator.execute_single_command(args.command))
             if message:
                 print(message.response)
             return 0
