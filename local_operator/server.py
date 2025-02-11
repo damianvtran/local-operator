@@ -332,6 +332,120 @@ async def chat_endpoint(request: ChatRequest):
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
+@app.post(
+    "/v1/chat/agents/{agent_id}",
+    response_model=ChatResponse,
+    summary="Process chat request using a specific agent",
+    description=(
+        "Accepts a prompt and optional context/configuration, retrieves the specified "
+        "agent from the registry, applies it to the operator and executor, and returns the "
+        "model response and conversation history."
+    ),
+    openapi_extra={
+        "parameters": [
+            {
+                "name": "agent_id",
+                "in": "path",
+                "description": "The ID of the agent to be used for the chat",
+                "required": True,
+                "schema": {"type": "string"},
+                "example": "agent123",
+            }
+        ],
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "example": {
+                            "summary": "Example Request with Agent",
+                            "value": {
+                                "prompt": "How do I implement a binary search in Python?",
+                                "hosting": "openai",
+                                "model": "gpt-4o",
+                                "context": [],
+                                "options": {"temperature": 0.7, "top_p": 0.9},
+                            },
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+async def chat_with_agent(
+    agent_id: str = FPath(
+        ..., description="ID of the agent to use for the chat", example="agent123"
+    ),
+    request: ChatRequest = Body(...),
+):
+    """
+    Process a chat request using a specific agent from the registry and return the response with
+    context. The specified agent is applied to both the operator and executor.
+    """
+    try:
+        # Retrieve the agent registry from app state
+        agent_registry = getattr(app.state, "agent_registry", None)
+        if agent_registry is None:
+            raise HTTPException(status_code=500, detail="Agent registry not initialized")
+        agent_registry = cast(AgentRegistry, agent_registry)
+
+        # Retrieve the specific agent from the registry
+        agent_obj = agent_registry.get_agent(agent_id)
+        if not agent_obj:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        # Create a new executor for this request using the provided hosting and model
+        operator = create_operator(request.hosting, request.model)
+
+        # Apply the retrieved agent to the operator and executor
+        operator.current_agent = agent_obj
+        setattr(operator.executor, "current_agent", agent_obj)
+
+        if request.context and len(request.context) > 0:
+            # Override the default system prompt with the provided context
+            conversation_history = [
+                {"role": msg.role, "content": msg.content} for msg in request.context
+            ]
+            operator.executor.initialize_conversation_history(conversation_history)
+        else:
+            operator.executor.initialize_conversation_history()
+
+        # Configure model options if provided
+        if request.options:
+            temperature = request.options.temperature or operator.executor.model.temperature
+            if temperature is not None:
+                operator.model.temperature = temperature
+            operator.model.top_p = request.options.top_p or operator.executor.model.top_p
+
+        response_json = await operator.handle_user_input(request.prompt)
+        response_content = response_json.response if response_json is not None else ""
+
+        # Calculate token stats using tiktoken
+        tokenizer = encoding_for_model(request.model)
+        prompt_tokens = sum(
+            len(tokenizer.encode(msg["content"])) for msg in operator.executor.conversation_history
+        )
+        completion_tokens = len(tokenizer.encode(response_content))
+        total_tokens = prompt_tokens + completion_tokens
+
+        return ChatResponse(
+            response=response_content,
+            context=[
+                ChatMessage(role=msg["role"], content=msg["content"])
+                for msg in operator.executor.conversation_history
+            ],
+            stats=ChatStats(
+                total_tokens=total_tokens,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            ),
+        )
+
+    except Exception:
+        logger.exception("Unexpected error while processing chat request with agent")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
 @app.get(
     "/v1/agents",
     response_model=CRUDResponse,
