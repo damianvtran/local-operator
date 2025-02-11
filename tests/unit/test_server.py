@@ -46,6 +46,7 @@ class DummyExecutor:
 class DummyOperator:
     def __init__(self, executor):
         self.executor = executor
+        self.current_agent = None
 
     async def handle_user_input(self, prompt: str):
         dummy_response = ResponseJsonSchema(
@@ -86,7 +87,7 @@ async def test_health_check():
     assert data.get("message") == "ok"
 
 
-# Test for successful /chat endpoint response.
+# Test for successful /v1/chat endpoint response.
 @pytest.mark.asyncio
 async def test_chat_success(dummy_executor):
     original_create_operator = srv.create_operator
@@ -105,7 +106,7 @@ async def test_chat_success(dummy_executor):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.post("/chat", json=payload)
+        response = await ac.post("/v1/chat", json=payload)
 
     srv.create_operator = original_create_operator
 
@@ -135,6 +136,108 @@ async def test_chat_success(dummy_executor):
     assert stats.get("completion_tokens") > 0
 
 
+# Test for successful /v1/chat/agents/{agent_id} endpoint response
+@pytest.mark.asyncio
+async def test_chat_with_agent_success(dummy_executor, dummy_registry):
+    original_create_operator = srv.create_operator
+    # Override create_operator to return a DummyOperator with our dummy executor
+    srv.create_operator = lambda hosting, model: DummyOperator(dummy_executor)
+
+    # Create a test agent
+    agent = dummy_registry.create_agent(name="Test Agent", description="Test Description")
+    agent_id = agent["id"]
+
+    test_prompt = "Hello agent, how are you?"
+    payload = {
+        "hosting": "openai",
+        "model": "gpt-4",
+        "prompt": test_prompt,
+        "context": [],
+    }
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.post(f"/v1/chat/agents/{agent_id}", json=payload)
+
+    srv.create_operator = original_create_operator
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data.get("response") == "dummy operator response"
+    conversation = data.get("context")
+    assert isinstance(conversation, list)
+
+    # Verify token stats
+    stats = data.get("stats")
+    assert stats is not None
+    assert stats.get("total_tokens") > 0
+    assert stats.get("prompt_tokens") > 0
+    assert stats.get("completion_tokens") > 0
+
+
+# Test chat with non-existent agent
+@pytest.mark.asyncio
+async def test_chat_with_nonexistent_agent(dummy_executor, dummy_registry):
+    original_create_operator = srv.create_operator
+    srv.create_operator = lambda hosting, model: DummyOperator(dummy_executor)
+
+    # Set up app state with registry
+    app.state.agent_registry = dummy_registry
+
+    payload = {
+        "hosting": "openai",
+        "model": "gpt-4",
+        "prompt": "Hello?",
+        "context": [],
+    }
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.post("/v1/chat/agents/nonexistent", json=payload)
+
+    srv.create_operator = original_create_operator
+
+    assert response.status_code == 404
+    data = response.json()
+    assert "Agent not found" in data.get("detail", "")
+
+
+# Test chat with agent when registry not initialized
+@pytest.mark.asyncio
+async def test_chat_with_agent_registry_not_initialized(dummy_executor):
+    original_create_operator = srv.create_operator
+    srv.create_operator = lambda hosting, model: DummyOperator(dummy_executor)
+
+    # Remove registry from app state
+    original_registry = getattr(app.state, "agent_registry", None)
+    if hasattr(app.state, "agent_registry"):
+        delattr(app.state, "agent_registry")
+
+    payload = {
+        "hosting": "openai",
+        "model": "gpt-4",
+        "prompt": "Hello?",
+        "context": [],
+    }
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.post("/v1/chat/agents/agent1", json=payload)
+
+        assert response.status_code == 500
+        data = response.json()
+        assert "Agent registry not initialized" in data.get("detail", "")
+
+    finally:
+        # Restore original registry
+        if original_registry is not None:
+            app.state.agent_registry = original_registry
+
+        srv.create_operator = original_create_operator
+
+
 # Test when the operator's chat method raises an exception (simulating an error during
 # model invocation).
 class FailingOperator:
@@ -159,7 +262,7 @@ async def test_chat_model_failure():
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.post("/chat", json=payload)
+        response = await ac.post("/v1/chat", json=payload)
 
     srv.create_operator = original_create_operator
 
@@ -189,7 +292,7 @@ async def test_chat_executor_not_initialized():
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.post("/chat", json=payload.model_dump())
+        response = await ac.post("/v1/chat", json=payload.model_dump())
 
     srv.create_operator = original_create_operator
 
@@ -197,3 +300,174 @@ async def test_chat_executor_not_initialized():
     data = response.json()
     # Adjusted assertion based on failure: expecting "Internal Server Error" in the error detail.
     assert "Internal Server Error" in data.get("detail", "")
+
+
+# Dummy Agent Registry for testing agent CRUD endpoints
+class DummyAgentRegistry:
+    def __init__(self):
+        self.agents = {}
+
+    def create_agent(self, name, description=None):
+        agent_id = f"agent{len(self.agents) + 1}"
+        agent = {"id": agent_id, "name": name, "description": description}
+        self.agents[agent_id] = agent
+        return agent
+
+    def update_agent(self, agent_id, update_data):
+        if agent_id not in self.agents:
+            return None
+        self.agents[agent_id].update(update_data)
+        return self.agents[agent_id]
+
+    def delete_agent(self, agent_id):
+        if agent_id in self.agents:
+            del self.agents[agent_id]
+            return True
+        return False
+
+    def list_agents(self):
+        return list(self.agents.values())
+
+    def get_agent(self, agent_id):
+        return self.agents.get(agent_id)
+
+
+@pytest.fixture
+def dummy_registry():
+    registry = DummyAgentRegistry()
+    app.state.agent_registry = registry
+    yield registry
+    app.state.agent_registry = None
+
+
+# Test for successful agent update.
+@pytest.mark.asyncio
+async def test_update_agent_success(dummy_registry):
+    # Create a dummy agent.
+    agent = dummy_registry.create_agent(name="Original Name", description="Original Description")
+    agent_id = agent["id"]
+
+    update_payload = {"name": "Updated Name", "description": "Updated Description"}
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.patch(f"/v1/agents/{agent_id}", json=update_payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("status") == 200
+    assert data.get("message") == "Agent updated successfully"
+    result = data.get("result")
+    assert result["id"] == agent_id
+    assert result["name"] == "Updated Name"
+    assert result["description"] == "Updated Description"
+
+
+# Test for updating only name field
+@pytest.mark.asyncio
+async def test_update_agent_single_field(dummy_registry):
+    # Create a dummy agent
+    agent = dummy_registry.create_agent(name="Original Name", description="Original Description")
+    agent_id = agent["id"]
+
+    update_payload = {"name": "Updated Name Only"}
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.patch(f"/v1/agents/{agent_id}", json=update_payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("status") == 200
+    assert data.get("message") == "Agent updated successfully"
+    result = data.get("result")
+    assert result["id"] == agent_id
+    assert result["name"] == "Updated Name Only"
+    assert result["description"] == "Original Description"  # Description should remain unchanged
+
+
+# Test for agent update when agent is not found.
+@pytest.mark.asyncio
+async def test_update_agent_not_found(dummy_registry):
+    update_payload = {"name": "Non-existent Update"}
+    non_existent_agent_id = "nonexistent"
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.patch(f"/v1/agents/{non_existent_agent_id}", json=update_payload)
+
+    assert response.status_code == 404
+    data = response.json()
+    assert "Agent not found" in data.get("detail", "")
+
+
+# Test for successful agent deletion.
+@pytest.mark.asyncio
+async def test_delete_agent_success(dummy_registry):
+    # Create a dummy agent.
+    agent = dummy_registry.create_agent(name="Agent to Delete", description="Will be deleted")
+    agent_id = agent["id"]
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.delete(f"/v1/agents/{agent_id}")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("status") == 200
+    assert data.get("message") == "Agent deleted successfully"
+
+
+# Test for agent deletion when agent is not found.
+@pytest.mark.asyncio
+async def test_delete_agent_not_found(dummy_registry):
+    non_existent_agent_id = "nonexistent"
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.delete(f"/v1/agents/{non_existent_agent_id}")
+
+    assert response.status_code == 404
+    data = response.json()
+    assert "Agent not found" in data.get("detail", "")
+
+
+# Test for agent update when agent registry is not initialized.
+@pytest.mark.asyncio
+async def test_update_agent_registry_not_initialized():
+    # Safely get the original agent_registry without risking a KeyError.
+    original_registry = getattr(app.state, "agent_registry", None)
+    app.state.agent_registry = None
+    update_payload = {"name": "New Name"}
+    agent_id = "agent1"
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.patch(f"/v1/agents/{agent_id}", json=update_payload)
+    # Restore the original state of agent_registry.
+    if original_registry is not None:
+        app.state.agent_registry = original_registry
+    else:
+        # Remove agent_registry from the underlying state dict if it exists.
+        if "agent_registry" in app.state._state:
+            del app.state._state["agent_registry"]
+    assert response.status_code == 500
+    data = response.json()
+    assert "Agent registry not initialized" in data.get("detail", "")
+
+
+# Test for agent deletion when agent registry is not initialized.
+@pytest.mark.asyncio
+async def test_delete_agent_registry_not_initialized():
+    original_registry = getattr(app.state, "agent_registry", None)
+    app.state.agent_registry = None
+    agent_id = "agent1"
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.delete(f"/v1/agents/{agent_id}")
+    if original_registry is not None:
+        app.state.agent_registry = original_registry
+    else:
+        if "agent_registry" in app.state._state:
+            del app.state._state["agent_registry"]
+    assert response.status_code == 500
+    data = response.json()
+    assert "Agent registry not initialized" in data.get("detail", "")
