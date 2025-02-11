@@ -80,14 +80,14 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
         },
     ],
 )
-def test_edit_agent(temp_agents_dir: Path, test_case):
+def test_update_agent(temp_agents_dir: Path, test_case):
     registry = AgentRegistry(temp_agents_dir)
 
     # Create initial agent
     agent = registry.create_agent(test_case["original"])
 
     # Edit the agent
-    registry.edit_agent(agent.id, test_case["update"])
+    registry.update_agent(agent.id, test_case["update"])
 
     # Verify updates
     updated_agent = registry.get_agent(agent.id)
@@ -174,10 +174,10 @@ def test_load_nonexistent_conversation(temp_agents_dir: Path):
     assert conversation == []
 
 
-def test_edit_agent_not_found(temp_agents_dir: Path):
+def test_update_agent_not_found(temp_agents_dir: Path):
     registry = AgentRegistry(temp_agents_dir)
     with pytest.raises(KeyError):
-        registry.edit_agent(
+        registry.update_agent(
             "non-existent-id", AgentEditFields(name="New Name", security_prompt=None)
         )
 
