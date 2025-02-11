@@ -406,7 +406,9 @@ async def list_agents(
     start_idx = (page - 1) * per_page
     end_idx = start_idx + per_page
     paginated = agents_list[start_idx:end_idx]
-    agents_serialized = [agent.dict() if hasattr(agent, "dict") else agent for agent in paginated]
+    agents_serialized = [
+        agent.model_dump() if hasattr(agent, "model_dump") else agent for agent in paginated
+    ]
 
     return CRUDResponse(
         status=200,
