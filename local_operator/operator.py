@@ -292,6 +292,29 @@ class Operator:
                 print(f"\033[1;35m│   {line}\033[0m")
         print("\033[1;35m╰──────────────────────────────────────────────────\033[0m\n")
 
+    async def execute_single_command(self, command: str) -> ResponseJsonSchema | None:
+        """Execute a single command in non-interactive mode.
+
+        This method is used for one-off command execution rather than interactive chat.
+        It initializes a fresh conversation history (if not already initialized),
+        processes the command through the language model, and returns the result.
+
+        Args:
+            command (str): The command/instruction to execute
+
+        Returns:
+            ResponseJsonSchema | None: The processed response from the language model,
+                or None if no valid response was generated
+        """
+        try:
+            self.executor.initialize_conversation_history()
+        except ExecutorInitError:
+            # Conversation history already initialized
+            pass
+
+        result = await self.handle_user_input(command)
+        return result
+
     async def chat(self) -> None:
         """Run the interactive chat interface with code execution capabilities.
 
