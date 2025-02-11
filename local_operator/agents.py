@@ -163,7 +163,7 @@ class AgentRegistry:
 
         return agent_metadata
 
-    def edit_agent(self, agent_id: str, updated_metadata: AgentEditFields) -> None:
+    def update_agent(self, agent_id: str, updated_metadata: AgentEditFields) -> None:
         """
         Edit an existing agent's metadata.
 
