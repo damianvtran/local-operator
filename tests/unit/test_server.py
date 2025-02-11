@@ -86,7 +86,7 @@ async def test_health_check():
     assert data.get("message") == "ok"
 
 
-# Test for successful /chat endpoint response.
+# Test for successful /v1/chat endpoint response.
 @pytest.mark.asyncio
 async def test_chat_success(dummy_executor):
     original_create_operator = srv.create_operator
@@ -105,7 +105,7 @@ async def test_chat_success(dummy_executor):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.post("/chat", json=payload)
+        response = await ac.post("/v1/chat", json=payload)
 
     srv.create_operator = original_create_operator
 
@@ -159,7 +159,7 @@ async def test_chat_model_failure():
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.post("/chat", json=payload)
+        response = await ac.post("/v1/chat", json=payload)
 
     srv.create_operator = original_create_operator
 
@@ -189,7 +189,7 @@ async def test_chat_executor_not_initialized():
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.post("/chat", json=payload.model_dump())
+        response = await ac.post("/v1/chat", json=payload.model_dump())
 
     srv.create_operator = original_create_operator
 

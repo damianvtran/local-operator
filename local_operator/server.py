@@ -241,7 +241,7 @@ def create_operator(request_hosting: str, request_model: str) -> Operator:
 
 
 @app.post(
-    "/chat",
+    "/v1/chat",
     response_model=ChatResponse,
     summary="Process chat request",
     description="Accepts a prompt and optional context/configuration, returns the model response "
