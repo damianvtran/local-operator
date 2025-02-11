@@ -245,6 +245,7 @@ def create_operator(request_hosting: str, request_model: str) -> Operator:
     summary="Process chat request",
     description="Accepts a prompt and optional context/configuration, returns the model response "
     "and conversation history.",
+    tags=["Chat"],
     openapi_extra={
         "requestBody": {
             "content": {
@@ -340,6 +341,7 @@ async def chat_endpoint(request: ChatRequest):
         "agent from the registry, applies it to the operator and executor, and returns the "
         "model response and conversation history."
     ),
+    tags=["Chat"],
     openapi_extra={
         "requestBody": {
             "content": {
@@ -761,6 +763,7 @@ async def delete_agent(
     "/health",
     summary="Health Check",
     description="Returns the health status of the API server.",
+    tags=["Health"],
 )
 async def health_check():
     """
