@@ -210,7 +210,7 @@ class DummyAgentRegistry:
         self.agents[agent_id] = agent
         return agent
 
-    def edit_agent(self, agent_id, update_data):
+    def update_agent(self, agent_id, update_data):
         if agent_id not in self.agents:
             return None
         self.agents[agent_id].update(update_data)

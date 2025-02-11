@@ -618,7 +618,7 @@ async def update_agent(
     agent_registry = cast(AgentRegistry, agent_registry)
 
     try:
-        updated_agent = agent_registry.edit_agent(
+        updated_agent = agent_registry.update_agent(
             agent_id, cast(AgentEditFields, agent_data.model_dump(exclude_unset=True))
         )
     except Exception as e:
