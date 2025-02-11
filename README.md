@@ -145,7 +145,7 @@ local-operator --agent "My Agent"
 or
 
 ```bash
-local-operator --agent "My Agent" exec "Make a new file called test.txt and write Hello World in it"
+local-operator --hosting openai --model gpt-4o exec "Make a new file called test.txt and write Hello World in it" --agent "My Agent"
 ```
 
 ## Configuration
