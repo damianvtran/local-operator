@@ -559,7 +559,8 @@ class LocalCodeExecutor:
         if safety_result == ConfirmSafetyResult.UNSAFE:
             if self.can_prompt_user:
                 confirm = input(
-                    "Warning: Potentially dangerous operation detected. Proceed? (y/n): "
+                    "\n\033[1;33m⚠️  Warning: Potentially dangerous operation detected."
+                    " Proceed? (y/n): \033[0m"
                 )
                 if confirm.lower() == "y":
                     return ConfirmSafetyResult.SAFE
