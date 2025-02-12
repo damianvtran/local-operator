@@ -23,7 +23,7 @@
 
 This project is proudly open source under the MIT license. We believe AI tools should be accessible to everyone, given their transformative impact on productivity. Your contributions and feedback help make this vision a reality!
 
-> "Democratizing AI-powered development, one conversation at a time."
+> "Democratizing AI-powered productivity, one conversation at a time."
 
 <div align="center">
   <a href="#contributing">Contribute</a> •
