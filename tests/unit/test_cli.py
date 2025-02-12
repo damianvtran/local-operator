@@ -115,6 +115,8 @@ def test_main_success():
         created_date=datetime.now(),
         version="1.0.0",
         security_prompt="",
+        hosting="test-hosting",
+        model="test-model",
     )
     mock_agent_registry.get_agent_by_name.return_value = mock_agent
     mock_agent_registry.load_agent_conversation.return_value = []
@@ -176,10 +178,22 @@ def test_agents_list_command_no_agents(mock_agent_registry):
 def test_agents_list_command_with_agents(mock_agent_registry):
     mock_agents = [
         AgentData(
-            id="1", name="Agent1", created_date=datetime.now(), version="1.0.0", security_prompt=""
+            id="1",
+            name="Agent1",
+            created_date=datetime.now(),
+            version="1.0.0",
+            security_prompt="",
+            hosting="test-hosting",
+            model="test-model",
         ),
         AgentData(
-            id="2", name="Agent2", created_date=datetime.now(), version="1.0.0", security_prompt=""
+            id="2",
+            name="Agent2",
+            created_date=datetime.now(),
+            version="1.0.0",
+            security_prompt="",
+            hosting="test-hosting",
+            model="test-model",
         ),
     ]
     mock_agent_registry.list_agents.return_value = mock_agents
@@ -198,6 +212,8 @@ def test_agents_create_command_with_name(mock_agent_registry):
         created_date=datetime.now(),
         version="1.0.0",
         security_prompt="",
+        hosting="test-hosting",
+        model="test-model",
     )
     mock_agent_registry.create_agent.return_value = mock_agent
     result = agents_create_command("TestAgent", mock_agent_registry)
@@ -224,6 +240,8 @@ def test_agents_delete_command_success(mock_agent_registry):
         created_date=datetime.now(),
         version="1.0.0",
         security_prompt="",
+        hosting="test-hosting",
+        model="test-model",
     )
     mock_agent_registry.list_agents.return_value = [mock_agent]
     result = agents_delete_command("TestAgent", mock_agent_registry)
