@@ -255,13 +255,13 @@ def agents_list_command(args: argparse.Namespace, agent_registry: AgentRegistry)
         is_last = i == len(page_agents) - 1
         branch = "└──" if is_last else "├──"
         print(f"\033[1;32m│ {branch} Agent {start_idx + i + 1}\033[0m")
-        left_bar = "│ │" if not is_last else "│ "
+        left_bar = "│ │" if not is_last else "│  "
         print(f"\033[1;32m{left_bar}   • Name: {agent.name}\033[0m")
         print(f"\033[1;32m{left_bar}   • ID: {agent.id}\033[0m")
         print(f"\033[1;32m{left_bar}   • Created: {agent.created_date}\033[0m")
         print(f"\033[1;32m{left_bar}   • Version: {agent.version}\033[0m")
-        print(f"\033[1;32m{left_bar}   • Hosting: {agent.hosting}\033[0m")
-        print(f"\033[1;32m{left_bar}   • Model: {agent.model}\033[0m")
+        print(f"\033[1;32m{left_bar}   • Hosting: {agent.hosting or "default"}\033[0m")
+        print(f"\033[1;32m{left_bar}   • Model: {agent.model or "default"}\033[0m")
         if not is_last:
             print("\033[1;32m│ │\033[0m")
 
