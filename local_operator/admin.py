@@ -89,6 +89,8 @@ def create_agent_from_conversation_tool(
             AgentEditFields(
                 name=name,
                 security_prompt="",
+                hosting="",
+                model="",
             )
         )
         agent_registry.save_agent_conversation(new_agent.id, history_to_save)
@@ -232,6 +234,8 @@ def create_agent_tool(agent_registry: AgentRegistry) -> Callable[[str, Optional[
             AgentEditFields(
                 name=name,
                 security_prompt=security_prompt or "",
+                hosting="",
+                model="",
             )
         )
 

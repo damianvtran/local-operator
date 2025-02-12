@@ -286,7 +286,9 @@ def agents_create_command(name: str, agent_registry: AgentRegistry) -> int:
             print("\n\033[1;31mAgent creation cancelled\033[0m")
             return -1
 
-    agent = agent_registry.create_agent(AgentEditFields(name=name, security_prompt=None))
+    agent = agent_registry.create_agent(
+        AgentEditFields(name=name, security_prompt=None, hosting=None, model=None)
+    )
     print("\n\033[1;32m╭─ Created New Agent ───────────────────────────\033[0m")
     print(f"\033[1;32m│ Name: {agent.name}\033[0m")
     print(f"\033[1;32m│ ID: {agent.id}\033[0m")
@@ -373,20 +375,6 @@ def main() -> int:
         # Override config with CLI args where provided
         config_manager.update_config_from_args(args)
 
-        # Get final config values
-        hosting = config_manager.get_config_value("hosting")
-        model = config_manager.get_config_value("model_name")
-
-        model_instance = configure_model(hosting, model, credential_manager)
-
-        if not model_instance:
-            error_msg = (
-                f"\n\033[1;31mError: Model not found for hosting: "
-                f"{hosting} and model: {model}\033[0m"
-            )
-            print(error_msg)
-            return -1
-
         # Get agent if name provided
         agent = None
         if args.agent_name:
@@ -397,7 +385,12 @@ def main() -> int:
                     f"Creating new agent...\033[0m"
                 )
                 agent = agent_registry.create_agent(
-                    AgentEditFields(name=args.agent_name, security_prompt=None)
+                    AgentEditFields(
+                        name=args.agent_name,
+                        security_prompt=None,
+                        hosting=None,
+                        model=None,
+                    )
                 )
                 print("\n\033[1;32m╭─ Created New Agent ───────────────────────────\033[0m")
                 print(f"\033[1;32m│ Name: {agent.name}\033[0m")
@@ -406,11 +399,30 @@ def main() -> int:
                 print(f"\033[1;32m│ Version: {agent.version}\033[0m")
                 print("\033[1;32m╰──────────────────────────────────────────────────\033[0m\n")
 
+        hosting = config_manager.get_config_value("hosting")
+        model = config_manager.get_config_value("model_name")
+
         if agent:
             # Get conversation history if agent name provided
             conversation_history = agent_registry.load_agent_conversation(agent.id)
+
+            # Use agent's hosting and model if provided
+            if agent.hosting:
+                hosting = agent.hosting
+            if agent.model:
+                model = agent.model
         else:
             conversation_history = []
+
+        model_instance = configure_model(hosting, model, credential_manager)
+
+        if not model_instance:
+            error_msg = (
+                f"\n\033[1;31mError: Model not found for hosting: "
+                f"{hosting} and model: {model}\033[0m"
+            )
+            print(error_msg)
+            return -1
 
         training_mode = False
         if args.train:

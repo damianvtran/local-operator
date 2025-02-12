@@ -22,6 +22,14 @@ class AgentData(BaseModel):
         description="The security prompt for the agent.  Allows a user to explicitly "
         "specify the security context for the agent's code security checks.",
     )
+    hosting: str = Field(
+        "",
+        description="The hosting environment for the agent.  Defaults to ''.",
+    )
+    model: str = Field(
+        "",
+        description="The model to use for the agent.  Defaults to ''.",
+    )
 
 
 class AgentEditFields(BaseModel):
@@ -34,6 +42,14 @@ class AgentEditFields(BaseModel):
         None,
         description="The security prompt for the agent.  Allows a user to explicitly "
         "specify the security context for the agent's code security checks.",
+    )
+    hosting: str | None = Field(
+        None,
+        description="The hosting environment for the agent.  Defaults to 'openrouter'.",
+    )
+    model: str | None = Field(
+        None,
+        description="The model to use for the agent.  Defaults to 'openai/gpt-4o-mini'.",
     )
 
 
@@ -134,6 +150,8 @@ class AgentRegistry:
             version=version("local-operator"),
             name=agent_edit_metadata.name,
             security_prompt=agent_edit_metadata.security_prompt or "",
+            hosting=agent_edit_metadata.hosting or "",
+            model=agent_edit_metadata.model or "",
         )
 
         # Add to in-memory agents
@@ -257,6 +275,8 @@ class AgentRegistry:
             AgentEditFields(
                 name=new_name,
                 security_prompt=original_agent.security_prompt,
+                hosting=original_agent.hosting,
+                model=original_agent.model,
             )
         )
 
