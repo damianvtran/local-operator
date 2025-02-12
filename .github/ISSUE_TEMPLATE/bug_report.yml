@@ -34,26 +34,16 @@ body:
       label: Hosting Platform
       description: Select the hosting platform in use.
       options:
-        - label: DeepSeek
-          value: deepseek
-        - label: OpenAI
-          value: openai
-        - label: OpenRouter
-          value: openrouter
-        - label: Anthropic
-          value: anthropic
-        - label: Kimi
-          value: kimi
-        - label: Alibaba
-          value: alibaba
-        - label: Google
-          value: google
-        - label: Mistral
-          value: mistral
-        - label: Ollama
-          value: ollama
-        - label: Other
-          value: other
+        - DeepSeek
+        - OpenAI
+        - OpenRouter
+        - Anthropic
+        - Kimi
+        - Alibaba
+        - Google
+        - Mistral
+        - Ollama
+        - Other
   - type: input
     id: local_operator_version
     attributes:
