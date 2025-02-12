@@ -16,7 +16,12 @@ def temp_agents_dir(tmp_path: Path) -> Path:
 def test_create_agent_success(temp_agents_dir: Path):
     registry = AgentRegistry(temp_agents_dir)
     agent_name = "Test Agent"
-    edit_metadata = AgentEditFields(name=agent_name, security_prompt="test security prompt")
+    edit_metadata = AgentEditFields(
+        name=agent_name,
+        security_prompt="test security prompt",
+        hosting="test-hosting",
+        model="test-model",
+    )
     agent = registry.create_agent(edit_metadata)
     agents = registry.list_agents()
     assert len(agents) == 1
@@ -24,6 +29,8 @@ def test_create_agent_success(temp_agents_dir: Path):
     assert created_agent.name == agent_name
     assert created_agent.id == agent.id
     assert created_agent.security_prompt == "test security prompt"
+    assert created_agent.hosting == "test-hosting"
+    assert created_agent.model == "test-model"
     # Verify that agents.json file is created
     agents_file = temp_agents_dir / "agents.json"
     assert agents_file.exists()
@@ -39,11 +46,18 @@ def test_create_agent_success(temp_agents_dir: Path):
 def test_create_agent_duplicate(temp_agents_dir: Path):
     registry = AgentRegistry(temp_agents_dir)
     agent_name = "Duplicate Agent"
-    edit_metadata = AgentEditFields(name=agent_name, security_prompt="test security prompt")
+    edit_metadata = AgentEditFields(
+        name=agent_name,
+        security_prompt="test security prompt",
+        hosting="test-hosting",
+        model="test-model",
+    )
     registry.create_agent(edit_metadata)
     with pytest.raises(ValueError) as exc_info:
         # Attempt to create another agent with the same name
-        registry.create_agent(AgentEditFields(name=agent_name, security_prompt=""))
+        registry.create_agent(
+            AgentEditFields(name=agent_name, security_prompt="", hosting="", model="")
+        )
     assert f"Agent with name {agent_name} already exists" in str(exc_info.value)
 
 
@@ -52,31 +66,114 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
     [
         {
             "name": "name_only",
-            "original": AgentEditFields(name="Original Agent", security_prompt="original prompt"),
-            "update": AgentEditFields(name="Updated Agent", security_prompt=None),
+            "original": AgentEditFields(
+                name="Original Agent",
+                security_prompt="original prompt",
+                hosting="test-hosting",
+                model="test-model",
+            ),
+            "update": AgentEditFields(
+                name="Updated Agent", security_prompt=None, hosting=None, model=None
+            ),
             "expected_name": "Updated Agent",
             "expected_prompt": "original prompt",
+            "expected_hosting": "test-hosting",
+            "expected_model": "test-model",
         },
         {
             "name": "security_only",
-            "original": AgentEditFields(name="Test Agent", security_prompt="original prompt"),
-            "update": AgentEditFields(name=None, security_prompt="New security prompt"),
+            "original": AgentEditFields(
+                name="Test Agent",
+                security_prompt="original prompt",
+                hosting="test-hosting",
+                model="test-model",
+            ),
+            "update": AgentEditFields(
+                name=None, security_prompt="New security prompt", hosting=None, model=None
+            ),
             "expected_name": "Test Agent",
             "expected_prompt": "New security prompt",
+            "expected_hosting": "test-hosting",
+            "expected_model": "test-model",
         },
         {
-            "name": "both_fields",
-            "original": AgentEditFields(name="Original Agent", security_prompt="original prompt"),
-            "update": AgentEditFields(name="Updated Agent", security_prompt="New security prompt"),
+            "name": "hosting_only",
+            "original": AgentEditFields(
+                name="Test Agent",
+                security_prompt="original prompt",
+                hosting="test-hosting",
+                model="test-model",
+            ),
+            "update": AgentEditFields(
+                name=None, security_prompt=None, hosting="new-hosting", model=None
+            ),
+            "expected_name": "Test Agent",
+            "expected_prompt": "original prompt",
+            "expected_hosting": "new-hosting",
+            "expected_model": "test-model",
+        },
+        {
+            "name": "model_only",
+            "original": AgentEditFields(
+                name="Test Agent",
+                security_prompt="original prompt",
+                hosting="test-hosting",
+                model="test-model",
+            ),
+            "update": AgentEditFields(
+                name=None, security_prompt=None, hosting=None, model="new-model"
+            ),
+            "expected_name": "Test Agent",
+            "expected_prompt": "original prompt",
+            "expected_hosting": "test-hosting",
+            "expected_model": "new-model",
+        },
+        {
+            "name": "all_fields",
+            "original": AgentEditFields(
+                name="Original Agent",
+                security_prompt="original prompt",
+                hosting="test-hosting",
+                model="test-model",
+            ),
+            "update": AgentEditFields(
+                name="Updated Agent",
+                security_prompt="New security prompt",
+                hosting="new-hosting",
+                model="new-model",
+            ),
             "expected_name": "Updated Agent",
             "expected_prompt": "New security prompt",
+            "expected_hosting": "new-hosting",
+            "expected_model": "new-model",
         },
         {
             "name": "no_fields",
-            "original": AgentEditFields(name="Test Agent", security_prompt="original prompt"),
-            "update": AgentEditFields(name=None, security_prompt=None),
+            "original": AgentEditFields(
+                name="Test Agent",
+                security_prompt="original prompt",
+                hosting="test-hosting",
+                model="test-model",
+            ),
+            "update": AgentEditFields(name=None, security_prompt=None, hosting=None, model=None),
             "expected_name": "Test Agent",
             "expected_prompt": "original prompt",
+            "expected_hosting": "test-hosting",
+            "expected_model": "test-model",
+        },
+        {
+            "name": "empty_strings",
+            "original": AgentEditFields(
+                name="Test Agent",
+                security_prompt="original prompt",
+                hosting="test-hosting",
+                model="test-model",
+            ),
+            "update": AgentEditFields(name="", security_prompt="", hosting="", model=""),
+            "expected_name": "",
+            "expected_prompt": "",
+            "expected_hosting": "",
+            "expected_model": "",
         },
     ],
 )
@@ -110,7 +207,9 @@ def test_update_agent(temp_agents_dir: Path, test_case):
 def test_delete_agent(temp_agents_dir: Path):
     registry = AgentRegistry(temp_agents_dir)
     agent_name = "Agent to Delete"
-    agent = registry.create_agent(AgentEditFields(name=agent_name, security_prompt=""))
+    agent = registry.create_agent(
+        AgentEditFields(name=agent_name, security_prompt="", hosting="", model="")
+    )
 
     # Ensure conversation file exists before deletion
     conversation_file = temp_agents_dir / f"{agent.id}_conversation.json"
@@ -137,8 +236,12 @@ def test_list_agents(temp_agents_dir: Path):
     assert registry.list_agents() == []
 
     # Create two agents and verify the list
-    agent1 = registry.create_agent(AgentEditFields(name="Agent One", security_prompt=""))
-    agent2 = registry.create_agent(AgentEditFields(name="Agent Two", security_prompt=""))
+    agent1 = registry.create_agent(
+        AgentEditFields(name="Agent One", security_prompt="", hosting="", model="")
+    )
+    agent2 = registry.create_agent(
+        AgentEditFields(name="Agent Two", security_prompt="", hosting="", model="")
+    )
     agents = registry.list_agents()
     assert len(agents) == 2
     names = {agent.name for agent in agents}
@@ -150,7 +253,9 @@ def test_list_agents(temp_agents_dir: Path):
 def test_save_and_load_conversation(temp_agents_dir: Path):
     registry = AgentRegistry(temp_agents_dir)
     agent_name = "Agent Conversation"
-    agent = registry.create_agent(AgentEditFields(name=agent_name, security_prompt=""))
+    agent = registry.create_agent(
+        AgentEditFields(name=agent_name, security_prompt="", hosting="", model="")
+    )
 
     conversation = [
         {"role": "USER", "content": "Hello"},
@@ -164,7 +269,7 @@ def test_save_and_load_conversation(temp_agents_dir: Path):
 def test_load_nonexistent_conversation(temp_agents_dir: Path):
     registry = AgentRegistry(temp_agents_dir)
     agent = registry.create_agent(
-        AgentEditFields(name="Agent No Conversation", security_prompt=None)
+        AgentEditFields(name="Agent No Conversation", security_prompt=None, hosting="", model="")
     )
     conversation_file = temp_agents_dir / f"{agent.id}_conversation.json"
     # Remove the conversation file if it exists to simulate a missing file
@@ -178,7 +283,8 @@ def test_update_agent_not_found(temp_agents_dir: Path):
     registry = AgentRegistry(temp_agents_dir)
     with pytest.raises(KeyError):
         registry.update_agent(
-            "non-existent-id", AgentEditFields(name="New Name", security_prompt=None)
+            "non-existent-id",
+            AgentEditFields(name="New Name", security_prompt=None, hosting="", model=""),
         )
 
 
@@ -198,7 +304,9 @@ def test_create_agent_save_failure(temp_agents_dir: Path, monkeypatch):
     monkeypatch.setattr(type(registry.agents_file), "open", fake_open)
 
     with pytest.raises(Exception) as exc_info:
-        registry.create_agent(AgentEditFields(name="Agent Fail", security_prompt=None))
+        registry.create_agent(
+            AgentEditFields(name="Agent Fail", security_prompt=None, hosting="", model="")
+        )
     assert str(exc_info.value) == "Fake write failure"
 
 
@@ -206,7 +314,9 @@ def test_clone_agent(temp_agents_dir: Path):
     registry = AgentRegistry(temp_agents_dir)
     source_name = "Source Agent"
     source_agent = registry.create_agent(
-        AgentEditFields(name=source_name, security_prompt="test security prompt")
+        AgentEditFields(
+            name=source_name, security_prompt="test security prompt", hosting="", model=""
+        )
     )
 
     # Add some conversation history to source agent
@@ -235,8 +345,12 @@ def test_clone_agent_not_found(temp_agents_dir: Path):
 
 def test_clone_agent_duplicate_name(temp_agents_dir: Path):
     registry = AgentRegistry(temp_agents_dir)
-    source_agent = registry.create_agent(AgentEditFields(name="Source", security_prompt=None))
-    registry.create_agent(AgentEditFields(name="Existing", security_prompt=None))
+    source_agent = registry.create_agent(
+        AgentEditFields(name="Source", security_prompt=None, hosting="", model="")
+    )
+    registry.create_agent(
+        AgentEditFields(name="Existing", security_prompt=None, hosting="", model="")
+    )
 
     with pytest.raises(ValueError):
         registry.clone_agent(source_agent.id, "Existing")
@@ -248,7 +362,9 @@ def test_get_agent_by_name(temp_agents_dir: Path):
     # Create a test agent
     agent_name = "Test Agent"
     agent = registry.create_agent(
-        AgentEditFields(name=agent_name, security_prompt="test security prompt")
+        AgentEditFields(
+            name=agent_name, security_prompt="test security prompt", hosting="", model=""
+        )
     )
 
     # Test finding existing agent
