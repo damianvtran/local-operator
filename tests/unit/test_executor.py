@@ -25,7 +25,13 @@ def mock_model():
 
 @pytest.fixture
 def executor(mock_model):
-    return LocalCodeExecutor(mock_model)
+    agent = MagicMock()
+    agent.id = "test_agent"
+    agent.name = "Test Agent"
+    agent.version = "1.0.0"
+    agent.security_prompt = ""
+
+    return LocalCodeExecutor(mock_model, agent=agent)
 
 
 @pytest.fixture
