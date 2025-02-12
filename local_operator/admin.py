@@ -71,22 +71,18 @@ def create_agent_from_conversation_tool(
         Returns:
             AgentData: The newly created agent's data
         """
-        # Find index of second-to-last user message by iterating backwards
+        # Find index of last user message by iterating backwards
         history = executor.conversation_history
         last_user_idx = None
-        second_last_user_idx = None
 
         for i in range(len(history) - 1, -1, -1):
-            if history[i]["role"] == ConversationRole.USER.value:
-                if last_user_idx is None:
-                    last_user_idx = i
-                else:
-                    second_last_user_idx = i
-                    break
+            if history[i]["role"].upper() == "USER":
+                last_user_idx = i
+                break
 
-        # Save history up to the second-to-last user message (excluding the create
+        # Save history up to the last user message (excluding the create
         # agent request itself)
-        cutoff_idx = second_last_user_idx if second_last_user_idx is not None else 0
+        cutoff_idx = last_user_idx if last_user_idx is not None else 0
         history_to_save = history[:cutoff_idx]
 
         new_agent = agent_registry.create_agent(
@@ -144,21 +140,17 @@ def save_agent_training_tool(
         if not executor.agent:
             raise ValueError("No current agent set in executor")
 
-        # Find index of second-to-last user message by iterating backwards
+        # Find index of last user message by iterating backwards
         history = executor.conversation_history
         last_user_idx = None
-        second_last_user_idx = None
 
         for i in range(len(history) - 1, -1, -1):
             if history[i]["role"] == ConversationRole.USER.value:
-                if last_user_idx is None:
-                    last_user_idx = i
-                else:
-                    second_last_user_idx = i
-                    break
+                last_user_idx = i
+                break
 
-        # Save history up to the second-to-last user message (excluding the save request itself)
-        cutoff_idx = second_last_user_idx if second_last_user_idx is not None else 0
+        # Save history up to the last user message (excluding the save request itself)
+        cutoff_idx = last_user_idx if last_user_idx is not None else 0
         history_to_save = history[:cutoff_idx]
 
         agent_registry.save_agent_conversation(executor.agent.id, history_to_save)
