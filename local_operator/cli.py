@@ -24,16 +24,19 @@ from pathlib import Path
 
 import uvicorn
 
+from local_operator.admin import (
+    create_agent_from_conversation_tool,
+    delete_agent_tool,
+    edit_agent_tool,
+    get_agent_info_tool,
+    save_conversation_tool,
+)
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
 from local_operator.model import configure_model
-from local_operator.operator import (
-    Operator,
-    OperatorType,
-    create_agent_from_conversation_tool,
-)
+from local_operator.operator import Operator, OperatorType
 from local_operator.tools import ToolRegistry
 
 CLI_DESCRIPTION = """
@@ -313,6 +316,50 @@ def agents_delete_command(name: str, agent_registry: AgentRegistry) -> int:
     return 0
 
 
+def build_tool_registry(executor: LocalCodeExecutor, agent_registry: AgentRegistry) -> ToolRegistry:
+    """Build and initialize the tool registry with agent management tools.
+
+    This function creates a new ToolRegistry instance and registers the core agent management tools:
+    - create_agent_from_conversation: Creates a new agent from the current conversation
+    - edit_agent: Modifies an existing agent's properties
+    - delete_agent: Removes an agent from the registry
+    - get_agent_info: Retrieves information about agents
+
+    Args:
+        executor: The LocalCodeExecutor instance containing conversation history
+        agent_registry: The AgentRegistry for managing agents
+
+    Returns:
+        ToolRegistry: The initialized tool registry with all agent management tools registered
+    """
+    tool_registry = ToolRegistry()
+    tool_registry.init_tools()
+    tool_registry.add_tool(
+        "create_agent_from_conversation",
+        create_agent_from_conversation_tool(
+            executor,
+            agent_registry,
+        ),
+    )
+    tool_registry.add_tool(
+        "edit_agent",
+        edit_agent_tool(agent_registry),
+    )
+    tool_registry.add_tool(
+        "delete_agent",
+        delete_agent_tool(agent_registry),
+    )
+    tool_registry.add_tool(
+        "get_agent_info",
+        get_agent_info_tool(agent_registry),
+    )
+    tool_registry.add_tool(
+        "save_conversation",
+        save_conversation_tool(executor),
+    )
+    return tool_registry
+
+
 def main() -> int:
     try:
         parser = build_cli_parser()
@@ -412,16 +459,7 @@ def main() -> int:
             training_mode=training_mode,
         )
 
-        tool_registry = ToolRegistry()
-        tool_registry.init_tools()
-        tool_registry.add_tool(
-            "create_agent_from_conversation",
-            create_agent_from_conversation_tool(
-                executor,
-                agent_registry,
-            ),
-        )
-
+        tool_registry = build_tool_registry(executor, agent_registry)
         executor.set_tool_registry(tool_registry)
 
         # Start the async chat interface or execute single command
