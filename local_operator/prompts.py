@@ -3,7 +3,6 @@ import inspect
 import os
 import platform
 from pathlib import Path
-from types import ModuleType
 
 from local_operator.tools import ToolRegistry
 

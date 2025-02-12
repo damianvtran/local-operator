@@ -8,10 +8,8 @@ isolate behaviors.
 """
 
 import json
-import uuid
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -31,7 +29,7 @@ from local_operator.admin import (
     save_conversation_tool,
     update_config_tool,
 )
-from local_operator.agents import AgentData, AgentEditFields
+from local_operator.agents import AgentEditFields
 from local_operator.config import Config, ConfigManager
 from local_operator.tools import ToolRegistry
 from local_operator.types import ConversationRole
