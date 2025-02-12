@@ -163,7 +163,7 @@ class AgentRegistry:
 
         return agent_metadata
 
-    def update_agent(self, agent_id: str, updated_metadata: AgentEditFields) -> None:
+    def update_agent(self, agent_id: str, updated_metadata: AgentEditFields) -> AgentData:
         """
         Edit an existing agent's metadata.
 
@@ -194,6 +194,8 @@ class AgentRegistry:
             # Restore original metadata if save fails
             self._agents[agent_id] = AgentData.model_validate(agent_id)
             raise Exception(f"Failed to save updated agent metadata: {str(e)}")
+
+        return current_metadata
 
     def delete_agent(self, agent_id: str) -> None:
         """
