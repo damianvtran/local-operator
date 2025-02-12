@@ -53,12 +53,7 @@ def get_tools_str(tool_registry: ToolRegistry | None = None) -> str:
     """Get formatted string describing available tool functions.
 
     Args:
-<<<<<<< HEAD
-        tools_module (ModuleType | None, optional): Module containing tool functions to document.
-            Defaults to None.
-=======
         tool_registry: ToolRegistry instance containing tool functions to document
->>>>>>> main
 
     Returns:
         str: Formatted string describing the tools, with each tool on a new line in the format:
@@ -214,12 +209,8 @@ Additional User Info:
 <user_system_prompt>
 {{user_system_prompt}}
 </user_system_prompt>
-<<<<<<< HEAD
-⚠️ Pay close attention to the user's information and use it to help you achieve the user's goal.
-=======
 ⚠️ Pay close attention to the user's information if provided and use it to help you achieve
 the user's goal.
->>>>>>> main
 
 Critical Constraints:
 - No combined steps or assumptions.
