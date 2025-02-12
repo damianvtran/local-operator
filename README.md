@@ -6,14 +6,31 @@
 </picture>
 
 <h1 align="center">Local Operator: On-device Agentic Task Execution</h1>
+<div align="center">
+  <h2>🤖 Your Personal Python AI Environment</h2>
+  <p><i>Code execution on your device through natural conversation</i></p>
+</div>
 
-**Local Operator** is an environment for agents to run Python code on-device, enabling secure execution of commands through a conversational chat interface. The agent can plan a series of steps to achieve a user goal, and execute the code sequentially with self-correction to achieve the goal.  When run with local models, it provides a safe environment for running Python code while maintaining system security through built-in safety checks and user confirmation prompts.  It is also compatible with 3rd party cloud-hosted models such as those from OpenAI and DeepSeek.  
+**<span style="color: #38C96A">Local Operator</span>** empowers you to run Python code safely on your own machine through an intuitive chat interface. The AI agent:
 
-This repository is open source and free to use, with an MIT license.  Feel free to incorporate it into your own projects as needed.  Though, we would love to hear your feedback and any contributions to the project will greatly help the community!
+🎯 **Plans & Executes** - Breaks down complex goals into manageable steps and executes them with precision.
 
-Artificial intelligence tools like these should be open and freely available to the majority of people due to the exponential impact that they have on personal productivity.  We hope to make this a reality for everyone!
+🔒 **Prioritizes Security** - Built-in safety checks by independent AI review and user confirmations keep your system protected
 
-## Key Features
+🌐 **Flexible Deployment** - Run completely locally with Ollama models or leverage cloud providers like OpenAI
+
+🔧 **Problem Solving** - Intelligently handles errors and roadblocks by adapting approaches and finding alternative solutions
+
+This project is proudly open source under the MIT license. We believe AI tools should be accessible to everyone, given their transformative impact on productivity. Your contributions and feedback help make this vision a reality!
+
+> "Democratizing AI-powered development, one conversation at a time."
+
+<div align="center">
+  <a href="#contributing">Contribute</a> •
+  <a href="https://local-operator.com">Learn More</a>
+</div>
+
+## 🔑 Key Features
 
 - **Interactive CLI Interface**: Chat with an AI assistant that can execute Python code locally
 - **Server Mode**: Run the operator as a FastAPI server to interact with the agent through a web interface
@@ -35,13 +52,13 @@ The Local Operator provides a command-line interface where you can:
 
 Visit the [Local Operator website](https://local-operator.com) for visualizations and information about the project.
 
-## Requirements
+## 💻 Requirements
 
 - Python 3.12+
 - For 3rd party hosting: [OpenRouter](https://openrouter.ai/keys), [OpenAI](https://platform.openai.com/api-keys), [DeepSeek](https://platform.deepseek.ai/), [Anthropic](https://console.anthropic.com/), [Google](https://ai.google.dev/), or other API key (prompted for on first run)
 - For local hosting: Ollama model installed and running
 
-## Setup
+## 🛠️ Setup
 
 To run Local Operator with a 3rd party cloud-hosted LLM model, you need to have an API key.  You can get one from OpenAI, DeepSeek, Anthropic, or other providers.
 
@@ -59,7 +76,7 @@ playwright install
 
 If you would like to run with a local Ollama model, you will need to install Ollama first from [here](https://ollama.ai/download), and fetch a model using `ollama pull`.  Make sure that the ollama server is running with `ollama serve`.
 
-## Usage (CLI)
+## 🖥️ Usage (CLI)
 
 Run the operator CLI with the following command:
 
@@ -89,7 +106,7 @@ Quit by typing `exit` or `quit`.
 
 Run `local-operator --help` for more information about parameters and configuration.
 
-## Usage (Single Execution Mode)
+## 🚀 Usage (Single Execution Mode)
 
 The operator can be run in a single execution mode where it will execute a single task and then exit.  This is useful for running the operator in a non-interactive way such as in a script.
 
@@ -99,7 +116,7 @@ local-operator exec "Make a new file called test.txt and write Hello World in it
 
 This will execute the task and then exit with a code 0 if successful, or a non-zero code if there was an error.
 
-## Usage (Server)
+## 📡 Usage (Server)
 
 To run the operator as a server, use the following command:
 
@@ -113,7 +130,7 @@ To view the API documentation, navigate to `http://localhost:8080/docs` in your 
 
 For development, use the `--reload` argument to enable hot reloading.
 
-## Usage (Agents)
+## 🧠 Usage (Agents)
 
 The agents mode is helpful for passing on knowledge between agents and between runs.  It is also useful for creating reusable agentic experiences learned through conversation with the user.
 
@@ -154,7 +171,7 @@ or
 local-operator --hosting openai --model gpt-4o exec "Make a new file called test.txt and write Hello World in it" --agent "My Agent"
 ```
 
-## Configuration
+## 🔑 Configuration
 
 The operator uses a configuration file to manage API keys and other settings.  It can be created at `~/.local-operator/config.yml` with the `local-operator config create` command.  You can edit this file directly to change the configuration.
 
@@ -167,7 +184,7 @@ Credentials are stored in the `~/.local-operator/credentials.yml` file.  Credent
 - `hosting`: The hosting platform to use.  Avoids needing to specify the `--hosting` argument every time.
 - `model_name`: The name of the model to use.  Avoids needing to specify the `--model` argument every time.
 
-## Examples
+## 📝 Examples
 
 ### Hello World
 
@@ -1701,7 +1718,19 @@ Total number of rows: 4495
 
 </details>
 
-## Safety Features
+## 👥 Contributing
+
+We welcome contributions from the community! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to:
+
+- Submit bug reports and feature requests
+- Set up your development environment
+- Submit pull requests
+- Follow our coding standards and practices
+- Join our community discussions
+
+Your contributions help make Local Operator better for everyone. We appreciate all forms of help, from code improvements to documentation updates.
+
+## 🔒 Safety Features
 
 The system includes multiple layers of protection:
 
@@ -1710,6 +1739,6 @@ The system includes multiple layers of protection:
 - Agent prompt with safety focused execution policy
 - Support for local Ollama models to prevent sending local system data to 3rd parties
 
-## License
+## 📝 License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
