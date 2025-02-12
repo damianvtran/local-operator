@@ -54,6 +54,16 @@ def print_cli_banner(
     config_manager: ConfigManager, current_agent: AgentData | None, training_mode: bool
 ) -> None:
     debug_mode = os.getenv("LOCAL_OPERATOR_DEBUG", "false").lower() == "true"
+
+    hosting = config_manager.get_config_value("hosting")
+    model = config_manager.get_config_value("model_name")
+
+    if current_agent:
+        if current_agent.hosting:
+            hosting = current_agent.hosting
+        if current_agent.model:
+            model = current_agent.model
+
     """Print the banner for the chat CLI."""
     debug_indicator = " [DEBUG MODE]" if debug_mode else ""
     print("\033[1;36m╭──────────────────────────────────────────────────╮\033[0m")
@@ -75,8 +85,6 @@ def print_cli_banner(
             padding = 49 - len(training_text)
             print(f"\033[1;36m│ {training_text}{' ' * padding}│\033[0m")
         print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
-    hosting = config_manager.get_config_value("hosting")
-    model = config_manager.get_config_value("model_name")
     if hosting:
         hosting_text = f"Using hosting: {hosting}"
         padding = 49 - len(hosting_text)

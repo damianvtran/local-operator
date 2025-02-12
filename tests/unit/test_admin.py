@@ -164,7 +164,9 @@ def test_save_agent_training_with_agent(
         {"role": ConversationRole.ASSISTANT.value, "content": "Assistant reply"},
     ]
     executor.conversation_history = conversation_history
-    agent = agent_registry.create_agent(AgentEditFields(name="TrainAgent", security_prompt=""))
+    agent = agent_registry.create_agent(
+        AgentEditFields(name="TrainAgent", security_prompt="", hosting="", model="")
+    )
     executor.agent = agent
     save_training_tool = save_agent_training_tool(executor, agent_registry)
     updated_agent = save_training_tool()
@@ -181,8 +183,12 @@ def test_list_agent_info_without_id(agent_registry: AgentRegistry) -> None:
     Test listing agent information without specifying an agent ID.
     All agents stored in the registry should be returned.
     """
-    agent1 = agent_registry.create_agent(AgentEditFields(name="Agent1", security_prompt="prompt1"))
-    agent2 = agent_registry.create_agent(AgentEditFields(name="Agent2", security_prompt="prompt2"))
+    agent1 = agent_registry.create_agent(
+        AgentEditFields(name="Agent1", security_prompt="prompt1", hosting="", model="")
+    )
+    agent2 = agent_registry.create_agent(
+        AgentEditFields(name="Agent2", security_prompt="prompt2", hosting="", model="")
+    )
     list_tool = list_agent_info_tool(agent_registry)
     agents_list = list_tool(None)
     assert len(agents_list) == 2, f"Expected 2 agents, got {len(agents_list)}"
@@ -196,7 +202,9 @@ def test_list_agent_info_with_id(agent_registry: AgentRegistry) -> None:
     Test retrieving agent information for a specific agent ID.
     Only the desired agent should be returned.
     """
-    agent = agent_registry.create_agent(AgentEditFields(name="AgentX", security_prompt="promptX"))
+    agent = agent_registry.create_agent(
+        AgentEditFields(name="AgentX", security_prompt="promptX", hosting="", model="")
+    )
     list_tool = list_agent_info_tool(agent_registry)
     agent_list = list_tool(agent.id)
     assert len(agent_list) == 1, f"Expected 1 agent, got {len(agent_list)}"
@@ -220,9 +228,13 @@ def test_edit_agent_tool(agent_registry: AgentRegistry) -> None:
     """
     Test the edit_agent_tool to verify that an agent's name and security prompt update correctly.
     """
-    agent = agent_registry.create_agent(AgentEditFields(name="OldName", security_prompt="old"))
+    agent = agent_registry.create_agent(
+        AgentEditFields(name="OldName", security_prompt="old", hosting="", model="")
+    )
     edit_tool = edit_agent_tool(agent_registry)
-    updated_agent = edit_tool(agent.id, AgentEditFields(name="NewName", security_prompt="new"))
+    updated_agent = edit_tool(
+        agent.id, AgentEditFields(name="NewName", security_prompt="new", hosting="", model="")
+    )
     assert updated_agent is not None, "edit_agent_tool returned None"
     assert updated_agent.name == "NewName", f"Expected 'NewName', got {updated_agent.name}"
     assert (
@@ -234,7 +246,9 @@ def test_delete_agent_tool(agent_registry: AgentRegistry) -> None:
     """
     Test the delete_agent_tool to confirm an agent is removed from the registry.
     """
-    agent = agent_registry.create_agent(AgentEditFields(name="ToDelete", security_prompt=""))
+    agent = agent_registry.create_agent(
+        AgentEditFields(name="ToDelete", security_prompt="", hosting="", model="")
+    )
     delete_tool = delete_agent_tool(agent_registry)
     delete_tool(agent.id)
     with pytest.raises(KeyError, match=rf"Agent with id {agent.id} not found"):
@@ -245,8 +259,12 @@ def test_get_agent_info_tool_without_id(agent_registry: AgentRegistry) -> None:
     """
     Test get_agent_info_tool returns all agents when no id is provided.
     """
-    agent_registry.create_agent(AgentEditFields(name="Agent1", security_prompt=""))
-    agent_registry.create_agent(AgentEditFields(name="Agent2", security_prompt=""))
+    agent_registry.create_agent(
+        AgentEditFields(name="Agent1", security_prompt="", hosting="", model="")
+    )
+    agent_registry.create_agent(
+        AgentEditFields(name="Agent2", security_prompt="", hosting="", model="")
+    )
     get_tool = get_agent_info_tool(agent_registry)
     agents = get_tool(None)
     assert len(agents) == 2, f"Expected 2 agents, got {len(agents)}"
@@ -256,7 +274,9 @@ def test_get_agent_info_tool_with_id(agent_registry: AgentRegistry) -> None:
     """
     Test get_agent_info_tool returns information for the specified agent.
     """
-    agent = agent_registry.create_agent(AgentEditFields(name="AgentSingle", security_prompt=""))
+    agent = agent_registry.create_agent(
+        AgentEditFields(name="AgentSingle", security_prompt="", hosting="", model="")
+    )
     get_tool = get_agent_info_tool(agent_registry)
     result = get_tool(agent.id)
     assert len(result) == 1, f"Expected 1 agent, got {len(result)}"
@@ -329,6 +349,8 @@ def test_add_admin_tools(
         "get_config",
         "update_config",
         "save_agent_training",
+        "open_agents_config",
+        "open_settings_config",
     }
     tools_set = set(tool_registry._tools.keys())
     # Check that all expected tools are present, but allow for additional builtin tools

@@ -118,6 +118,8 @@ def test_print_cli_banner_with_agent(monkeypatch, mock_config_manager):
         created_date=datetime.now(),
         version="1.0.0",
         security_prompt="",
+        hosting="",
+        model="",
     )
 
     print_cli_banner(mock_config_manager, current_agent=agent, training_mode=False)
@@ -134,6 +136,37 @@ def test_print_cli_banner_with_agent(monkeypatch, mock_config_manager):
     assert "Using model: test-model" in result
 
 
+def test_print_cli_banner_with_agent_and_config(monkeypatch, mock_config_manager):
+    output = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+
+    # Create mock agent metadata with custom hosting and model
+    agent = AgentData(
+        id="test-agent-id",
+        name="Test Agent",
+        created_date=datetime.now(),
+        version="1.0.0",
+        security_prompt="",
+        hosting="custom-host",
+        model="custom-model",
+    )
+
+    print_cli_banner(mock_config_manager, current_agent=agent, training_mode=False)
+    result = output.getvalue()
+
+    # Check agent info is displayed
+    assert "Current agent: Test Agent" in result
+    assert "Agent ID: test-agent-id" in result
+    assert "Training Mode" not in result
+
+    # Check other banner elements are still present
+    assert "Local Executor Agent CLI" in result
+
+    # Check that agent's hosting and model override config values
+    assert "Using hosting: custom-host" in result
+    assert "Using model: custom-model" in result
+
+
 def test_print_cli_banner_with_agent_and_training(monkeypatch, mock_config_manager):
     output = io.StringIO()
     monkeypatch.setattr(sys, "stdout", output)
@@ -146,6 +179,8 @@ def test_print_cli_banner_with_agent_and_training(monkeypatch, mock_config_manag
         created_date=datetime.now(),
         version="1.0.0",
         security_prompt="Security prompt",
+        hosting="test-host",
+        model="test-model",
     )
 
     print_cli_banner(mock_config_manager, current_agent=agent, training_mode=True)
