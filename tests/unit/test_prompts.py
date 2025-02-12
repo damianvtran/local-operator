@@ -81,10 +81,14 @@ def test_get_tools_str():
             "name": "Default init registry",
             "registry": ToolRegistry(),
             "expected": (
-                "- async browse_single_url(url: str) -> str: Browse to a URL using "
-                "Playwright to render JavaScript and return the page content.\n"
-                "- get_current_directory_info() -> Dict: Walk over the current directory "
-                "and return a dictionary of files and their"
+                "- add_info_to_knowledge_base(rag_manager: EmbeddingManager, info: str) -> None: "
+                "Add information to the knowledge base and save the manager.  Use this to store\n"
+                "- async browse_single_url(url: str) -> str: Browse to a URL using Playwright to "
+                "render JavaScript and return the page content.\n"
+                "- get_current_directory_info() -> Dict: Walk over the current directory and "
+                "return a dictionary of files and their\n"
+                "- query_knowledge_base(rag_manager: EmbeddingManager, query: str, "
+                "num_results: int = 10, max_distance: float = 3.0) -> str: "
             ),
         },
     ]
