@@ -17,12 +17,14 @@ from fastapi import Query
 from pydantic import BaseModel, Field
 from tiktoken import encoding_for_model
 
+from local_operator.admin import add_admin_tools
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
 from local_operator.model import configure_model
 from local_operator.operator import Operator, OperatorType
+from local_operator.tools import ToolRegistry
 
 logger = logging.getLogger("local_operator.server")
 
@@ -175,6 +177,31 @@ class AgentListResult(BaseModel):
     agents: List[Agent] = Field(..., description="List of agents")
 
 
+def build_tool_registry(
+    executor: LocalCodeExecutor, agent_registry: AgentRegistry, config_manager: ConfigManager
+) -> ToolRegistry:
+    """Build and initialize the tool registry with agent management tools.
+
+    This function creates a new ToolRegistry instance and registers the core agent management tools:
+    - create_agent_from_conversation: Creates a new agent from the current conversation
+    - edit_agent: Modifies an existing agent's properties
+    - delete_agent: Removes an agent from the registry
+    - get_agent_info: Retrieves information about agents
+
+    Args:
+        executor: The LocalCodeExecutor instance containing conversation history
+        agent_registry: The AgentRegistry for managing agents
+        config_manager: The ConfigManager for managing configuration
+
+    Returns:
+        ToolRegistry: The initialized tool registry with all agent management tools registered
+    """
+    tool_registry = ToolRegistry()
+    tool_registry.init_tools()
+    add_admin_tools(tool_registry, executor, agent_registry, config_manager)
+    return tool_registry
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize on startup by setting up the credential and config managers
@@ -227,7 +254,7 @@ def create_operator(request_hosting: str, request_model: str) -> Operator:
         can_prompt_user=False,
     )
 
-    return Operator(
+    operator = Operator(
         executor=executor,
         credential_manager=credential_manager,
         model_instance=executor.model,
@@ -237,6 +264,11 @@ def create_operator(request_hosting: str, request_model: str) -> Operator:
         current_agent=None,
         training_mode=False,
     )
+
+    tool_registry = build_tool_registry(executor, agent_registry, config_manager)
+    executor.set_tool_registry(tool_registry)
+
+    return operator
 
 
 @app.post(
