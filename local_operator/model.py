@@ -73,6 +73,10 @@ def configure_model(hosting: str, model: str, credential_manager) -> ModelType:
             temperature=0.3,
             model=model,
             base_url="https://openrouter.ai/api/v1",
+            default_headers={
+                "HTTP-Referer": "https://local-operator.com",
+                "X-Title": "Local Operator",
+            },
         )
     elif hosting == "anthropic":
         if not model:

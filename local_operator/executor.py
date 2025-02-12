@@ -3,13 +3,14 @@ import io
 import os
 import sys
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List
 
 from langchain.schema import BaseMessage
-from langchain_anthropic import ChatAnthropic
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
+from tiktoken import encoding_for_model
 
+from local_operator.agents import AgentData, AgentRegistry
 from local_operator.console import (
     ExecutionSection,
     format_agent_output,
@@ -23,9 +24,22 @@ from local_operator.console import (
     spinner,
 )
 from local_operator.model import ModelType
-from local_operator.prompts import SafetyCheckSystemPrompt, SafetyCheckUserPrompt
+from local_operator.prompts import (
+    SafetyCheckSystemPrompt,
+    SafetyCheckUserPrompt,
+    create_system_prompt,
+)
 from local_operator.rag import EmbeddingManager
+from local_operator.tools import ToolRegistry
 from local_operator.types import ConversationRole, ResponseJsonSchema
+
+
+class ExecutorInitError(Exception):
+    """Raised when the executor fails to initialize properly."""
+
+    def __init__(self, message: str = "Failed to initialize executor"):
+        self.message = message
+        super().__init__(self.message)
 
 
 class ProcessResponseStatus(Enum):
@@ -55,9 +69,24 @@ class ConfirmSafetyResult(Enum):
 
     SAFE = "safe"  # Code is safe, no further action needed
     UNSAFE = "unsafe"  # Code is unsafe, execution should be cancelled
+    OVERRIDE = "override"  # Code is unsafe, but a user security override allows it
     CONVERSATION_CONFIRM = (
         "conversation_confirm"  # Safety needs to be confirmed in further conversation with the user
     )
+
+
+def get_confirm_safety_result(response_content: str) -> ConfirmSafetyResult:
+    """Get the result of the safety check from the response content."""
+    if not response_content:
+        return ConfirmSafetyResult.SAFE
+
+    content_lower = response_content.lower()
+    if "[override]" in content_lower:
+        return ConfirmSafetyResult.OVERRIDE
+    elif "[unsafe]" in content_lower:
+        return ConfirmSafetyResult.UNSAFE
+    else:
+        return ConfirmSafetyResult.SAFE
 
 
 def process_json_response(response_str: str) -> ResponseJsonSchema:
@@ -96,6 +125,9 @@ class LocalCodeExecutor:
     interrupted: bool
     can_prompt_user: bool
     rag_manager: EmbeddingManager | None
+    total_tokens: int
+    agent: AgentData | None
+    tool_registry: ToolRegistry | None
 
     """A class to handle local Python code execution with safety checks and context management.
 
@@ -115,6 +147,8 @@ class LocalCodeExecutor:
             cannot respond via the terminal (False).
         rag_manager (EmbeddingManager | None): The RAG manager to use for information
         retrieval.
+        total_tokens (int): Running count of total tokens consumed by model invocations
+        agent (AgentData | None): The agent data for the current conversation
     """
 
     def __init__(
@@ -124,6 +158,8 @@ class LocalCodeExecutor:
         detail_conversation_length: int = 10,
         can_prompt_user: bool = True,
         rag_manager: EmbeddingManager | None = None,
+        conversation_history: List[Dict[str, str]] = [],
+        agent: AgentData | None = None,
     ):
         """Initialize the LocalCodeExecutor with a language model.
 
@@ -135,14 +171,19 @@ class LocalCodeExecutor:
                 conversation history.  Every step before this except the system prompt will be
                 summarized.  Set to -1 to keep all messages in full detail.
             can_prompt_user: Informs the executor about whether the end user has access to the
-            terminal (True), or is consuming the service from some remote source where they
-            cannot respond via the terminal (False).
+                terminal (True), or is consuming the service from some remote source where they
+                cannot respond via the terminal (False).
+            conversation_history: A list of message dictionaries tracking the conversation.
+            agent: The agent data for the current conversation.
         """
-        self.conversation_history = []
+        self.context = {}
+        self.conversation_history = conversation_history
         self.model = model
         self.max_conversation_history = max_conversation_history
         self.detail_conversation_length = detail_conversation_length
         self.can_prompt_user = can_prompt_user
+        self.total_tokens = 0
+        self.agent = agent
         self.reset_step_counter()
         self.interrupted = False
         self.rag_manager = rag_manager
@@ -205,6 +246,129 @@ class LocalCodeExecutor:
             msg["content"] = summary
             msg["summarized"] = "True"
 
+    def get_model_name(self) -> str:
+        """Get the name of the model being used.
+
+        Returns:
+            str: The lowercase name of the model. For OpenAI models, returns the model_name
+                attribute. For other models, returns the string representation of the model.
+        """
+        if isinstance(self.model, ChatOpenAI):
+            return self.model.model_name.lower()
+        else:
+            return str(self.model.model).lower()
+
+    def get_invoke_token_count(self, messages: List[Dict[str, str]]) -> int:
+        """Calculate the total number of tokens in a list of conversation messages.
+
+        Uses the appropriate tokenizer for the current model to count tokens. Falls back
+        to the GPT-4 tokenizer if the model-specific tokenizer is not available.
+
+        Args:
+            messages: List of conversation message dictionaries, each containing a "content" key
+                with the message text.
+
+        Returns:
+            int: Total number of tokens across all messages.
+        """
+        tokenizer = None
+        try:
+            tokenizer = encoding_for_model(self.get_model_name())
+        except Exception:
+            tokenizer = encoding_for_model("gpt-4o")
+
+        return sum(len(tokenizer.encode(entry["content"])) for entry in messages)
+
+    def get_session_token_usage(self) -> int:
+        """Get the total token count for the current session."""
+        return self.total_tokens
+
+    def initialize_conversation_history(
+        self, conversation_history: List[Dict[str, str]] = []
+    ) -> None:
+        """Initialize the conversation history."""
+        if len(self.conversation_history) != 0:
+            raise ExecutorInitError("Conversation history already initialized")
+
+        if len(conversation_history) == 0:
+            self.conversation_history = [
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": create_system_prompt(self.tool_registry),
+                }
+            ]
+        else:
+            self.conversation_history = conversation_history
+
+    def extract_code_blocks(self, text: str) -> List[str]:
+        """Extract Python code blocks from text using markdown-style syntax.
+        Handles nested code blocks by matching outermost ```python enclosures.
+
+        Args:
+            text (str): The text containing potential code blocks
+
+        Returns:
+            list: A list of extracted code blocks as strings
+        """
+        blocks = []
+        current_pos = 0
+
+        while True:
+            # Find start of next ```python block
+            start = text.find("```python", current_pos)
+            if start == -1:
+                break
+
+            # Find matching end block by counting nested blocks
+            nested_count = 1
+            pos = start + 9  # Length of ```python
+
+            while nested_count > 0 and pos < len(text):
+                if (
+                    text[pos:].startswith("```")
+                    and len(text[pos + 3 :].strip()) > 0
+                    and not text[pos + 3].isspace()
+                    and not pos + 3 >= len(text)
+                ):
+                    nested_count += 1
+                    pos += 9
+                elif text[pos:].startswith("```"):
+                    nested_count -= 1
+                    pos += 3
+                else:
+                    pos += 1
+
+            if nested_count == 0:
+                # Extract the block content between the outermost delimiters
+                block = text[start + 9 : pos - 3].strip()
+
+                # Validate block is not just comments/diffs
+                is_comment = True
+                for line in block.split("\n"):
+                    trimmed_line = line.strip()
+                    if not (
+                        trimmed_line.startswith("//")
+                        or trimmed_line.startswith("/*")
+                        or trimmed_line.startswith("#")
+                        or trimmed_line.startswith("+")
+                        or trimmed_line.startswith("-")
+                        or trimmed_line.startswith("<<<<<<<")
+                        or trimmed_line.startswith(">>>>>>>")
+                        or trimmed_line.startswith("=======")
+                    ):
+                        is_comment = False
+                        break
+
+                if not is_comment:
+                    blocks.append(block)
+
+                current_pos = pos
+            else:
+                # No matching end found, move past this start marker
+                current_pos = start + 9
+
+        return blocks
+
     async def invoke_model(
         self, messages: List[Dict[str, str]], max_attempts: int = 3
     ) -> BaseMessage:
@@ -232,11 +396,7 @@ class LocalCodeExecutor:
 
         while attempt < max_attempts:
             try:
-                model_name = ""
-                if isinstance(self.model, ChatOpenAI):
-                    model_name = self.model.model_name.lower()
-                else:
-                    model_name = str(self.model.model).lower()
+                model_name = self.get_model_name()
 
                 if "claude" in model_name:
                     # Anthropic models expect a single message, so combine the conversation history
@@ -253,47 +413,40 @@ class LocalCodeExecutor:
                         )
                         combined_message += f"{role_prefix}{msg['content']}\n\n"
                     combined_message = combined_message.strip()
-                    return await self.model.ainvoke(combined_message)
-                elif "o1" in model_name or "o3" in model_name:
-                    # OpenAI reasoning models (o1 and o3) expect a combined prompt
-                    # for chain-of-thought reasoning.
-                    combined_message = ""
-                    for msg in messages:
-                        role_prefix = (
-                            "User: "
-                            if msg["role"] == ConversationRole.USER.value
-                            else (
-                                "Assistant: "
-                                if msg["role"] == ConversationRole.ASSISTANT.value
-                                else "System: "
-                            )
-                        )
-                        combined_message += f"{role_prefix}{msg['content']}\n\n"
-                    combined_message = combined_message.strip()
-                    return await self.model.ainvoke(combined_message)
-                elif "gemini" in model_name or "mistral" in model_name:
-                    # Convert system messages to human messages for Google Gemini
-                    # or Mistral models.
-                    formatted_messages = []
-                    for msg in messages:
-                        if msg["role"] == ConversationRole.SYSTEM.value:
-                            msg["role"] = ConversationRole.USER.value
-                        formatted_messages.append(msg)
-
-                    # Ensure last message is from user for Mistral
-                    if (
-                        isinstance(self.model, ChatOpenAI)
-                        and self.model.model_name.lower().startswith("mistral")
-                        and formatted_messages[-1]["role"] == ConversationRole.ASSISTANT.value
-                    ):
-                        # Add an empty user message if last message is from assistant
-                        formatted_messages.append(
-                            {"role": ConversationRole.USER.value, "content": "Please continue."}
-                        )
-
-                    return await self.model.ainvoke(formatted_messages)
+                    response = await self.model.ainvoke(combined_message)
                 else:
-                    return await self.model.ainvoke(messages)
+                    if "o1" in model_name or "o3" in model_name:
+                        # OpenAI reasoning models (o1 and o3) expect a combined prompt
+                        # for chain-of-thought reasoning.
+                        combined_message = ""
+                        for msg in messages:
+                            role_prefix = (
+                                "User: "
+                                if msg["role"] == ConversationRole.USER.value
+                                else (
+                                    "Assistant: "
+                                    if msg["role"] == ConversationRole.ASSISTANT.value
+                                    else "System: "
+                                )
+                            )
+                            combined_message += f"{role_prefix}{msg['content']}\n\n"
+                        combined_message = combined_message.strip()
+                        response = await self.model.ainvoke(combined_message)
+                    elif "gemini" in model_name or "mistral" in model_name:
+                        # Convert system messages to human messages for Google Gemini
+                        # or Mistral models.
+                        for msg in messages[1:]:
+                            if msg["role"] == ConversationRole.SYSTEM.value:
+                                msg["role"] = ConversationRole.USER.value
+                        response = await self.model.ainvoke(messages)
+                    else:
+                        response = await self.model.ainvoke(messages)
+
+                # Update the total token count
+                self.total_tokens += self.get_invoke_token_count(messages)
+
+                return response
+
             except Exception as e:
                 last_error = e
                 attempt += 1
@@ -321,23 +474,29 @@ class LocalCodeExecutor:
         else:
             raise Exception("Failed to invoke model")
 
-    async def check_code_safety(self, code: str) -> bool:
+    async def check_code_safety(self, code: str) -> ConfirmSafetyResult:
         """Analyze code for potentially dangerous operations using the language model.
 
         Args:
             code (str): The Python code to analyze
 
         Returns:
-            bool: True if dangerous operations are detected, False otherwise
+            ConfirmSafetyResult: Result of the safety check
         """
         response: BaseMessage
 
+        agent_security_prompt = self.agent.security_prompt if self.agent else ""
+
         if self.can_prompt_user:
+            safety_prompt = SafetyCheckSystemPrompt.replace(
+                "{{security_prompt}}", agent_security_prompt
+            )
+
             safety_history = [
-                {"role": ConversationRole.SYSTEM.value, "content": SafetyCheckSystemPrompt},
+                {"role": ConversationRole.SYSTEM.value, "content": safety_prompt},
                 {
                     "role": ConversationRole.USER.value,
-                    "content": f"Determine if the following code is safe: {code}",
+                    "content": f"Determine a status for the following code:\n\n{code}",
                 },
             ]
 
@@ -346,11 +505,13 @@ class LocalCodeExecutor:
             response_content = (
                 response.content if isinstance(response.content, str) else str(response.content)
             )
-            return "[UNSAFE]" in response_content
+            return get_confirm_safety_result(response_content)
 
         # If we can't prompt the user, we need to use the conversation history to determine
         # if the user has previously indicated a decision.
-        safety_prompt = SafetyCheckUserPrompt.replace("{{code}}", code)
+        safety_prompt = SafetyCheckUserPrompt.replace("{{code}}", code).replace(
+            "{{security_prompt}}", agent_security_prompt
+        )
         self._append_to_history(
             ConversationRole.USER,
             safety_prompt,
@@ -361,15 +522,17 @@ class LocalCodeExecutor:
         )
         self.conversation_history.pop()
 
-        if "[UNSAFE]" in response_content:
+        safety_result = get_confirm_safety_result(response_content)
+
+        if safety_result == ConfirmSafetyResult.UNSAFE:
             analysis = response_content.replace("[UNSAFE]", "").strip()
             self._append_to_history(
                 ConversationRole.ASSISTANT,
                 f"The code is unsafe. Here is an analysis of the code risk: {analysis}",
             )
-            return True
+            return ConfirmSafetyResult.UNSAFE
 
-        return False
+        return safety_result
 
     async def execute_code(self, code: str, max_retries: int = 2) -> str:
         """Execute Python code with safety checks and context management.
@@ -387,6 +550,11 @@ class LocalCodeExecutor:
             return "Code execution canceled by user"
         elif safety_result == ConfirmSafetyResult.CONVERSATION_CONFIRM:
             return "Code execution requires further confirmation from the user"
+        elif safety_result == ConfirmSafetyResult.OVERRIDE:
+            print(
+                "\n\033[1;33m⚠️  Warning: Code safety override applied based on user's security"
+                " prompt\033[0m\n"
+            )
 
         # Try initial execution
         try:
@@ -400,10 +568,13 @@ class LocalCodeExecutor:
         Returns:
             ConfirmSafetyResult: Result of the safety check
         """
-        if await self.check_code_safety(code):
+        safety_result = await self.check_code_safety(code)
+
+        if safety_result == ConfirmSafetyResult.UNSAFE:
             if self.can_prompt_user:
                 confirm = input(
-                    "Warning: Potentially dangerous operation detected. Proceed? (y/n): "
+                    "\n\033[1;33m⚠️  Warning: Potentially dangerous operation detected."
+                    " Proceed? (y/n): \033[0m"
                 )
                 if confirm.lower() == "y":
                     return ConfirmSafetyResult.SAFE
@@ -426,7 +597,7 @@ class LocalCodeExecutor:
                 )
                 self._append_to_history(ConversationRole.ASSISTANT, msg)
                 return ConfirmSafetyResult.CONVERSATION_CONFIRM
-        return ConfirmSafetyResult.SAFE
+        return safety_result
 
     async def _execute_with_output(self, code: str) -> str:
         """Execute code and capture stdout/stderr output.
@@ -718,3 +889,36 @@ class LocalCodeExecutor:
 
         response = await self.invoke_model(summary_history)
         return response.content if isinstance(response.content, str) else str(response.content)
+
+    def get_conversation_working_directory(self) -> Path | None:
+        """Get the working directory from the conversation history.
+
+        Searches through the conversation history in reverse order to find the most recent
+        system message containing a working directory specification. This is used to maintain
+        context about which directory the conversation is operating in.
+
+        Returns:
+            Path | None: The working directory path extracted from the most recent system
+                        message that specifies it, or None if no working directory is found
+                        in any system message.
+        """
+        for msg in reversed(self.conversation_history):
+            if msg["role"] == ConversationRole.SYSTEM.value:
+                content = msg["content"]
+                lower_content = content.lower()
+                if lower_content.startswith("current working directory:"):
+                    return Path(lower_content.split("current working directory:", 1)[1].strip())
+        return None
+
+    def set_tool_registry(self, tool_registry: ToolRegistry) -> None:
+        """Set the tool registry for the current conversation."""
+        self.tool_registry = tool_registry
+        self.context["tools"] = tool_registry
+
+    def get_conversation_history(self) -> list[dict[str, str]]:
+        """Get the conversation history as a list of dictionaries.
+
+        Returns:
+            list[dict[str, str]]: The conversation history as a list of dictionaries
+        """
+        return [msg if isinstance(msg, dict) else msg.dict() for msg in self.conversation_history]

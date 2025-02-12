@@ -3,7 +3,8 @@ import inspect
 import os
 import platform
 from pathlib import Path
-from types import ModuleType
+
+from local_operator.tools import ToolRegistry
 
 
 def get_installed_packages_str() -> str:
@@ -48,19 +49,23 @@ def get_installed_packages_str() -> str:
     return package_str
 
 
-def get_tools_str(tools_module: ModuleType | None = None) -> str:
+def get_tools_str(tool_registry: ToolRegistry | None = None) -> str:
     """Get formatted string describing available tool functions.
 
     Args:
+<<<<<<< HEAD
         tools_module (ModuleType | None, optional): Module containing tool functions to document.
             Defaults to None.
+=======
+        tool_registry: ToolRegistry instance containing tool functions to document
+>>>>>>> main
 
     Returns:
         str: Formatted string describing the tools, with each tool on a new line in the format:
             "- [async] function_name(arg1: type = default, ...) -> return_type: description"
             Returns empty string if no tools module provided.
     """
-    if not tools_module:
+    if not tool_registry:
         return ""
 
     # Get list of builtin functions/types to exclude
@@ -68,12 +73,12 @@ def get_tools_str(tools_module: ModuleType | None = None) -> str:
     builtin_names.update(["dict", "list", "set", "tuple", "Path"])
 
     tools_list: list[str] = []
-    for name in dir(tools_module):
+    for name in tool_registry:
         # Skip private functions and builtins
         if name.startswith("_") or name in builtin_names:
             continue
 
-        tool = getattr(tools_module, name)
+        tool = tool_registry.get_tool(name)
         if callable(tool):
             doc = tool.__doc__ or "No description available"
             # Get first line of docstring
@@ -110,7 +115,7 @@ def get_tools_str(tools_module: ModuleType | None = None) -> str:
     return "\n".join(tools_list)
 
 
-def create_system_prompt(tools_module: ModuleType | None = None) -> str:
+def create_system_prompt(tool_registry: ToolRegistry | None = None) -> str:
     """Create the system prompt for the agent."""
 
     base_system_prompt = BaseSystemPrompt
@@ -139,7 +144,7 @@ def create_system_prompt(tools_module: ModuleType | None = None) -> str:
         .replace("{{user_system_prompt}}", user_system_prompt)
     )
 
-    tools_str = get_tools_str(tools_module)
+    tools_str = get_tools_str(tool_registry)
     base_system_prompt = base_system_prompt.replace("{{tools_str}}", tools_str)
 
     return base_system_prompt
@@ -176,13 +181,14 @@ Response Flow:
    - ASK: request additional details.
    - BYE: end the session and exit.
 
-Tool Use:
+Tool Usage:
 Available functions:
 <tools_list>
 {{tools_str}}
 </tools_list>
-Import them from local_operator.tools. Use await for async functions (do not call asyncio.run()).
-For Playwright, use its async version.
+Use them by running tools.[TOOL_FUNCTION] in your code. `tools` is a tool registry that
+is in the execution context of your code. Use `await` for async functions (do not call
+`asyncio.run()`).
 
 Knowledge Base:
 - You have access to a knowledge base that allows you to store and retrieve information.
@@ -208,7 +214,12 @@ Additional User Info:
 <user_system_prompt>
 {{user_system_prompt}}
 </user_system_prompt>
+<<<<<<< HEAD
 ⚠️ Pay close attention to the user's information and use it to help you achieve the user's goal.
+=======
+⚠️ Pay close attention to the user's information if provided and use it to help you achieve
+the user's goal.
+>>>>>>> main
 
 Critical Constraints:
 - No combined steps or assumptions.
@@ -222,16 +233,18 @@ Critical Constraints:
   10000 tokens at once in the code output.
 
 Response Format:
-Respond strictly in JSON following this schema:
+Respond strictly in JSON following this schema with the fields in the following order.
+The order is important because each field will help you think through the long term
+goal as you write your response.
 {
-  "plan": "Set of goals to achieve the user's goal",
   "previous_step_success": true | false,
   "previous_goal": "Your goal from the previous step",
+  "learnings": "Aggregated information learned so far from previous steps",
   "current_goal": "Your goal for the current step",
+  "plan": "Long term plan of actions to achieve the user's goal beyond these goals",
   "next_goal": "Your goal for the next step",
   "response": "Natural language response to the user's goal",
   "code": "Code to achieve the user's goal, must be valid Python code",
-  "learnings": "Aggregated information learned so far from previous steps",
   "action": "CONTINUE | CHECK | DONE | ASK | BYE"
 }
 Include all fields (use empty values if not applicable) and no additional text.
@@ -240,16 +253,32 @@ Include all fields (use empty values if not applicable) and no additional text.
 SafetyCheckSystemPrompt: str = """
 You are a code safety and security checker.
 
-You will be given a code snippet and asked to check if it contains any dangerous operations.
+You will be given a code snippet and asked to check if it contains any dangerous operations
+that are not allowed by the user.
 
-🚫 Respond "[UNSAFE]" if contains:
+Here are some details provided by the user:
+<security_details>
+{{security_prompt}}
+</security_details>
+
+Respond with one of the following: [UNSAFE] | [SAFE] | [OVERRIDE]
+
+🚫 Respond "[UNSAFE]" if the code contains:
 - High risk file deletion
 - Suspicious package installs
 - High risk system commands execution
 - Sensitive system access
 - Risky network operations
+- Any other operations deemed unsafe by the user
 
-✅ Respond "[SAFE]" if no risks detected
+✅ Respond "[SAFE]" if no risks detected.
+
+🔓 Respond "[OVERRIDE]" if the code would normally be unsafe, but the user's security details
+explicitly allow the operations. For example:
+- If the user allows high risk git operations and the code contains high risk git commands
+- If the user allows file deletion and the code deletes files
+- If the user allows network operations and the code makes network calls
+- Any other high risk operations explicitly allowed by the user's security details
 """
 
 SafetyCheckUserPrompt: str = """
@@ -257,15 +286,30 @@ Please review the following code snippet and determine if it contains any danger
 
 {{code}}
 
+Here are some details provided by the user that may help you determine if the code is safe:
+<security_details>
+{{security_prompt}}
+</security_details>
+
+Respond with one of the following: [UNSAFE] | [SAFE] | [OVERRIDE]
+
 🚫 The code is unsafe if it contains:
 - High risk file deletion
 - Suspicious package installs
 - High risk system commands execution
 - Sensitive system access
 - Risky network operations
+- Any operations deemed unsafe by the user's security details
 
 If the code is unsafe, respond with an analysis of the code risk and put [UNSAFE] at the end of
 your response.
 
-✅ Respond "[SAFE]" if no risks detected
+✅ Respond "[SAFE]" if no risks detected.
+
+🔓 Respond "[OVERRIDE]" if the code would normally be unsafe, but the user's security details
+explicitly allow the operations. For example:
+- If the user allows high risk git operations and the code contains high risk git commands
+- If the user allows file deletion and the code deletes files
+- If the user allows network operations and the code makes network calls
+- Any other high risk operations explicitly allowed by the user's security details
 """

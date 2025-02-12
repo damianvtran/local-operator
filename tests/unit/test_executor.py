@@ -1,11 +1,13 @@
 import io
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from openai import APIError
 
+from local_operator.executor import ConfirmSafetyResult, get_confirm_safety_result
 from local_operator.operator import LocalCodeExecutor, Operator, OperatorType
-from local_operator.types import ResponseJsonSchema
+from local_operator.types import ConversationRole, ResponseJsonSchema
 
 
 @pytest.fixture
@@ -17,7 +19,13 @@ def mock_model():
 
 @pytest.fixture
 def executor(mock_model):
-    return LocalCodeExecutor(mock_model)
+    agent = MagicMock()
+    agent.id = "test_agent"
+    agent.name = "Test Agent"
+    agent.version = "1.0.0"
+    agent.security_prompt = ""
+
+    return LocalCodeExecutor(mock_model, agent=agent)
 
 
 @pytest.fixture
@@ -28,12 +36,18 @@ def cli_operator(mock_model, executor):
     config_manager = MagicMock()
     config_manager.get_config_value = MagicMock(return_value="test_value")
 
+    agent_registry = MagicMock()
+    agent_registry.list_agents = MagicMock(return_value=[])
+
     operator = Operator(
         executor=executor,
         credential_manager=credential_manager,
         model_instance=mock_model,
         config_manager=config_manager,
         type=OperatorType.CLI,
+        agent_registry=agent_registry,
+        current_agent=None,
+        training_mode=False,
     )
 
     operator._get_input_with_history = MagicMock(return_value="noop")
@@ -46,7 +60,7 @@ async def test_check_code_safety_safe(executor, mock_model):
     mock_model.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
     code = "print('hello')"
     result = await executor.check_code_safety(code)
-    assert result is False
+    assert result == ConfirmSafetyResult.SAFE
     mock_model.ainvoke.assert_called_once()
 
 
@@ -58,7 +72,18 @@ async def test_check_code_safety_unsafe(executor, mock_model):
     )
     code = "import os; os.remove('important_file.txt')"
     result = await executor.check_code_safety(code)
-    assert result is True
+    assert result == ConfirmSafetyResult.UNSAFE
+    mock_model.ainvoke.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_check_code_safety_override(executor, mock_model):
+    mock_model.ainvoke.return_value.content = (
+        "The code is safe with security override\n\n[OVERRIDE]"
+    )
+    code = "import os; os.system('some_command')"
+    result = await executor.check_code_safety(code)
+    assert result == ConfirmSafetyResult.OVERRIDE
     mock_model.ainvoke.assert_called_once()
 
 
@@ -71,7 +96,7 @@ async def test_check_code_safety_unsafe_without_prompt(executor, mock_model):
     )
     code = "import os; os.remove('important_file.txt')"
     result = await executor.check_code_safety(code)
-    assert result is True
+    assert result == ConfirmSafetyResult.UNSAFE
     mock_model.ainvoke.assert_called_once()
     mock_model.ainvoke.assert_called_with(executor.conversation_history)
 
@@ -153,6 +178,83 @@ async def test_execute_code_safety_with_prompt_approved(executor, mock_model):
 
         # Should proceed with execution when user approves
         assert "Code Execution Complete" in result
+
+
+@pytest.mark.asyncio
+async def test_execute_code_safety_with_override(executor, mock_model):
+    # Default can_prompt_user is True
+    mock_model.ainvoke.return_value.content = (
+        "The code is unsafe but has security override\n\n[OVERRIDE]"
+    )
+    code = "x = 1 + 1"
+
+    with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        result = await executor.execute_code(code)
+
+        # Should proceed with execution and log override
+        assert "Code Execution Complete" in result
+        output = mock_stdout.getvalue()
+        assert "Code safety override applied" in output
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        {
+            "name": "Safe response",
+            "input": "The code looks safe to execute\n[SAFE]",
+            "expected": ConfirmSafetyResult.SAFE,
+        },
+        {
+            "name": "Unsafe response",
+            "input": "This code contains dangerous operations\n[UNSAFE]",
+            "expected": ConfirmSafetyResult.UNSAFE,
+        },
+        {
+            "name": "Override response",
+            "input": "Code is normally unsafe but allowed by security settings\n[OVERRIDE]",
+            "expected": ConfirmSafetyResult.OVERRIDE,
+        },
+        {
+            "name": "Default to safe",
+            "input": "Some response without any safety markers",
+            "expected": ConfirmSafetyResult.SAFE,
+        },
+        {
+            "name": "Empty string",
+            "input": "",
+            "expected": ConfirmSafetyResult.SAFE,
+        },
+        {
+            "name": "Just whitespace",
+            "input": "   \n  ",
+            "expected": ConfirmSafetyResult.SAFE,
+        },
+        {
+            "name": "None input",
+            "input": None,
+            "expected": ConfirmSafetyResult.SAFE,
+        },
+        {
+            "name": "Case insensitive SAFE",
+            "input": "[safe]",
+            "expected": ConfirmSafetyResult.SAFE,
+        },
+        {
+            "name": "Case insensitive UNSAFE",
+            "input": "[unsafe]",
+            "expected": ConfirmSafetyResult.UNSAFE,
+        },
+        {
+            "name": "Case insensitive OVERRIDE",
+            "input": "[override]",
+            "expected": ConfirmSafetyResult.OVERRIDE,
+        },
+    ],
+)
+def test_get_confirm_safety_result(case):
+    result = get_confirm_safety_result(case["input"])
+    assert result == case["expected"], f"Failed {case['name']}"
 
 
 @pytest.mark.asyncio
@@ -510,3 +612,111 @@ async def test_invoke_model_timeout(executor):
             await executor.invoke_model([{"role": "user", "content": "test"}])
 
     assert str(exc_info.value) == "Request timed out"
+
+
+@pytest.mark.parametrize(
+    "test_case",
+    [
+        {
+            "name": "No working directory",
+            "conversation": [
+                {"role": ConversationRole.SYSTEM.value, "content": "Some system message"},
+                {"role": ConversationRole.USER.value, "content": "Test message"},
+            ],
+            "expected": None,
+        },
+        {
+            "name": "Single working directory",
+            "conversation": [
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": "Current working directory: /test/path",
+                },
+                {"role": ConversationRole.USER.value, "content": "Test message"},
+            ],
+            "expected": Path("/test/path"),
+        },
+        {
+            "name": "Multiple working directories - returns most recent",
+            "conversation": [
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": "Current working directory: /old/path",
+                },
+                {"role": ConversationRole.USER.value, "content": "Test message"},
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": "Current working directory: /new/path",
+                },
+            ],
+            "expected": Path("/new/path"),
+        },
+        {
+            "name": "Case insensitive working directory",
+            "conversation": [
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": "CURRENT WORKING DIRECTORY: /test/path",
+                },
+                {"role": ConversationRole.USER.value, "content": "Test message"},
+            ],
+            "expected": Path("/test/path"),
+        },
+        {
+            "name": "Message with working directory but not at start",
+            "conversation": [
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": "Some text before Current working directory: /test/path",
+                },
+                {"role": ConversationRole.USER.value, "content": "Test message"},
+            ],
+            "expected": None,
+        },
+        {
+            "name": "Multiple entries - returns last in list",
+            "conversation": [
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": "Current working directory: /path/one",
+                },
+                {"role": ConversationRole.USER.value, "content": "Test message"},
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": "Current working directory: /path/two",
+                },
+                {"role": ConversationRole.USER.value, "content": "Another message"},
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": "Current working directory: /path/three",
+                },
+            ],
+            "expected": Path("/path/three"),
+        },
+        {
+            "name": "First entry with working directory",
+            "conversation": [
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": "Current working directory: /first/path",
+                },
+                {"role": ConversationRole.USER.value, "content": "Test message"},
+                {
+                    "role": ConversationRole.SYSTEM.value,
+                    "content": "Some other system message",
+                },
+                {"role": ConversationRole.ASSISTANT.value, "content": "Response"},
+            ],
+            "expected": Path("/first/path"),
+        },
+        {
+            "name": "Empty conversation",
+            "conversation": [],
+            "expected": None,
+        },
+    ],
+)
+def test_get_conversation_working_directory(executor, test_case):
+    executor.conversation_history = test_case["conversation"]
+    result = executor.get_conversation_working_directory()
+    assert result == test_case["expected"]

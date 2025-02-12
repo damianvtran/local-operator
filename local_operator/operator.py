@@ -7,15 +7,17 @@ from pathlib import Path
 
 from langchain_core.messages import BaseMessage
 from pydantic import ValidationError
-from tiktoken import encoding_for_model
 
-import local_operator.tools as tools
+from local_operator.agents import AgentData, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.console import print_cli_banner, spinner
 from local_operator.credentials import CredentialManager
-from local_operator.executor import LocalCodeExecutor, process_json_response
+from local_operator.executor import (
+    ExecutorInitError,
+    LocalCodeExecutor,
+    process_json_response,
+)
 from local_operator.model import ModelType
-from local_operator.prompts import create_system_prompt
 from local_operator.types import ResponseJsonSchema
 
 
@@ -61,6 +63,13 @@ class Operator:
         config_manager: ConfigManager instance for managing configuration
         credential_manager: CredentialManager instance for managing credentials
         executor_is_processing: Whether the executor is processing a response
+        agent_registry: AgentRegistry instance for managing agents
+        current_agent: The current agent to use for this session
+        training_mode: Whether the operator is in training mode.  If True, the operator will save
+        the conversation history to the agent's directory after each completed task.  This
+        allows the agent to learn from its experiences and improve its performance over time.
+        Omit this flag to have the agent not store the conversation history, thus resetting it
+        after each session.
     """
 
     credential_manager: CredentialManager
@@ -69,6 +78,9 @@ class Operator:
     executor: LocalCodeExecutor
     executor_is_processing: bool
     type: OperatorType
+    agent_registry: AgentRegistry
+    current_agent: AgentData | None
+    training_mode: bool
 
     def __init__(
         self,
@@ -77,12 +89,30 @@ class Operator:
         model_instance: ModelType,
         config_manager: ConfigManager,
         type: OperatorType,
+        agent_registry: AgentRegistry,
+        current_agent: AgentData | None,
+        training_mode: bool,
     ):
-        """Initialize the CLI by loading credentials or prompting for them.
+        """Initialize the Operator with required components.
 
         Args:
-            hosting (str): Hosting platform (deepseek, openai, or ollama)
-            model (str): Model name to use
+            executor (LocalCodeExecutor): Executor instance for handling code execution
+            credential_manager (CredentialManager): Manager for handling credentials
+            model_instance (ModelType): The configured language model instance
+            config_manager (ConfigManager): Manager for handling configuration
+            type (OperatorType): Type of operator (CLI or Server)
+            agent_registry (AgentRegistry): Registry for managing AI agents
+            current_agent (AgentData | None): The current agent to use for this session
+            training_mode (bool): Whether the operator is in training mode.
+                If True, the operator will save the conversation history to the agent's directory
+                after each completed task. This allows the agent to learn from its experiences
+                and improve its performance over time.
+                Omit this flag to have the agent not store the conversation history, thus
+                resetting it after each session.
+
+        The Operator class serves as the main interface for interacting with language models,
+        managing configuration, credentials, and code execution. It handles both CLI and
+        server-based operation modes.
         """
         self.credential_manager = credential_manager
         self.config_manager = config_manager
@@ -90,6 +120,9 @@ class Operator:
         self.executor = executor
         self.executor_is_processing = False
         self.type = type
+        self.agent_registry = agent_registry
+        self.current_agent = current_agent
+        self.training_mode = training_mode
 
         if self.type == OperatorType.CLI:
             self._load_input_history()
@@ -288,7 +321,7 @@ class Operator:
                         "role": ConversationRole.SYSTEM.value,
                         "content": "Invalid JSON response.  Please try again and "
                         "generate a valid JSON response that exactly matches the JSON "
-                        "schema.",
+                        "schema so that you can continue on and complete the task.",
                     }
                 )
                 continue
@@ -302,6 +335,12 @@ class Operator:
             ):
                 break
 
+        # Save the conversation history if an agent is being used and training mode is enabled
+        if self.training_mode and self.current_agent:
+            self.agent_registry.save_agent_conversation(
+                self.current_agent.id, self.executor.conversation_history
+            )
+
         if os.environ.get("LOCAL_OPERATOR_DEBUG") == "true":
             self.print_conversation_history()
 
@@ -309,13 +348,11 @@ class Operator:
 
     def print_conversation_history(self) -> None:
         """Print the conversation history for debugging."""
-        tokenizer = encoding_for_model("gpt-4o")
-        total_tokens = sum(
-            len(tokenizer.encode(entry["content"])) for entry in self.executor.conversation_history
-        )
+        total_tokens = self.executor.get_invoke_token_count(self.executor.conversation_history)
 
         print("\n\033[1;35m╭─ Debug: Conversation History ───────────────────────\033[0m")
-        print(f"\033[1;35m│ Total tokens: {total_tokens}\033[0m")
+        print(f"\033[1;35m│ Message tokens: {total_tokens}                       \033[0m")
+        print(f"\033[1;35m│ Session tokens: {self.executor.get_session_token_usage()}\033[0m")
         for i, entry in enumerate(self.executor.conversation_history, 1):
             role = entry["role"]
             content = entry["content"]
@@ -323,6 +360,29 @@ class Operator:
             for line in content.split("\n"):
                 print(f"\033[1;35m│   {line}\033[0m")
         print("\033[1;35m╰──────────────────────────────────────────────────\033[0m\n")
+
+    async def execute_single_command(self, command: str) -> ResponseJsonSchema | None:
+        """Execute a single command in non-interactive mode.
+
+        This method is used for one-off command execution rather than interactive chat.
+        It initializes a fresh conversation history (if not already initialized),
+        processes the command through the language model, and returns the result.
+
+        Args:
+            command (str): The command/instruction to execute
+
+        Returns:
+            ResponseJsonSchema | None: The processed response from the language model,
+                or None if no valid response was generated
+        """
+        try:
+            self.executor.initialize_conversation_history()
+        except ExecutorInitError:
+            # Conversation history already initialized
+            pass
+
+        result = await self.handle_user_input(command)
+        return result
 
     async def chat(self) -> None:
         """Run the interactive chat interface with code execution capabilities.
@@ -344,14 +404,13 @@ class Operator:
         - [DONE]: Model has completed its task
         - [BYE]: Gracefully exit the chat session
         """
-        print_cli_banner(self.config_manager)
+        print_cli_banner(self.config_manager, self.current_agent, self.training_mode)
 
-        self.executor.conversation_history = [
-            {
-                "role": ConversationRole.SYSTEM.value,
-                "content": create_system_prompt(tools),
-            }
-        ]
+        try:
+            self.executor.initialize_conversation_history()
+        except ExecutorInitError:
+            # Conversation history already initialized
+            pass
 
         while True:
             self.executor_is_processing = False

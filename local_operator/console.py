@@ -4,6 +4,7 @@ import os
 import sys
 from enum import Enum
 
+from local_operator.agents import AgentData
 from local_operator.config import ConfigManager
 
 
@@ -16,12 +17,55 @@ class ExecutionSection(Enum):
     FOOTER = "footer"
 
 
-def print_cli_banner(config_manager: ConfigManager) -> None:
-    """Print the banner for the chat CLI."""
-    debug_indicator = (
-        " [DEBUG MODE]" if os.getenv("LOCAL_OPERATOR_DEBUG", "false").lower() == "true" else ""
-    )
+def wrap_text_to_width(text: str, max_width: int, first_line_prefix: str = "") -> list[str]:
+    """
+    Wrap text to a specified width, handling a prefix on the first line.
 
+    Args:
+        text (str): The text to wrap
+        max_width (int): Maximum width for each line
+        first_line_prefix (str): Prefix to add to first line, reducing its available width
+
+    Returns:
+        list[str]: List of wrapped lines
+    """
+    words = text.split()
+    lines = []
+    current_line = []
+    current_length = len(first_line_prefix) if first_line_prefix else 0
+
+    for word in words:
+        # +1 for the space between words
+        if current_length + len(word) + 1 <= max_width:
+            current_line.append(word)
+            current_length += len(word) + 1
+        else:
+            lines.append(" ".join(current_line))
+            current_line = [word]
+            current_length = len(word)
+
+    if current_line:
+        lines.append(" ".join(current_line))
+
+    return lines
+
+
+def print_cli_banner(
+    config_manager: ConfigManager, current_agent: AgentData | None, training_mode: bool
+) -> None:
+    debug_mode = os.getenv("LOCAL_OPERATOR_DEBUG", "false").lower() == "true"
+
+    hosting = config_manager.get_config_value("hosting")
+    model = config_manager.get_config_value("model_name")
+
+    if current_agent:
+        if current_agent.hosting:
+            hosting = current_agent.hosting
+        if current_agent.model:
+            model = current_agent.model
+
+    """Print the banner for the chat CLI."""
+    debug_indicator = " [DEBUG MODE]" if debug_mode else ""
     print("\033[1;36m╭──────────────────────────────────────────────────╮\033[0m")
     print(f"\033[1;36m│ Local Executor Agent CLI{debug_indicator:<25}│\033[0m")
     print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
@@ -29,8 +73,18 @@ def print_cli_banner(config_manager: ConfigManager) -> None:
     print("\033[1;36m│ that can execute tasks locally on your device    │\033[0m")
     print("\033[1;36m│ by running Python code.                          │\033[0m")
     print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
-    hosting = config_manager.get_config_value("hosting")
-    model = config_manager.get_config_value("model_name")
+    if current_agent:
+        agent_name = f"Current agent: {current_agent.name}"
+        padding = 49 - len(agent_name)
+        print(f"\033[1;36m│ {agent_name}{' ' * padding}│\033[0m")
+        agent_id = f"Agent ID: {current_agent.id}"
+        padding = 49 - len(agent_id)
+        print(f"\033[1;36m│ {agent_id}{' ' * padding}│\033[0m")
+        if training_mode:
+            training_text = "** Training Mode **"
+            padding = 49 - len(training_text)
+            print(f"\033[1;36m│ {training_text}{' ' * padding}│\033[0m")
+        print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
     if hosting:
         hosting_text = f"Using hosting: {hosting}"
         padding = 49 - len(hosting_text)
@@ -46,7 +100,7 @@ def print_cli_banner(config_manager: ConfigManager) -> None:
     print("\033[1;36m╰──────────────────────────────────────────────────╯\033[0m\n")
 
     # Print configuration options
-    if os.getenv("LOCAL_OPERATOR_DEBUG", "false").lower() == "true":
+    if debug_mode:
         print("\033[1;36m╭─ Configuration ────────────────────────────────\033[0m")
         print(f"\033[1;36m│\033[0m Hosting: {config_manager.get_config_value('hosting')}")
         print(f"\033[1;36m│\033[0m Model: {config_manager.get_config_value('model_name')}")
@@ -54,6 +108,15 @@ def print_cli_banner(config_manager: ConfigManager) -> None:
         detail_len = config_manager.get_config_value("detail_length")
         print(f"\033[1;36m│\033[0m Conversation Length: {conv_len}")
         print(f"\033[1;36m│\033[0m Detail Length: {detail_len}")
+        print(f"\033[1;36m│\033[0m Training Mode: {training_mode}")
+        if current_agent and current_agent.security_prompt:
+            security_prompt = current_agent.security_prompt
+            lines = wrap_text_to_width(security_prompt, 49, "Security Prompt: ")
+
+            print(f"\033[1;36m│\033[0m Security Prompt: {lines[0]}")
+            for line in lines[1:]:
+                padding = " " * len("Security Prompt: ")
+                print(f"\033[1;36m│\033[0m {padding}{line}")
         print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
 
 

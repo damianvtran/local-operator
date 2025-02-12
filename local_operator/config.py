@@ -25,8 +25,11 @@ class Config:
             hosting (str): AI model hosting provider
             model_name (str): Name of the AI model to use
             rag_enabled (bool): Whether RAG is enabled
+<<<<<<< HEAD
             rag_k (int): Number of RAG results to return
             rag_max_distance (float): Maximum distance for RAG results
+=======
+>>>>>>> main
     """
 
     version: str
