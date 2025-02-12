@@ -81,10 +81,10 @@ def test_get_tools_str():
             "name": "Default init registry",
             "registry": ToolRegistry(),
             "expected": (
-                "- async browse_single_url(url: str) -> str: Browse to a URL using Playwright to "
-                "render JavaScript and return the page content.\n"
-                "- index_current_directory() -> Dict: Index the current directory showing files "
-                "and their metadata."
+                "- async browse_single_url(url: str) -> str: Browse to a URL using "
+                "Playwright to render JavaScript and return the page content.\n"
+                "- get_current_directory_info() -> Dict: Walk over the current directory "
+                "and return a dictionary of files and their"
             ),
         },
     ]

@@ -73,5 +73,5 @@ strictListInference = true
 reportPrivateImportUsage = false
 
 [tool.pytest.ini_options]
-addopts = "-v -s"
+addopts = "-vv -s"
 testpaths = ["tests"]
