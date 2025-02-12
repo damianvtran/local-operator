@@ -27,9 +27,10 @@ Typical usage example:
 """
 
 import json
-from typing import Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from local_operator.agents import AgentData, AgentEditFields, AgentRegistry
+from local_operator.config import Config, ConfigManager
 from local_operator.executor import LocalCodeExecutor
 
 
@@ -56,10 +57,11 @@ def create_agent_from_conversation_tool(
     """
 
     def create_agent_from_conversation(name: str) -> AgentData:
-        """Create a new agent from an existing conversation history.
+        """Create a new Local Operator agent initialized with the current conversation history.
 
-        Creates a new agent with the given name and saves the conversation history from the
-        provided executor. This allows reusing previous conversations to initialize new agents.
+        Creates a new agent with the given name and saves the current conversation history from the
+        provided executor. This allows reusing previous conversations to initialize new agents with
+        existing context and knowledge.
 
         Args:
             name: Name to give the new agent
@@ -99,10 +101,11 @@ def list_agent_info_tool(
     """
 
     def list_agent_info(agent_id: Optional[str] = None) -> List[AgentData]:
-        """Get information about agents in the registry.
+        """List all Local Operator agents or get details for a specific agent.
 
         If an agent_id is provided, returns info for just that agent.
-        Otherwise returns info for all agents.
+        Otherwise returns info for all registered Local Operator agents including their names,
+        IDs, and security prompts.
 
         Args:
             agent_id: Optional ID of specific agent to get info for
@@ -135,11 +138,14 @@ def create_agent_tool(agent_registry: AgentRegistry) -> Callable[[str, Optional[
     """
 
     def create_agent(name: str, security_prompt: Optional[str] = None) -> AgentData:
-        """Create a new empty agent.
+        """Create a new empty Local Operator agent with the specified name and security settings.
+
+        Creates a fresh agent instance that can be used to handle conversations and execute
+        commands. The security prompt defines the agent's permissions and operating constraints.
 
         Args:
             name: Name to give the new agent
-            security_prompt: Optional security prompt for the agent
+            security_prompt: Optional security prompt for the agent to define its permissions
 
         Returns:
             AgentData: The newly created agent's data
@@ -170,11 +176,14 @@ def edit_agent_tool(agent_registry: AgentRegistry) -> Callable[[str, AgentEditFi
     """
 
     def edit_agent(agent_id: str, edit_fields: AgentEditFields) -> AgentData:
-        """Edit an existing agent.
+        """Edit an existing Local Operator agent's name or security settings.
+
+        Modifies the specified agent's properties like name and security prompt while preserving
+        its conversation history and other data.
 
         Args:
             agent_id: ID of the agent to edit
-            edit_fields: Fields to update on the agent
+            edit_fields: Fields to update on the agent (name and/or security prompt)
 
         Returns:
             AgentData: The updated agent data
@@ -202,7 +211,10 @@ def delete_agent_tool(agent_registry: AgentRegistry) -> Callable[[str], None]:
     """
 
     def delete_agent(agent_id: str) -> None:
-        """Delete an existing agent.
+        """Delete a Local Operator agent and all its associated data.
+
+        Permanently removes the specified agent, including its conversation history,
+        security settings, and other metadata.
 
         Args:
             agent_id: ID of the agent to delete
@@ -229,7 +241,10 @@ def get_agent_info_tool(
     """
 
     def get_agent_info(agent_id: Optional[str] = None) -> List[AgentData]:
-        """Get information about agents.
+        """Get detailed information about Local Operator agents.
+
+        Retrieves comprehensive information about either all registered agents or a specific
+        agent, including name, ID, security settings, and metadata.
 
         Args:
             agent_id: Optional ID of a specific agent to retrieve
@@ -267,10 +282,11 @@ def save_conversation_tool(
     """
 
     def save_conversation(filename: str) -> None:
-        """Save the current conversation history to a JSON file.
+        """Save the current Local Operator conversation history to a JSON file.
 
-        Saves all messages from the conversation history to the specified file in JSON format.
-        Messages are serialized to dictionaries, with proper indentation and UTF-8 encoding.
+        Exports the complete conversation history including all messages between user and agent,
+        commands executed, and their results. The file can be used for analysis or to initialize
+        new agents.
 
         Args:
             filename: The path where the JSON file should be saved. Should include the full
@@ -301,3 +317,76 @@ def save_conversation_tool(
             raise RuntimeError(f"Error saving conversation: {str(e)}")
 
     return save_conversation
+
+
+def get_config_tool(config_manager: ConfigManager) -> Callable[[], Config]:
+    """Create a tool function that retrieves the current configuration.
+
+    This function returns a callable that can be used as a tool to get the current
+    configuration settings from the config manager.
+
+    Args:
+        config_manager: The ConfigManager instance to get config from
+
+    Returns:
+        Callable[[], Config]: A function that returns the current Config object
+    """
+
+    def get_config() -> Config:
+        """Get the current Local Operator configuration settings.
+
+        Retrieves the current configuration values including:
+        - conversation_length: Number of conversation messages to retain
+        - detail_length: Maximum length of detailed conversation history
+        - hosting: AI model hosting provider
+        - model_name: Name of the AI model to use
+
+        Returns:
+            Config: The current configuration settings object
+        """
+        return config_manager.get_config()
+
+    return get_config
+
+
+def update_config_tool(config_manager: ConfigManager) -> Callable[[Dict[str, Any]], None]:
+    """Create a tool function that updates configuration settings.
+
+    This function returns a callable that can be used as a tool to update the conversation
+    and model configuration values in the config manager.
+
+    Args:
+        config_manager: The ConfigManager instance to update config in
+
+    Returns:
+        Callable[[Dict[str, Any]], None]: A function that takes a dictionary of updates
+            and applies them to the configuration
+
+    Raises:
+        ValueError: If the update dictionary contains invalid keys or values
+        RuntimeError: If there are issues writing the updated configuration
+    """
+
+    def update_config(values: Dict[str, Any]) -> None:
+        """Update Local Operator configuration settings.
+
+        Updates conversation and model configuration values including:
+        - conversation_length: Number of messages to retain
+        - detail_length: Maximum length of detailed history
+        - hosting: AI model hosting provider
+        - model_name: Name of AI model to use
+        - rag_enabled: Whether RAG is enabled
+
+        Args:
+            updates: Dictionary mapping config keys to their new values
+
+        Raises:
+            ValueError: If any of the update keys or values are invalid
+            RuntimeError: If there are issues saving the configuration
+        """
+        try:
+            config_manager.update_config(values)
+        except Exception as e:
+            raise RuntimeError(f"Failed to update configuration: {str(e)}")
+
+    return update_config

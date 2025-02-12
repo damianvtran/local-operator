@@ -29,7 +29,9 @@ from local_operator.admin import (
     delete_agent_tool,
     edit_agent_tool,
     get_agent_info_tool,
+    get_config_tool,
     save_conversation_tool,
+    update_config_tool,
 )
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.config import ConfigManager
@@ -316,7 +318,9 @@ def agents_delete_command(name: str, agent_registry: AgentRegistry) -> int:
     return 0
 
 
-def build_tool_registry(executor: LocalCodeExecutor, agent_registry: AgentRegistry) -> ToolRegistry:
+def build_tool_registry(
+    executor: LocalCodeExecutor, agent_registry: AgentRegistry, config_manager: ConfigManager
+) -> ToolRegistry:
     """Build and initialize the tool registry with agent management tools.
 
     This function creates a new ToolRegistry instance and registers the core agent management tools:
@@ -328,6 +332,7 @@ def build_tool_registry(executor: LocalCodeExecutor, agent_registry: AgentRegist
     Args:
         executor: The LocalCodeExecutor instance containing conversation history
         agent_registry: The AgentRegistry for managing agents
+        config_manager: The ConfigManager for managing configuration
 
     Returns:
         ToolRegistry: The initialized tool registry with all agent management tools registered
@@ -356,6 +361,14 @@ def build_tool_registry(executor: LocalCodeExecutor, agent_registry: AgentRegist
     tool_registry.add_tool(
         "save_conversation",
         save_conversation_tool(executor),
+    )
+    tool_registry.add_tool(
+        "get_config",
+        get_config_tool(config_manager),
+    )
+    tool_registry.add_tool(
+        "update_config",
+        update_config_tool(config_manager),
     )
     return tool_registry
 
@@ -459,7 +472,7 @@ def main() -> int:
             training_mode=training_mode,
         )
 
-        tool_registry = build_tool_registry(executor, agent_registry)
+        tool_registry = build_tool_registry(executor, agent_registry, config_manager)
         executor.set_tool_registry(tool_registry)
 
         # Start the async chat interface or execute single command

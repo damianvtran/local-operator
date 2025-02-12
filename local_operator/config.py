@@ -24,6 +24,7 @@ class Config:
             detail_length (int): Maximum length of detailed conversation history
             hosting (str): AI model hosting provider
             model_name (str): Name of the AI model to use
+            rag_enabled (bool): Whether RAG is enabled
     """
 
     version: str
