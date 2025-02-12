@@ -14,9 +14,64 @@ body:
     attributes:
       label: Brief Summary
       description: Provide a short summary of the bug.
-      placeholder: "App crashes when executing command XYZ"
+      placeholder: "Local Operator crashes when executing command XYZ"
     validations:
       required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      description: Select the mode you were using when the bug occurred.
+      options:
+        - CLI
+        - Single Execution
+        - Server
+    validations:
+      required: true
+  - type: dropdown
+    id: hosting_platform
+    attributes:
+      label: Hosting Platform
+      description: Select the hosting platform in use.
+      options:
+        - label: DeepSeek
+          value: deepseek
+        - label: OpenAI
+          value: openai
+        - label: OpenRouter
+          value: openrouter
+        - label: Anthropic
+          value: anthropic
+        - label: Kimi
+          value: kimi
+        - label: Alibaba
+          value: alibaba
+        - label: Google
+          value: google
+        - label: Mistral
+          value: mistral
+        - label: Ollama
+          value: ollama
+        - label: Other
+          value: other
+  - type: input
+    id: local_operator_version
+    attributes:
+      label: Local Operator Version
+      description: Specify the version of Local Operator you are using.
+      placeholder: "e.g., 0.1.1"
+  - type: input
+    id: python_version
+    attributes:
+      label: Python Version
+      description: Specify your Python version.
+      placeholder: "e.g., 3.12.0"
+  - type: input
+    id: operating_system
+    attributes:
+      label: Operating System
+      description: Specify your operating system.
+      placeholder: "e.g., macOS, Ubuntu, Windows"
   - type: textarea
     id: steps
     attributes:
@@ -24,8 +79,8 @@ body:
       description: |
         Please list the steps to reproduce the bug. Include any relevant command line instructions or contextual details.
       placeholder: |
-        1. Do this...
-        2. Then do that...
+        1. Start with command:
+        2. Follow-up with:
         3. ...
     validations:
       required: true
@@ -45,38 +100,6 @@ body:
       placeholder: "The application crashes with a stack trace or error message."
     validations:
       required: true
-  - type: input
-    id: local_operator_version
-    attributes:
-      label: Local Operator Version
-      description: Specify the version of Local Operator you are using.
-      placeholder: "e.g., 0.1.1"
-  - type: input
-    id: python_version
-    attributes:
-      label: Python Version
-      description: Specify your Python version.
-      placeholder: "e.g., 3.12.0"
-  - type: input
-    id: operating_system
-    attributes:
-      label: Operating System
-      description: Specify your operating system.
-      placeholder: "e.g., macOS, Ubuntu, Windows"
-  - type: dropdown
-    id: hosting_platform
-    attributes:
-      label: Hosting Platform
-      description: Select the hosting platform in use.
-      options:
-        - label: DeepSeek
-          value: deepseek
-        - label: Ollama
-          value: ollama
-        - label: OpenAI
-          value: openai
-        - label: Other
-          value: other
   - type: textarea
     id: error_logs
     attributes:
