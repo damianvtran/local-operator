@@ -32,6 +32,7 @@ from typing import Any, Callable, Dict, List, Optional
 from local_operator.agents import AgentData, AgentEditFields, AgentRegistry
 from local_operator.config import Config, ConfigManager
 from local_operator.executor import LocalCodeExecutor
+from local_operator.tools import ToolRegistry
 
 
 def create_agent_from_conversation_tool(
@@ -390,3 +391,58 @@ def update_config_tool(config_manager: ConfigManager) -> Callable[[Dict[str, Any
             raise RuntimeError(f"Failed to update configuration: {str(e)}")
 
     return update_config
+
+
+def add_admin_tools(
+    tool_registry: ToolRegistry,
+    executor: LocalCodeExecutor,
+    agent_registry: AgentRegistry,
+    config_manager: ConfigManager,
+) -> None:
+    """Add admin tools to the tool registry.
+
+    This function adds the following tools to the tool registry:
+    - create_agent_from_conversation_tool
+    - list_agent_info_tool
+    - create_agent_tool
+    - edit_agent_tool
+    - delete_agent_tool
+    - get_agent_info_tool
+    - save_conversation_tool
+    - get_config_tool
+    - update_config_tool
+
+    Args:
+        tool_registry: The ToolRegistry instance to add tools to
+    """
+    tool_registry.add_tool(
+        "create_agent_from_conversation",
+        create_agent_from_conversation_tool(
+            executor,
+            agent_registry,
+        ),
+    )
+    tool_registry.add_tool(
+        "edit_agent",
+        edit_agent_tool(agent_registry),
+    )
+    tool_registry.add_tool(
+        "delete_agent",
+        delete_agent_tool(agent_registry),
+    )
+    tool_registry.add_tool(
+        "get_agent_info",
+        get_agent_info_tool(agent_registry),
+    )
+    tool_registry.add_tool(
+        "save_conversation",
+        save_conversation_tool(executor),
+    )
+    tool_registry.add_tool(
+        "get_config",
+        get_config_tool(config_manager),
+    )
+    tool_registry.add_tool(
+        "update_config",
+        update_config_tool(config_manager),
+    )

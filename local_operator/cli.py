@@ -24,15 +24,7 @@ from pathlib import Path
 
 import uvicorn
 
-from local_operator.admin import (
-    create_agent_from_conversation_tool,
-    delete_agent_tool,
-    edit_agent_tool,
-    get_agent_info_tool,
-    get_config_tool,
-    save_conversation_tool,
-    update_config_tool,
-)
+from local_operator.admin import add_admin_tools
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
@@ -339,37 +331,7 @@ def build_tool_registry(
     """
     tool_registry = ToolRegistry()
     tool_registry.init_tools()
-    tool_registry.add_tool(
-        "create_agent_from_conversation",
-        create_agent_from_conversation_tool(
-            executor,
-            agent_registry,
-        ),
-    )
-    tool_registry.add_tool(
-        "edit_agent",
-        edit_agent_tool(agent_registry),
-    )
-    tool_registry.add_tool(
-        "delete_agent",
-        delete_agent_tool(agent_registry),
-    )
-    tool_registry.add_tool(
-        "get_agent_info",
-        get_agent_info_tool(agent_registry),
-    )
-    tool_registry.add_tool(
-        "save_conversation",
-        save_conversation_tool(executor),
-    )
-    tool_registry.add_tool(
-        "get_config",
-        get_config_tool(config_manager),
-    )
-    tool_registry.add_tool(
-        "update_config",
-        update_config_tool(config_manager),
-    )
+    add_admin_tools(tool_registry, executor, agent_registry, config_manager)
     return tool_registry
 
 
