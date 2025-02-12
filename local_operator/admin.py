@@ -531,3 +531,7 @@ def add_admin_tools(
         "update_config",
         update_config_tool(config_manager),
     )
+    tool_registry.add_tool(
+        "save_agent_training",
+        save_agent_training_tool(executor, agent_registry),
+    )
