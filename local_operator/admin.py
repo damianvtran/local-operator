@@ -521,6 +521,53 @@ def open_agents_config_tool(agent_registry: AgentRegistry) -> Callable[[], None]
     return open_agents_config
 
 
+def open_settings_config_tool(config_manager: ConfigManager) -> Callable[[], None]:
+    """Create a tool function that opens the main settings configuration file.
+
+    This function returns a callable that opens the config.yml file in the default system editor.
+    The file location is determined from the config manager's config directory.
+
+    Args:
+        config_manager: The ConfigManager instance containing the config directory path
+
+    Returns:
+        Callable[[], None]: A function that opens the settings configuration file
+
+    Raises:
+        RuntimeError: If there are issues opening the configuration file
+    """
+
+    def open_settings_config() -> None:
+        """Open the settings configuration file in the default system editor.
+
+        Opens the config.yml file located in the config manager's directory
+        using the system's default application for YAML files.
+
+        Raises:
+            RuntimeError: If the configuration file cannot be opened
+        """
+        try:
+            config_file = config_manager.config_dir / "config.yml"
+            if not config_file.exists():
+                raise RuntimeError(f"Settings configuration file not found at {config_file}")
+
+            import platform
+            import subprocess
+
+            system = platform.system()
+            if system == "Darwin":  # macOS
+                subprocess.run(["open", str(config_file)], check=True)
+            elif system == "Windows":
+                subprocess.run(["start", str(config_file)], shell=True, check=True)
+            else:  # Linux and other Unix-like
+                subprocess.run(["xdg-open", str(config_file)], check=True)
+
+        except Exception as e:
+            raise RuntimeError(f"Failed to open settings configuration file: {str(e)}")
+
+    return open_settings_config
+
+
 def add_admin_tools(
     tool_registry: ToolRegistry,
     executor: LocalCodeExecutor,
@@ -581,4 +628,8 @@ def add_admin_tools(
     tool_registry.add_tool(
         "open_agents_config",
         open_agents_config_tool(agent_registry),
+    )
+    tool_registry.add_tool(
+        "open_settings_config",
+        open_settings_config_tool(config_manager),
     )
