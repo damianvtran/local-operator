@@ -350,6 +350,7 @@ def test_add_admin_tools(
         "update_config",
         "save_agent_training",
         "open_agents_config",
+        "open_settings_config",
     }
     tools_set = set(tool_registry._tools.keys())
     # Check that all expected tools are present, but allow for additional builtin tools
