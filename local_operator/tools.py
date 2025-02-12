@@ -1,7 +1,7 @@
 import fnmatch
 import os
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Any, Callable, Dict, List, Set, Tuple
 
 import playwright.async_api as pw
 
@@ -45,6 +45,44 @@ def _should_ignore_file(file_path: str) -> bool:
         "bin",
         "obj",
         "out",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".coverage",
+        ".tox",
+        ".eggs",
+        ".env",
+        "env",
+        "htmlcov",
+        "coverage",
+        ".DS_Store",
+        "*.pyc",
+        "*.pyo",
+        "*.pyd",
+        "*.so",
+        "*.egg",
+        "*.egg-info",
+        ".ipynb_checkpoints",
+        ".sass-cache",
+        ".gradle",
+        "tmp",
+        "temp",
+        "logs",
+        "log",
+        ".next",
+        ".nuxt",
+        ".cache",
+        ".parcel-cache",
+        "public/uploads",
+        "uploads",
+        "vendor",
+        "bower_components",
+        "jspm_packages",
+        ".serverless",
+        ".terraform",
+        ".vagrant",
+        ".bundle",
+        "coverage",
+        ".nyc_output",
     }
 
     # Check if file is in an ignored directory
@@ -99,11 +137,106 @@ def index_current_directory() -> Dict[str, List[Tuple[str, str, int]]]:
             ext = Path(file).suffix.lower()
 
             # Categorize file type
-            if ext in [".py", ".js", ".java", ".cpp", ".h", ".c", ".go", ".rs"]:
+            if ext in [
+                ".py",
+                ".js",
+                ".java",
+                ".cpp",
+                ".h",
+                ".c",
+                ".go",
+                ".rs",
+                ".ts",
+                ".jsx",
+                ".tsx",
+                ".php",
+                ".rb",
+                ".cs",
+                ".swift",
+                ".kt",
+                ".scala",
+                ".r",
+                ".m",
+                ".mm",
+                ".pl",
+                ".sh",
+                ".bash",
+                ".zsh",
+                ".fish",
+                ".sql",
+                ".vue",
+                ".elm",
+                ".clj",
+                ".ex",
+                ".erl",
+                ".hs",
+                ".lua",
+                ".jl",
+                ".nim",
+                ".ml",
+                ".fs",
+                ".f90",
+                ".f95",
+                ".f03",
+                ".pas",
+                ".groovy",
+                ".dart",
+                ".coffee",
+                ".ls",
+            ]:
                 file_type = "code"
-            elif ext in [".md", ".txt", ".rst", ".json", ".yaml", ".yml"]:
+            elif ext in [
+                ".md",
+                ".txt",
+                ".rst",
+                ".json",
+                ".yaml",
+                ".yml",
+                ".ini",
+                ".toml",
+                ".xml",
+                ".html",
+                ".htm",
+                ".css",
+                ".csv",
+                ".tsv",
+                ".log",
+                ".conf",
+                ".cfg",
+                ".properties",
+                ".env",
+                ".doc",
+                ".docx",
+                ".pdf",
+                ".rtf",
+                ".odt",
+                ".tex",
+                ".adoc",
+                ".org",
+                ".wiki",
+                ".textile",
+                ".pod",
+            ]:
                 file_type = "doc"
-            elif ext in [".jpg", ".jpeg", ".png", ".gif", ".svg", ".ico"]:
+            elif ext in [
+                ".jpg",
+                ".jpeg",
+                ".png",
+                ".gif",
+                ".svg",
+                ".ico",
+                ".bmp",
+                ".tiff",
+                ".tif",
+                ".webp",
+                ".raw",
+                ".psd",
+                ".ai",
+                ".eps",
+                ".heic",
+                ".heif",
+                ".avif",
+            ]:
                 file_type = "image"
             else:
                 file_type = "other"
@@ -135,3 +268,100 @@ async def browse_single_url(url: str) -> str:
             return content
     except Exception as e:
         raise RuntimeError(f"Failed to browse {url}: {str(e)}")
+
+
+class ToolRegistry:
+    """Registry for tools that can be used by agents.
+
+    The ToolRegistry maintains a collection of callable tools that agents can access and execute.
+    It provides methods to initialize with default tools, add custom tools, and retrieve
+    tools by name.
+
+    Attributes:
+        tools (dict): Dictionary mapping tool names to their callable implementations
+    """
+
+    _tools: Dict[str, Callable[..., Any]]
+
+    def __init__(self):
+        """Initialize an empty tool registry."""
+        # Initialize _tools first before calling super().__init__()
+        super().__init__()
+        object.__setattr__(self, "_tools", {})
+
+    def init_tools(self):
+        """Initialize the registry with default tools.
+
+        Default tools include:
+        - browse_single_url: Browse a URL and get page content
+        - index_current_directory: Index files in current directory
+        """
+        self.add_tool("browse_single_url", browse_single_url)
+        self.add_tool("index_current_directory", index_current_directory)
+
+    def add_tool(self, name: str, tool: Callable[..., Any]):
+        """Add a new tool to the registry.
+
+        Args:
+            name (str): Name to register the tool under
+            tool (Callable[..., Any]): The tool implementation function/callable with any arguments
+        """
+        self._tools[name] = tool
+        super().__setattr__(name, tool)
+
+    def get_tool(self, name: str) -> Callable[..., Any]:
+        """Retrieve a tool from the registry by name.
+
+        Args:
+            name (str): Name of the tool to retrieve
+
+        Returns:
+            Callable[..., Any]: The requested tool implementation that can accept any arguments
+        """
+        return self._tools[name]
+
+    def remove_tool(self, name: str) -> None:
+        """Remove a tool from the registry by name.
+
+        Args:
+            name (str): Name of the tool to remove
+        """
+        del self._tools[name]
+        delattr(self, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Set attribute on the registry.
+
+        Args:
+            name (str): Name of the attribute
+            value (Any): Value to set
+        """
+        # Only add to _tools if it's not _tools itself
+        if name != "_tools":
+            self._tools[name] = value
+        super().__setattr__(name, value)
+
+    def __getattr__(self, name: str) -> Callable[..., Any]:
+        """Allow accessing tools as attributes.
+
+        Args:
+            name (str): Name of the tool to retrieve
+
+        Returns:
+            Callable[..., Any]: The requested tool implementation
+
+        Raises:
+            AttributeError: If the requested tool does not exist
+        """
+        try:
+            return self._tools[name]
+        except KeyError:
+            raise AttributeError(f"Tool '{name}' not found in registry")
+
+    def __iter__(self):
+        """Make the registry iterable.
+
+        Returns:
+            Iterator[str]: Iterator over tool names in the registry
+        """
+        return iter(self._tools)

@@ -101,13 +101,11 @@ def print_cli_banner(
         print(f"\033[1;36m│\033[0m Conversation Length: {conv_len}")
         print(f"\033[1;36m│\033[0m Detail Length: {detail_len}")
         print(f"\033[1;36m│\033[0m Training Mode: {training_mode}")
-        if current_agent:
+        if current_agent and current_agent.security_prompt:
             security_prompt = current_agent.security_prompt
             lines = wrap_text_to_width(security_prompt, 49, "Security Prompt: ")
 
-            # Print first line with prefix
             print(f"\033[1;36m│\033[0m Security Prompt: {lines[0]}")
-            # Print continuation lines indented to align with first line
             for line in lines[1:]:
                 padding = " " * len("Security Prompt: ")
                 print(f"\033[1;36m│\033[0m {padding}{line}")
