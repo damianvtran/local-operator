@@ -1,7 +1,16 @@
+"""
+Unit tests for admin tools.
+
+These tests cover functionalities such as agent creation from conversation,
+training data saving, agent info lookup, and configuration handling.
+Fake implementations are used throughout in order to avoid side effects and to
+isolate behaviors.
+"""
+
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import pytest
 
@@ -26,7 +35,6 @@ from local_operator.tools import ToolRegistry
 from local_operator.types import ConversationRole
 
 
-# Fake implementations for testing purposes
 class FakeAgentRegistry(AgentRegistry):
     """
     Fake implementation of an agent registry for testing admin tools.
@@ -38,7 +46,8 @@ class FakeAgentRegistry(AgentRegistry):
 
     def create_agent(self, agent_edit_metadata: AgentEditFields) -> AgentData:
         """
-        Create a new agent with the provided metadata.
+        Create a new agent using the provided metadata.
+        Raises a ValueError if the agent name is missing.
         """
         if not agent_edit_metadata.name:
             raise ValueError("Agent name is required")
@@ -55,18 +64,15 @@ class FakeAgentRegistry(AgentRegistry):
 
     def save_agent_conversation(self, agent_id: str, conversation: List[Dict[str, str]]) -> None:
         """
-        Save the conversation history for a given agent.
-
-        Args:
-            agent_id: The unique identifier of the agent
-            conversation: The conversation history to save
+        Save conversation history for an agent.
+        A copy is stored to avoid side effects.
         """
-        # Store a copy of the provided conversation to prevent reference issues
         self.conversations[agent_id] = conversation.copy() if conversation else []
 
     def get_agent(self, agent_id: str) -> AgentData:
         """
-        Retrieve an agent by its unique identifier.
+        Retrieve an agent by its ID.
+        Raises KeyError if not found.
         """
         if agent_id in self.agents:
             return self.agents[agent_id]
@@ -74,13 +80,13 @@ class FakeAgentRegistry(AgentRegistry):
 
     def list_agents(self) -> List[AgentData]:
         """
-        Return a list of all agents stored in the registry.
+        List all agents.
         """
         return list(self.agents.values())
 
     def update_agent(self, agent_id: str, edit_fields: AgentEditFields) -> Optional[AgentData]:
         """
-        Update an existing agent's details.
+        Update agent details and return updated agent if exists.
         """
         if agent_id in self.agents:
             agent = self.agents[agent_id]
@@ -94,7 +100,7 @@ class FakeAgentRegistry(AgentRegistry):
 
     def delete_agent(self, agent_id: str) -> None:
         """
-        Delete an agent and its associated conversation.
+        Delete an agent and its conversation history.
         """
         self.agents.pop(agent_id, None)
         self.conversations.pop(agent_id, None)
@@ -112,9 +118,7 @@ class FakeExecutor(LocalCodeExecutor):
         self.agent = agent
 
     def get_conversation_history(self) -> List[Dict[str, str]]:
-        """
-        Return the current conversation history.
-        """
+        """Return the current conversation history."""
         return self.conversation_history
 
 
@@ -127,15 +131,11 @@ class FakeConfigManager(ConfigManager):
         self._config: Dict[str, Any] = {"setting": "value"}
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Retrieve the current configuration.
-        """
+        """Retrieve the current configuration."""
         return self._config
 
     def update_config(self, values: Dict[str, Any]) -> None:
-        """
-        Update the configuration with provided values.
-        """
+        """Update configuration settings."""
         self._config.update(values)
 
 
@@ -145,29 +145,22 @@ class FakeToolRegistry(ToolRegistry):
     """
 
     def __init__(self) -> None:
-        self._tools: Dict[str, Callable[..., Any]] = {}
+        self._tools: Dict[str, Any] = {}
 
-    def add_tool(self, name: str, tool_func: Callable[..., Any]) -> None:
-        """
-        Register a tool function under the provided name.
-        """
+    def add_tool(self, name: str, tool_func: Any) -> None:
+        """Register a tool function."""
         self._tools[name] = tool_func
 
     @property
-    def tools(self) -> Dict[str, Callable[..., Any]]:
-        """
-        Get the registered tools dictionary.
-        """
+    def tools(self) -> Dict[str, Any]:
+        """Return the dictionary of registered tools."""
         return self._tools
-
-
-# ==================== Tests ====================
 
 
 def test_create_agent_from_conversation_no_user_messages() -> None:
     """
-    Test creating an agent from a conversation with no user messages.
-    The saved conversation history should be empty.
+    Test creating an agent from a conversation that contains no user messages.
+    The expected saved conversation history should be empty.
     """
     conversation_history = [{"role": ConversationRole.SYSTEM.value, "content": "Initial prompt"}]
     fake_executor = FakeExecutor(conversation_history)
@@ -176,13 +169,14 @@ def test_create_agent_from_conversation_no_user_messages() -> None:
     agent_name = "TestAgent"
     new_agent = create_tool(agent_name)
     saved_history = fake_registry.conversations.get(new_agent.id)
-    assert saved_history == []
+    assert saved_history == [], f"Expected empty conversation history, got {saved_history}"
 
 
 def test_create_agent_from_conversation_with_user_messages() -> None:
     """
-    Test creating an agent from a conversation containing multiple user messages.
-    Verify that the conversation is truncated based on the second-to-last user message.
+    Test creating an agent from a conversation that contains multiple user messages.
+    Verifies that the conversation history is truncated based on the cutoff index before
+    the last user message.
     """
     conversation_history = [
         {"role": ConversationRole.SYSTEM.value, "content": "Initial prompt"},
@@ -198,36 +192,29 @@ def test_create_agent_from_conversation_with_user_messages() -> None:
     agent_name = "TestAgent2"
     new_agent = create_tool(agent_name)
     saved_history = fake_registry.conversations.get(new_agent.id)
-    # In reverse order, the last USER message is found at index 4,
-    # so cutoff index should be 4, resulting in history[:4].
     expected_history = conversation_history[:4]
-    assert saved_history == expected_history
+    assert (
+        saved_history == expected_history
+    ), f"Expected conversation history {expected_history}, got {saved_history}"
 
 
 def test_save_agent_training_no_agent() -> None:
     """
     Test saving agent training data when no current agent is set.
-    Expect a ValueError to be raised.
+    Expect a ValueError to be raised with the appropriate message.
     """
     conversation_history = [{"role": ConversationRole.USER.value, "content": "User message"}]
     fake_executor = FakeExecutor(conversation_history, agent=None)
     fake_registry = FakeAgentRegistry()
     save_training_tool = save_agent_training_tool(fake_executor, fake_registry)
-    with pytest.raises(ValueError) as exc_info:
+    with pytest.raises(ValueError, match="No current agent set"):
         save_training_tool()
-    assert "No current agent set" in str(exc_info.value)
 
 
 def test_save_agent_training_with_agent() -> None:
-    """Test saving agent training data when a current agent is available.
-
-    This test verifies that the conversation history is saved correctly when saving training data
-    for an agent. It checks that:
-    1. The conversation is truncated at the last user message
-    2. The stored history matches the expected truncated history
-    3. The updated agent matches the original agent
-
-    The test uses fake implementations of the registry and executor to isolate the testing.
+    """
+    Test saving agent training data when a current agent is available.
+    The conversation history should be truncated correctly and the agent remains unchanged.
     """
     conversation_history = [
         {"role": ConversationRole.SYSTEM.value, "content": "System message"},
@@ -239,67 +226,71 @@ def test_save_agent_training_with_agent() -> None:
     agent = fake_registry.create_agent(AgentEditFields(name="TrainAgent", security_prompt=""))
     fake_executor = FakeExecutor(conversation_history, agent=agent)
     save_training_tool = save_agent_training_tool(fake_executor, fake_registry)
-
     updated_agent = save_training_tool()
-
-    # The last USER message is at index 2, so history should be truncated there
     expected_history = conversation_history[:2]
     stored_history = fake_registry.conversations.get(agent.id)
-    assert stored_history == expected_history
-    assert updated_agent == agent
+    assert (
+        stored_history == expected_history
+    ), f"Expected conversation history {expected_history}, got {stored_history}"
+    assert updated_agent == agent, "The updated agent does not match the original agent."
 
 
 def test_list_agent_info_without_id() -> None:
     """
     Test listing agent information without specifying an agent ID.
-    Expect all agents in the registry to be returned.
+    All agents stored in the registry should be returned.
     """
     fake_registry = FakeAgentRegistry()
     agent1 = fake_registry.create_agent(AgentEditFields(name="Agent1", security_prompt="prompt1"))
     agent2 = fake_registry.create_agent(AgentEditFields(name="Agent2", security_prompt="prompt2"))
     list_tool = list_agent_info_tool(fake_registry)
     agents_list = list_tool(None)
-    assert len(agents_list) == 2
+    assert len(agents_list) == 2, f"Expected 2 agents, got {len(agents_list)}"
     agent_ids = {agent1.id, agent2.id}
     returned_ids = {agent.id for agent in agents_list}
-    assert agent_ids == returned_ids
+    assert agent_ids == returned_ids, f"Expected agent ids {agent_ids}, got {returned_ids}"
 
 
 def test_list_agent_info_with_id() -> None:
     """
     Test retrieving agent information for a specific agent ID.
-    Expect a list containing the desired agent only.
+    Only the desired agent should be returned.
     """
     fake_registry = FakeAgentRegistry()
     agent = fake_registry.create_agent(AgentEditFields(name="AgentX", security_prompt="promptX"))
     list_tool = list_agent_info_tool(fake_registry)
     agent_list = list_tool(agent.id)
-    assert len(agent_list) == 1
-    assert agent_list[0].id == agent.id
+    assert len(agent_list) == 1, f"Expected 1 agent, got {len(agent_list)}"
+    assert agent_list[0].id == agent.id, f"Expected agent id {agent.id}, got {agent_list[0].id}"
 
 
 def test_create_agent_tool() -> None:
     """
-    Test the create_agent_tool to ensure it creates an agent with the correct parameters.
+    Test the create_agent_tool function to ensure it creates an agent with the proper details.
     """
     fake_registry = FakeAgentRegistry()
     create_tool = create_agent_tool(fake_registry)
     agent = create_tool("NewAgent", "secure")
-    assert agent.name == "NewAgent"
-    assert agent.security_prompt == "secure"
-    assert agent.id in fake_registry.agents
+    assert agent.name == "NewAgent", f"Expected agent name 'NewAgent', got {agent.name}"
+    assert (
+        agent.security_prompt == "secure"
+    ), f"Expected security prompt 'secure', got {agent.security_prompt}"
+    assert agent.id in fake_registry.agents, f"Agent id {agent.id} not found in registry"
 
 
 def test_edit_agent_tool() -> None:
     """
-    Test the edit_agent_tool to verify updating an agent's name and security prompt.
+    Test the edit_agent_tool to verify that an agent's name and security prompt update correctly.
     """
     fake_registry = FakeAgentRegistry()
     agent = fake_registry.create_agent(AgentEditFields(name="OldName", security_prompt="old"))
     edit_tool = edit_agent_tool(fake_registry)
     updated_agent = edit_tool(agent.id, AgentEditFields(name="NewName", security_prompt="new"))
-    assert updated_agent.name == "NewName"
-    assert updated_agent.security_prompt == "new"
+    assert updated_agent is not None, "edit_agent_tool returned None"
+    assert updated_agent.name == "NewName", f"Expected 'NewName', got {updated_agent.name}"
+    assert (
+        updated_agent.security_prompt == "new"
+    ), f"Expected security prompt 'new', got {updated_agent.security_prompt}"
 
 
 def test_delete_agent_tool() -> None:
@@ -310,37 +301,37 @@ def test_delete_agent_tool() -> None:
     agent = fake_registry.create_agent(AgentEditFields(name="ToDelete", security_prompt=""))
     delete_tool = delete_agent_tool(fake_registry)
     delete_tool(agent.id)
-    with pytest.raises(KeyError):
+    with pytest.raises(KeyError, match=rf"Agent with id {agent.id} not found"):
         fake_registry.get_agent(agent.id)
 
 
 def test_get_agent_info_tool_without_id() -> None:
     """
-    Test the get_agent_info_tool to retrieve all agents when no ID is provided.
+    Test get_agent_info_tool returns all agents when no id is provided.
     """
     fake_registry = FakeAgentRegistry()
     fake_registry.create_agent(AgentEditFields(name="Agent1", security_prompt=""))
     fake_registry.create_agent(AgentEditFields(name="Agent2", security_prompt=""))
     get_tool = get_agent_info_tool(fake_registry)
     agents = get_tool(None)
-    assert len(agents) == 2
+    assert len(agents) == 2, f"Expected 2 agents, got {len(agents)}"
 
 
 def test_get_agent_info_tool_with_id() -> None:
     """
-    Test the get_agent_info_tool to retrieve information for a specific agent.
+    Test get_agent_info_tool returns information for the specified agent.
     """
     fake_registry = FakeAgentRegistry()
     agent = fake_registry.create_agent(AgentEditFields(name="AgentSingle", security_prompt=""))
     get_tool = get_agent_info_tool(fake_registry)
     result = get_tool(agent.id)
-    assert len(result) == 1
-    assert result[0].id == agent.id
+    assert len(result) == 1, f"Expected 1 agent, got {len(result)}"
+    assert result[0].id == agent.id, f"Expected agent id {agent.id}, got {result[0].id}"
 
 
 def test_save_conversation_tool(tmp_path: Any) -> None:
     """
-    Test the save_conversation_tool to ensure conversation history is written to a file.
+    Test the save_conversation_tool to verify that the conversation history is written to a file.
     """
     file_path = tmp_path / "conversation.json"
     conversation_history = [
@@ -352,38 +343,43 @@ def test_save_conversation_tool(tmp_path: Any) -> None:
     save_tool(str(file_path))
     with open(file_path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    assert isinstance(data, list)
+    assert isinstance(data, list), "Saved JSON data is not a list"
     for msg in data:
-        assert isinstance(msg, dict)
-        assert "role" in msg
-        assert "content" in msg
+        assert isinstance(msg, dict), f"Message {msg} is not a dict"
+        assert "role" in msg, f"Message {msg} missing key 'role'"
+        assert "content" in msg, f"Message {msg} missing key 'content'"
 
 
 def test_get_config_tool() -> None:
     """
-    Test the get_config_tool to verify retrieval of current configuration settings.
+    Test the get_config_tool to verify it returns the correct configuration.
     """
     fake_config_manager = FakeConfigManager()
     get_tool = get_config_tool(fake_config_manager)
     config = get_tool()
-    assert isinstance(config, dict)
-    assert config.get("setting") == "value"
+    assert isinstance(config, dict), "Configuration is not a dictionary"
+    assert (
+        config.get("setting") == "value"
+    ), f"Expected setting 'value', got {config.get('setting')}"
 
 
 def test_update_config_tool() -> None:
     """
-    Test the update_config_tool to check that configuration settings are updated correctly.
+    Test the update_config_tool to check that configuration updates are applied correctly.
     """
     fake_config_manager = FakeConfigManager()
     update_tool = update_config_tool(fake_config_manager)
     update_tool({"new_key": "new_value"})
     config = fake_config_manager.get_config()
-    assert config.get("new_key") == "new_value"
+    assert (
+        config.get("new_key") == "new_value"
+    ), f"Expected 'new_value' for 'new_key', got {config.get('new_key')}"
 
 
 def test_add_admin_tools() -> None:
     """
-    Test add_admin_tools to ensure all expected admin tools are added to the tool registry.
+    Test add_admin_tools to ensure that all expected admin tools
+    are registered in the tool registry.
     """
     fake_tool_registry = FakeToolRegistry()
     fake_executor = FakeExecutor([])
@@ -400,4 +396,5 @@ def test_add_admin_tools() -> None:
         "update_config",
         "save_agent_training",
     }
-    assert set(fake_tool_registry.tools.keys()) == expected_tools
+    tools_set = set(fake_tool_registry.tools.keys())
+    assert tools_set == expected_tools, f"Expected tools {expected_tools}, but got {tools_set}"
