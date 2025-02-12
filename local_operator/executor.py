@@ -10,8 +10,7 @@ from langchain.schema import BaseMessage
 from langchain_openai import ChatOpenAI
 from tiktoken import encoding_for_model
 
-from local_operator import tools
-from local_operator.agents import AgentData
+from local_operator.agents import AgentData, AgentRegistry
 from local_operator.console import (
     ExecutionSection,
     format_agent_output,
@@ -30,6 +29,7 @@ from local_operator.prompts import (
     SafetyCheckUserPrompt,
     create_system_prompt,
 )
+from local_operator.tools import ToolRegistry
 from local_operator.types import ConversationRole, ResponseJsonSchema
 
 
@@ -124,6 +124,8 @@ class LocalCodeExecutor:
     interrupted: bool
     can_prompt_user: bool
     total_tokens: int
+    agent: AgentData | None
+    tool_registry: ToolRegistry | None
 
     """A class to handle local Python code execution with safety checks and context management.
 
@@ -142,6 +144,7 @@ class LocalCodeExecutor:
             terminal (True), or is consuming the service from some remote source where they
             cannot respond via the terminal (False).
         total_tokens (int): Running count of total tokens consumed by model invocations
+        agent (AgentData | None): The agent data for the current conversation
     """
 
     def __init__(
@@ -166,6 +169,7 @@ class LocalCodeExecutor:
                 terminal (True), or is consuming the service from some remote source where they
                 cannot respond via the terminal (False).
             conversation_history: A list of message dictionaries tracking the conversation.
+            agent: The agent data for the current conversation.
         """
         self.context = {}
         self.conversation_history = conversation_history
@@ -280,7 +284,7 @@ class LocalCodeExecutor:
             self.conversation_history = [
                 {
                     "role": ConversationRole.SYSTEM.value,
-                    "content": create_system_prompt(tools),
+                    "content": create_system_prompt(self.tool_registry),
                 }
             ]
         else:
@@ -895,3 +899,16 @@ class LocalCodeExecutor:
                 if lower_content.startswith("current working directory:"):
                     return Path(lower_content.split("current working directory:", 1)[1].strip())
         return None
+
+    def set_tool_registry(self, tool_registry: ToolRegistry) -> None:
+        """Set the tool registry for the current conversation."""
+        self.tool_registry = tool_registry
+        self.context["tools"] = tool_registry
+
+    def get_conversation_history(self) -> list[dict[str, str]]:
+        """Get the conversation history as a list of dictionaries.
+
+        Returns:
+            list[dict[str, str]]: The conversation history as a list of dictionaries
+        """
+        return [msg if isinstance(msg, dict) else msg.dict() for msg in self.conversation_history]

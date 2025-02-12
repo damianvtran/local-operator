@@ -8,7 +8,6 @@ from pathlib import Path
 from langchain_core.messages import BaseMessage
 from pydantic import ValidationError
 
-import local_operator.tools as tools
 from local_operator.agents import AgentData, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.console import print_cli_banner, spinner
@@ -19,7 +18,6 @@ from local_operator.executor import (
     process_json_response,
 )
 from local_operator.model import ModelType
-from local_operator.prompts import create_system_prompt
 from local_operator.types import ResponseJsonSchema
 
 
@@ -252,7 +250,7 @@ class Operator:
                         "role": ConversationRole.SYSTEM.value,
                         "content": "Invalid JSON response.  Please try again and "
                         "generate a valid JSON response that exactly matches the JSON "
-                        "schema.",
+                        "schema so that you can continue on and complete the task.",
                     }
                 )
                 continue

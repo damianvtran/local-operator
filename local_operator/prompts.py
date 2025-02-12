@@ -5,6 +5,8 @@ import platform
 from pathlib import Path
 from types import ModuleType
 
+from local_operator.tools import ToolRegistry
+
 
 def get_installed_packages_str() -> str:
     """Get installed packages for the system prompt context."""
@@ -48,16 +50,16 @@ def get_installed_packages_str() -> str:
     return package_str
 
 
-def get_tools_str(tools_module: ModuleType | None = None) -> str:
+def get_tools_str(tool_registry: ToolRegistry | None = None) -> str:
     """Get formatted string describing available tool functions.
 
     Args:
-        tools_module: Optional module containing tool functions to document
+        tool_registry: ToolRegistry instance containing tool functions to document
 
     Returns:
         Formatted string describing the tools, or empty string if no tools module provided
     """
-    if not tools_module:
+    if not tool_registry:
         return ""
 
     # Get list of builtin functions/types to exclude
@@ -65,12 +67,12 @@ def get_tools_str(tools_module: ModuleType | None = None) -> str:
     builtin_names.update(["dict", "list", "set", "tuple", "Path"])
 
     tools_list: list[str] = []
-    for name in dir(tools_module):
+    for name in tool_registry:
         # Skip private functions and builtins
         if name.startswith("_") or name in builtin_names:
             continue
 
-        tool = getattr(tools_module, name)
+        tool = tool_registry.get_tool(name)
         if callable(tool):
             doc = tool.__doc__ or "No description available"
             # Get first line of docstring
@@ -100,7 +102,7 @@ def get_tools_str(tools_module: ModuleType | None = None) -> str:
     return "\n".join(tools_list)
 
 
-def create_system_prompt(tools_module: ModuleType | None = None) -> str:
+def create_system_prompt(tool_registry: ToolRegistry | None = None) -> str:
     """Create the system prompt for the agent."""
 
     base_system_prompt = BaseSystemPrompt
@@ -129,7 +131,7 @@ def create_system_prompt(tools_module: ModuleType | None = None) -> str:
         .replace("{{user_system_prompt}}", user_system_prompt)
     )
 
-    tools_str = get_tools_str(tools_module)
+    tools_str = get_tools_str(tool_registry)
     base_system_prompt = base_system_prompt.replace("{{tools_str}}", tools_str)
 
     return base_system_prompt
@@ -164,13 +166,14 @@ Response Flow:
    - ASK: request additional details.
    - BYE: end the session and exit.
 
-Tool Use:
+Tool Usage:
 Available functions:
 <tools_list>
 {{tools_str}}
 </tools_list>
-Import them from local_operator.tools. Use await for async functions (do not call asyncio.run()).
-For Playwright, use its async version.
+Use them by running tools.[TOOL_FUNCTION] in your code. `tools` is a tool registry that
+is in the execution context of your code. Use `await` for async functions (do not call
+`asyncio.run()`).
 
 Additional User Info:
 <user_system_prompt>
