@@ -26,7 +26,7 @@ This project is proudly open source under the MIT license. We believe AI tools s
 > "Democratizing AI-powered productivity, one conversation at a time."
 
 <div align="center">
-  <a href="#contributing">Contribute</a> •
+  <a href="#-contributing">Contribute</a> •
   <a href="https://local-operator.com">Learn More</a>
 </div>
 
