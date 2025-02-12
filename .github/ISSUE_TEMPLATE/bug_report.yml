@@ -45,6 +45,12 @@ body:
         - Ollama
         - Other
   - type: input
+    id: model_name
+    attributes:
+      label: Model Name
+      description: Specify the model you were using.
+      placeholder: "e.g., gpt-4o, deepseek-v3, claude-3.5-sonnet"
+  - type: input
     id: local_operator_version
     attributes:
       label: Local Operator Version
