@@ -1,7 +1,8 @@
 import platform
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from local_operator.prompts import create_system_prompt, get_tools_str
+from local_operator.tools import ToolRegistry
 
 
 def test_create_system_prompt():
@@ -52,29 +53,39 @@ def test_create_system_prompt():
 
 def test_get_tools_str():
     test_cases = [
-        {"name": "No module provided", "module": None, "expected": ""},
+        {"name": "No registry provided", "registry": None, "expected": ""},
         {
-            "name": "Empty module (0 functions)",
-            "module": MagicMock(__dir__=MagicMock(return_value=[])),
+            "name": "Empty registry (0 tools)",
+            "registry": ToolRegistry(),
             "expected": "",
         },
         {
-            "name": "One function module",
-            "module": MagicMock(),
+            "name": "One tool registry",
+            "registry": ToolRegistry(),
             "expected": "- test_func(param1: str, param2: int) -> bool: Test function description",
         },
         {
-            "name": "Two function module",
-            "module": MagicMock(),
+            "name": "Two tool registry",
+            "registry": ToolRegistry(),
             "expected": (
                 "- test_func(param1: str, param2: int) -> bool: Test function description\n"
                 "- other_func(name: str) -> str: Another test function"
             ),
         },
         {
-            "name": "Async function module",
-            "module": MagicMock(),
+            "name": "Async tool registry",
+            "registry": ToolRegistry(),
             "expected": "- async async_func(url: str) -> str: Async test function",
+        },
+        {
+            "name": "Default init registry",
+            "registry": ToolRegistry(),
+            "expected": (
+                "- async browse_single_url(url: str) -> str: Browse to a URL using Playwright to "
+                "render JavaScript and return the page content.\n"
+                "- index_current_directory() -> Dict: Index the current directory showing files "
+                "and their metadata."
+            ),
         },
     ]
 
@@ -100,24 +111,22 @@ def test_get_tools_str():
     async_func.__name__ = "async_func"
     async_func.__doc__ = "Async test function"
 
-    # Configure the one function module
-    test_cases[2]["module"].test_func = test_func
-    test_cases[2]["module"].__dir__ = MagicMock(return_value=["test_func"])
+    # Configure the one tool registry
+    test_cases[2]["registry"].add_tool("test_func", test_func)
 
-    # Configure the two function module
-    test_cases[3]["module"].test_func = test_func
-    test_cases[3]["module"].other_func = other_func
-    test_cases[3]["module"].__dir__ = MagicMock(
-        return_value=["test_func", "other_func", "_private"]
-    )
+    # Configure the two tool registry
+    test_cases[3]["registry"].add_tool("test_func", test_func)
+    test_cases[3]["registry"].add_tool("other_func", other_func)
 
-    # Configure the async function module
-    test_cases[4]["module"].async_func = async_func
-    test_cases[4]["module"].__dir__ = MagicMock(return_value=["async_func"])
+    # Configure the async tool registry
+    test_cases[4]["registry"].add_tool("async_func", async_func)
+
+    # Configure the default init registry
+    test_cases[5]["registry"].init_tools()
 
     # Run test cases
     for case in test_cases:
-        result = get_tools_str(case["module"])
+        result = get_tools_str(case["registry"])
         result_lines = sorted(result.split("\n")) if result else []
         expected_lines = sorted(case["expected"].split("\n")) if case["expected"] else []
         assert (

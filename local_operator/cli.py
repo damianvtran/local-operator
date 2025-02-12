@@ -29,7 +29,12 @@ from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
 from local_operator.model import configure_model
-from local_operator.operator import Operator, OperatorType
+from local_operator.operator import (
+    Operator,
+    OperatorType,
+    create_agent_from_conversation_tool,
+)
+from local_operator.tools import ToolRegistry
 
 CLI_DESCRIPTION = """
     Local Operator - An environment for agentic AI models to perform tasks on the local device.
@@ -406,6 +411,18 @@ def main() -> int:
             current_agent=agent,
             training_mode=training_mode,
         )
+
+        tool_registry = ToolRegistry()
+        tool_registry.init_tools()
+        tool_registry.add_tool(
+            "create_agent_from_conversation",
+            create_agent_from_conversation_tool(
+                executor,
+                agent_registry,
+            ),
+        )
+
+        executor.set_tool_registry(tool_registry)
 
         # Start the async chat interface or execute single command
         if args.subcommand == "exec":
