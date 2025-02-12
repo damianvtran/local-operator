@@ -474,6 +474,53 @@ def update_config_tool(config_manager: ConfigManager) -> Callable[[Dict[str, Any
     return update_config
 
 
+def open_agents_config_tool(agent_registry: AgentRegistry) -> Callable[[], None]:
+    """Create a tool function that opens the agents configuration file.
+
+    This function returns a callable that opens the agents.json file in the default system editor.
+    The file location is determined from the agent registry's config directory.
+
+    Args:
+        agent_registry: The AgentRegistry instance containing the config directory path
+
+    Returns:
+        Callable[[], None]: A function that opens the agents configuration file
+
+    Raises:
+        RuntimeError: If there are issues opening the configuration file
+    """
+
+    def open_agents_config() -> None:
+        """Open the agents configuration file in the default system editor.
+
+        Opens the agents.json file located in the agent registry's config directory
+        using the system's default application for JSON files.
+
+        Raises:
+            RuntimeError: If the configuration file cannot be opened
+        """
+        try:
+            agents_file = agent_registry.config_dir / "agents.json"
+            if not agents_file.exists():
+                raise RuntimeError(f"Agents configuration file not found at {agents_file}")
+
+            import platform
+            import subprocess
+
+            system = platform.system()
+            if system == "Darwin":  # macOS
+                subprocess.run(["open", str(agents_file)], check=True)
+            elif system == "Windows":
+                subprocess.run(["start", str(agents_file)], shell=True, check=True)
+            else:  # Linux and other Unix-like
+                subprocess.run(["xdg-open", str(agents_file)], check=True)
+
+        except Exception as e:
+            raise RuntimeError(f"Failed to open agents configuration file: {str(e)}")
+
+    return open_agents_config
+
+
 def add_admin_tools(
     tool_registry: ToolRegistry,
     executor: LocalCodeExecutor,
@@ -492,7 +539,7 @@ def add_admin_tools(
     - save_conversation_tool
     - get_config_tool
     - update_config_tool
-
+    - open_agents_config_tool
     Args:
         tool_registry: The ToolRegistry instance to add tools to
     """
@@ -530,4 +577,8 @@ def add_admin_tools(
     tool_registry.add_tool(
         "save_agent_training",
         save_agent_training_tool(executor, agent_registry),
+    )
+    tool_registry.add_tool(
+        "open_agents_config",
+        open_agents_config_tool(agent_registry),
     )
