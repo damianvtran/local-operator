@@ -56,7 +56,7 @@ Visit the [Local Operator website](https://local-operator.com) for visualization
 
 - Python 3.12+
 - For 3rd party hosting: [OpenRouter](https://openrouter.ai/keys), [OpenAI](https://platform.openai.com/api-keys), [DeepSeek](https://platform.deepseek.ai/), [Anthropic](https://console.anthropic.com/), [Google](https://ai.google.dev/), or other API key (prompted for on first run)
-- For local hosting: Ollama model installed and running
+- For local hosting: [Ollama](https://ollama.com/download) model installed and running
 
 ## 🛠️ Setup
 
