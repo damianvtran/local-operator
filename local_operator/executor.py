@@ -904,3 +904,11 @@ class LocalCodeExecutor:
         """Set the tool registry for the current conversation."""
         self.tool_registry = tool_registry
         self.context["tools"] = tool_registry
+
+    def get_conversation_history(self) -> list[dict[str, str]]:
+        """Get the conversation history as a list of dictionaries.
+
+        Returns:
+            list[dict[str, str]]: The conversation history as a list of dictionaries
+        """
+        return [msg if isinstance(msg, dict) else msg.dict() for msg in self.conversation_history]

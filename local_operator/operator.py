@@ -4,12 +4,11 @@ import readline
 import signal
 from enum import Enum
 from pathlib import Path
-from typing import Callable
 
 from langchain_core.messages import BaseMessage
 from pydantic import ValidationError
 
-from local_operator.agents import AgentData, AgentEditFields, AgentRegistry
+from local_operator.agents import AgentData, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.console import print_cli_banner, spinner
 from local_operator.credentials import CredentialManager
@@ -251,7 +250,7 @@ class Operator:
                         "role": ConversationRole.SYSTEM.value,
                         "content": "Invalid JSON response.  Please try again and "
                         "generate a valid JSON response that exactly matches the JSON "
-                        "schema.",
+                        "schema so that you can continue on and complete the task.",
                     }
                 )
                 continue
@@ -366,33 +365,3 @@ class Operator:
                 print("\n\033[1;36m╭─ Agent Question Requires Input ────────────────\033[0m")
                 print(f"\033[1;36m│\033[0m {response_content}")
                 print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
-
-
-def create_agent_from_conversation_tool(
-    executor: LocalCodeExecutor, agent_registry: AgentRegistry
-) -> Callable[[str], AgentData]:
-
-    def create_agent_from_converation(name: str) -> AgentData:
-        """Create a new agent from an existing conversation history.
-
-        Creates a new agent with the given name and saves the conversation history from the
-        provided executor. This allows reusing previous conversations to initialize new agents.
-
-        Args:
-            executor: The executor containing the conversation history to use
-            agent_registry: The registry to create and store the new agent in
-            name: Name to give the new agent
-
-        Returns:
-            AgentData: The newly created agent's data
-        """
-        new_agent = agent_registry.create_agent(
-            AgentEditFields(
-                name=name,
-                security_prompt="",
-            )
-        )
-        agent_registry.save_agent_conversation(new_agent.id, executor.conversation_history)
-        return new_agent
-
-    return create_agent_from_converation
