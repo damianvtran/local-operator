@@ -35,6 +35,12 @@ The Local Operator provides a command-line interface where you can:
 
 Visit the [Local Operator website](https://local-operator.com) for visualizations and information about the project.
 
+## Requirements
+
+- Python 3.12+
+- For 3rd party hosting: DeepSeek API key or OpenAI API key (prompted for on first run)
+- For local hosting: Ollama model installed and running
+
 ## Setup
 
 To run Local Operator with a 3rd party cloud-hosted LLM model, you need to have an API key.  You can get one from OpenAI, DeepSeek, Anthropic, or other providers.
@@ -1703,12 +1709,6 @@ The system includes multiple layers of protection:
 - User confirmation prompts for potentially unsafe code
 - Agent prompt with safety focused execution policy
 - Support for local Ollama models to prevent sending local system data to 3rd parties
-
-## Requirements
-
-- Python 3.12+
-- For 3rd party hosting: DeepSeek API key or OpenAI API key (prompted for on first run)
-- For local hosting: Ollama model installed and running
 
 ## License
 
