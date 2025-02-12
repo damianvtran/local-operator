@@ -329,9 +329,13 @@ class ToolRegistry:
         Default tools include:
         - browse_single_url: Browse a URL and get page content
         - get_current_directory_info: Get information about the current directory
+        - add_info_to_knowledge_base: Add information to the knowledge base
+        - query_knowledge_base: Query the knowledge base
         """
         self.add_tool("browse_single_url", browse_single_url)
         self.add_tool("get_current_directory_info", get_current_directory_info)
+        self.add_tool("add_info_to_knowledge_base", add_info_to_knowledge_base)
+        self.add_tool("query_knowledge_base", query_knowledge_base)
 
     def add_tool(self, name: str, tool: Callable[..., Any]):
         """Add a new tool to the registry.
