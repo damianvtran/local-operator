@@ -1,6 +1,6 @@
 name: "🐞 Bug Report"
 description: "🚨 Report a bug in Local Operator."
-title: "[🐛 BUG] "
+title: "[Bug] <mode>: <brief description>"
 labels:
   - bug
   - needs-triage
