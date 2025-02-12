@@ -32,6 +32,7 @@ from typing import Any, Callable, Dict, List, Optional
 from local_operator.agents import AgentData, AgentEditFields, AgentRegistry
 from local_operator.config import Config, ConfigManager
 from local_operator.executor import LocalCodeExecutor
+from local_operator.operator import ConversationRole
 from local_operator.tools import ToolRegistry
 
 
@@ -61,8 +62,8 @@ def create_agent_from_conversation_tool(
         """Create a new Local Operator agent initialized with the current conversation history.
 
         Creates a new agent with the given name and saves the current conversation history from the
-        provided executor. This allows reusing previous conversations to initialize new agents with
-        existing context and knowledge.
+        provided executor, excluding the create agent request itself. This allows reusing previous
+        conversations to initialize new agents with existing context and knowledge.
 
         Args:
             name: Name to give the new agent
@@ -70,16 +71,100 @@ def create_agent_from_conversation_tool(
         Returns:
             AgentData: The newly created agent's data
         """
+        # Find index of second-to-last user message by iterating backwards
+        history = executor.conversation_history
+        last_user_idx = None
+        second_last_user_idx = None
+
+        for i in range(len(history) - 1, -1, -1):
+            if history[i]["role"] == ConversationRole.USER.value:
+                if last_user_idx is None:
+                    last_user_idx = i
+                else:
+                    second_last_user_idx = i
+                    break
+
+        # Save history up to the second-to-last user message (excluding the create
+        # agent request itself)
+        cutoff_idx = second_last_user_idx if second_last_user_idx is not None else 0
+        history_to_save = history[:cutoff_idx]
+
         new_agent = agent_registry.create_agent(
             AgentEditFields(
                 name=name,
                 security_prompt="",
             )
         )
-        agent_registry.save_agent_conversation(new_agent.id, executor.conversation_history)
+        agent_registry.save_agent_conversation(new_agent.id, history_to_save)
         return new_agent
 
     return create_agent_from_conversation
+
+
+def save_agent_training_tool(
+    executor: LocalCodeExecutor, agent_registry: AgentRegistry
+) -> Callable[[], AgentData]:
+    """Create a tool function that saves the current conversation to train an agent.
+
+    This function returns a callable that can be used as a tool to save the current conversation
+    history as training data for the agent. The tool will save all conversation turns up to the
+    second-to-last user message, excluding the final save request itself. This allows the agent
+    to learn from the interaction and build up its knowledge over time through training.
+
+    The saved conversation history becomes part of the agent's training data and helps shape its
+    responses in future interactions. Each time this tool is used, it adds the current conversation
+    to the agent's existing training data.
+
+    Args:
+        executor: The executor containing the conversation history to use as training data
+        agent_registry: The registry to update the agent's training data in
+
+    Returns:
+        Callable[[], AgentData]: A function that saves the conversation and returns the updated
+            agent's data
+
+    Raises:
+        ValueError: If the executor has no current agent
+        RuntimeError: If there are issues saving the training data
+    """
+
+    def save_agent_training() -> AgentData:
+        """Save the current conversation as training data for the agent.
+
+        Saves the conversation history from the executor as training data for the current agent,
+        rewinding to before the last user input to exclude the save request itself. This allows
+        the agent to learn from the current interaction and improve its responses over time.
+
+        Returns:
+            AgentData: The updated agent's data with new training conversation saved
+
+        Raises:
+            ValueError: If there is no current agent set in the executor
+        """
+        if not executor.agent:
+            raise ValueError("No current agent set in executor")
+
+        # Find index of second-to-last user message by iterating backwards
+        history = executor.conversation_history
+        last_user_idx = None
+        second_last_user_idx = None
+
+        for i in range(len(history) - 1, -1, -1):
+            if history[i]["role"] == ConversationRole.USER.value:
+                if last_user_idx is None:
+                    last_user_idx = i
+                else:
+                    second_last_user_idx = i
+                    break
+
+        # Save history up to the second-to-last user message (excluding the save request itself)
+        cutoff_idx = second_last_user_idx if second_last_user_idx is not None else 0
+        history_to_save = history[:cutoff_idx]
+
+        agent_registry.save_agent_conversation(executor.agent.id, history_to_save)
+        return executor.agent
+
+    return save_agent_training
 
 
 def list_agent_info_tool(
