@@ -2,6 +2,37 @@
 
 Thank you for your interest in contributing to Local Operator! We welcome all contributions, including bug reports, feature requests, documentation improvements, and code contributions. By participating in this project, you agree to abide by its [MIT License](LICENSE).
 
+## Project Structure
+
+```shell
+.
+├── docs                         # Documentation files and resources
+├── local_operator
+│   ├── admin.py                 # Tools for managing agents and conversations
+│   ├── agents.py                # Agent data structures and registry management
+│   ├── cli.py                   # Command line interface implementation
+│   ├── config.py                # Configuration management and settings
+│   ├── console.py               # Terminal output formatting and display
+│   ├── credentials.py           # Secure storage of API keys and credentials
+│   ├── executor.py              # Code execution with safety checks
+│   ├── mocks.py                 # Mock objects for testing
+│   ├── model.py                 # Language model interface implementations
+│   ├── operator.py              # Core environment manager for model interactions
+│   ├── prompts.py               # System prompts and message templates
+│   ├── server.py                # HTTP API server implementation
+│   ├── tools.py                 # Utility functions and tool registry
+│   └── types.py                 # Type definitions and enums
+├── setup.py                     # Package installation configuration
+├── static                       # Static assets and resources
+└── tests                        # Test suite directory
+    ├── conftest.py              # Pytest configuration and fixtures
+    └── unit                     # Unit test implementations
+```
+
+## Dependency Graph
+
+Refer to the [dependency graph](docs/dependencies.md) for a visual representation of the project structure.
+
 ## Getting Started
 
 ### Prerequisites
@@ -167,6 +198,7 @@ Help us improve documentation by:
 
 - Fixing typos/outdated information
 - Adding usage examples
+- Updating the dependency graph in `docs/dependencies.md`
 - Improving section organization
 - Translating documentation (if applicable)
 
