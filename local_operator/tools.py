@@ -94,9 +94,12 @@ def _should_ignore_file(file_path: str) -> bool:
     return False
 
 
-def index_current_directory() -> Dict[str, List[Tuple[str, str, int]]]:
+def index_current_directory(max_depth: int = 3) -> Dict[str, List[Tuple[str, str, int]]]:
     """Index the current directory showing files and their metadata.
     If in a git repo, only shows unignored files. If not in a git repo, shows all files.
+
+    Args:
+        max_depth: Maximum directory depth to traverse. Defaults to 3.
 
     Returns:
         Dict mapping directory paths to lists of (filename, file_type, size_bytes) tuples.
@@ -108,6 +111,12 @@ def index_current_directory() -> Dict[str, List[Tuple[str, str, int]]]:
     ignored_files = _get_git_ignored_files(".gitignore")
 
     for root, dirs, files in os.walk("."):
+        # Skip if we've reached max depth
+        depth = root.count(os.sep)
+        if depth >= max_depth:
+            dirs.clear()  # Clear dirs to prevent further recursion
+            continue
+
         # Skip .git directory if it exists
         if ".git" in dirs:
             dirs.remove(".git")
