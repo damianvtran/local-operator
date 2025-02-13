@@ -2,6 +2,7 @@ import asyncio
 import os
 import readline
 import signal
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from local_operator.executor import (
     process_json_response,
 )
 from local_operator.model import ModelType
+from local_operator.tools import index_current_directory
 from local_operator.types import ResponseJsonSchema
 
 
@@ -193,6 +195,48 @@ class Operator:
 
         return response.action == "BYE"
 
+    def get_environment_details(self) -> str:
+        """Get environment details."""
+        directory_index = index_current_directory()
+        directory_tree_str = ""
+
+        for path, files in directory_index.items():
+            # Add directory name with forward slash
+            directory_tree_str += f"📁 {path}/\n"
+
+            # Add files under directory
+            for filename, file_type, size in files:
+                # Format size to be human readable
+                if size < 1024:
+                    size_str = f"{size}B"
+                elif size < 1024 * 1024:
+                    size_str = f"{size/1024:.1f}KB"
+                else:
+                    size_str = f"{size/(1024*1024):.1f}MB"
+
+                # Add icon based on file type
+                icon = {"code": "📄", "doc": "📝", "image": "🖼️", "other": "📎"}.get(file_type, "📎")
+
+                # Add indented file info
+                directory_tree_str += f"  {icon} {filename} ({file_type}, {size_str})\n"
+
+        return f"""Current working directory: {os.getcwd()}
+        Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        Directory tree: {directory_tree_str}"""
+
+    def format_user_prompt(self, user_input: str) -> str:
+        """Format user prompt for display."""
+        env_details = self.get_environment_details()
+        return f"""
+        <user_input>
+        {user_input}
+        </user_input>
+
+        <environment_details>
+        {env_details}
+        </environment_details>
+        """
+
     async def handle_user_input(self, user_input: str) -> ResponseJsonSchema | None:
         """Process user input and generate agent responses.
 
@@ -211,8 +255,9 @@ class Operator:
         Raises:
             ValueError: If the model is not properly initialized
         """
+        formatted_user_input = self.format_user_prompt(user_input)
         self.executor.conversation_history.append(
-            {"role": ConversationRole.USER.value, "content": user_input}
+            {"role": ConversationRole.USER.value, "content": formatted_user_input}
         )
 
         response_json: ResponseJsonSchema | None = None
