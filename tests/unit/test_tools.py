@@ -125,3 +125,47 @@ def test_index_empty_directory(tmp_path, monkeypatch):
     with patch("builtins.open", side_effect=FileNotFoundError()):
         index = index_current_directory()
     assert index == {}
+
+
+def test_index_current_directory_max_depth():
+    """Test that index_current_directory respects the max_depth parameter."""
+    mock_walk_data = [
+        (".", ["level1"], ["root.txt"]),
+        ("./level1", ["level2"], ["level1.txt"]),
+        ("./level1/level2", ["level3"], ["level2.txt"]),
+        ("./level1/level2/level3", [], ["level3.txt"]),
+    ]
+
+    def mock_stat(*args, **kwargs):
+        m = MagicMock()
+        m.st_size = 100
+        return m
+
+    with (
+        patch("os.walk", return_value=mock_walk_data),
+        patch("os.stat", side_effect=mock_stat),
+        patch("builtins.open", side_effect=FileNotFoundError()),
+    ):
+        # Test with max_depth=1 (only root directory)
+        index = index_current_directory(max_depth=1)
+        assert list(index.keys()) == ["."]
+        assert len(index["."]) == 1
+        assert index["."][0][0] == "root.txt"
+        assert "level1" not in index
+
+        # Test with max_depth=2 (root and level1)
+        index = index_current_directory(max_depth=2)
+        assert sorted(list(index.keys())) == [".", "level1"]
+        assert len(index["."]) == 1
+        assert len(index["level1"]) == 1
+        assert index["level1"][0][0] == "level1.txt"
+        assert "level1/level2" not in index
+
+        # Test with max_depth=3 (root, level1, and level2)
+        index = index_current_directory(max_depth=3)
+        assert sorted(list(index.keys())) == [".", "level1", "level1/level2"]
+        assert len(index["."]) == 1
+        assert len(index["level1"]) == 1
+        assert len(index["level1/level2"]) == 1
+        assert index["level1/level2"][0][0] == "level2.txt"
+        assert "level1/level2/level3" not in index
