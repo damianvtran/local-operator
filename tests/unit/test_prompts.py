@@ -83,8 +83,8 @@ def test_get_tools_str():
             "expected": (
                 "- async browse_single_url(url: str) -> str: Browse to a URL using Playwright to "
                 "render JavaScript and return the page content.\n"
-                "- index_current_directory() -> Dict: Index the current directory showing files "
-                "and their metadata."
+                "- index_current_directory(max_depth: int) -> Dict: Index the current directory "
+                "showing files and their metadata."
             ),
         },
     ]
