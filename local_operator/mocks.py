@@ -104,8 +104,16 @@ class ChatMock:
                 break
 
         if user_message_index > code_execution_response_index:
-            if user_message_lower in USER_MOCK_RESPONSES:
-                response = USER_MOCK_RESPONSES[user_message_lower]
+            # Find closest matching response by partial string match
+            closest_match = None
+            max_match_length = 0
+            for key in USER_MOCK_RESPONSES:
+                if key in user_message_lower and len(key) > max_match_length:
+                    closest_match = key
+                    max_match_length = len(key)
+
+            if closest_match:
+                response = USER_MOCK_RESPONSES[closest_match]
                 return BaseMessage(
                     content=response.model_dump_json(),
                     type=ConversationRole.ASSISTANT.value,
