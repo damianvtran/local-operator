@@ -188,6 +188,8 @@ Credentials are stored in the `~/.local-operator/credentials.yml` file.  Credent
 
 - `SERP_API_KEY`: The API key for the SERP API from [SerpApi](https://serpapi.com/users/sign_up).  This is used to search the web for information.  This is required for the agent to be able to do real time searches of the web using search engines.  The agent can still browse the web without it, though information access will be less efficient.
 
+- `OPENROUTER_API_KEY`: The API key for the OpenRouter API.  This is used to access the OpenRouter service with a wide range of models.  It is the best option for being able to easily switch between models with less configuration.
+
 - `OPENAI_API_KEY`: The API key for the OpenAI API.  This is used to access the OpenAI model.
 
 - `DEEPSEEK_API_KEY`: The API key for the DeepSeek API.  This is used to access the DeepSeek model.
@@ -195,8 +197,6 @@ Credentials are stored in the `~/.local-operator/credentials.yml` file.  Credent
 - `ANTHROPIC_API_KEY`: The API key for the Anthropic API.  This is used to access the Anthropic model.
 
 - `GOOGLE_API_KEY`: The API key for the Google API.  This is used to access the Google model.
-
-- `OPENROUTER_API_KEY`: The API key for the OpenRouter API.  This is used to access the OpenRouter model.
 
 - `DEEPSEEK_API_KEY`: The API key for the DeepSeek API.  This is used to access the DeepSeek model.
 
