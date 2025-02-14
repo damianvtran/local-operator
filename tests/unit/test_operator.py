@@ -2,6 +2,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from local_operator.model import configure_model
 from local_operator.operator import LocalCodeExecutor, Operator, OperatorType
 from local_operator.types import ResponseJsonSchema
 
@@ -225,3 +226,31 @@ def test_agent_should_exit(cli_operator):
         assert (
             cli_operator._agent_should_exit(test_case["response"]) == test_case["expected"]
         ), f"Failed test case: {test_case['name']}"
+
+
+@pytest.mark.asyncio
+async def test_operator_print_hello_world(cli_operator):
+    """Test that operator correctly handles 'print hello world' command and output
+    using ChatMock."""
+    # Configure mock model
+    mock_model, _ = configure_model("test", "", None)
+
+    mock_executor = LocalCodeExecutor(mock_model)
+    cli_operator.executor = mock_executor
+    cli_operator.model = mock_model
+
+    # Execute command and get response
+    await cli_operator.handle_user_input("print hello world")
+
+    # Verify conversation history was updated
+    assert len(cli_operator.executor.conversation_history) > 0
+    last_message = cli_operator.executor.conversation_history[-1]
+    last_message_content = ResponseJsonSchema.model_validate_json(last_message["content"])
+
+    assert last_message_content is not None
+    assert last_message_content.previous_step_success is True
+    assert last_message_content.previous_goal == "Print Hello World"
+    assert last_message_content.current_goal == "Complete task"
+    assert last_message_content.response == "I have printed 'Hello World' to the console."
+    assert last_message_content.code == ""
+    assert last_message_content.action == "DONE"
