@@ -23,6 +23,7 @@ from importlib.metadata import version
 from pathlib import Path
 
 import uvicorn
+from pydantic import SecretStr
 
 from local_operator.admin import add_admin_tools
 from local_operator.agents import AgentEditFields, AgentRegistry
@@ -30,7 +31,7 @@ from local_operator.clients.serpapi import SerpApiClient
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
-from local_operator.model import configure_model
+from local_operator.model import configure_model, validate_model
 from local_operator.operator import Operator, OperatorType
 from local_operator.tools import ToolRegistry
 
@@ -432,7 +433,7 @@ def main() -> int:
         else:
             conversation_history = []
 
-        model_instance = configure_model(hosting, model, credential_manager)
+        model_instance, model_api_key = configure_model(hosting, model, credential_manager)
 
         if not model_instance:
             error_msg = (
@@ -441,6 +442,8 @@ def main() -> int:
             )
             print(error_msg)
             return -1
+
+        validate_model(hosting, model, model_api_key or SecretStr(""))
 
         training_mode = False
         if args.train:

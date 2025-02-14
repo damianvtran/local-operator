@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
+from pydantic import SecretStr
 
 # Name of the file used to store credentials in .env format
 CREDENTIALS_FILE_NAME: str = "credentials.env"
@@ -52,16 +53,16 @@ class CredentialManager:
             self.config_file.touch()
             self.config_file.chmod(0o600)
 
-    def get_credential(self, key: str) -> str:
+    def get_credential(self, key: str) -> SecretStr:
         """Retrieve the credential from config file.
 
         Args:
             key (str): The environment variable key to retrieve
 
         Returns:
-            str: The credential value
+            SecretStr: The credential value wrapped in SecretStr
         """
-        return os.getenv(key, "")
+        return SecretStr(os.getenv(key, ""))
 
     def set_credential(self, key: str, value: str):
         """Set the credential in the config file.
@@ -91,7 +92,9 @@ class CredentialManager:
         # Reload environment variables
         load_dotenv(self.config_file, override=True)
 
-    def prompt_for_credential(self, key: str, reason: str = "not found in configuration") -> str:
+    def prompt_for_credential(
+        self, key: str, reason: str = "not found in configuration"
+    ) -> SecretStr:
         """Prompt the user to enter a credential if not present in environment.
 
         Args:
@@ -99,7 +102,10 @@ class CredentialManager:
             reason (str): The reason for prompting the user
 
         Returns:
-            str: The credential value
+            SecretStr: The credential value wrapped in SecretStr
+
+        Raises:
+            ValueError: If the user enters an empty credential
         """
         # Calculate border length based on key length
         line_length = max(50, len(key) + 12)
@@ -134,4 +140,4 @@ class CredentialManager:
         # Reload environment variables
         load_dotenv(self.config_file, override=True)
 
-        return credential
+        return SecretStr(credential)
