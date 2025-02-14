@@ -3,7 +3,6 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from pydantic import SecretStr
 
 from local_operator.credentials import CREDENTIALS_FILE_NAME, CredentialManager
 
