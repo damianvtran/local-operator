@@ -2,7 +2,9 @@ import fnmatch
 import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Set, Tuple
+from urllib.parse import urlencode
 
+import aiohttp
 import playwright.async_api as pw
 
 
@@ -277,6 +279,42 @@ async def browse_single_url(url: str) -> str:
             return content
     except Exception as e:
         raise RuntimeError(f"Failed to browse {url}: {str(e)}")
+
+
+async def search_web(query: str, provider: str = "google", max_results: int = 20) -> Dict[str, Any]:
+    """Search the web using SERP API.
+
+    Makes a request to SERP API using the provided API key to search the web. Supports multiple
+    search providers and configurable result limits.
+
+    Args:
+        query (str): The search query string
+        provider (str, optional): Search provider to use. Defaults to "google".
+        max_results (int, optional): Maximum number of results to return. Defaults to 20.
+
+    Returns:
+        dict: Search results containing metadata and results list
+
+    Raises:
+        RuntimeError: If SERP_API_KEY environment variable is not set
+        RuntimeError: If the API request fails
+    """
+    api_key = os.getenv("SERP_API_KEY")
+    if not api_key:
+        raise RuntimeError("SERP_API_KEY environment variable must be set")
+
+    params = {"api_key": api_key, "q": query, "engine": provider, "num": max_results}
+
+    url = f"https://serpapi.com/search?{urlencode(params)}"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    raise RuntimeError(f"API request failed with status {response.status}")
+                return await response.json()
+    except Exception as e:
+        raise RuntimeError(f"Failed to search web: {str(e)}")
 
 
 class ToolRegistry:
