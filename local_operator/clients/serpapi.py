@@ -30,6 +30,14 @@ class SerpApiSearchMetadata(BaseModel):
     # Allow additional fields
     model_config = {"extra": "allow"}
 
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable.
+
+        Returns:
+            Dict[str, Any]: A JSON serializable dictionary representation of the model.
+        """
+        return super().model_dump(*args, **kwargs)
+
 
 class SerpApiSearchParameters(BaseModel):
     """Parameters used for a SERP API search request.
@@ -56,6 +64,14 @@ class SerpApiSearchParameters(BaseModel):
     # Allow additional fields
     model_config = {"extra": "allow"}
 
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable.
+
+        Returns:
+            Dict[str, Any]: A JSON serializable dictionary representation of the model.
+        """
+        return super().model_dump(*args, **kwargs)
+
 
 class SerpApiSearchInformation(BaseModel):
     """Information about the search results.
@@ -69,10 +85,14 @@ class SerpApiSearchInformation(BaseModel):
 
     organic_results_state: str
     query_displayed: str
-    total_results: int
-    time_taken_displayed: float
+    total_results: int | None = None
+    time_taken_displayed: float | None = None
     # Allow additional fields
     model_config = {"extra": "allow"}
+
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        return super().model_dump(*args, **kwargs)
 
 
 class SerpApiRecipeResult(BaseModel):
@@ -99,6 +119,10 @@ class SerpApiRecipeResult(BaseModel):
     reviews: int | None = None
     # Allow additional fields
     model_config = {"extra": "allow"}
+
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        return super().model_dump(*args, **kwargs)
 
 
 class SerpApiShoppingResult(BaseModel):
@@ -127,6 +151,10 @@ class SerpApiShoppingResult(BaseModel):
     thumbnail: str
     # Allow additional fields
     model_config = {"extra": "allow"}
+
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        return super().model_dump(*args, **kwargs)
 
 
 class SerpApiLocalResult(BaseModel):
@@ -162,6 +190,10 @@ class SerpApiLocalResult(BaseModel):
     # Allow additional fields
     model_config = {"extra": "allow"}
 
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        return super().model_dump(*args, **kwargs)
+
 
 class SerpApiSiteLink(BaseModel):
     """Inline sitelink in organic search results.
@@ -176,6 +208,10 @@ class SerpApiSiteLink(BaseModel):
     # Allow additional fields
     model_config = {"extra": "allow"}
 
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        return super().model_dump(*args, **kwargs)
+
 
 class SerpApiRichSnippetExtensions(BaseModel):
     """Detected extensions in rich snippets.
@@ -188,6 +224,10 @@ class SerpApiRichSnippetExtensions(BaseModel):
     # Allow additional fields
     model_config = {"extra": "allow"}
 
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        return super().model_dump(*args, **kwargs)
+
 
 class SerpApiRichSnippet(BaseModel):
     """Rich snippet information for organic results.
@@ -199,6 +239,10 @@ class SerpApiRichSnippet(BaseModel):
     bottom: Dict[str, Any] | None = None
     # Allow additional fields
     model_config = {"extra": "allow"}
+
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        return super().model_dump(*args, **kwargs)
 
 
 class SerpApiResultSource(BaseModel):
@@ -218,6 +262,10 @@ class SerpApiResultSource(BaseModel):
     # Allow additional fields
     model_config = {"extra": "allow"}
 
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        return super().model_dump(*args, **kwargs)
+
 
 class SerpApiAboutResult(BaseModel):
     """Additional information about organic results.
@@ -235,6 +283,10 @@ class SerpApiAboutResult(BaseModel):
     regions: list[str]
     # Allow additional fields
     model_config = {"extra": "allow"}
+
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        return super().model_dump(*args, **kwargs)
 
 
 class SerpApiOrganicResult(BaseModel):
@@ -272,6 +324,10 @@ class SerpApiOrganicResult(BaseModel):
     # Allow additional fields
     model_config = {"extra": "allow"}
 
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        return super().model_dump(*args, **kwargs)
+
 
 class SerpApiGpsCoordinates(BaseModel):
     """GPS coordinates for a local business result.
@@ -285,6 +341,10 @@ class SerpApiGpsCoordinates(BaseModel):
     longitude: float
     # Allow additional fields
     model_config = {"extra": "allow"}
+
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        return super().model_dump(*args, **kwargs)
 
 
 class SerpApiLocalPlace(BaseModel):
@@ -320,6 +380,10 @@ class SerpApiLocalPlace(BaseModel):
     # Allow additional fields
     model_config = {"extra": "allow"}
 
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        return super().model_dump(*args, **kwargs)
+
 
 class SerpApiLocalResults(BaseModel):
     """Local business results section from SERP API.
@@ -333,6 +397,10 @@ class SerpApiLocalResults(BaseModel):
     places: list[SerpApiLocalPlace]
     # Allow additional fields
     model_config = {"extra": "allow"}
+
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        return super().model_dump(*args, **kwargs)
 
 
 class SerpApiResponse(BaseModel):
@@ -361,6 +429,10 @@ class SerpApiResponse(BaseModel):
     pagination: Dict[str, Any] | None = None
     # Allow additional fields
     model_config = {"extra": "allow"}
+
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        return super().model_dump(*args, **kwargs)
 
 
 class SerpApiClient:
