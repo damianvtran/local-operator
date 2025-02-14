@@ -186,9 +186,7 @@ The operator uses a configuration file to manage API keys and other settings.  I
 
 Credentials are stored in the `~/.local-operator/credentials.yml` file.  Credentials can be updated at any time by running `local-operator credential --key <key>`.
 
-- `SERP_API_KEY`: The API key for the SERP API.  This is used to search the web for information.  This is required for the agent to be able to do real time searches
-of the web using search engines.  The agent can still browse the web without it, though
-information access will be less efficient.
+- `SERP_API_KEY`: The API key for the SERP API from [SerpApi](https://serpapi.com/users/sign_up).  This is used to search the web for information.  This is required for the agent to be able to do real time searches of the web using search engines.  The agent can still browse the web without it, though information access will be less efficient.
 
 - `OPENAI_API_KEY`: The API key for the OpenAI API.  This is used to access the OpenAI model.
 
