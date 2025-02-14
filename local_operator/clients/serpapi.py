@@ -2,7 +2,7 @@ from typing import Any, Dict
 from urllib.parse import urlencode
 
 import requests
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class SerpApiSearchMetadata(BaseModel):
@@ -27,6 +27,8 @@ class SerpApiSearchMetadata(BaseModel):
     google_url: str
     raw_html_file: str
     total_time_taken: float
+    # Allow additional fields
+    model_config = {"extra": "allow"}
 
 
 class SerpApiSearchParameters(BaseModel):
@@ -45,12 +47,14 @@ class SerpApiSearchParameters(BaseModel):
 
     engine: str
     q: str
-    location_requested: str | None
-    location_used: str | None
-    google_domain: str
-    hl: str
-    gl: str
+    location_requested: str | None = Field(default=None)
+    location_used: str | None = Field(default=None)
+    google_domain: str = Field(default="google.com")
+    hl: str = Field(default="en")
+    gl: str = Field(default="us")
     device: str
+    # Allow additional fields
+    model_config = {"extra": "allow"}
 
 
 class SerpApiSearchInformation(BaseModel):
@@ -67,6 +71,8 @@ class SerpApiSearchInformation(BaseModel):
     query_displayed: str
     total_results: int
     time_taken_displayed: float
+    # Allow additional fields
+    model_config = {"extra": "allow"}
 
 
 class SerpApiRecipeResult(BaseModel):
@@ -86,11 +92,13 @@ class SerpApiRecipeResult(BaseModel):
     title: str
     link: str
     source: str
-    total_time: str | None
+    total_time: str | None = None
     ingredients: list[str]
     thumbnail: str
-    rating: float | None
-    reviews: int | None
+    rating: float | None = None
+    reviews: int | None = None
+    # Allow additional fields
+    model_config = {"extra": "allow"}
 
 
 class SerpApiShoppingResult(BaseModel):
@@ -115,8 +123,10 @@ class SerpApiShoppingResult(BaseModel):
     extracted_price: float
     link: str
     source: str
-    reviews: int | None
+    reviews: int | None = None
     thumbnail: str
+    # Allow additional fields
+    model_config = {"extra": "allow"}
 
 
 class SerpApiLocalResult(BaseModel):
@@ -142,13 +152,15 @@ class SerpApiLocalResult(BaseModel):
     place_id: str
     lsig: str
     place_id_search: str
-    rating: float | None
-    reviews: int | None
-    price: str | None
+    rating: float | None = None
+    reviews: int | None = None
+    price: str | None = None
     type: str
     address: str
     thumbnail: str
-    gps_coordinates: dict[str, float]
+    gps_coordinates: Dict[str, float]
+    # Allow additional fields
+    model_config = {"extra": "allow"}
 
 
 class SerpApiSiteLink(BaseModel):
@@ -161,6 +173,8 @@ class SerpApiSiteLink(BaseModel):
 
     title: str
     link: str
+    # Allow additional fields
+    model_config = {"extra": "allow"}
 
 
 class SerpApiRichSnippetExtensions(BaseModel):
@@ -170,7 +184,9 @@ class SerpApiRichSnippetExtensions(BaseModel):
         introduced_th_century (int | None): Century when item was introduced
     """
 
-    introduced_th_century: int | None
+    introduced_th_century: int | None = None
+    # Allow additional fields
+    model_config = {"extra": "allow"}
 
 
 class SerpApiRichSnippet(BaseModel):
@@ -180,7 +196,9 @@ class SerpApiRichSnippet(BaseModel):
         bottom (dict[str, Any] | None): Bottom snippet information including extensions
     """
 
-    bottom: dict[str, Any] | None
+    bottom: Dict[str, Any] | None = None
+    # Allow additional fields
+    model_config = {"extra": "allow"}
 
 
 class SerpApiResultSource(BaseModel):
@@ -197,6 +215,8 @@ class SerpApiResultSource(BaseModel):
     source_info_link: str
     security: str
     icon: str
+    # Allow additional fields
+    model_config = {"extra": "allow"}
 
 
 class SerpApiAboutResult(BaseModel):
@@ -213,6 +233,8 @@ class SerpApiAboutResult(BaseModel):
     keywords: list[str]
     languages: list[str]
     regions: list[str]
+    # Allow additional fields
+    model_config = {"extra": "allow"}
 
 
 class SerpApiOrganicResult(BaseModel):
@@ -237,16 +259,18 @@ class SerpApiOrganicResult(BaseModel):
     position: int
     title: str
     link: str
-    redirect_link: str | None
+    redirect_link: str | None = None
     displayed_link: str
     snippet: str
-    sitelinks: dict[str, list[SerpApiSiteLink]] | None
-    rich_snippet: SerpApiRichSnippet | None
-    about_this_result: SerpApiAboutResult | None
-    about_page_link: str | None
-    about_page_serpapi_link: str | None
-    cached_page_link: str | None
-    related_pages_link: str | None
+    sitelinks: Dict[str, list[SerpApiSiteLink]] | None = None
+    rich_snippet: SerpApiRichSnippet | None = None
+    about_this_result: SerpApiAboutResult | None = None
+    about_page_link: str | None = None
+    about_page_serpapi_link: str | None = None
+    cached_page_link: str | None = None
+    related_pages_link: str | None = None
+    # Allow additional fields
+    model_config = {"extra": "allow"}
 
 
 class SerpApiGpsCoordinates(BaseModel):
@@ -259,6 +283,8 @@ class SerpApiGpsCoordinates(BaseModel):
 
     latitude: float
     longitude: float
+    # Allow additional fields
+    model_config = {"extra": "allow"}
 
 
 class SerpApiLocalPlace(BaseModel):
@@ -284,13 +310,15 @@ class SerpApiLocalPlace(BaseModel):
     place_id: str
     lsig: str
     place_id_search: str
-    rating: float | None
-    reviews: int | None
-    price: str | None
+    rating: float | None = None
+    reviews: int | None = None
+    price: str | None = None
     type: str
     address: str
     thumbnail: str
     gps_coordinates: SerpApiGpsCoordinates
+    # Allow additional fields
+    model_config = {"extra": "allow"}
 
 
 class SerpApiLocalResults(BaseModel):
@@ -303,6 +331,8 @@ class SerpApiLocalResults(BaseModel):
 
     more_locations_link: str
     places: list[SerpApiLocalPlace]
+    # Allow additional fields
+    model_config = {"extra": "allow"}
 
 
 class SerpApiResponse(BaseModel):
@@ -323,12 +353,14 @@ class SerpApiResponse(BaseModel):
     search_metadata: SerpApiSearchMetadata
     search_parameters: SerpApiSearchParameters
     search_information: SerpApiSearchInformation
-    recipes_results: list[SerpApiRecipeResult] | None
-    shopping_results: list[SerpApiShoppingResult] | None
-    local_results: SerpApiLocalResults | None
-    organic_results: list[SerpApiOrganicResult] | None
-    related_searches: list[Dict[str, Any]] | None
-    pagination: Dict[str, Any] | None
+    recipes_results: list[SerpApiRecipeResult] | None = None
+    shopping_results: list[SerpApiShoppingResult] | None = None
+    local_results: SerpApiLocalResults | None = None
+    organic_results: list[SerpApiOrganicResult] | None = None
+    related_searches: list[Dict[str, Any]] | None = None
+    pagination: Dict[str, Any] | None = None
+    # Allow additional fields
+    model_config = {"extra": "allow"}
 
 
 class SerpApiClient:
