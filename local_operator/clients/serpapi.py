@@ -2,7 +2,7 @@ from typing import Any, Dict
 from urllib.parse import urlencode
 
 import requests
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 
 class SerpApiSearchMetadata(BaseModel):
@@ -442,7 +442,7 @@ class SerpApiClient:
         api_key (str): SERP API key for authentication
     """
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: SecretStr):
         """Initialize the SERP API client.
 
         Args:

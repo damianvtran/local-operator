@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.2.10"
+version = "0.2.11"
 description = "A Python-based agent for local command execution"
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damianvtran@gmail.com" }]
@@ -52,6 +52,7 @@ local-operator = "local_operator.cli:main"
 [tool.black]
 line-length = 100
 target-version = ['py312']
+extend-exclude = "F401"
 
 [tool.pylint."messages control"]
 ignore = ["setup.py", "__init__.py"]

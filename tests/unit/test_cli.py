@@ -1,8 +1,8 @@
 from datetime import datetime
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import SecretStr
 
 from local_operator.agents import AgentData
 from local_operator.cli import (
@@ -125,7 +125,7 @@ def test_main_success():
         patch("local_operator.cli.ConfigManager") as mock_config_manager_cls,
         patch("local_operator.cli.CredentialManager"),
         patch(
-            "local_operator.cli.configure_model", return_value=mock_model
+            "local_operator.cli.configure_model", return_value=[mock_model, SecretStr("test_key")]
         ) as mock_configure_model,
         patch("local_operator.cli.LocalCodeExecutor"),
         patch("local_operator.cli.Operator", return_value=mock_operator) as mock_operator_cls,

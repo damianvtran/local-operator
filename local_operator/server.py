@@ -238,7 +238,7 @@ def create_operator(request_hosting: str, request_model: str) -> Operator:
     if not request_hosting:
         raise ValueError("Hosting is not set")
 
-    model_instance = configure_model(
+    model_instance, _ = configure_model(
         credential_manager=credential_manager,
         hosting=request_hosting,
         model=request_model,
