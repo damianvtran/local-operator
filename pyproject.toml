@@ -27,6 +27,7 @@ dependencies = [
     "uvicorn",
     "fastapi",
     "playwright",
+    "requests",
     # Constraints
     "certifi>=2024.7.4",
     "configobj>=5.0.9",

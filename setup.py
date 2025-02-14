@@ -21,6 +21,7 @@ setup(
         "uvicorn>=0.22.0",
         "fastapi>=0.115.8",
         "playwright>=1.49.1",
+        "requests>=2.32.3",
     ],
     python_requires=">=3.12",
     extras_require={
