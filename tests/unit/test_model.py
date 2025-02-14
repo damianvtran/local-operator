@@ -38,7 +38,10 @@ def test_configure_model_deepseek(mock_credential_manager):
         assert model is not None
         mock_chat_openai.assert_called_once()
         call_args = mock_chat_openai.call_args
-        assert call_args.kwargs["api_key"].get_secret_value() == SecretStr("test_key")
+        assert (
+            call_args.kwargs["api_key"].get_secret_value()
+            == SecretStr("test_key").get_secret_value()
+        )
         assert api_key is not None
         assert call_args.kwargs["model"] == "deepseek-chat"
 
@@ -49,7 +52,10 @@ def test_configure_model_openai(mock_credential_manager):
         assert model is not None
         mock_chat_openai.assert_called_once()
         call_args = mock_chat_openai.call_args
-        assert call_args.kwargs["api_key"].get_secret_value() == SecretStr("test_key")
+        assert (
+            call_args.kwargs["api_key"].get_secret_value()
+            == SecretStr("test_key").get_secret_value()
+        )
         assert api_key is not None
         assert call_args.kwargs["model"] == "gpt-4"
 
@@ -89,7 +95,10 @@ def test_configure_model_deepseek_fallback():
         assert model is not None
         mock_chat_openai.assert_called_once()
         call_args = mock_chat_openai.call_args
-        assert call_args.kwargs["api_key"].get_secret_value() == SecretStr("prompted_key")
+        assert (
+            call_args.kwargs["api_key"].get_secret_value()
+            == SecretStr("prompted_key").get_secret_value()
+        )
         assert api_key is not None
 
 
@@ -101,7 +110,10 @@ def test_configure_model_anthropic(mock_credential_manager):
         assert model is not None
         mock_chat_anthropic.assert_called_once()
         call_args = mock_chat_anthropic.call_args
-        assert call_args.kwargs["api_key"].get_secret_value() == SecretStr("test_key")
+        assert (
+            call_args.kwargs["api_key"].get_secret_value()
+            == SecretStr("test_key").get_secret_value()
+        )
         assert api_key is not None
         assert call_args.kwargs["model_name"] == "claude-x"
         assert call_args.kwargs["temperature"] == 0.3
@@ -133,7 +145,10 @@ def test_configure_model_anthropic_fallback():
         assert model is not None
         mock_chat_anthropic.assert_called_once()
         call_args = mock_chat_anthropic.call_args
-        assert call_args.kwargs["api_key"].get_secret_value() == SecretStr("fallback_anthropic_key")
+        assert (
+            call_args.kwargs["api_key"].get_secret_value()
+            == SecretStr("fallback_anthropic_key").get_secret_value()
+        )
         assert api_key is not None
 
 
@@ -166,7 +181,10 @@ def test_configure_model_kimi_fallback():
         model, api_key = configure_model("kimi", "custom-kimi-model", credential_manager)
         assert model is not None
         call_args = mock_chat_openai.call_args
-        assert call_args.kwargs["api_key"].get_secret_value() == SecretStr("fallback_kimi_key")
+        assert (
+            call_args.kwargs["api_key"].get_secret_value()
+            == SecretStr("fallback_kimi_key").get_secret_value()
+        )
         assert api_key is not None
         assert call_args.kwargs["model"] == "custom-kimi-model"
 
@@ -193,7 +211,10 @@ def test_configure_model_alibaba_fallback():
         model, api_key = configure_model("alibaba", "custom-alibaba-model", credential_manager)
         assert model is not None
         call_args = mock_chat_openai.call_args
-        assert call_args.kwargs["api_key"].get_secret_value() == SecretStr("fallback_alibaba_key")
+        assert (
+            call_args.kwargs["api_key"].get_secret_value()
+            == SecretStr("fallback_alibaba_key").get_secret_value()
+        )
         assert api_key is not None
         assert call_args.kwargs["model"] == "custom-alibaba-model"
 
@@ -208,7 +229,10 @@ def test_configure_model_openai_fallback():
         model, api_key = configure_model("openai", "custom-openai-model", credential_manager)
         assert model is not None
         call_args = mock_chat_openai.call_args
-        assert call_args.kwargs["api_key"].get_secret_value() == SecretStr("fallback_openai_key")
+        assert (
+            call_args.kwargs["api_key"].get_secret_value()
+            == SecretStr("fallback_openai_key").get_secret_value()
+        )
         assert api_key is not None
         assert call_args.kwargs["model"] == "custom-openai-model"
 
@@ -242,7 +266,10 @@ def test_configure_model_google_fallback():
         model, api_key = configure_model("google", "custom-google-model", credential_manager)
         assert model is not None
         call_args = mock_chat_google.call_args
-        assert call_args.kwargs["api_key"].get_secret_value() == SecretStr("fallback_google_key")
+        assert (
+            call_args.kwargs["api_key"].get_secret_value()
+            == SecretStr("fallback_google_key").get_secret_value()
+        )
         assert api_key is not None
         assert call_args.kwargs["model"] == "custom-google-model"
 
@@ -267,6 +294,9 @@ def test_configure_model_mistral_fallback():
         model, api_key = configure_model("mistral", "custom-mistral-model", credential_manager)
         assert model is not None
         call_args = mock_chat_openai.call_args
-        assert call_args.kwargs["api_key"].get_secret_value() == SecretStr("fallback_mistral_key")
+        assert (
+            call_args.kwargs["api_key"].get_secret_value()
+            == SecretStr("fallback_mistral_key").get_secret_value()
+        )
         assert api_key is not None
         assert call_args.kwargs["model"] == "custom-mistral-model"
