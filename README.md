@@ -173,16 +173,34 @@ local-operator --hosting openai --model gpt-4o exec "Make a new file called test
 
 ## 🔑 Configuration
 
-The operator uses a configuration file to manage API keys and other settings.  It can be created at `~/.local-operator/config.yml` with the `local-operator config create` command.  You can edit this file directly to change the configuration.
-
-Credentials are stored in the `~/.local-operator/credentials.yml` file.  Credentials can be updated at any time by running `local-operator credential --key <key>`.
-
 ### Configuration Values
+
+The operator uses a configuration file to manage API keys and other settings.  It can be created at `~/.local-operator/config.yml` with the `local-operator config create` command.  You can edit this file directly to change the configuration.
 
 - `conversation_length`: The number of messages to keep in the conversation history.  Defaults to 100.
 - `detail_length`: The number of messages to keep in the detail history.  All messages beyond this number excluding the primary system prompt will be summarized into a shorter form to reduce token costs.  Defaults to 10.
 - `hosting`: The hosting platform to use.  Avoids needing to specify the `--hosting` argument every time.
 - `model_name`: The name of the model to use.  Avoids needing to specify the `--model` argument every time.
+
+### Credentials
+
+Credentials are stored in the `~/.local-operator/credentials.yml` file.  Credentials can be updated at any time by running `local-operator credential --key <key>`.
+
+- `SERP_API_KEY`: The API key for the SERP API.  This is used to search the web for information.  This is required for the agent to be able to do real time searches
+of the web using search engines.  The agent can still browse the web without it, though
+information access will be less efficient.
+
+- `OPENAI_API_KEY`: The API key for the OpenAI API.  This is used to access the OpenAI model.
+
+- `DEEPSEEK_API_KEY`: The API key for the DeepSeek API.  This is used to access the DeepSeek model.
+
+- `ANTHROPIC_API_KEY`: The API key for the Anthropic API.  This is used to access the Anthropic model.
+
+- `GOOGLE_API_KEY`: The API key for the Google API.  This is used to access the Google model.
+
+- `OPENROUTER_API_KEY`: The API key for the OpenRouter API.  This is used to access the OpenRouter model.
+
+- `DEEPSEEK_API_KEY`: The API key for the DeepSeek API.  This is used to access the DeepSeek model.
 
 ## 📝 Examples
 
