@@ -146,7 +146,7 @@ def configure_model(
         return ChatNoop(), None
 
     configured_model = None
-    api_key = None
+    api_key: Optional[SecretStr] = None
 
     if hosting == "deepseek":
         base_url = "https://api.deepseek.com/v1"
@@ -156,7 +156,7 @@ def configure_model(
         if not api_key:
             api_key = credential_manager.prompt_for_credential("DEEPSEEK_API_KEY")
         configured_model = ChatOpenAI(
-            api_key=SecretStr(api_key),
+            api_key=api_key,
             temperature=0.3,
             base_url=base_url,
             model=model,
@@ -170,7 +170,7 @@ def configure_model(
             api_key = credential_manager.prompt_for_credential("OPENAI_API_KEY")
         temperature = 1.0 if model.startswith(("o1", "o3")) else 0.3
         configured_model = ChatOpenAI(
-            api_key=SecretStr(api_key),
+            api_key=api_key,
             temperature=temperature,
             model=model,
         )
@@ -182,7 +182,7 @@ def configure_model(
         if not api_key:
             api_key = credential_manager.prompt_for_credential("OPENROUTER_API_KEY")
         configured_model = ChatOpenAI(
-            api_key=SecretStr(api_key),
+            api_key=api_key,
             temperature=0.3,
             model=model,
             base_url="https://openrouter.ai/api/v1",
@@ -198,8 +198,12 @@ def configure_model(
         api_key = credential_manager.get_credential("ANTHROPIC_API_KEY")
         if not api_key:
             api_key = credential_manager.prompt_for_credential("ANTHROPIC_API_KEY")
+
+        if not api_key:
+            raise ValueError("Anthropic API key is required")
+
         configured_model = ChatAnthropic(
-            api_key=SecretStr(api_key),
+            api_key=api_key,
             temperature=0.3,
             model_name=model,
             timeout=None,
@@ -213,7 +217,7 @@ def configure_model(
         if not api_key:
             api_key = credential_manager.prompt_for_credential("KIMI_API_KEY")
         configured_model = ChatOpenAI(
-            api_key=SecretStr(api_key),
+            api_key=api_key,
             temperature=0.3,
             model=model,
             base_url="https://api.moonshot.cn/v1",
@@ -226,7 +230,7 @@ def configure_model(
         if not api_key:
             api_key = credential_manager.prompt_for_credential("ALIBABA_CLOUD_API_KEY")
         configured_model = ChatOpenAI(
-            api_key=SecretStr(api_key),
+            api_key=api_key,
             temperature=0.3,
             model=model,
             base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
@@ -239,7 +243,7 @@ def configure_model(
         if not api_key:
             api_key = credential_manager.prompt_for_credential("GOOGLE_AI_STUDIO_API_KEY")
         configured_model = ChatGoogleGenerativeAI(
-            api_key=SecretStr(api_key),
+            api_key=api_key,
             temperature=0.3,
             model=model,
         )
@@ -251,7 +255,7 @@ def configure_model(
         if not api_key:
             api_key = credential_manager.prompt_for_credential("MISTRAL_API_KEY")
         configured_model = ChatOpenAI(
-            api_key=SecretStr(api_key),
+            api_key=api_key,
             temperature=0.3,
             model=model,
             base_url="https://api.mistral.ai/v1",
