@@ -5,6 +5,8 @@ from typing import Any, Callable, Dict, List, Set, Tuple
 
 import playwright.async_api as pw
 
+from local_operator.clients.serpapi import SerpApiClient, SerpApiResponse
+
 
 def _get_git_ignored_files(gitignore_path: str) -> Set[str]:
     """Get list of files ignored by git from a .gitignore file.
@@ -279,6 +281,31 @@ async def browse_single_url(url: str) -> str:
         raise RuntimeError(f"Failed to browse {url}: {str(e)}")
 
 
+def search_web_tool(serp_api_client: SerpApiClient) -> Callable[..., Any]:
+    """Search the web using SERP API.
+
+    Makes a request to SERP API using the provided API key to search the web. Supports multiple
+    search providers and configurable result limits.
+
+    Args:
+        query (str): The search query string
+        provider (str, optional): Search provider to use. Defaults to "google".
+        max_results (int, optional): Maximum number of results to return. Defaults to 20.
+
+    Returns:
+        dict: Search results containing metadata and results list
+
+    Raises:
+        RuntimeError: If SERP_API_KEY environment variable is not set
+        RuntimeError: If the API request fails
+    """
+
+    def search_web(query: str, provider: str = "google", max_results: int = 20) -> SerpApiResponse:
+        return serp_api_client.search(query, provider, max_results)
+
+    return search_web
+
+
 class ToolRegistry:
     """Registry for tools that can be used by agents.
 
@@ -291,6 +318,7 @@ class ToolRegistry:
     """
 
     _tools: Dict[str, Callable[..., Any]]
+    serp_api_client: SerpApiClient | None = None
 
     def __init__(self):
         """Initialize an empty tool registry."""
@@ -298,15 +326,26 @@ class ToolRegistry:
         super().__init__()
         object.__setattr__(self, "_tools", {})
 
+    def set_serp_api_client(self, serp_api_client: SerpApiClient):
+        """Set the SERP API client for the registry.
+
+        Args:
+            serp_api_client (SerpApiClient): The SERP API client to set
+        """
+        self.serp_api_client = serp_api_client
+
     def init_tools(self):
         """Initialize the registry with default tools.
 
         Default tools include:
         - browse_single_url: Browse a URL and get page content
         - index_current_directory: Index files in current directory
+        - search_web: Search the web using SERP API
         """
         self.add_tool("browse_single_url", browse_single_url)
         self.add_tool("index_current_directory", index_current_directory)
+        if self.serp_api_client:
+            self.add_tool("search_web", search_web_tool(self.serp_api_client))
 
     def add_tool(self, name: str, tool: Callable[..., Any]):
         """Add a new tool to the registry.
