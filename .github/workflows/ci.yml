@@ -97,7 +97,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e .
-      - name: Run CLI E2E Test
+      - name: Run CLI Sanity Test
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
@@ -135,7 +135,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e .
-      - name: Start Server and Test Health Check
+      - name: Start Server and Check Functionality
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
