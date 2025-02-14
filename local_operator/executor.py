@@ -10,7 +10,7 @@ from langchain.schema import BaseMessage
 from langchain_openai import ChatOpenAI
 from tiktoken import encoding_for_model
 
-from local_operator.agents import AgentData, AgentRegistry
+from local_operator.agents import AgentData
 from local_operator.console import (
     ExecutionSection,
     format_agent_output,
