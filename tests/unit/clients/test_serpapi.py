@@ -2,6 +2,7 @@ from typing import Any, Dict
 from unittest.mock import Mock, patch
 
 import pytest
+from pydantic import SecretStr
 
 from local_operator.clients.serpapi import (
     SerpApiClient,
@@ -13,13 +14,13 @@ from local_operator.clients.serpapi import (
 
 
 @pytest.fixture
-def api_key() -> str:
+def api_key() -> SecretStr:
     """Fixture for providing a test API key."""
-    return "test_api_key"
+    return SecretStr("test_api_key")
 
 
 @pytest.fixture
-def serp_client(api_key: str) -> SerpApiClient:
+def serp_client(api_key: SecretStr) -> SerpApiClient:
     """Fixture for creating a SerpApiClient instance.
 
     Args:
@@ -138,7 +139,7 @@ def test_client_init_no_api_key() -> None:
         RuntimeError: If no API key is provided.
     """
     with pytest.raises(RuntimeError) as exc_info:
-        SerpApiClient("")
+        SerpApiClient(SecretStr(""))
     assert "SERP API key must be provided" in str(exc_info.value)
 
 

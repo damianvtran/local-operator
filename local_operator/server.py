@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, cast
 from fastapi import Body, FastAPI, HTTPException
 from fastapi import Path as FPath
 from fastapi import Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 from tiktoken import encoding_for_model
 
 from local_operator.admin import add_admin_tools
@@ -22,7 +22,7 @@ from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
-from local_operator.model import configure_model
+from local_operator.model import configure_model, validate_model
 from local_operator.operator import Operator, OperatorType
 from local_operator.tools import ToolRegistry
 
@@ -238,7 +238,7 @@ def create_operator(request_hosting: str, request_model: str) -> Operator:
     if not request_hosting:
         raise ValueError("Hosting is not set")
 
-    model_instance = configure_model(
+    model_instance, model_api_key = configure_model(
         credential_manager=credential_manager,
         hosting=request_hosting,
         model=request_model,
@@ -246,6 +246,8 @@ def create_operator(request_hosting: str, request_model: str) -> Operator:
 
     if not model_instance:
         raise ValueError("No model instance configured")
+
+    validate_model(request_hosting, request_model, model_api_key or SecretStr(""))
 
     executor = LocalCodeExecutor(
         model=model_instance,
