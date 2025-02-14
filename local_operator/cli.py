@@ -26,6 +26,7 @@ import uvicorn
 
 from local_operator.admin import add_admin_tools
 from local_operator.agents import AgentEditFields, AgentRegistry
+from local_operator.clients.serpapi import SerpApiClient
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
@@ -315,7 +316,10 @@ def agents_delete_command(name: str, agent_registry: AgentRegistry) -> int:
 
 
 def build_tool_registry(
-    executor: LocalCodeExecutor, agent_registry: AgentRegistry, config_manager: ConfigManager
+    executor: LocalCodeExecutor,
+    agent_registry: AgentRegistry,
+    config_manager: ConfigManager,
+    credential_manager: CredentialManager,
 ) -> ToolRegistry:
     """Build and initialize the tool registry with agent management tools.
 
@@ -324,18 +328,30 @@ def build_tool_registry(
     - edit_agent: Modifies an existing agent's properties
     - delete_agent: Removes an agent from the registry
     - get_agent_info: Retrieves information about agents
+    - search_web: Search the web using SERP API
 
     Args:
         executor: The LocalCodeExecutor instance containing conversation history
         agent_registry: The AgentRegistry for managing agents
         config_manager: The ConfigManager for managing configuration
-
+        credential_manager: The CredentialManager for managing credentials
     Returns:
         ToolRegistry: The initialized tool registry with all agent management tools registered
     """
     tool_registry = ToolRegistry()
+
+    serp_api_key = credential_manager.get_credential("SERP_API_KEY")
+
+    if serp_api_key:
+        serp_api_client = SerpApiClient(serp_api_key)
+        tool_registry.set_serp_api_client(serp_api_client)
+    else:
+        serp_api_client = None
+
     tool_registry.init_tools()
+
     add_admin_tools(tool_registry, executor, agent_registry, config_manager)
+
     return tool_registry
 
 
@@ -448,7 +464,9 @@ def main() -> int:
             training_mode=training_mode,
         )
 
-        tool_registry = build_tool_registry(executor, agent_registry, config_manager)
+        tool_registry = build_tool_registry(
+            executor, agent_registry, config_manager, credential_manager
+        )
         executor.set_tool_registry(tool_registry)
 
         # Start the async chat interface or execute single command
