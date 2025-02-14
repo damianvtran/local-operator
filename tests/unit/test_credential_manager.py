@@ -3,6 +3,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 
 from local_operator.credentials import CREDENTIALS_FILE_NAME, CredentialManager
 
@@ -46,7 +47,7 @@ def test_get_credential(temp_config):
     manager = CredentialManager(config_dir=temp_config.parent)
 
     credential = manager.get_credential("DEEPSEEK_API_KEY")
-    assert credential == "test_key"
+    assert credential.get_secret_value() == "test_key"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="File permission tests only run on Unix")
@@ -60,7 +61,7 @@ def test_set_credential_existing(temp_config):
 
     manager.set_credential("DEEPSEEK_API_KEY", "new_test_key")
     credential = manager.get_credential("DEEPSEEK_API_KEY")
-    assert credential == "new_test_key"
+    assert credential.get_secret_value() == "new_test_key"
 
 
 def test_set_credential_new(temp_config):
@@ -69,7 +70,7 @@ def test_set_credential_new(temp_config):
 
     manager.set_credential("NEW_API_KEY", "new_test_key")
     credential = manager.get_credential("NEW_API_KEY")
-    assert credential == "new_test_key"
+    assert credential.get_secret_value() == "new_test_key"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="File permission tests only run on Unix")
@@ -82,7 +83,7 @@ def test_prompt_for_credential(temp_config, monkeypatch):
     monkeypatch.setattr("builtins.print", lambda *args, **kwargs: None)
 
     credential = manager.prompt_for_credential("NEW_API_KEY")
-    assert credential == "new_test_key"
+    assert credential.get_secret_value() == "new_test_key"
 
     # Verify the key was saved to the config file
     with open(temp_config, "r") as f:
@@ -133,7 +134,7 @@ def test_windows_set_credential_existing(temp_config):
 
     manager.set_credential("DEEPSEEK_API_KEY", "new_test_key")
     credential = manager.get_credential("DEEPSEEK_API_KEY")
-    assert credential == "new_test_key"
+    assert credential.get_secret_value() == "new_test_key"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows-specific tests")
@@ -146,7 +147,7 @@ def test_windows_prompt_for_credential(temp_config, monkeypatch):
     monkeypatch.setattr("builtins.print", lambda *args, **kwargs: None)
 
     credential = manager.prompt_for_credential("NEW_API_KEY")
-    assert credential == "new_test_key"
+    assert credential.get_secret_value() == "new_test_key"
 
     # Verify the key was saved to the config file
     with open(temp_config, "r") as f:
