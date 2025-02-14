@@ -1,5 +1,4 @@
 [flake8]
 max-line-length = 100
-# required for compatibility with black
-extend-ignore = E203,F401,F403
+extend-ignore = E203
 exclude = .venv

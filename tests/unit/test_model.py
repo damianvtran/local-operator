@@ -1,7 +1,6 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-import requests
 from pydantic import SecretStr
 
 from local_operator.credentials import CredentialManager
