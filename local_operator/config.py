@@ -91,7 +91,7 @@ DEFAULT_CONFIG = Config(
         },
         "values": {
             "conversation_length": 100,
-            "detail_length": 10,
+            "detail_length": 25,
             "hosting": "",
             "model_name": "",
         },
