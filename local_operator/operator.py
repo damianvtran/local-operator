@@ -2,6 +2,7 @@ import asyncio
 import os
 import readline
 import signal
+import subprocess
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -220,8 +221,21 @@ class Operator:
                 # Add indented file info
                 directory_tree_str += f"  {icon} {filename} ({file_type}, {size_str})\n"
 
+        # Get current git branch
+        try:
+            git_branch = (
+                subprocess.check_output(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"], stderr=subprocess.DEVNULL
+                )
+                .decode()
+                .strip()
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            git_branch = "Not a git repository"
+
         return f"""Current working directory: {os.getcwd()}
         Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        Git branch: {git_branch}
         Directory tree: {directory_tree_str}"""
 
     def format_user_prompt(self, user_input: str) -> str:
