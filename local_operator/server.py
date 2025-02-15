@@ -535,9 +535,13 @@ async def chat_with_agent(
                                 "per_page": 10,
                                 "agents": [
                                     {
-                                        "id": "agent1",
-                                        "name": "Agent One",
-                                        "description": "First test agent",
+                                        "id": "agent123",
+                                        "name": "Example Agent",
+                                        "created_date": "2024-01-01T00:00:00Z",
+                                        "version": "0.2.16",
+                                        "security_prompt": "Example security prompt",
+                                        "hosting": "openrouter",
+                                        "model": "openai/gpt-4o-mini",
                                     }
                                 ],
                             },
@@ -599,7 +603,12 @@ async def list_agents(
                     "examples": {
                         "example": {
                             "summary": "Create Agent Example",
-                            "value": {"name": "New Agent", "description": "A newly created agent"},
+                            "value": {
+                                "name": "New Agent",
+                                "security_prompt": "Example security prompt",
+                                "hosting": "openrouter",
+                                "model": "openai/gpt-4o-mini",
+                            },
                         }
                     }
                 }
@@ -616,7 +625,11 @@ async def list_agents(
                             "result": {
                                 "id": "agent123",
                                 "name": "New Agent",
-                                "description": "A newly created agent",
+                                "created_date": "2024-01-01T00:00:00Z",
+                                "version": "0.2.16",
+                                "security_prompt": "Example security prompt",
+                                "hosting": "openrouter",
+                                "model": "openai/gpt-4o-mini",
                             },
                         }
                     }
@@ -672,8 +685,12 @@ async def create_agent(agent: AgentCreate = Body(...)):
                             "message": "Agent retrieved successfully",
                             "result": {
                                 "id": "agent123",
-                                "name": "New Agent",
-                                "description": "A newly created agent",
+                                "name": "Example Agent",
+                                "created_date": "2024-01-01T00:00:00Z",
+                                "version": "0.2.16",
+                                "security_prompt": "Example security prompt",
+                                "hosting": "openrouter",
+                                "model": "openai/gpt-4o-mini",
                             },
                         }
                     }
@@ -729,7 +746,9 @@ async def get_agent(
                             "summary": "Update Agent Example",
                             "value": {
                                 "name": "Updated Agent Name",
-                                "description": "Updated description",
+                                "security_prompt": "Updated security prompt",
+                                "hosting": "openrouter",
+                                "model": "openai/gpt-4o-mini",
                             },
                         }
                     }
@@ -747,7 +766,11 @@ async def get_agent(
                             "result": {
                                 "id": "agent123",
                                 "name": "Updated Agent Name",
-                                "description": "Updated description",
+                                "created_date": "2024-01-01T00:00:00Z",
+                                "version": "0.2.16",
+                                "security_prompt": "Updated security prompt",
+                                "hosting": "openrouter",
+                                "model": "openai/gpt-4o-mini",
                             },
                         }
                     }
