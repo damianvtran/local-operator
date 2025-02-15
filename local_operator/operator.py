@@ -254,8 +254,8 @@ class Operator:
         Git branch: {git_branch}
         Directory tree: {directory_tree_str}"""
 
-    def handle_ephemeral_messages(self) -> None:
-        """Handle ephemeral messages in the conversation history.
+    def add_ephemeral_messages(self) -> None:
+        """Add environment details and other ephemeral messages to the conversation history.
 
         This method performs two main tasks:
         1. Removes any messages marked as ephemeral (temporary) from the conversation history
@@ -269,11 +269,7 @@ class Operator:
         """
 
         # Remove ephemeral messages from conversation history
-        self.executor.conversation_history = [
-            msg
-            for msg in self.executor.conversation_history
-            if not (isinstance(msg, dict) and msg.get("ephemeral") == "True")
-        ]
+        self.executor.remove_ephemeral_messages()
 
         # Add environment details to the latest message
         environment_details = self.get_environment_details()
@@ -324,7 +320,8 @@ class Operator:
             if self.model is None:
                 raise ValueError("Model is not initialized")
 
-            self.handle_ephemeral_messages()
+            # Add environment details, etc.
+            self.add_ephemeral_messages()
 
             spinner_task = asyncio.create_task(spinner("Generating response"))
             try:

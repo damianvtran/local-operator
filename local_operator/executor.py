@@ -959,3 +959,7 @@ class LocalCodeExecutor:
             list[ConversationRecord]: The conversation history as a list of ConversationRecord
         """
         return self.conversation_history
+
+    def remove_ephemeral_messages(self) -> None:
+        """Remove ephemeral messages from the conversation history."""
+        self.conversation_history = [msg for msg in self.conversation_history if not msg.ephemeral]
