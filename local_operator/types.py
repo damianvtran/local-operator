@@ -1,6 +1,7 @@
 """Types module containing enums and type definitions used throughout the local-operator package."""
 
 from enum import Enum
+from typing import Any, Dict, Optional
 
 from pydantic import BaseModel
 
@@ -20,6 +21,68 @@ class ConversationRole(Enum):
     FUNCTION = "function"  # Function call messages in LangChain
     TOOL = "tool"  # Tool/plugin response messages in LangChain
     CHAT = "chat"  # Generic chat messages in LangChain
+
+
+class ConversationRecord(BaseModel):
+    """A record of a conversation with an AI model.
+
+    Attributes:
+        role (ConversationRole): The role of the sender of the message
+        content (str): The content of the message
+        should_summarize (bool): Whether this message should be summarized
+        ephemeral (bool): Whether this message is temporary/ephemeral
+        summarized (bool): Whether this message has been summarized
+
+    Methods:
+        to_dict(): Convert the record to a dictionary format
+        from_dict(data): Create a ConversationRecord from a dictionary
+    """
+
+    content: str
+    role: ConversationRole
+    should_summarize: Optional[bool] = True
+    ephemeral: Optional[bool] = False
+    summarized: Optional[bool] = False
+
+    def dict(self, *args, **kwargs) -> Dict[str, Any]:
+        """Convert the conversation record to a dictionary format compatible with LangChain.
+
+        Returns:
+            dict: Dictionary with role and content fields for LangChain
+        """
+        return {"role": self.role.value, "content": self.content}
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert the conversation record to a dictionary.
+
+        Returns:
+            dict: Dictionary representation with string values for role and booleans
+        """
+        return {
+            "role": self.role.value,
+            "content": self.content,
+            "should_summarize": str(self.should_summarize),
+            "ephemeral": str(self.ephemeral),
+            "summarized": str(self.summarized),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ConversationRecord":
+        """Create a ConversationRecord from a dictionary.
+
+        Args:
+            data (dict): Dictionary containing conversation record data
+
+        Returns:
+            ConversationRecord: New instance created from dictionary data
+        """
+        return cls(
+            role=ConversationRole(data["role"]),
+            content=data["content"],
+            should_summarize=data.get("should_summarize", "true").lower() == "true",
+            ephemeral=data.get("ephemeral", "false").lower() == "true",
+            summarized=data.get("summarized", "false").lower() == "true",
+        )
 
 
 class ResponseJsonSchema(BaseModel):
