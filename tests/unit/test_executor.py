@@ -6,9 +6,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from openai import APIError
 
-from local_operator.executor import ConfirmSafetyResult, get_confirm_safety_result
-from local_operator.operator import LocalCodeExecutor, Operator, OperatorType
-from local_operator.types import ConversationRole, ResponseJsonSchema
+from local_operator.executor import (
+    ConfirmSafetyResult,
+    LocalCodeExecutor,
+    get_confirm_safety_result,
+)
+from local_operator.operator import Operator, OperatorType
+from local_operator.types import (
+    ConversationRecord,
+    ConversationRole,
+    ResponseJsonSchema,
+)
 
 
 # Helper function to normalize code blocks.
@@ -366,7 +374,7 @@ async def test_check_code_safety_unsafe(executor, mock_model):
     mock_model.ainvoke.return_value.content = (
         "The code is unsafe because it deletes important files\n\n[UNSAFE]"
     )
-    code = "import os; os.remove('important_file.txt')"
+    code = "x = 1 + 1"
     result = await executor.check_code_safety(code)
     assert result == ConfirmSafetyResult.UNSAFE
     mock_model.ainvoke.assert_called_once()
@@ -377,7 +385,7 @@ async def test_check_code_safety_override(executor, mock_model):
     mock_model.ainvoke.return_value.content = (
         "The code is safe with security override\n\n[OVERRIDE]"
     )
-    code = "import os; os.system('some_command')"
+    code = "x = 1 + 1"
     result = await executor.check_code_safety(code)
     assert result == ConfirmSafetyResult.OVERRIDE
     mock_model.ainvoke.assert_called_once()
@@ -390,11 +398,17 @@ async def test_check_code_safety_unsafe_without_prompt(executor, mock_model):
     mock_model.ainvoke.return_value.content = (
         "The code is unsafe because it deletes important files\n\n[UNSAFE]"
     )
-    code = "import os; os.remove('important_file.txt')"
+    code = "x = 1 + 1"
     result = await executor.check_code_safety(code)
     assert result == ConfirmSafetyResult.UNSAFE
     mock_model.ainvoke.assert_called_once()
-    mock_model.ainvoke.assert_called_with(executor.conversation_history)
+
+    # Conversation history is converted to a list of Dict
+    assert executor.conversation_history[-1].role == ConversationRole.ASSISTANT
+    assert (
+        "The code is unsafe because it deletes important files"
+        in executor.conversation_history[-1].content
+    )
 
 
 @pytest.mark.asyncio
@@ -434,8 +448,8 @@ async def test_execute_code_safety_no_prompt(executor, mock_model):
         assert "requires further confirmation" in result
         assert len(executor.conversation_history) > 0
         last_message = executor.conversation_history[-1]
-        assert last_message["role"] == "assistant"
-        assert "potentially dangerous operation" in last_message["content"]
+        assert last_message.role == ConversationRole.ASSISTANT
+        assert "potentially dangerous operation" in last_message.content
 
 
 @pytest.mark.asyncio
@@ -456,8 +470,8 @@ async def test_execute_code_safety_with_prompt(executor, mock_model):
         assert "Code execution canceled by user" in result
         assert len(executor.conversation_history) > 0
         last_message = executor.conversation_history[-1]
-        assert last_message["role"] == "user"
-        assert "dangerous operation" in last_message["content"]
+        assert last_message.role == ConversationRole.USER
+        assert "dangerous operation" in last_message.content
 
 
 @pytest.mark.asyncio
@@ -580,35 +594,35 @@ def test_limit_conversation_history(executor):
         {"name": "Empty history", "initial": [], "expected": []},
         {
             "name": "Only system prompt",
-            "initial": [{"role": "system", "content": "system prompt"}],
-            "expected": [{"role": "system", "content": "system prompt"}],
+            "initial": [ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt")],
+            "expected": [ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt")],
         },
         {
             "name": "History within limit",
             "initial": [
-                {"role": "system", "content": "system prompt"},
-                {"role": "user", "content": "msg1"},
-                {"role": "assistant", "content": "msg2"},
+                ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt"),
+                ConversationRecord(role=ConversationRole.USER, content="msg1"),
+                ConversationRecord(role=ConversationRole.ASSISTANT, content="msg2"),
             ],
             "expected": [
-                {"role": "system", "content": "system prompt"},
-                {"role": "user", "content": "msg1"},
-                {"role": "assistant", "content": "msg2"},
+                ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt"),
+                ConversationRecord(role=ConversationRole.USER, content="msg1"),
+                ConversationRecord(role=ConversationRole.ASSISTANT, content="msg2"),
             ],
         },
         {
             "name": "History exceeding limit",
             "initial": [
-                {"role": "system", "content": "system prompt"},
-                {"role": "user", "content": "msg1"},
-                {"role": "assistant", "content": "msg2"},
-                {"role": "user", "content": "msg3"},
-                {"role": "assistant", "content": "msg4"},
+                ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt"),
+                ConversationRecord(role=ConversationRole.USER, content="msg1"),
+                ConversationRecord(role=ConversationRole.ASSISTANT, content="msg2"),
+                ConversationRecord(role=ConversationRole.USER, content="msg3"),
+                ConversationRecord(role=ConversationRole.ASSISTANT, content="msg4"),
             ],
             "expected": [
-                {"role": "system", "content": "system prompt"},
-                {"role": "user", "content": "msg3"},
-                {"role": "assistant", "content": "msg4"},
+                ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt"),
+                ConversationRecord(role=ConversationRole.USER, content="msg3"),
+                ConversationRecord(role=ConversationRole.ASSISTANT, content="msg4"),
             ],
         },
     ]
@@ -624,15 +638,15 @@ def test_limit_conversation_history(executor):
         ), f"{test_case['name']}: Expected length {expected_len} but got {actual_len}"
 
         for i, msg in enumerate(test_case["expected"]):
-            expected_role = msg["role"]
-            actual_role = executor.conversation_history[i]["role"]
+            expected_role = msg.role
+            actual_role = executor.conversation_history[i].role
             assert expected_role == actual_role, (
                 f"{test_case['name']}: Expected role {expected_role} but got {actual_role} "
                 f"at position {i}"
             )
 
-            expected_content = msg["content"]
-            actual_content = executor.conversation_history[i]["content"]
+            expected_content = msg.content
+            actual_content = executor.conversation_history[i].content
             assert expected_content == actual_content, (
                 f"{test_case['name']}: Expected content {expected_content} "
                 f"but got {actual_content} at position {i}"
@@ -655,154 +669,154 @@ async def test_summarize_old_steps(mock_model):
         {
             "name": "Only system prompt",
             "initial": [
-                {
-                    "role": "system",
-                    "content": "system prompt",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                }
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="system prompt",
+                    should_summarize=True,
+                    summarized=False,
+                )
             ],
             "expected": [
-                {
-                    "role": "system",
-                    "content": "system prompt",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                }
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="system prompt",
+                    should_summarize=True,
+                    summarized=False,
+                )
             ],
         },
         {
             "name": "Within detail length",
             "initial": [
-                {
-                    "role": "system",
-                    "content": "system prompt",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "msg1",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "msg2",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="system prompt",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="msg1",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="msg2",
+                    should_summarize=True,
+                    summarized=False,
+                ),
             ],
             "expected": [
-                {
-                    "role": "system",
-                    "content": "system prompt",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "msg1",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "msg2",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="system prompt",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="msg1",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="msg2",
+                    should_summarize=True,
+                    summarized=False,
+                ),
             ],
         },
         {
             "name": "Beyond detail length with skip conditions",
             "initial": [
-                {
-                    "role": "system",
-                    "content": "system prompt",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "user",
-                    "content": "user msg",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "skip me",
-                    "summarized": "False",
-                    "should_summarize": "False",
-                },
-                {
-                    "role": "assistant",
-                    "content": "already summarized",
-                    "summarized": "True",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "summarize me",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "recent1",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "recent2",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="system prompt",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.USER,
+                    content="user msg",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="skip me",
+                    should_summarize=False,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="already summarized",
+                    should_summarize=True,
+                    summarized=True,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="summarize me",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="recent1",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="recent2",
+                    should_summarize=True,
+                    summarized=False,
+                ),
             ],
             "expected": [
-                {
-                    "role": "system",
-                    "content": "system prompt",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "user",
-                    "content": "user msg",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "skip me",
-                    "summarized": "False",
-                    "should_summarize": "False",
-                },
-                {
-                    "role": "assistant",
-                    "content": "already summarized",
-                    "summarized": "True",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "[SUMMARY] This is a summary",
-                    "summarized": "True",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "recent1",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "recent2",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="system prompt",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.USER,
+                    content="user msg",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="skip me",
+                    should_summarize=False,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="already summarized",
+                    should_summarize=True,
+                    summarized=True,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="[SUMMARY] This is a summary",
+                    should_summarize=True,
+                    summarized=True,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="recent1",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="recent2",
+                    should_summarize=True,
+                    summarized=False,
+                ),
             ],
         },
     ]
@@ -822,15 +836,15 @@ async def test_summarize_old_steps(mock_model):
 async def test_summarize_old_steps_all_detail(executor):
     executor.detail_conversation_length = -1
     executor.conversation_history = [
-        {"role": "system", "content": "system prompt"},
-        {"role": "user", "content": "user msg"},
+        ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt"),
+        ConversationRecord(role=ConversationRole.USER, content="user msg"),
     ]
 
     await executor._summarize_old_steps()
 
     assert executor.conversation_history == [
-        {"role": "system", "content": "system prompt"},
-        {"role": "user", "content": "user msg"},
+        ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt"),
+        ConversationRecord(role=ConversationRole.USER, content="user msg"),
     ]
 
 
@@ -845,7 +859,9 @@ async def test_invoke_model_api_error(executor):
         )
 
         with pytest.raises(APIError) as exc_info:
-            await executor.invoke_model([{"role": "user", "content": "test"}])
+            await executor.invoke_model(
+                [ConversationRecord(role=ConversationRole.USER, content="test")]
+            )
 
         assert str(exc_info.value) == "API Error"
         assert exc_info.value.code == "error_code"
@@ -863,7 +879,9 @@ async def test_invoke_model_rate_limit(executor):
 
     with patch("asyncio.sleep", AsyncMock(return_value=None)):
         with pytest.raises(APIError) as exc_info:
-            await executor.invoke_model([{"role": "user", "content": "test"}])
+            await executor.invoke_model(
+                [ConversationRecord(role=ConversationRole.USER, content="test")]
+            )
 
     assert str(exc_info.value) == "Rate limit exceeded"
     assert exc_info.value.code == "rate_limit_exceeded"
@@ -881,7 +899,9 @@ async def test_invoke_model_context_length(executor):
 
     with patch("asyncio.sleep", AsyncMock(return_value=None)):
         with pytest.raises(APIError) as exc_info:
-            await executor.invoke_model([{"role": "user", "content": "test"}])
+            await executor.invoke_model(
+                [ConversationRecord(role=ConversationRole.USER, content="test")]
+            )
 
     assert str(exc_info.value) == "Maximum context length exceeded"
     assert exc_info.value.code == "context_length_exceeded"
@@ -894,7 +914,9 @@ async def test_invoke_model_general_exception(executor):
 
     with patch("asyncio.sleep", AsyncMock(return_value=None)):
         with pytest.raises(Exception) as exc_info:
-            await executor.invoke_model([{"role": "user", "content": "test"}])
+            await executor.invoke_model(
+                [ConversationRecord(role=ConversationRole.USER, content="test")]
+            )
 
     assert str(exc_info.value) == "Unexpected error"
 
@@ -905,7 +927,9 @@ async def test_invoke_model_timeout(executor):
 
     with patch("asyncio.sleep", AsyncMock(return_value=None)):
         with pytest.raises(TimeoutError) as exc_info:
-            await executor.invoke_model([{"role": "user", "content": "test"}])
+            await executor.invoke_model(
+                [ConversationRecord(role=ConversationRole.USER, content="test")]
+            )
 
     assert str(exc_info.value) == "Request timed out"
 
@@ -916,92 +940,88 @@ async def test_invoke_model_timeout(executor):
         {
             "name": "No working directory",
             "conversation": [
-                {"role": ConversationRole.SYSTEM.value, "content": "Some system message"},
-                {"role": ConversationRole.USER.value, "content": "Test message"},
+                ConversationRecord(role=ConversationRole.SYSTEM, content="Some system message"),
+                ConversationRecord(role=ConversationRole.USER, content="Test message"),
             ],
             "expected": None,
         },
         {
             "name": "Single working directory",
             "conversation": [
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": "Current working directory: /test/path",
-                },
-                {"role": ConversationRole.USER.value, "content": "Test message"},
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM, content="Current working directory: /test/path"
+                ),
+                ConversationRecord(role=ConversationRole.USER, content="Test message"),
             ],
             "expected": Path("/test/path"),
         },
         {
             "name": "Multiple working directories - returns most recent",
             "conversation": [
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": "Current working directory: /old/path",
-                },
-                {"role": ConversationRole.USER.value, "content": "Test message"},
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": "Current working directory: /new/path",
-                },
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM, content="Current working directory: /old/path"
+                ),
+                ConversationRecord(role=ConversationRole.USER, content="Test message"),
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM, content="Current working directory: /new/path"
+                ),
             ],
             "expected": Path("/new/path"),
         },
         {
             "name": "Case insensitive working directory",
             "conversation": [
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": "CURRENT WORKING DIRECTORY: /test/path",
-                },
-                {"role": ConversationRole.USER.value, "content": "Test message"},
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM, content="CURRENT WORKING DIRECTORY: /test/path"
+                ),
+                ConversationRecord(role=ConversationRole.USER, content="Test message"),
             ],
             "expected": Path("/test/path"),
         },
         {
             "name": "Message with working directory but not at start",
             "conversation": [
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": "Some text before Current working directory: /test/path",
-                },
-                {"role": ConversationRole.USER.value, "content": "Test message"},
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="Some text before Current working directory: /test/path",
+                ),
+                ConversationRecord(role=ConversationRole.USER, content="Test message"),
             ],
             "expected": None,
         },
         {
             "name": "Multiple entries - returns last in list",
             "conversation": [
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": "Current working directory: /path/one",
-                },
-                {"role": ConversationRole.USER.value, "content": "Test message"},
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": "Current working directory: /path/two",
-                },
-                {"role": ConversationRole.USER.value, "content": "Another message"},
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": "Current working directory: /path/three",
-                },
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="Current working directory: /path/one",
+                ),
+                ConversationRecord(role=ConversationRole.USER, content="Test message"),
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="Current working directory: /path/two",
+                ),
+                ConversationRecord(role=ConversationRole.USER, content="Another message"),
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="Current working directory: /path/three",
+                ),
             ],
             "expected": Path("/path/three"),
         },
         {
             "name": "First entry with working directory",
             "conversation": [
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": "Current working directory: /first/path",
-                },
-                {"role": ConversationRole.USER.value, "content": "Test message"},
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": "Some other system message",
-                },
-                {"role": ConversationRole.ASSISTANT.value, "content": "Response"},
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="Current working directory: /first/path",
+                ),
+                ConversationRecord(role=ConversationRole.USER, content="Test message"),
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="Some other system message",
+                ),
+                ConversationRecord(role=ConversationRole.ASSISTANT, content="Response"),
             ],
             "expected": Path("/first/path"),
         },

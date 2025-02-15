@@ -30,7 +30,11 @@ from local_operator.prompts import (
     create_system_prompt,
 )
 from local_operator.tools import ToolRegistry
-from local_operator.types import ConversationRole, ResponseJsonSchema
+from local_operator.types import (
+    ConversationRecord,
+    ConversationRole,
+    ResponseJsonSchema,
+)
 
 
 class ExecutorInitError(Exception):
@@ -116,7 +120,7 @@ def process_json_response(response_str: str) -> ResponseJsonSchema:
 
 class LocalCodeExecutor:
     context: Dict[str, Any]
-    conversation_history: List[Dict[str, str]]
+    conversation_history: List[ConversationRecord]
     model: ModelType
     step_counter: int
     max_conversation_history: int
@@ -153,7 +157,7 @@ class LocalCodeExecutor:
         max_conversation_history: int = 100,
         detail_conversation_length: int = 10,
         can_prompt_user: bool = True,
-        conversation_history: List[Dict[str, str]] = [],
+        conversation_history: List[ConversationRecord] = [],
         agent: AgentData | None = None,
     ):
         """Initialize the LocalCodeExecutor with a language model.
@@ -186,26 +190,25 @@ class LocalCodeExecutor:
         """Reset the step counter."""
         self.step_counter = 1
 
-    def _append_to_history(
-        self, role: ConversationRole, content: str, should_summarize: str = "True"
+    def append_to_history(
+        self,
+        new_record: ConversationRecord,
     ) -> None:
         """Append a message to conversation history and maintain length limit.
 
+        This method adds a new conversation record to the history and ensures the total history
+        length stays within the configured maximum by calling _limit_conversation_history().
+
         Args:
-            role (str): The role of the message sender (user/assistant/system)
-            content (str): The message content
-            should_summarize (str): Whether to summarize the message in the future.
-            This can be set to False for messages that are already sufficiently
-            summarized.
+            new_record (ConversationRecord): The conversation record to append, containing:
+                role: The role of the message sender (user/assistant/system)
+                content: The message content
+                should_summarize: Whether to summarize this message in the future
+                ephemeral: Whether this message is temporary/ephemeral
+
+        The method updates self.conversation_history in-place.
         """
-        self.conversation_history.append(
-            {
-                "role": role.value,
-                "content": content,
-                "summarized": "False",
-                "should_summarize": should_summarize,
-            }
-        )
+        self.conversation_history.append(new_record)
         self._limit_conversation_history()
 
     async def _summarize_old_steps(self) -> None:
@@ -222,19 +225,19 @@ class LocalCodeExecutor:
 
         for msg in history_to_summarize:
             # Skip messages that are already sufficiently concise/summarized
-            if msg.get("should_summarize") == "False":
+            if not msg.should_summarize:
                 continue
 
-            if msg.get("summarized") == "True":
+            if msg.summarized:
                 continue
 
             # Leave the user prompts intact
-            if msg.get("role") == ConversationRole.USER.value:
+            if msg.role == ConversationRole.USER:
                 continue
 
             summary = await self._summarize_conversation_step(msg)
-            msg["content"] = summary
-            msg["summarized"] = "True"
+            msg.content = summary
+            msg.summarized = True
 
     def get_model_name(self) -> str:
         """Get the name of the model being used.
@@ -248,7 +251,7 @@ class LocalCodeExecutor:
         else:
             return str(self.model.model).lower()
 
-    def get_invoke_token_count(self, messages: List[Dict[str, str]]) -> int:
+    def get_invoke_token_count(self, messages: List[ConversationRecord]) -> int:
         """Calculate the total number of tokens in a list of conversation messages.
 
         Uses the appropriate tokenizer for the current model to count tokens. Falls back
@@ -267,14 +270,14 @@ class LocalCodeExecutor:
         except Exception:
             tokenizer = encoding_for_model("gpt-4o")
 
-        return sum(len(tokenizer.encode(entry["content"])) for entry in messages)
+        return sum(len(tokenizer.encode(entry.content)) for entry in messages)
 
     def get_session_token_usage(self) -> int:
         """Get the total token count for the current session."""
         return self.total_tokens
 
     def initialize_conversation_history(
-        self, conversation_history: List[Dict[str, str]] = []
+        self, conversation_history: List[ConversationRecord] = []
     ) -> None:
         """Initialize the conversation history."""
         if len(self.conversation_history) != 0:
@@ -282,10 +285,10 @@ class LocalCodeExecutor:
 
         if len(conversation_history) == 0:
             self.conversation_history = [
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": create_system_prompt(self.tool_registry),
-                }
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content=create_system_prompt(self.tool_registry),
+                )
             ]
         else:
             self.conversation_history = conversation_history
@@ -359,8 +362,13 @@ class LocalCodeExecutor:
 
         return blocks
 
+    async def _convert_and_invoke(self, messages: List[ConversationRecord]) -> BaseMessage:
+        """Convert the messages to a list of dictionaries and invoke the model."""
+        messages_list = [msg.dict() for msg in messages]
+        return await self.model.ainvoke(messages_list)
+
     async def invoke_model(
-        self, messages: List[Dict[str, str]], max_attempts: int = 3
+        self, messages: List[ConversationRecord], max_attempts: int = 3
     ) -> BaseMessage:
         """Invoke the language model with a list of messages.
 
@@ -394,14 +402,14 @@ class LocalCodeExecutor:
                     for msg in messages:
                         role_prefix = (
                             "Human: "
-                            if msg["role"] == ConversationRole.USER.value
+                            if msg.role == ConversationRole.USER
                             else (
                                 "Assistant: "
-                                if msg["role"] == ConversationRole.ASSISTANT.value
+                                if msg.role == ConversationRole.ASSISTANT
                                 else "System: "
                             )
                         )
-                        combined_message += f"{role_prefix}{msg['content']}\n\n"
+                        combined_message += f"{role_prefix}{msg.content}\n\n"
                     combined_message = combined_message.strip()
                     response = await self.model.ainvoke(combined_message)
                 else:
@@ -412,25 +420,25 @@ class LocalCodeExecutor:
                         for msg in messages:
                             role_prefix = (
                                 "User: "
-                                if msg["role"] == ConversationRole.USER.value
+                                if msg.role == ConversationRole.USER
                                 else (
                                     "Assistant: "
-                                    if msg["role"] == ConversationRole.ASSISTANT.value
+                                    if msg.role == ConversationRole.ASSISTANT
                                     else "System: "
                                 )
                             )
-                            combined_message += f"{role_prefix}{msg['content']}\n\n"
+                            combined_message += f"{role_prefix}{msg.content}\n\n"
                         combined_message = combined_message.strip()
                         response = await self.model.ainvoke(combined_message)
                     elif "gemini" in model_name or "mistral" in model_name:
                         # Convert system messages to human messages for Google Gemini
                         # or Mistral models.
                         for msg in messages[1:]:
-                            if msg["role"] == ConversationRole.SYSTEM.value:
-                                msg["role"] = ConversationRole.USER.value
-                        response = await self.model.ainvoke(messages)
+                            if msg.role == ConversationRole.SYSTEM:
+                                msg.role = ConversationRole.USER
+                        response = await self._convert_and_invoke(messages)
                     else:
-                        response = await self.model.ainvoke(messages)
+                        response = await self._convert_and_invoke(messages)
 
                 # Update the total token count
                 self.total_tokens += self.get_invoke_token_count(messages)
@@ -483,11 +491,14 @@ class LocalCodeExecutor:
             )
 
             safety_history = [
-                {"role": ConversationRole.SYSTEM.value, "content": safety_prompt},
-                {
-                    "role": ConversationRole.USER.value,
-                    "content": f"Determine a status for the following code:\n\n{code}",
-                },
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content=safety_prompt,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.USER,
+                    content=f"Determine a status for the following code:\n\n{code}",
+                ),
             ]
 
             response = await self.invoke_model(safety_history)
@@ -502,9 +513,11 @@ class LocalCodeExecutor:
         safety_prompt = SafetyCheckUserPrompt.replace("{{code}}", code).replace(
             "{{security_prompt}}", agent_security_prompt
         )
-        self._append_to_history(
-            ConversationRole.USER,
-            safety_prompt,
+        self.append_to_history(
+            ConversationRecord(
+                role=ConversationRole.USER,
+                content=safety_prompt,
+            )
         )
         response = await self.invoke_model(self.conversation_history)
         response_content = (
@@ -516,9 +529,11 @@ class LocalCodeExecutor:
 
         if safety_result == ConfirmSafetyResult.UNSAFE:
             analysis = response_content.replace("[UNSAFE]", "").strip()
-            self._append_to_history(
-                ConversationRole.ASSISTANT,
-                f"The code is unsafe. Here is an analysis of the code risk: {analysis}",
+            self.append_to_history(
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content=f"The code is unsafe. Here is an analysis of the code risk: {analysis}",
+                )
             )
             return ConfirmSafetyResult.UNSAFE
 
@@ -574,7 +589,12 @@ class LocalCodeExecutor:
                     "Let's stop this task for now, I will provide further instructions shortly. "
                     "Action DONE."
                 )
-                self._append_to_history(ConversationRole.USER, msg)
+                self.append_to_history(
+                    ConversationRecord(
+                        role=ConversationRole.USER,
+                        content=msg,
+                    )
+                )
                 return ConfirmSafetyResult.UNSAFE
             else:
                 # If we can't prompt the user, we need to add our question to the conversation
@@ -585,7 +605,12 @@ class LocalCodeExecutor:
                     "I've identified that this is a potentially dangerous operation. "
                     "Do you want me to proceed, find another way, or stop this task?"
                 )
-                self._append_to_history(ConversationRole.ASSISTANT, msg)
+                self.append_to_history(
+                    ConversationRecord(
+                        role=ConversationRole.ASSISTANT,
+                        content=msg,
+                    )
+                )
                 return ConfirmSafetyResult.CONVERSATION_CONFIRM
         return safety_result
 
@@ -617,7 +642,12 @@ class LocalCodeExecutor:
                 f"Output:\n{output}\n"
                 f"Error output:\n{error_output}"
             )
-            self._append_to_history(ConversationRole.SYSTEM, error_msg)
+            self.append_to_history(
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content=error_msg,
+                )
+            )
             raise e
         finally:
             sys.stdout, sys.stderr = old_stdout, old_stderr
@@ -686,14 +716,18 @@ class LocalCodeExecutor:
         """
         stdout.flush()
         stderr.flush()
-        output = stdout.getvalue() or "[No output]"
-        error_output = stderr.getvalue() or "[No error output]"
+        output = f"```shell\n{stdout.getvalue()}\n```" if stdout.getvalue() else "[No output]"
+        error_output = (
+            f"```shell\n{stderr.getvalue()}\n```" if stderr.getvalue() else "[No error output]"
+        )
 
         self.context["last_code_output"] = output
         self.context["last_code_error"] = error_output
-        self._append_to_history(
-            ConversationRole.SYSTEM,
-            f"Code execution output:\n{output}\nError output:\n{error_output}",
+        self.append_to_history(
+            ConversationRecord(
+                role=ConversationRole.SYSTEM,
+                content=f"Code execution output:\n{output}\nError output:\n{error_output}",
+            )
         )
 
         return output, error_output
@@ -733,7 +767,12 @@ class LocalCodeExecutor:
             f"The initial execution failed with error: {str(error)}. "
             "Review the code and make corrections to run successfully."
         )
-        self._append_to_history(ConversationRole.USER, msg)
+        self.append_to_history(
+            ConversationRecord(
+                role=ConversationRole.USER,
+                content=msg,
+            )
+        )
 
     def _record_retry_error(self, error: Exception, attempt: int) -> None:
         """Record retry attempt errors in conversation history.
@@ -746,7 +785,12 @@ class LocalCodeExecutor:
             f"The code execution failed with error (attempt {attempt + 1}): {str(error)}. "
             "Please review and make corrections to the code to fix this error and try again."
         )
-        self._append_to_history(ConversationRole.USER, msg)
+        self.append_to_history(
+            ConversationRecord(
+                role=ConversationRole.USER,
+                content=msg,
+            )
+        )
 
     async def _get_corrected_code(self) -> str:
         """Get corrected code from the language model.
@@ -761,7 +805,12 @@ class LocalCodeExecutor:
 
         response_json = process_json_response(response_content)
 
-        self._append_to_history(ConversationRole.ASSISTANT, response_json.model_dump_json())
+        self.append_to_history(
+            ConversationRecord(
+                role=ConversationRole.ASSISTANT,
+                content=response_json.model_dump_json(),
+            )
+        )
 
         return response_json.code
 
@@ -785,7 +834,12 @@ class LocalCodeExecutor:
         # Phase 2: Display agent response
         formatted_response = format_agent_output(plain_text_response)
         print_agent_response(self.step_counter, formatted_response)
-        self._append_to_history(ConversationRole.ASSISTANT, response.model_dump_json())
+        self.append_to_history(
+            ConversationRecord(
+                role=ConversationRole.ASSISTANT,
+                content=response.model_dump_json(),
+            )
+        )
 
         # Extract code blocks from the agent response
         code_block = response.code
@@ -814,11 +868,6 @@ class LocalCodeExecutor:
             self.context["last_code_result"] = result
 
             print_execution_section(ExecutionSection.FOOTER)
-            self._append_to_history(
-                ConversationRole.SYSTEM,
-                f"Current working directory: {os.getcwd()}",
-                should_summarize="False",
-            )
             self.step_counter += 1
 
         # Phase 4: Summarize old conversation steps
@@ -846,7 +895,7 @@ class LocalCodeExecutor:
                 -self.max_conversation_history + 1 :
             ]
 
-    async def _summarize_conversation_step(self, msg: dict[str, str]) -> str:
+    async def _summarize_conversation_step(self, msg: ConversationRecord) -> str:
         """Summarize the conversation step by invoking the model to generate a concise summary.
 
         Args:
@@ -869,12 +918,12 @@ class LocalCodeExecutor:
         """
 
         step_info = "Please summarize the following conversation step:\n" + "\n".join(
-            f"{msg['role']}: {msg['content']}"
+            f"{msg.role}: {msg.content}"
         )
 
         summary_history = [
-            {"role": ConversationRole.SYSTEM.value, "content": summary_prompt},
-            {"role": ConversationRole.USER.value, "content": step_info},
+            ConversationRecord(role=ConversationRole.SYSTEM, content=summary_prompt),
+            ConversationRecord(role=ConversationRole.USER, content=step_info),
         ]
 
         response = await self.invoke_model(summary_history)
@@ -893,8 +942,8 @@ class LocalCodeExecutor:
                         in any system message.
         """
         for msg in reversed(self.conversation_history):
-            if msg["role"] == ConversationRole.SYSTEM.value:
-                content = msg["content"]
+            if msg.role == ConversationRole.SYSTEM:
+                content = msg.content
                 lower_content = content.lower()
                 if lower_content.startswith("current working directory:"):
                     return Path(lower_content.split("current working directory:", 1)[1].strip())
@@ -905,10 +954,14 @@ class LocalCodeExecutor:
         self.tool_registry = tool_registry
         self.context["tools"] = tool_registry
 
-    def get_conversation_history(self) -> list[dict[str, str]]:
+    def get_conversation_history(self) -> list[ConversationRecord]:
         """Get the conversation history as a list of dictionaries.
 
         Returns:
-            list[dict[str, str]]: The conversation history as a list of dictionaries
+            list[ConversationRecord]: The conversation history as a list of ConversationRecord
         """
-        return [msg if isinstance(msg, dict) else msg.dict() for msg in self.conversation_history]
+        return self.conversation_history
+
+    def remove_ephemeral_messages(self) -> None:
+        """Remove ephemeral messages from the conversation history."""
+        self.conversation_history = [msg for msg in self.conversation_history if not msg.ephemeral]
