@@ -242,6 +242,9 @@ class Operator:
             if total_files >= 300:
                 break
 
+        if total_files == 0:
+            directory_tree_str = "No files in the current directory"
+
         # Get current git branch
         try:
             git_branch = (
@@ -452,6 +455,7 @@ class Operator:
 
         while True:
             self.executor_is_processing = False
+            self.executor.interrupted = False
 
             prompt = f"You ({os.getcwd()}): > "
             user_input = self._get_input_with_history(prompt)
