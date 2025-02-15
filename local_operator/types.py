@@ -50,7 +50,13 @@ class ConversationRecord(BaseModel):
         Returns:
             dict: Dictionary with role and content fields for LangChain
         """
-        return {"role": self.role.value, "content": self.content}
+        return {
+            "role": self.role.value,
+            "content": self.content,
+            "should_summarize": str(self.should_summarize),
+            "ephemeral": str(self.ephemeral),
+            "summarized": str(self.summarized),
+        }
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert the conversation record to a dictionary.
