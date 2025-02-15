@@ -261,23 +261,27 @@ class Operator:
         directory_index = index_current_directory()
         directory_tree_str = self._format_directory_tree(directory_index)
 
-        # Get current git branch
+        # Get git status
         try:
-            git_branch = (
-                subprocess.check_output(
-                    ["git", "rev-parse", "--abbrev-ref", "HEAD"], stderr=subprocess.DEVNULL
-                )
+            git_status = (
+                subprocess.check_output(["git", "status"], stderr=subprocess.DEVNULL)
                 .decode()
                 .strip()
             )
+            if not git_status:
+                git_status = "Clean working directory"
         except (subprocess.CalledProcessError, FileNotFoundError):
-            git_branch = "Not a git repository"
+            git_status = "Not a git repository"
 
         return f"""Environment Details:
         Current working directory: {os.getcwd()}
         Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-        Git branch: {git_branch}
-        Directory tree: {directory_tree_str}"""
+        <git status>
+        {git_status}
+        </git status>
+        <directory tree>
+        {directory_tree_str}
+        </directory tree>"""
 
     def add_ephemeral_messages(self) -> None:
         """Add environment details and other ephemeral messages to the conversation history.
