@@ -736,6 +736,7 @@ class LocalCodeExecutor:
             ConversationRecord(
                 role=ConversationRole.SYSTEM,
                 content=f"Code execution output:\n{output}\nError output:\n{error_output}",
+                should_summarize=True,
             )
         )
 
