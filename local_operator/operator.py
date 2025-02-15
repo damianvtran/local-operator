@@ -207,7 +207,11 @@ class Operator:
             directory_tree_str += f"📁 {path}/\n"
 
             # Add files under directory (limited to 30)
-            for filename, file_type, size in list(files)[:30]:
+            file_list = list(files)
+            shown_files = file_list[:30]
+            has_more_files = len(file_list) > 30
+
+            for filename, file_type, size in shown_files:
                 # Format size to be human readable
                 if size < 1024:
                     size_str = f"{size}B"
@@ -226,7 +230,11 @@ class Operator:
                 if total_files >= 300:
                     break
 
+            if has_more_files:
+                directory_tree_str += "  ... and more files\n"
+
             if total_files >= 300:
+                directory_tree_str += "\n... and more directories\n"
                 break
 
         # Get current git branch
