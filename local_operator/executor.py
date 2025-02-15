@@ -716,8 +716,10 @@ class LocalCodeExecutor:
         """
         stdout.flush()
         stderr.flush()
-        output = stdout.getvalue() or "[No output]"
-        error_output = stderr.getvalue() or "[No error output]"
+        output = f"```shell\n{stdout.getvalue()}\n```" if stdout.getvalue() else "[No output]"
+        error_output = (
+            f"```shell\n{stderr.getvalue()}\n```" if stderr.getvalue() else "[No error output]"
+        )
 
         self.context["last_code_output"] = output
         self.context["last_code_error"] = error_output

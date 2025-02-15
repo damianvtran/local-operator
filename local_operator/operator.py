@@ -219,7 +219,13 @@ class Operator:
                     size_str = f"{size/(1024*1024):.1f}MB"
 
                 # Add icon based on file type
-                icon = {"code": "📄", "doc": "📝", "image": "🖼️", "other": "📎"}.get(file_type, "📎")
+                icon = {
+                    "code": "📄",
+                    "doc": "📝",
+                    "image": "🖼️",
+                    "config": "🔑",
+                    "other": "📎",
+                }.get(file_type, "📎")
 
                 # Add indented file info
                 directory_tree_str += f"  {icon} {filename} ({file_type}, {size_str})\n"

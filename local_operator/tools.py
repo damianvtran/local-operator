@@ -105,7 +105,7 @@ def index_current_directory(max_depth: int = 3) -> Dict[str, List[Tuple[str, str
 
     Returns:
         Dict mapping directory paths to lists of (filename, file_type, size_bytes) tuples.
-        File types are: 'code', 'doc', 'image', 'other'
+        File types are: 'code', 'doc', 'image', 'config', 'other'
     """
     directory_index = {}
 
@@ -151,9 +151,97 @@ def index_current_directory(max_depth: int = 3) -> Dict[str, List[Tuple[str, str
                 continue
 
             ext = Path(file).suffix.lower()
+            filename = Path(file).name.lower()
 
             # Categorize file type
-            if ext in [
+            if filename in [
+                # Version Control
+                ".gitignore",
+                ".gitattributes",
+                ".gitmodules",
+                ".hgignore",
+                ".svnignore",
+                # Docker
+                ".dockerignore",
+                "Dockerfile",
+                "docker-compose.yml",
+                "docker-compose.yaml",
+                # Node/JS
+                ".npmignore",
+                ".npmrc",
+                ".nvmrc",
+                "package.json",
+                "package-lock.json",
+                "yarn.lock",
+                # Python
+                ".flake8",
+                "pyproject.toml",
+                "setup.cfg",
+                "setup.py",
+                "requirements.txt",
+                "requirements-dev.txt",
+                "Pipfile",
+                "Pipfile.lock",
+                "poetry.lock",
+                "tox.ini",
+                # Code Style/Linting
+                ".eslintrc",
+                ".eslintignore",
+                ".prettierrc",
+                ".editorconfig",
+                ".stylelintrc",
+                ".pylintrc",
+                "mypy.ini",
+                ".black",
+                ".isort.cfg",
+                "prettier.config.js",
+                # Build/CI
+                ".travis.yml",
+                ".circleci/config.yml",
+                ".github/workflows/*.yml",
+                "Jenkinsfile",
+                "azure-pipelines.yml",
+                ".gitlab-ci.yml",
+                "bitbucket-pipelines.yml",
+                # Environment/Config
+                ".env",
+                ".env.example",
+                ".env.template",
+                ".env.sample",
+                ".env.local",
+                ".env.development",
+                ".env.production",
+                ".env.test",
+                # Build Systems
+                "Makefile",
+                "CMakeLists.txt",
+                "build.gradle",
+                "pom.xml",
+                "build.sbt",
+                # Web/Frontend
+                "tsconfig.json",
+                "webpack.config.js",
+                "babel.config.js",
+                ".babelrc",
+                "rollup.config.js",
+                "vite.config.js",
+                "next.config.js",
+                "nuxt.config.js",
+                # Other Languages
+                "composer.json",
+                "composer.lock",
+                "Gemfile",
+                "Gemfile.lock",
+                "cargo.toml",
+                "mix.exs",
+                "rebar.config",
+                "stack.yaml",
+                "deno.json",
+                "go.mod",
+                "go.sum",
+            ]:
+                file_type = "config"
+            elif ext in [
                 ".py",
                 ".js",
                 ".java",
