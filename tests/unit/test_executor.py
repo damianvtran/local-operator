@@ -370,7 +370,7 @@ async def test_check_code_safety_unsafe(executor, mock_model):
     mock_model.ainvoke.return_value.content = (
         "The code is unsafe because it deletes important files\n\n[UNSAFE]"
     )
-    code = "import os; os.remove('important_file.txt')"
+    code = "x = 1 + 1"
     result = await executor.check_code_safety(code)
     assert result == ConfirmSafetyResult.UNSAFE
     mock_model.ainvoke.assert_called_once()
@@ -381,7 +381,7 @@ async def test_check_code_safety_override(executor, mock_model):
     mock_model.ainvoke.return_value.content = (
         "The code is safe with security override\n\n[OVERRIDE]"
     )
-    code = "import os; os.system('some_command')"
+    code = "x = 1 + 1"
     result = await executor.check_code_safety(code)
     assert result == ConfirmSafetyResult.OVERRIDE
     mock_model.ainvoke.assert_called_once()
@@ -394,11 +394,17 @@ async def test_check_code_safety_unsafe_without_prompt(executor, mock_model):
     mock_model.ainvoke.return_value.content = (
         "The code is unsafe because it deletes important files\n\n[UNSAFE]"
     )
-    code = "import os; os.remove('important_file.txt')"
+    code = "x = 1 + 1"
     result = await executor.check_code_safety(code)
     assert result == ConfirmSafetyResult.UNSAFE
     mock_model.ainvoke.assert_called_once()
-    mock_model.ainvoke.assert_called_with(executor.conversation_history)
+
+    # Conversation history is converted to a list of Dict
+    assert executor.conversation_history[-1].role == ConversationRole.ASSISTANT
+    assert (
+        "The code is unsafe because it deletes important files"
+        in executor.conversation_history[-1].content
+    )
 
 
 @pytest.mark.asyncio
@@ -904,7 +910,9 @@ async def test_invoke_model_general_exception(executor):
 
     with patch("asyncio.sleep", AsyncMock(return_value=None)):
         with pytest.raises(Exception) as exc_info:
-            await executor.invoke_model([{"role": "user", "content": "test"}])
+            await executor.invoke_model(
+                [ConversationRecord(role=ConversationRole.USER, content="test")]
+            )
 
     assert str(exc_info.value) == "Unexpected error"
 
@@ -915,7 +923,9 @@ async def test_invoke_model_timeout(executor):
 
     with patch("asyncio.sleep", AsyncMock(return_value=None)):
         with pytest.raises(TimeoutError) as exc_info:
-            await executor.invoke_model([{"role": "user", "content": "test"}])
+            await executor.invoke_model(
+                [ConversationRecord(role=ConversationRole.USER, content="test")]
+            )
 
     assert str(exc_info.value) == "Request timed out"
 
@@ -926,92 +936,88 @@ async def test_invoke_model_timeout(executor):
         {
             "name": "No working directory",
             "conversation": [
-                {"role": ConversationRole.SYSTEM.value, "content": "Some system message"},
-                {"role": ConversationRole.USER.value, "content": "Test message"},
+                ConversationRecord(role=ConversationRole.SYSTEM, content="Some system message"),
+                ConversationRecord(role=ConversationRole.USER, content="Test message"),
             ],
             "expected": None,
         },
         {
             "name": "Single working directory",
             "conversation": [
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": "Current working directory: /test/path",
-                },
-                {"role": ConversationRole.USER.value, "content": "Test message"},
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM, content="Current working directory: /test/path"
+                ),
+                ConversationRecord(role=ConversationRole.USER, content="Test message"),
             ],
             "expected": Path("/test/path"),
         },
         {
             "name": "Multiple working directories - returns most recent",
             "conversation": [
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": "Current working directory: /old/path",
-                },
-                {"role": ConversationRole.USER.value, "content": "Test message"},
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": "Current working directory: /new/path",
-                },
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM, content="Current working directory: /old/path"
+                ),
+                ConversationRecord(role=ConversationRole.USER, content="Test message"),
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM, content="Current working directory: /new/path"
+                ),
             ],
             "expected": Path("/new/path"),
         },
         {
             "name": "Case insensitive working directory",
             "conversation": [
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": "CURRENT WORKING DIRECTORY: /test/path",
-                },
-                {"role": ConversationRole.USER.value, "content": "Test message"},
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM, content="CURRENT WORKING DIRECTORY: /test/path"
+                ),
+                ConversationRecord(role=ConversationRole.USER, content="Test message"),
             ],
             "expected": Path("/test/path"),
         },
         {
             "name": "Message with working directory but not at start",
             "conversation": [
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": "Some text before Current working directory: /test/path",
-                },
-                {"role": ConversationRole.USER.value, "content": "Test message"},
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="Some text before Current working directory: /test/path",
+                ),
+                ConversationRecord(role=ConversationRole.USER, content="Test message"),
             ],
             "expected": None,
         },
         {
             "name": "Multiple entries - returns last in list",
             "conversation": [
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": "Current working directory: /path/one",
-                },
-                {"role": ConversationRole.USER.value, "content": "Test message"},
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": "Current working directory: /path/two",
-                },
-                {"role": ConversationRole.USER.value, "content": "Another message"},
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": "Current working directory: /path/three",
-                },
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="Current working directory: /path/one",
+                ),
+                ConversationRecord(role=ConversationRole.USER, content="Test message"),
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="Current working directory: /path/two",
+                ),
+                ConversationRecord(role=ConversationRole.USER, content="Another message"),
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="Current working directory: /path/three",
+                ),
             ],
             "expected": Path("/path/three"),
         },
         {
             "name": "First entry with working directory",
             "conversation": [
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": "Current working directory: /first/path",
-                },
-                {"role": ConversationRole.USER.value, "content": "Test message"},
-                {
-                    "role": ConversationRole.SYSTEM.value,
-                    "content": "Some other system message",
-                },
-                {"role": ConversationRole.ASSISTANT.value, "content": "Response"},
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="Current working directory: /first/path",
+                ),
+                ConversationRecord(role=ConversationRole.USER, content="Test message"),
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="Some other system message",
+                ),
+                ConversationRecord(role=ConversationRole.ASSISTANT, content="Response"),
             ],
             "expected": Path("/first/path"),
         },
