@@ -11,102 +11,106 @@ Local Operator is built with a modular architecture that separates concerns into
 The arrows indicate dependencies and data flow between components.
 
 ```mermaid
-graph TB
-    subgraph Entry Points
-        CLI[cli.py] -.-> Operator
-        CLI -.-> FastAPI
+graph LR
+    classDef cli fill:#1f77b4,stroke:#333,stroke-width:2px
+    classDef config fill:#ff7f0e,stroke:#333,stroke-width:2px
+    classDef execution fill:#2ca02c,stroke:#333,stroke-width:2px
+    classDef modeling fill:#d62728,stroke:#333,stroke-width:2px
+    classDef agents fill:#9467bd,stroke:#333,stroke-width:2px
+    classDef tools fill:#8c564b,stroke:#333,stroke-width:2px
+    classDef api fill:#e377c2,stroke:#333,stroke-width:2px
+    classDef external fill:#7f7f7f,stroke:#333,stroke-width:2px
+
+    subgraph CLI [CLI Domain]
+        direction TB
+        cli(CLI - Command Line Interface):::cli
     end
 
-    subgraph Core Components
-        Operator[operator.py]
-        Executor[executor.py]
-        Tools[tools.py]
-        Model[model.py]
-        Console[console.py]
-        FastAPI[server.py]
+    subgraph Configuration [Configuration Domain]
+        direction TB
+        config(Config - Configuration Management):::config
+        credentials(Credentials - API Key Management):::config
     end
 
-    subgraph Configuration
-        Config[config.py]
-        Credentials[credentials.py]
-        Types[types.py]
-        Prompts[prompts.py]
+    subgraph Execution [Execution Domain]
+        direction TB
+        executor(Executor - Code Execution & Safety):::execution
+        console(Console - Output Formatting):::execution
     end
 
-    subgraph Agent Management
-        Agents[agents.py]
+    subgraph Modeling [Modeling Domain]
+        direction TB
+        model(Model - Language Model Configuration):::modeling
+        types(Types - Data Type Definitions):::modeling
+        prompts(Prompts - Prompt Engineering):::modeling
     end
 
-    subgraph External Services
-        LLMProviders[LLM Providers]
-        Browser[Playwright Browser]
-        SerpAPIClient[serpapi.py]
+    subgraph Agents [Agent Management Domain]
+        direction TB
+        agents(Agents - Agent Registry & Management):::agents
+        admin(Admin - Admin Tools):::agents
     end
 
-    subgraph Admin
-        AdminModule[admin.py]
+    subgraph Tools [Tooling Domain]
+        direction TB
+        tools(Tools - External Tool Integration):::tools
     end
 
-    %% Core component relationships
-    Operator --> Executor
-    Operator --> Console
-    Executor --> Tools
-    Executor --> Model
-    FastAPI --> Operator
-    FastAPI --> AdminModule
-    
-    %% Configuration flows
-    Config --> Operator
-    Config --> FastAPI
-    Credentials --> Model
-    Types --> Executor
-    Types --> FastAPI
-    Prompts --> Executor
-    
-    %% Agent management
-    Agents --> Operator
-    
-    %% External integrations  
-    Model --> LLMProviders
-    Tools --> Browser
-    Tools --> SerpAPIClient
+    subgraph API [API Domain]
+        direction TB
+        server(Server - FastAPI API):::api
+    end
 
-    AdminModule --> Agents
-    AdminModule --> Config
-    AdminModule --> Executor
-    AdminModule --> Operator
-    AdminModule --> Tools
+    subgraph External [External Tools]
+        direction TB
+        web_browsing(Web Browsing - Playwright):::external
+        serp_api(SERP API - Search Engine Results):::external
+    end
 
-    %% Component descriptions
-    classDef entryPoint fill:#ff9999,stroke:#ff0000,stroke-width:2px,color:#000
-    classDef core fill:#4a90e2,stroke:#2c3e50,stroke-width:2px,color:#fff
-    classDef config fill:#95DAC1,stroke:#2c3e50,stroke-width:2px,color:#000
-    classDef agent fill:#FD6F96,stroke:#2c3e50,stroke-width:2px,color:#fff
-    classDef external fill:#FFEBA1,stroke:#2c3e50,stroke-width:2px,color:#000
-    classDef admin fill:#c778dd,stroke:#2c3e50,stroke-width:2px,color:#fff
 
-    class CLI entryPoint
-    class Operator,Executor,Tools,Model,Console,FastAPI core
-    class Config,Credentials,Types,Prompts config
-    class Agents agent
-    class LLMProviders,Browser,SerpAPIClient external
-    class AdminModule admin
+    cli --> config:::config
+    cli -- "uses" --> operator:::execution
+    cli -- "manages" --> agents:::agents
 
-    %% Descriptions
-    CLI[CLI - Main entry point]
-    Operator[Operator - Environment manager]
-    Executor[Executor - Code execution & safety]
-    Tools[Tools - Agent capabilities]
-    Model[Model - LLM configuration]
-    Console[Console - Terminal UI]
-    FastAPI[FastAPI Server]
-    Config[Config - Settings]
-    Credentials[Credentials - API keys]
-    Types[Types - Data structures]
-    Prompts[Prompts - System prompts]
-    Agents[Agents - Agent definitions]
-    LLMProviders[OpenAI/Anthropic/etc]
-    Browser[Web browsing]
-    SerpAPIClient[SerpAPI Client]
-    AdminModule[Admin Module]
+    executor -- "configures" --> model:::modeling
+    executor -- "integrates" --> tools:::tools
+    executor -- "defines" --> types:::modeling
+    executor -- "manages" --> agents:::agents
+    executor --> console:::execution
+    executor -- "uses" --> web_browsing:::external
+    executor -- "uses" --> serp_api:::external
+
+    operator -- "orchestrates" --> executor:::execution
+    operator -- "reads" --> config:::config
+    operator -- "secures" --> credentials:::config
+    operator -- "defines" --> types:::modeling
+    operator -- "manages" --> agents:::agents
+
+    agents -- "defines" --> types:::modeling
+
+    admin -- "manages" --> agents:::agents
+    admin -- "reads" --> config:::config
+    admin -- "uses" --> executor:::execution
+    admin -- "integrates" --> tools:::tools
+
+    server -- "manages" --> agents:::agents
+    server -- "reads" --> config:::config
+    server -- "secures" --> credentials:::config
+    server -- "uses" --> executor:::execution
+    server -- "configures" --> model:::modeling
+    server -- "orchestrates" --> operator:::execution
+    server -- "defines" --> types:::modeling
+
+    prompts -- "integrates" --> tools:::tools
+    tools -- "uses" --> web_browsing:::external
+    tools -- "uses" --> serp_api:::external
+
+    style cli fill:#1f77b4,stroke:#333,stroke-width:2px
+    style config fill:#ff7f0e,stroke:#333,stroke-width:2px
+    style execution fill:#2ca02c,stroke:#333,stroke-width:2px
+    style modeling fill:#d62728,stroke:#333,stroke-width:2px
+    style agents fill:#9467bd,stroke:#333,stroke-width:2px
+    style tools fill:#8c564b,stroke:#333,stroke-width:2px
+    style api fill:#e377c2,stroke:#333,stroke-width:2px
+    style external fill:#7f7f7f,stroke:#333,stroke-width:2px
 ```
