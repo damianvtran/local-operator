@@ -8,7 +8,11 @@ from openai import APIError
 
 from local_operator.executor import ConfirmSafetyResult, get_confirm_safety_result
 from local_operator.operator import LocalCodeExecutor, Operator, OperatorType
-from local_operator.types import ConversationRole, ResponseJsonSchema
+from local_operator.types import (
+    ConversationRecord,
+    ConversationRole,
+    ResponseJsonSchema,
+)
 
 
 # Helper function to normalize code blocks.
@@ -434,8 +438,8 @@ async def test_execute_code_safety_no_prompt(executor, mock_model):
         assert "requires further confirmation" in result
         assert len(executor.conversation_history) > 0
         last_message = executor.conversation_history[-1]
-        assert last_message["role"] == "assistant"
-        assert "potentially dangerous operation" in last_message["content"]
+        assert last_message.role == ConversationRole.ASSISTANT
+        assert "potentially dangerous operation" in last_message.content
 
 
 @pytest.mark.asyncio
@@ -456,8 +460,8 @@ async def test_execute_code_safety_with_prompt(executor, mock_model):
         assert "Code execution canceled by user" in result
         assert len(executor.conversation_history) > 0
         last_message = executor.conversation_history[-1]
-        assert last_message["role"] == "user"
-        assert "dangerous operation" in last_message["content"]
+        assert last_message.role == ConversationRole.USER
+        assert "dangerous operation" in last_message.content
 
 
 @pytest.mark.asyncio
@@ -580,35 +584,35 @@ def test_limit_conversation_history(executor):
         {"name": "Empty history", "initial": [], "expected": []},
         {
             "name": "Only system prompt",
-            "initial": [{"role": "system", "content": "system prompt"}],
-            "expected": [{"role": "system", "content": "system prompt"}],
+            "initial": [ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt")],
+            "expected": [ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt")],
         },
         {
             "name": "History within limit",
             "initial": [
-                {"role": "system", "content": "system prompt"},
-                {"role": "user", "content": "msg1"},
-                {"role": "assistant", "content": "msg2"},
+                ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt"),
+                ConversationRecord(role=ConversationRole.USER, content="msg1"),
+                ConversationRecord(role=ConversationRole.ASSISTANT, content="msg2"),
             ],
             "expected": [
-                {"role": "system", "content": "system prompt"},
-                {"role": "user", "content": "msg1"},
-                {"role": "assistant", "content": "msg2"},
+                ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt"),
+                ConversationRecord(role=ConversationRole.USER, content="msg1"),
+                ConversationRecord(role=ConversationRole.ASSISTANT, content="msg2"),
             ],
         },
         {
             "name": "History exceeding limit",
             "initial": [
-                {"role": "system", "content": "system prompt"},
-                {"role": "user", "content": "msg1"},
-                {"role": "assistant", "content": "msg2"},
-                {"role": "user", "content": "msg3"},
-                {"role": "assistant", "content": "msg4"},
+                ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt"),
+                ConversationRecord(role=ConversationRole.USER, content="msg1"),
+                ConversationRecord(role=ConversationRole.ASSISTANT, content="msg2"),
+                ConversationRecord(role=ConversationRole.USER, content="msg3"),
+                ConversationRecord(role=ConversationRole.ASSISTANT, content="msg4"),
             ],
             "expected": [
-                {"role": "system", "content": "system prompt"},
-                {"role": "user", "content": "msg3"},
-                {"role": "assistant", "content": "msg4"},
+                ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt"),
+                ConversationRecord(role=ConversationRole.USER, content="msg3"),
+                ConversationRecord(role=ConversationRole.ASSISTANT, content="msg4"),
             ],
         },
     ]
@@ -624,15 +628,15 @@ def test_limit_conversation_history(executor):
         ), f"{test_case['name']}: Expected length {expected_len} but got {actual_len}"
 
         for i, msg in enumerate(test_case["expected"]):
-            expected_role = msg["role"]
-            actual_role = executor.conversation_history[i]["role"]
+            expected_role = msg.role
+            actual_role = executor.conversation_history[i].role
             assert expected_role == actual_role, (
                 f"{test_case['name']}: Expected role {expected_role} but got {actual_role} "
                 f"at position {i}"
             )
 
-            expected_content = msg["content"]
-            actual_content = executor.conversation_history[i]["content"]
+            expected_content = msg.content
+            actual_content = executor.conversation_history[i].content
             assert expected_content == actual_content, (
                 f"{test_case['name']}: Expected content {expected_content} "
                 f"but got {actual_content} at position {i}"
@@ -655,154 +659,154 @@ async def test_summarize_old_steps(mock_model):
         {
             "name": "Only system prompt",
             "initial": [
-                {
-                    "role": "system",
-                    "content": "system prompt",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                }
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="system prompt",
+                    should_summarize=True,
+                    summarized=False,
+                )
             ],
             "expected": [
-                {
-                    "role": "system",
-                    "content": "system prompt",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                }
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="system prompt",
+                    should_summarize=True,
+                    summarized=False,
+                )
             ],
         },
         {
             "name": "Within detail length",
             "initial": [
-                {
-                    "role": "system",
-                    "content": "system prompt",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "msg1",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "msg2",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="system prompt",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="msg1",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="msg2",
+                    should_summarize=True,
+                    summarized=False,
+                ),
             ],
             "expected": [
-                {
-                    "role": "system",
-                    "content": "system prompt",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "msg1",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "msg2",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="system prompt",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="msg1",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="msg2",
+                    should_summarize=True,
+                    summarized=False,
+                ),
             ],
         },
         {
             "name": "Beyond detail length with skip conditions",
             "initial": [
-                {
-                    "role": "system",
-                    "content": "system prompt",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "user",
-                    "content": "user msg",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "skip me",
-                    "summarized": "False",
-                    "should_summarize": "False",
-                },
-                {
-                    "role": "assistant",
-                    "content": "already summarized",
-                    "summarized": "True",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "summarize me",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "recent1",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "recent2",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="system prompt",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.USER,
+                    content="user msg",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="skip me",
+                    should_summarize=False,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="already summarized",
+                    should_summarize=True,
+                    summarized=True,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="summarize me",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="recent1",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="recent2",
+                    should_summarize=True,
+                    summarized=False,
+                ),
             ],
             "expected": [
-                {
-                    "role": "system",
-                    "content": "system prompt",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "user",
-                    "content": "user msg",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "skip me",
-                    "summarized": "False",
-                    "should_summarize": "False",
-                },
-                {
-                    "role": "assistant",
-                    "content": "already summarized",
-                    "summarized": "True",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "[SUMMARY] This is a summary",
-                    "summarized": "True",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "recent1",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
-                {
-                    "role": "assistant",
-                    "content": "recent2",
-                    "summarized": "False",
-                    "should_summarize": "True",
-                },
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="system prompt",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.USER,
+                    content="user msg",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="skip me",
+                    should_summarize=False,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="already summarized",
+                    should_summarize=True,
+                    summarized=True,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="[SUMMARY] This is a summary",
+                    should_summarize=True,
+                    summarized=True,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="recent1",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="recent2",
+                    should_summarize=True,
+                    summarized=False,
+                ),
             ],
         },
     ]
@@ -822,15 +826,15 @@ async def test_summarize_old_steps(mock_model):
 async def test_summarize_old_steps_all_detail(executor):
     executor.detail_conversation_length = -1
     executor.conversation_history = [
-        {"role": "system", "content": "system prompt"},
-        {"role": "user", "content": "user msg"},
+        ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt"),
+        ConversationRecord(role=ConversationRole.USER, content="user msg"),
     ]
 
     await executor._summarize_old_steps()
 
     assert executor.conversation_history == [
-        {"role": "system", "content": "system prompt"},
-        {"role": "user", "content": "user msg"},
+        ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt"),
+        ConversationRecord(role=ConversationRole.USER, content="user msg"),
     ]
 
 
@@ -845,7 +849,9 @@ async def test_invoke_model_api_error(executor):
         )
 
         with pytest.raises(APIError) as exc_info:
-            await executor.invoke_model([{"role": "user", "content": "test"}])
+            await executor.invoke_model(
+                [ConversationRecord(role=ConversationRole.USER, content="test")]
+            )
 
         assert str(exc_info.value) == "API Error"
         assert exc_info.value.code == "error_code"
@@ -863,7 +869,9 @@ async def test_invoke_model_rate_limit(executor):
 
     with patch("asyncio.sleep", AsyncMock(return_value=None)):
         with pytest.raises(APIError) as exc_info:
-            await executor.invoke_model([{"role": "user", "content": "test"}])
+            await executor.invoke_model(
+                [ConversationRecord(role=ConversationRole.USER, content="test")]
+            )
 
     assert str(exc_info.value) == "Rate limit exceeded"
     assert exc_info.value.code == "rate_limit_exceeded"
@@ -881,7 +889,9 @@ async def test_invoke_model_context_length(executor):
 
     with patch("asyncio.sleep", AsyncMock(return_value=None)):
         with pytest.raises(APIError) as exc_info:
-            await executor.invoke_model([{"role": "user", "content": "test"}])
+            await executor.invoke_model(
+                [ConversationRecord(role=ConversationRole.USER, content="test")]
+            )
 
     assert str(exc_info.value) == "Maximum context length exceeded"
     assert exc_info.value.code == "context_length_exceeded"

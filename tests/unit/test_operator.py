@@ -247,7 +247,7 @@ async def test_operator_print_hello_world(cli_operator):
     # Verify conversation history was updated
     assert len(cli_operator.executor.conversation_history) > 0
     last_message = cli_operator.executor.conversation_history[-1]
-    last_message_content = ResponseJsonSchema.model_validate_json(last_message["content"])
+    last_message_content = ResponseJsonSchema.model_validate_json(last_message.content)
 
     assert last_message_content is not None
     assert last_message_content.previous_step_success is True

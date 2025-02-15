@@ -7,6 +7,8 @@ from typing import Dict, List
 
 from pydantic import BaseModel, Field
 
+from local_operator.types import ConversationRecord
+
 
 class AgentData(BaseModel):
     """
@@ -58,17 +60,16 @@ class AgentConversation(BaseModel):
     Pydantic model representing an agent's conversation history.
 
     This model stores both the version of the conversation format and the actual
-    conversation history as a list of message dictionaries. Each message in the
-    conversation history contains a 'role' (e.g. 'USER' or 'ASSISTANT') and 'content'.
+    conversation history as a list of ConversationRecord objects.
 
     Attributes:
         version (str): The version of the conversation format/schema
-        conversation (List[Dict[str, str]]): List of conversation messages, where each
-            message is a dictionary with 'role' and 'content' keys
+        conversation (List[ConversationRecord]): List of conversation messages, where each
+            message is a ConversationRecord object
     """
 
     version: str = Field(..., description="The version of the conversation")
-    conversation: List[Dict[str, str]] = Field(..., description="The conversation history")
+    conversation: List[ConversationRecord] = Field(..., description="The conversation history")
 
 
 class AgentRegistry:
@@ -331,7 +332,7 @@ class AgentRegistry:
         """
         return list(self._agents.values())
 
-    def load_agent_conversation(self, agent_id: str) -> List[Dict[str, str]]:
+    def load_agent_conversation(self, agent_id: str) -> List[ConversationRecord]:
         """
         Load the conversation history for a specified agent.
 
@@ -342,8 +343,8 @@ class AgentRegistry:
             agent_id (str): The unique identifier of the agent.
 
         Returns:
-            List[Dict[str, str]]: The conversation history as a list of message dictionaries
-                with role and content fields matching ConversationRole enum values.
+            List[ConversationRecord]: The conversation history as a list of ConversationRecord
+                objects.
                 Returns an empty list if no conversation history exists or if there's an error.
         """
         conversation_file = self.config_dir / f"{agent_id}_conversation.json"
@@ -362,7 +363,9 @@ class AgentRegistry:
                 return []
         return []
 
-    def save_agent_conversation(self, agent_id: str, conversation: List[Dict[str, str]]) -> None:
+    def save_agent_conversation(
+        self, agent_id: str, conversation: List[ConversationRecord]
+    ) -> None:
         """
         Save the conversation history for a specified agent.
 

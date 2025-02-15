@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from local_operator.agents import AgentEditFields, AgentRegistry
+from local_operator.types import ConversationRecord, ConversationRole
 
 
 @pytest.fixture
@@ -258,8 +259,8 @@ def test_save_and_load_conversation(temp_agents_dir: Path):
     )
 
     conversation = [
-        {"role": "USER", "content": "Hello"},
-        {"role": "ASSISTANT", "content": "Hi there!"},
+        ConversationRecord(role=ConversationRole.USER, content="Hello"),
+        ConversationRecord(role=ConversationRole.ASSISTANT, content="Hi there!"),
     ]
     registry.save_agent_conversation(agent.id, conversation)
     loaded_conversation = registry.load_agent_conversation(agent.id)
@@ -321,8 +322,8 @@ def test_clone_agent(temp_agents_dir: Path):
 
     # Add some conversation history to source agent
     conversation = [
-        {"role": "USER", "content": "Hello"},
-        {"role": "ASSISTANT", "content": "Hi there!"},
+        ConversationRecord(role=ConversationRole.USER, content="Hello"),
+        ConversationRecord(role=ConversationRole.ASSISTANT, content="Hi there!"),
     ]
     registry.save_agent_conversation(source_agent.id, conversation)
 

@@ -21,7 +21,11 @@ from local_operator.executor import (
 )
 from local_operator.model import ModelType
 from local_operator.tools import index_current_directory
-from local_operator.types import ResponseJsonSchema
+from local_operator.types import (
+    ConversationRecord,
+    ConversationRole,
+    ResponseJsonSchema,
+)
 
 
 class ProcessResponseStatus(Enum):
@@ -44,12 +48,6 @@ class ProcessResponseOutput:
     def __init__(self, status: ProcessResponseStatus, message: str):
         self.status = status
         self.message = message
-
-
-class ConversationRole(Enum):
-    SYSTEM = "system"
-    USER = "user"
-    ASSISTANT = "assistant"
 
 
 class OperatorType(Enum):
@@ -250,23 +248,43 @@ class Operator:
         except (subprocess.CalledProcessError, FileNotFoundError):
             git_branch = "Not a git repository"
 
-        return f"""Current working directory: {os.getcwd()}
+        return f"""Environment Details:
+        Current working directory: {os.getcwd()}
         Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         Git branch: {git_branch}
         Directory tree: {directory_tree_str}"""
 
-    def format_user_prompt(self, user_input: str) -> str:
-        """Format user prompt for display."""
-        env_details = self.get_environment_details()
-        return f"""
-        <user_input>
-        {user_input}
-        </user_input>
+    def handle_ephemeral_messages(self) -> None:
+        """Handle ephemeral messages in the conversation history.
 
-        <environment_details>
-        {env_details}
-        </environment_details>
+        This method performs two main tasks:
+        1. Removes any messages marked as ephemeral (temporary) from the conversation history
+        2. Appends the current environment details as a system message to provide context
+
+        Ephemeral messages are identified by having an 'ephemeral' field set to 'true' in their
+        dictionary representation. These messages are meant to be temporary and are removed
+        before the next model invocation.
+
+        The method updates self.executor.conversation_history in-place.
         """
+
+        # Remove ephemeral messages from conversation history
+        self.executor.conversation_history = [
+            msg
+            for msg in self.executor.conversation_history
+            if not (isinstance(msg, dict) and msg.get("ephemeral") == "True")
+        ]
+
+        # Add environment details to the latest message
+        environment_details = self.get_environment_details()
+        self.executor.append_to_history(
+            ConversationRecord(
+                role=ConversationRole.SYSTEM,
+                content=environment_details,
+                should_summarize=False,
+                ephemeral=True,
+            )
+        )
 
     async def handle_user_input(self, user_input: str) -> ResponseJsonSchema | None:
         """Process user input and generate agent responses.
@@ -286,9 +304,11 @@ class Operator:
         Raises:
             ValueError: If the model is not properly initialized
         """
-        formatted_user_input = self.format_user_prompt(user_input)
         self.executor.conversation_history.append(
-            {"role": ConversationRole.USER.value, "content": formatted_user_input}
+            ConversationRecord(
+                role=ConversationRole.USER,
+                content=user_input,
+            )
         )
 
         response_json: ResponseJsonSchema | None = None
@@ -303,6 +323,8 @@ class Operator:
         ):
             if self.model is None:
                 raise ValueError("Model is not initialized")
+
+            self.handle_ephemeral_messages()
 
             spinner_task = asyncio.create_task(spinner("Generating response"))
             try:
@@ -323,18 +345,18 @@ class Operator:
             except ValidationError as e:
                 self.executor.conversation_history.extend(
                     [
-                        {
-                            "role": ConversationRole.ASSISTANT.value,
-                            "content": response_content,
-                        },
-                        {
-                            "role": ConversationRole.SYSTEM.value,
-                            "content": f"Your attempted response was not valid JSON.  "
+                        ConversationRecord(
+                            role=ConversationRole.ASSISTANT,
+                            content=response_content,
+                        ),
+                        ConversationRecord(
+                            role=ConversationRole.SYSTEM,
+                            content=f"Your attempted response was not valid JSON.  "
                             f"See the following error for details:\n\n{str(e)}.\n\n"
                             "Please reformat your response and generate a valid JSON response that "
                             "exactly matches the JSON schema so that you can continue on and "
                             "complete the task.",
-                        },
+                        ),
                     ]
                 )
                 continue
@@ -367,9 +389,9 @@ class Operator:
         print(f"\033[1;35m│ Message tokens: {total_tokens}                       \033[0m")
         print(f"\033[1;35m│ Session tokens: {self.executor.get_session_token_usage()}\033[0m")
         for i, entry in enumerate(self.executor.conversation_history, 1):
-            role = entry["role"]
-            content = entry["content"]
-            print(f"\033[1;35m│ {i}. {role.capitalize()}:\033[0m")
+            role = entry.role
+            content = entry.content
+            print(f"\033[1;35m│ {i}. {role.value.capitalize()}:\033[0m")
             for line in content.split("\n"):
                 print(f"\033[1;35m│   {line}\033[0m")
         print("\033[1;35m╰──────────────────────────────────────────────────\033[0m\n")

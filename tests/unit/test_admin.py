@@ -32,7 +32,7 @@ from local_operator.admin import (
 from local_operator.agents import AgentEditFields
 from local_operator.config import Config, ConfigManager
 from local_operator.tools import ToolRegistry
-from local_operator.types import ConversationRole
+from local_operator.types import ConversationRecord, ConversationRole
 
 
 @pytest.fixture
@@ -99,7 +99,7 @@ def test_create_agent_from_conversation_no_user_messages(
     The expected saved conversation history should be empty.
     """
     executor.conversation_history = [
-        {"role": ConversationRole.SYSTEM.value, "content": "Initial prompt"}
+        ConversationRecord(role=ConversationRole.SYSTEM, content="Initial prompt")
     ]
     create_tool = create_agent_from_conversation_tool(executor, agent_registry)
     agent_name = "TestAgent"
@@ -117,12 +117,12 @@ def test_create_agent_from_conversation_with_user_messages(
     the last user message.
     """
     conversation_history = [
-        {"role": ConversationRole.SYSTEM.value, "content": "Initial prompt"},
-        {"role": ConversationRole.USER.value, "content": "First user message"},
-        {"role": ConversationRole.USER.value, "content": "Second user message"},
-        {"role": ConversationRole.ASSISTANT.value, "content": "Response"},
-        {"role": ConversationRole.USER.value, "content": "Third user message"},
-        {"role": ConversationRole.SYSTEM.value, "content": "System message"},
+        ConversationRecord(role=ConversationRole.SYSTEM, content="Initial prompt"),
+        ConversationRecord(role=ConversationRole.USER, content="First user message"),
+        ConversationRecord(role=ConversationRole.USER, content="Second user message"),
+        ConversationRecord(role=ConversationRole.ASSISTANT, content="Response"),
+        ConversationRecord(role=ConversationRole.USER, content="Third user message"),
+        ConversationRecord(role=ConversationRole.SYSTEM, content="System message"),
     ]
     executor.conversation_history = conversation_history
     create_tool = create_agent_from_conversation_tool(executor, agent_registry)
@@ -142,7 +142,7 @@ def test_save_agent_training_no_agent(
     Test saving agent training data when no current agent is set.
     Expect a ValueError to be raised with the appropriate message.
     """
-    conversation_history = [{"role": ConversationRole.USER.value, "content": "User message"}]
+    conversation_history = [ConversationRecord(role=ConversationRole.USER, content="User message")]
     executor.conversation_history = conversation_history
     executor.agent = None
     save_training_tool = save_agent_training_tool(executor, agent_registry)
@@ -158,10 +158,10 @@ def test_save_agent_training_with_agent(
     The conversation history should be truncated correctly and the agent remains unchanged.
     """
     conversation_history = [
-        {"role": ConversationRole.SYSTEM.value, "content": "System message"},
-        {"role": ConversationRole.USER.value, "content": "User message 1"},
-        {"role": ConversationRole.USER.value, "content": "User message 2"},
-        {"role": ConversationRole.ASSISTANT.value, "content": "Assistant reply"},
+        ConversationRecord(role=ConversationRole.SYSTEM, content="System message"),
+        ConversationRecord(role=ConversationRole.USER, content="User message 1"),
+        ConversationRecord(role=ConversationRole.USER, content="User message 2"),
+        ConversationRecord(role=ConversationRole.ASSISTANT, content="Assistant reply"),
     ]
     executor.conversation_history = conversation_history
     agent = agent_registry.create_agent(
@@ -289,8 +289,8 @@ def test_save_conversation_tool(tmp_path: Any, executor: LocalCodeExecutor) -> N
     """
     file_path = tmp_path / "conversation.json"
     conversation_history = [
-        {"role": ConversationRole.USER.value, "content": "Hello"},
-        {"role": ConversationRole.ASSISTANT.value, "content": "Hi there!"},
+        ConversationRecord(role=ConversationRole.USER, content="Hello"),
+        ConversationRecord(role=ConversationRole.ASSISTANT, content="Hi there!"),
     ]
     executor.conversation_history = conversation_history
     save_tool = save_conversation_tool(executor)

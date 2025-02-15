@@ -76,7 +76,7 @@ def create_agent_from_conversation_tool(
         last_user_idx = None
 
         for i in range(len(history) - 1, -1, -1):
-            if history[i]["role"].upper() == "USER":
+            if history[i].role == ConversationRole.USER:
                 last_user_idx = i
                 break
 
@@ -147,7 +147,7 @@ def save_agent_training_tool(
         last_user_idx = None
 
         for i in range(len(history) - 1, -1, -1):
-            if history[i]["role"] == ConversationRole.USER.value:
+            if history[i].role == ConversationRole.USER:
                 last_user_idx = i
                 break
 
@@ -387,7 +387,7 @@ def save_conversation_tool(
             # Save to JSON file
             with open(filename, "w", encoding="utf-8") as f:
                 json.dump(
-                    [msg if isinstance(msg, dict) else msg.dict() for msg in conversation],
+                    [msg.dict() for msg in conversation],
                     f,
                     indent=2,
                     ensure_ascii=False,
