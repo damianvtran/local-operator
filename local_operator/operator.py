@@ -320,14 +320,22 @@ class Operator:
 
             try:
                 response_json = process_json_response(response_content)
-            except ValidationError:
-                self.executor.conversation_history.append(
-                    {
-                        "role": ConversationRole.SYSTEM.value,
-                        "content": "Invalid JSON response.  Please try again and "
-                        "generate a valid JSON response that exactly matches the JSON "
-                        "schema so that you can continue on and complete the task.",
-                    }
+            except ValidationError as e:
+                self.executor.conversation_history.extend(
+                    [
+                        {
+                            "role": ConversationRole.ASSISTANT.value,
+                            "content": response_content,
+                        },
+                        {
+                            "role": ConversationRole.SYSTEM.value,
+                            "content": f"Your attempted response was not valid JSON.  "
+                            f"See the following error for details:\n\n{str(e)}.\n\n"
+                            "Please reformat your response and generate a valid JSON response that "
+                            "exactly matches the JSON schema so that you can continue on and "
+                            "complete the task.",
+                        },
+                    ]
                 )
                 continue
 
