@@ -42,7 +42,7 @@ def get_installed_packages_str() -> str:
 
     # Add count of non-critical packages
     other_count = len(installed_packages) - len(filtered_packages)
-    package_str = ", ".join(filtered_packages[:15])  # Show first 15 matches
+    package_str = ", ".join(filtered_packages[:30])  # Show first 30 matches
     if other_count > 0:
         package_str += f" + {other_count} others"
 
