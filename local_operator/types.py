@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 from pydantic import BaseModel
 
 
-class ConversationRole(Enum):
+class ConversationRole(str, Enum):
     """Enum representing the different roles in a conversation with an AI model.
 
     Used to track who sent each message in the conversation history.
