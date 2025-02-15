@@ -276,9 +276,9 @@ def test_get_environment_details(cli_operator, monkeypatch, tmp_path):
     }
     monkeypatch.setattr("local_operator.operator.index_current_directory", lambda: mock_index)
 
-    # Mock git branch
+    # Mock git status
     def mock_check_output(*args, **kwargs):
-        return b"main\n"
+        return b"On branch main\nnothing to commit, working tree clean\n"
 
     monkeypatch.setattr("subprocess.check_output", mock_check_output)
 
@@ -296,7 +296,8 @@ def test_get_environment_details(cli_operator, monkeypatch, tmp_path):
     # Verify output contains expected information
     assert str(tmp_path) in env_details
     assert "2024-01-01 12:00:00" in env_details
-    assert "Git branch: main" in env_details
+    assert "On branch main" in env_details
+    assert "nothing to commit, working tree clean" in env_details
 
     # Verify directory tree formatting
     assert "📁 ./" in env_details
