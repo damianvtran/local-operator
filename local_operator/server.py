@@ -7,6 +7,7 @@ through HTTP requests instead of CLI.
 
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Dict, List, Optional, cast
@@ -14,7 +15,9 @@ from typing import Any, Dict, List, Optional, cast
 from fastapi import Body, FastAPI, HTTPException
 from fastapi import Path as FPath
 from fastapi import Query
-from pydantic import BaseModel, Field
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, ValidationError
 from tiktoken import encoding_for_model
 
 from local_operator.admin import add_admin_tools
@@ -139,22 +142,60 @@ class Agent(BaseModel):
     """Representation of an Agent."""
 
     id: str = Field(..., description="Unique identifier for the agent")
-    name: str = Field(..., description="Name of the agent")
-    description: Optional[str] = Field(None, description="Description of the agent")
+    name: str = Field(..., description="Agent's name")
+    created_date: datetime = Field(..., description="The date when the agent was created")
+    version: str = Field(..., description="The version of the agent")
+    security_prompt: str = Field(
+        "",
+        description="The security prompt for the agent. Allows a user to explicitly "
+        "specify the security context for the agent's code security checks.",
+    )
+    hosting: str = Field(
+        "",
+        description="The hosting environment for the agent. Defaults to ''.",
+    )
+    model: str = Field(
+        "",
+        description="The model to use for the agent. Defaults to ''.",
+    )
 
 
 class AgentCreate(BaseModel):
     """Data required to create a new agent."""
 
-    name: str = Field(..., description="Name of the agent")
-    description: Optional[str] = Field(None, description="Description of the agent")
+    name: str = Field(..., description="Agent's name")
+    security_prompt: str | None = Field(
+        None,
+        description="The security prompt for the agent. Allows a user to explicitly "
+        "specify the security context for the agent's code security checks.",
+    )
+    hosting: str | None = Field(
+        None,
+        description="The hosting environment for the agent. Defaults to 'openrouter'.",
+    )
+    model: str | None = Field(
+        None,
+        description="The model to use for the agent. Defaults to 'openai/gpt-4o-mini'.",
+    )
 
 
 class AgentUpdate(BaseModel):
     """Data for updating an existing agent."""
 
-    name: Optional[str] = Field(None, description="Updated name of the agent")
-    description: Optional[str] = Field(None, description="Updated description of the agent")
+    name: str | None = Field(None, description="Agent's name")
+    security_prompt: str | None = Field(
+        None,
+        description="The security prompt for the agent. Allows a user to explicitly "
+        "specify the security context for the agent's code security checks.",
+    )
+    hosting: str | None = Field(
+        None,
+        description="The hosting environment for the agent. Defaults to 'openrouter'.",
+    )
+    model: str | None = Field(
+        None,
+        description="The model to use for the agent. Defaults to 'openai/gpt-4o-mini'.",
+    )
 
 
 class AgentListResult(BaseModel):
@@ -391,7 +432,7 @@ async def chat_endpoint(request: ChatRequest):
 )
 async def chat_with_agent(
     agent_id: str = FPath(
-        ..., description="ID of the agent to use for the chat", example="agent123"
+        ..., description="ID of the agent to use for the chat", examples=["agent123"]
     ),
     request: ChatRequest = Body(...),
 ):
@@ -407,9 +448,11 @@ async def chat_with_agent(
         agent_registry = cast(AgentRegistry, agent_registry)
 
         # Retrieve the specific agent from the registry
-        agent_obj = agent_registry.get_agent(agent_id)
-        if not agent_obj:
-            raise HTTPException(status_code=404, detail="Agent not found")
+        try:
+            agent_obj = agent_registry.get_agent(agent_id)
+        except KeyError as e:
+            logger.exception("Error retrieving agent")
+            raise HTTPException(status_code=404, detail=f"Agent not found: {e}")
 
         # Create a new executor for this request using the provided hosting and model
         operator = create_operator(request.hosting, request.model)
@@ -592,20 +635,24 @@ async def create_agent(agent: AgentCreate = Body(...)):
     agent_registry = cast(AgentRegistry, agent_registry)
 
     try:
-        new_agent = agent_registry.create_agent(
-            agent_edit_metadata=cast(AgentEditFields, agent.dict())
-        )
+        agent_edit_metadata = AgentEditFields.model_validate(agent.model_dump(exclude_unset=True))
+        new_agent = agent_registry.create_agent(agent_edit_metadata)
+    except ValidationError as e:
+        logger.exception("Validation error creating agent")
+        raise HTTPException(status_code=422, detail=f"Validation error: {e}")
     except Exception as e:
+        logger.error(f"Error type: {type(e).__name__}")
         logger.exception("Error creating agent")
         raise HTTPException(status_code=400, detail=f"Failed to create agent: {e}")
 
-    new_agent_serialized = new_agent.dict() if hasattr(new_agent, "dict") else new_agent
+    new_agent_serialized = new_agent.model_dump()
 
-    return CRUDResponse(
+    response = CRUDResponse(
         status=201,
         message="Agent created successfully",
         result=cast(Dict[str, Any], new_agent_serialized),
     )
+    return JSONResponse(status_code=201, content=jsonable_encoder(response))
 
 
 @app.get(
@@ -636,7 +683,7 @@ async def create_agent(agent: AgentCreate = Body(...)):
     },
 )
 async def get_agent(
-    agent_id: str = FPath(..., description="ID of the agent to retrieve", example="agent123")
+    agent_id: str = FPath(..., description="ID of the agent to retrieve", examples=["agent123"])
 ):
     """
     Retrieve an agent by ID.
@@ -648,6 +695,9 @@ async def get_agent(
 
     try:
         agent_obj = agent_registry.get_agent(agent_id)
+    except KeyError as e:
+        logger.exception("Agent not found")
+        raise HTTPException(status_code=404, detail=f"Agent not found: {e}")
     except Exception as e:
         logger.exception("Error retrieving agent")
         raise HTTPException(status_code=500, detail=f"Error retrieving agent: {e}")
@@ -655,7 +705,7 @@ async def get_agent(
     if not agent_obj:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    agent_serialized = agent_obj.dict() if hasattr(agent_obj, "dict") else agent_obj
+    agent_serialized = agent_obj.model_dump()
 
     return CRUDResponse(
         status=200,
@@ -707,7 +757,7 @@ async def get_agent(
     },
 )
 async def update_agent(
-    agent_id: str = FPath(..., description="ID of the agent to update", example="agent123"),
+    agent_id: str = FPath(..., description="ID of the agent to update", examples=["agent123"]),
     agent_data: AgentUpdate = Body(...),
 ):
     """
@@ -719,9 +769,11 @@ async def update_agent(
     agent_registry = cast(AgentRegistry, agent_registry)
 
     try:
-        updated_agent = agent_registry.update_agent(
-            agent_id, cast(AgentEditFields, agent_data.model_dump(exclude_unset=True))
-        )
+        agent_edit_data = AgentEditFields.model_validate(agent_data.model_dump(exclude_unset=True))
+        updated_agent = agent_registry.update_agent(agent_id, agent_edit_data)
+    except KeyError as e:
+        logger.exception("Agent not found")
+        raise HTTPException(status_code=404, detail=f"Agent not found: {e}")
     except Exception as e:
         logger.exception("Error updating agent")
         raise HTTPException(status_code=400, detail=f"Failed to update agent: {e}")
@@ -729,9 +781,7 @@ async def update_agent(
     if not updated_agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    updated_agent_serialized = (
-        updated_agent.dict() if hasattr(updated_agent, "dict") else updated_agent
-    )
+    updated_agent_serialized = updated_agent.model_dump()
 
     return CRUDResponse(
         status=200,
@@ -764,7 +814,7 @@ async def update_agent(
     },
 )
 async def delete_agent(
-    agent_id: str = FPath(..., description="ID of the agent to delete", example="agent123")
+    agent_id: str = FPath(..., description="ID of the agent to delete", examples=["agent123"])
 ):
     """
     Delete an existing agent.
@@ -775,13 +825,13 @@ async def delete_agent(
     agent_registry = cast(AgentRegistry, agent_registry)
 
     try:
-        success = agent_registry.delete_agent(agent_id)
+        agent_registry.delete_agent(agent_id)
+    except KeyError as e:
+        logger.exception("Agent not found")
+        raise HTTPException(status_code=404, detail=f"Agent not found: {e}")
     except Exception as e:
         logger.exception("Error deleting agent")
         raise HTTPException(status_code=500, detail=f"Error deleting agent: {e}")
-
-    if not success:
-        raise HTTPException(status_code=404, detail="Agent not found")
 
     return CRUDResponse(
         status=200,
