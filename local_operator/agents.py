@@ -197,6 +197,8 @@ class AgentRegistry:
         if agent_id not in self._agents:
             raise KeyError(f"Agent with id {agent_id} not found")
 
+        print(f"Updating agent {agent_id} with metadata: {updated_metadata}")
+
         current_metadata = self._agents[agent_id]
 
         # Update all non-None fields from updated_metadata
