@@ -25,6 +25,7 @@ from local_operator.executor import LocalCodeExecutor
 from local_operator.model import configure_model
 from local_operator.operator import Operator, OperatorType
 from local_operator.tools import ToolRegistry
+from local_operator.types import ConversationRecord
 
 logger = logging.getLogger("local_operator.server")
 
@@ -72,18 +73,6 @@ class ChatOptions(BaseModel):
     seed: Optional[int] = None
 
 
-class ChatMessage(BaseModel):
-    """A single message in the chat conversation.
-
-    Attributes:
-        role: The role of who sent the message - "system", "user", or "assistant"
-        content: The actual text content of the message
-    """
-
-    role: str
-    content: str
-
-
 class ChatRequest(BaseModel):
     """Request body for chat generation endpoint.
 
@@ -100,7 +89,7 @@ class ChatRequest(BaseModel):
     model: str
     prompt: str
     stream: bool = False
-    context: Optional[List[ChatMessage]] = None
+    context: Optional[List[ConversationRecord]] = None
     options: Optional[ChatOptions] = None
 
 
@@ -128,7 +117,7 @@ class ChatResponse(BaseModel):
     """
 
     response: str
-    context: List[ChatMessage]
+    context: List[ConversationRecord]
     stats: ChatStats
 
 
@@ -319,7 +308,7 @@ async def chat_endpoint(request: ChatRequest):
         if request.context and len(request.context) > 0:
             # Override the default system prompt with the provided context
             conversation_history = [
-                {"role": msg.role, "content": msg.content} for msg in request.context
+                ConversationRecord(role=msg.role, content=msg.content) for msg in request.context
             ]
             operator.executor.initialize_conversation_history(conversation_history)
         else:
@@ -346,7 +335,7 @@ async def chat_endpoint(request: ChatRequest):
             tokenizer = encoding_for_model("gpt-4o")
 
         prompt_tokens = sum(
-            len(tokenizer.encode(msg["content"])) for msg in operator.executor.conversation_history
+            len(tokenizer.encode(msg.content)) for msg in operator.executor.conversation_history
         )
         completion_tokens = len(tokenizer.encode(response_content))
         total_tokens = prompt_tokens + completion_tokens
@@ -354,7 +343,7 @@ async def chat_endpoint(request: ChatRequest):
         return ChatResponse(
             response=response_content,
             context=[
-                ChatMessage(role=msg["role"], content=msg["content"])
+                ConversationRecord(role=msg.role, content=msg.content)
                 for msg in operator.executor.conversation_history
             ],
             stats=ChatStats(
@@ -432,7 +421,7 @@ async def chat_with_agent(
         if request.context and len(request.context) > 0:
             # Override the default system prompt with the provided context
             conversation_history = [
-                {"role": msg.role, "content": msg.content} for msg in request.context
+                ConversationRecord(role=msg.role, content=msg.content) for msg in request.context
             ]
             operator.executor.initialize_conversation_history(conversation_history)
         else:
@@ -456,7 +445,7 @@ async def chat_with_agent(
             tokenizer = encoding_for_model("gpt-4o")
 
         prompt_tokens = sum(
-            len(tokenizer.encode(msg["content"])) for msg in operator.executor.conversation_history
+            len(tokenizer.encode(msg.content)) for msg in operator.executor.conversation_history
         )
         completion_tokens = len(tokenizer.encode(response_content))
         total_tokens = prompt_tokens + completion_tokens
@@ -464,7 +453,7 @@ async def chat_with_agent(
         return ChatResponse(
             response=response_content,
             context=[
-                ChatMessage(role=msg["role"], content=msg["content"])
+                ConversationRecord(role=msg.role, content=msg.content)
                 for msg in operator.executor.conversation_history
             ],
             stats=ChatStats(

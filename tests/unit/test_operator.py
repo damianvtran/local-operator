@@ -4,8 +4,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from local_operator.executor import LocalCodeExecutor
 from local_operator.model import configure_model
-from local_operator.operator import LocalCodeExecutor, Operator, OperatorType
+from local_operator.operator import Operator, OperatorType
+from local_operator.tools import ToolRegistry
 from local_operator.types import ResponseJsonSchema
 
 
@@ -18,7 +20,10 @@ def mock_model():
 
 @pytest.fixture
 def executor(mock_model):
-    return LocalCodeExecutor(mock_model)
+    executor = LocalCodeExecutor(mock_model)
+    executor.conversation_history = []
+    executor.tool_registry = ToolRegistry()
+    return executor
 
 
 @pytest.fixture
@@ -94,7 +99,7 @@ async def test_cli_operator_chat(cli_operator, mock_model):
         await cli_operator.chat()
 
         assert (
-            cli_operator.executor.conversation_history[-1]["content"]
+            cli_operator.executor.conversation_history[-1].content
             == mock_response.model_dump_json()
         )
 
@@ -247,7 +252,7 @@ async def test_operator_print_hello_world(cli_operator):
     # Verify conversation history was updated
     assert len(cli_operator.executor.conversation_history) > 0
     last_message = cli_operator.executor.conversation_history[-1]
-    last_message_content = ResponseJsonSchema.model_validate_json(last_message["content"])
+    last_message_content = ResponseJsonSchema.model_validate_json(last_message.content)
 
     assert last_message_content is not None
     assert last_message_content.previous_step_success is True

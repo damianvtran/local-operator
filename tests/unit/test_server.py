@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import List
 
 import pytest
 from fastapi import HTTPException
@@ -6,9 +6,12 @@ from httpx import ASGITransport, AsyncClient
 
 from local_operator import server as srv
 from local_operator.executor import ExecutorInitError
-from local_operator.operator import ConversationRole
-from local_operator.server import ChatMessage, ChatRequest, app
-from local_operator.types import ResponseJsonSchema
+from local_operator.server import ChatRequest, app
+from local_operator.types import (
+    ConversationRecord,
+    ConversationRole,
+    ResponseJsonSchema,
+)
 
 
 # Dummy implementations for the executor dependency
@@ -30,13 +33,13 @@ class DummyExecutor:
         # Dummy processing; does nothing extra.
         return "processed successfully"
 
-    def initialize_conversation_history(self, conversation_history: List[Dict[str, str]] = []):
+    def initialize_conversation_history(self, conversation_history: List[ConversationRecord] = []):
         if len(self.conversation_history) != 0:
             raise ExecutorInitError("Conversation history already initialized")
 
         if len(conversation_history) == 0:
             self.conversation_history = [
-                {"role": ConversationRole.SYSTEM.value, "content": "System prompt"}
+                ConversationRecord(role=ConversationRole.SYSTEM, content="System prompt")
             ]
         else:
             self.conversation_history = conversation_history
@@ -61,9 +64,13 @@ class DummyOperator:
             plan="",
         )
 
-        self.executor.conversation_history.append({"role": "user", "content": prompt})
         self.executor.conversation_history.append(
-            {"role": "assistant", "content": dummy_response.model_dump_json()}
+            ConversationRecord(role=ConversationRole.USER, content=prompt)
+        )
+        self.executor.conversation_history.append(
+            ConversationRecord(
+                role=ConversationRole.ASSISTANT, content=dummy_response.model_dump_json()
+            )
         )
 
         return dummy_response
@@ -287,7 +294,9 @@ async def test_chat_executor_not_initialized():
         hosting="openai",
         model="gpt-4o",
         prompt="Test executor not initialized",
-        context=[ChatMessage(role="user", content="Test executor not initialized")],
+        context=[
+            ConversationRecord(role=ConversationRole.USER, content="Test executor not initialized")
+        ],
     )
 
     transport = ASGITransport(app=app)
