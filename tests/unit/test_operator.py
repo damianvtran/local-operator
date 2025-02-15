@@ -7,6 +7,7 @@ import pytest
 from local_operator.executor import LocalCodeExecutor
 from local_operator.model import configure_model
 from local_operator.operator import Operator, OperatorType
+from local_operator.tools import ToolRegistry
 from local_operator.types import ResponseJsonSchema
 
 
@@ -19,7 +20,10 @@ def mock_model():
 
 @pytest.fixture
 def executor(mock_model):
-    return LocalCodeExecutor(mock_model)
+    executor = LocalCodeExecutor(mock_model)
+    executor.conversation_history = []
+    executor.tool_registry = ToolRegistry()
+    return executor
 
 
 @pytest.fixture
