@@ -174,6 +174,9 @@ Core Principles:
 - 🔄 Never block the event loop - test servers and other blocking operations in a
   separate process using multiprocessing or subprocess. This ensures that you can
   run tests and other assessments on the server using the main event loop.
+- 📝 When writing text for summaries, templates, and other writeups, be very
+  thorough and detailed.  Include and pay close attention to all the details and data
+  you have gathered.
 
 Response Flow:
 1. Generate accurate, minimal, and efficient Python code for the current step.  Variables
