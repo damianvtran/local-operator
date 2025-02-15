@@ -349,6 +349,14 @@ class Operator:
             try:
                 response_json = process_json_response(response_content)
             except ValidationError as e:
+                error_details = "\n".join(
+                    f"Error {i+1}:\n"
+                    f"  Location: {' -> '.join(str(loc) for loc in err['loc'])}\n"
+                    f"  Type: {err['type']}\n"
+                    f"  Message: {err['msg']}"
+                    for i, err in enumerate(e.errors())
+                )
+
                 self.executor.conversation_history.extend(
                     [
                         ConversationRecord(
@@ -357,11 +365,15 @@ class Operator:
                         ),
                         ConversationRecord(
                             role=ConversationRole.SYSTEM,
-                            content=f"Your attempted response was not valid JSON.  "
-                            f"See the following error for details:\n\n{str(e)}.\n\n"
-                            "Please reformat your response and generate a valid JSON response that "
-                            "exactly matches the JSON schema so that you can continue on and "
-                            "complete the task.",
+                            content=(
+                                "Your attempted response failed JSON schema validation. "
+                                "Please review the validation errors and generate a valid "
+                                "response:\n\n"
+                                f"{error_details}\n\n"
+                                "Your response must exactly match the expected JSON schema "
+                                "structure. Please reformat your response to continue with "
+                                "the task."
+                            ),
                         ),
                     ]
                 )
