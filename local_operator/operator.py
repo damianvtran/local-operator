@@ -231,7 +231,8 @@ class Operator:
                     break
 
             if has_more_files:
-                directory_tree_str += "  ... and more files\n"
+                remaining_files = len(file_list) - 30
+                directory_tree_str += f"  ... and {remaining_files} more files\n"
 
             if total_files >= 300:
                 directory_tree_str += "\n... and more directories\n"
