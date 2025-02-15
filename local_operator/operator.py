@@ -201,12 +201,13 @@ class Operator:
         directory_index = index_current_directory()
         directory_tree_str = ""
 
+        total_files = 0
         for path, files in directory_index.items():
             # Add directory name with forward slash
             directory_tree_str += f"📁 {path}/\n"
 
-            # Add files under directory
-            for filename, file_type, size in files:
+            # Add files under directory (limited to 30)
+            for filename, file_type, size in list(files)[:30]:
                 # Format size to be human readable
                 if size < 1024:
                     size_str = f"{size}B"
@@ -220,6 +221,13 @@ class Operator:
 
                 # Add indented file info
                 directory_tree_str += f"  {icon} {filename} ({file_type}, {size_str})\n"
+
+                total_files += 1
+                if total_files >= 300:
+                    break
+
+            if total_files >= 300:
+                break
 
         # Get current git branch
         try:
