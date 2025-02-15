@@ -6,8 +6,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from openai import APIError
 
-from local_operator.executor import ConfirmSafetyResult, get_confirm_safety_result
-from local_operator.operator import LocalCodeExecutor, Operator, OperatorType
+from local_operator.executor import (
+    ConfirmSafetyResult,
+    LocalCodeExecutor,
+    get_confirm_safety_result,
+)
+from local_operator.operator import Operator, OperatorType
 from local_operator.types import (
     ConversationRecord,
     ConversationRole,

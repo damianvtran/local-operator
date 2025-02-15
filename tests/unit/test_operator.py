@@ -4,8 +4,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from local_operator.executor import LocalCodeExecutor
 from local_operator.model import configure_model
-from local_operator.operator import LocalCodeExecutor, Operator, OperatorType
+from local_operator.operator import Operator, OperatorType
 from local_operator.types import ResponseJsonSchema
 
 
@@ -94,7 +95,7 @@ async def test_cli_operator_chat(cli_operator, mock_model):
         await cli_operator.chat()
 
         assert (
-            cli_operator.executor.conversation_history[-1]["content"]
+            cli_operator.executor.conversation_history[-1].content
             == mock_response.model_dump_json()
         )
 
