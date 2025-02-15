@@ -144,7 +144,12 @@ def index_current_directory(max_depth: int = 3) -> Dict[str, List[Tuple[str, str
 
         for file in sorted(files):
             file_path = os.path.join(root, file)
-            size = os.stat(file_path).st_size
+            try:
+                size = os.stat(file_path).st_size
+            except (FileNotFoundError, PermissionError):
+                # Skip files that can't be accessed
+                continue
+
             ext = Path(file).suffix.lower()
 
             # Categorize file type
