@@ -2,13 +2,24 @@
 
 Local Operator is built with a modular architecture that separates concerns into distinct components. The Mermaid diagram below illustrates the key components and their relationships:
 
-- **CLI Interface**: The entry point and user interaction layer
-- **Core Components**: The main business logic and execution engine
-- **Configuration & State**: Settings, credentials and shared types
-- **Agent Management**: Handles creation and coordination of AI agents
-- **External Services**: Third-party integrations like LLM providers
+- **CLI Domain**: The command line interface for user interaction
+- **Configuration Domain**: Manages configuration settings and API credentials
+- **Execution Domain**: Handles code execution, safety, and console output
+- **Modeling Domain**: Defines language models, data types, and prompt engineering
+- **Agent Management Domain**: Coordinates AI agents and admin tools
+- **Tooling Domain**: Integrates with external tools and services
+- **API Domain**: Provides a FastAPI server interface
+- **External Tools**: Third-party integrations like web browsing and search
 
-The arrows indicate dependencies and data flow between components.
+The arrows indicate dependencies and data flow between components. Key relationships include:
+
+- The CLI interfaces with configuration and manages agents
+- The executor orchestrates model configuration, tool integration, and agent management
+- The operator coordinates execution while managing configuration, credentials and types
+- The API server provides a REST interface to core functionality
+- External tools are integrated through the tooling layer
+
+The following was generated with ❤️ by Local Operator for humans 🤝
 
 ```mermaid
 graph LR
