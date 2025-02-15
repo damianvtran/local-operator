@@ -703,22 +703,31 @@ class LocalCodeExecutor:
             sys.stdin = old_stdin
 
     def _capture_and_record_output(
-        self, stdout: io.StringIO, stderr: io.StringIO
+        self, stdout: io.StringIO, stderr: io.StringIO, format_for_ui: bool = False
     ) -> tuple[str, str]:
         """Capture stdout/stderr output and record it in conversation history.
 
         Args:
             stdout (io.StringIO): Buffer containing standard output
             stderr (io.StringIO): Buffer containing error output
+            format_for_ui (bool): Whether to format the output for a UI chat
+            interface.  This will include markdown formatting and other
+            UI-friendly features.
 
         Returns:
             tuple[str, str]: Tuple containing (stdout output, stderr output)
         """
         stdout.flush()
         stderr.flush()
-        output = f"```shell\n{stdout.getvalue()}\n```" if stdout.getvalue() else "[No output]"
+        output = (
+            f"```shell\n{stdout.getvalue()}\n```"
+            if format_for_ui and stdout.getvalue()
+            else stdout.getvalue() or "[No output]"
+        )
         error_output = (
-            f"```shell\n{stderr.getvalue()}\n```" if stderr.getvalue() else "[No error output]"
+            f"```shell\n{stderr.getvalue()}\n```"
+            if format_for_ui and stderr.getvalue()
+            else stderr.getvalue() or "[No error output]"
         )
 
         self.context["last_code_output"] = output
@@ -727,6 +736,7 @@ class LocalCodeExecutor:
             ConversationRecord(
                 role=ConversationRole.SYSTEM,
                 content=f"Code execution output:\n{output}\nError output:\n{error_output}",
+                should_summarize=True,
             )
         )
 
@@ -823,7 +833,6 @@ class LocalCodeExecutor:
         # Phase 1: Check for interruption
         if self.interrupted:
             print_task_interrupted()
-            self.interrupted = False
             return ProcessResponseOutput(
                 status=ProcessResponseStatus.INTERRUPTED,
                 message="Task interrupted by user",

@@ -6,6 +6,7 @@ import subprocess
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from typing import Dict, List, Tuple
 
 from langchain_core.messages import BaseMessage
 from pydantic import ValidationError
@@ -194,12 +195,20 @@ class Operator:
 
         return response.action == "BYE"
 
-    def get_environment_details(self) -> str:
-        """Get environment details."""
-        directory_index = index_current_directory()
-        directory_tree_str = ""
+    def _format_directory_tree(self, directory_index: Dict[str, List[Tuple[str, str, int]]]) -> str:
+        """
+        Format a directory index into a human-readable tree structure with icons and file sizes.
 
+        Args:
+            directory_index: Dictionary mapping directory paths to lists of
+                (filename, file_type, size) tuples
+
+        Returns:
+            str: Formatted directory tree string with icons, file types, and human-readable sizes
+        """
+        directory_tree_str = ""
         total_files = 0
+
         for path, files in directory_index.items():
             # Add directory name with forward slash
             directory_tree_str += f"📁 {path}/\n"
@@ -242,23 +251,37 @@ class Operator:
             if total_files >= 300:
                 break
 
-        # Get current git branch
+        if total_files == 0:
+            directory_tree_str = "No files in the current directory"
+
+        return directory_tree_str
+
+    def get_environment_details(self) -> str:
+        """Get environment details."""
+        directory_index = index_current_directory()
+        directory_tree_str = self._format_directory_tree(directory_index)
+
+        # Get git status
         try:
-            git_branch = (
-                subprocess.check_output(
-                    ["git", "rev-parse", "--abbrev-ref", "HEAD"], stderr=subprocess.DEVNULL
-                )
+            git_status = (
+                subprocess.check_output(["git", "status"], stderr=subprocess.DEVNULL)
                 .decode()
                 .strip()
             )
+            if not git_status:
+                git_status = "Clean working directory"
         except (subprocess.CalledProcessError, FileNotFoundError):
-            git_branch = "Not a git repository"
+            git_status = "Not a git repository"
 
         return f"""Environment Details:
         Current working directory: {os.getcwd()}
         Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-        Git branch: {git_branch}
-        Directory tree: {directory_tree_str}"""
+        <git status>
+        {git_status}
+        </git status>
+        <directory tree>
+        {directory_tree_str}
+        </directory tree>"""
 
     def add_ephemeral_messages(self) -> None:
         """Add environment details and other ephemeral messages to the conversation history.
@@ -346,6 +369,14 @@ class Operator:
             try:
                 response_json = process_json_response(response_content)
             except ValidationError as e:
+                error_details = "\n".join(
+                    f"Error {i+1}:\n"
+                    f"  Location: {' -> '.join(str(loc) for loc in err['loc'])}\n"
+                    f"  Type: {err['type']}\n"
+                    f"  Message: {err['msg']}"
+                    for i, err in enumerate(e.errors())
+                )
+
                 self.executor.conversation_history.extend(
                     [
                         ConversationRecord(
@@ -354,11 +385,15 @@ class Operator:
                         ),
                         ConversationRecord(
                             role=ConversationRole.SYSTEM,
-                            content=f"Your attempted response was not valid JSON.  "
-                            f"See the following error for details:\n\n{str(e)}.\n\n"
-                            "Please reformat your response and generate a valid JSON response that "
-                            "exactly matches the JSON schema so that you can continue on and "
-                            "complete the task.",
+                            content=(
+                                "Your attempted response failed JSON schema validation. "
+                                "Please review the validation errors and generate a valid "
+                                "response:\n\n"
+                                f"{error_details}\n\n"
+                                "Your response must exactly match the expected JSON schema "
+                                "structure. Please reformat your response to continue with "
+                                "the task."
+                            ),
                         ),
                     ]
                 )
@@ -452,6 +487,7 @@ class Operator:
 
         while True:
             self.executor_is_processing = False
+            self.executor.interrupted = False
 
             prompt = f"You ({os.getcwd()}): > "
             user_input = self._get_input_with_history(prompt)
