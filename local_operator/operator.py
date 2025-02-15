@@ -6,6 +6,7 @@ import subprocess
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from typing import Dict, List, Tuple
 
 from langchain_core.messages import BaseMessage
 from pydantic import ValidationError
@@ -194,12 +195,20 @@ class Operator:
 
         return response.action == "BYE"
 
-    def get_environment_details(self) -> str:
-        """Get environment details."""
-        directory_index = index_current_directory()
-        directory_tree_str = ""
+    def _format_directory_tree(self, directory_index: Dict[str, List[Tuple[str, str, int]]]) -> str:
+        """
+        Format a directory index into a human-readable tree structure with icons and file sizes.
 
+        Args:
+            directory_index: Dictionary mapping directory paths to lists of
+                (filename, file_type, size) tuples
+
+        Returns:
+            str: Formatted directory tree string with icons, file types, and human-readable sizes
+        """
+        directory_tree_str = ""
         total_files = 0
+
         for path, files in directory_index.items():
             # Add directory name with forward slash
             directory_tree_str += f"📁 {path}/\n"
@@ -244,6 +253,13 @@ class Operator:
 
         if total_files == 0:
             directory_tree_str = "No files in the current directory"
+
+        return directory_tree_str
+
+    def get_environment_details(self) -> str:
+        """Get environment details."""
+        directory_index = index_current_directory()
+        directory_tree_str = self._format_directory_tree(directory_index)
 
         # Get current git branch
         try:
