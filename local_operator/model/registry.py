@@ -41,61 +41,72 @@ def get_model_info(hosting: str, model: str) -> ModelInfo:
     """
     Retrieves the model information based on the hosting provider and model name.
 
+    This function checks a series of known hosting providers and their associated
+    models to return a `ModelInfo` object containing relevant details such as
+    pricing, context window, and image support. If the hosting provider is not
+    supported, a ValueError is raised. If the model is not found for a supported
+    hosting provider, a default `unknown_model_info` is returned.
+
     Args:
-        hosting (str): The hosting provider name.
-        model (str): The model name.
+        hosting (str): The hosting provider name (e.g., "openai", "google").
+        model (str): The model name (e.g., "gpt-3.5-turbo", "gemini-1.0-pro").
 
     Returns:
-        ModelInfo: The model information.
+        ModelInfo: The model information for the specified hosting and model.
+                   Returns `unknown_model_info` if the model is not found for a
+                   supported hosting provider.
 
     Raises:
-        ValueError: If the hosting provider is unsupported or the model is not found.
+        ValueError: If the hosting provider is unsupported.
     """
+    model_info = unknown_model_info
 
-    try:
-        if hosting == "anthropic":
-            if model in anthropic_models:
-                return anthropic_models[model]
-            else:
-                raise ValueError(f"Model {model} not found for Anthropic hosting.")
-        elif hosting == "ollama":
-            return ollama_default_model_info
-        elif hosting == "deepseek":
-            if model in deepseek_models:
-                return deepseek_models[model]
-            else:
-                raise ValueError(f"Model {model} not found for DeepSeek hosting.")
-        elif hosting == "google":
-            if model in google_models:
-                return google_models[model]
-            else:
-                raise ValueError(f"Model {model} not found for google hosting.")
-        elif hosting == "openai":
-            return openai_model_info_sane_defaults
-        elif hosting == "openrouter":
-            return openrouter_default_model_info
-        elif hosting == "alibaba":
-            if model in qwen_models:
-                return qwen_models[model]
-            else:
-                raise ValueError(f"Model {model} not found for Alibaba hosting.")
-        elif hosting == "kimi":
-            if model in kimi_models:
-                return kimi_models[model]
-            else:
-                raise ValueError(f"Model {model} not found for Kimi hosting.")
-        elif hosting == "mistral":
-            if model in mistral_models:
-                return mistral_models[model]
-            else:
-                raise ValueError(f"Model {model} not found for Mistral hosting.")
-        else:
-            raise ValueError(f"Unsupported hosting provider: {hosting}")
-    except ValueError as e:
-        raise e
-    except Exception as e:
-        raise ValueError(f"Error retrieving model info: {e}") from e
+    if hosting == "anthropic":
+        if model in anthropic_models:
+            model_info = anthropic_models[model]
+    elif hosting == "ollama":
+        return ollama_default_model_info
+    elif hosting == "deepseek":
+        if model in deepseek_models:
+            return deepseek_models[model]
+    elif hosting == "google":
+        if model in google_models:
+            return google_models[model]
+    elif hosting == "openai":
+        return openai_model_info_sane_defaults
+    elif hosting == "openrouter":
+        return openrouter_default_model_info
+    elif hosting == "alibaba":
+        if model in qwen_models:
+            return qwen_models[model]
+    elif hosting == "kimi":
+        if model in kimi_models:
+            return kimi_models[model]
+    elif hosting == "mistral":
+        if model in mistral_models:
+            return mistral_models[model]
+    else:
+        raise ValueError(f"Unsupported hosting provider: {hosting}")
 
+    return model_info
+
+
+unknown_model_info: ModelInfo = ModelInfo(
+    max_tokens=-1,
+    context_window=-1,
+    supports_images=False,
+    supports_prompt_cache=False,
+    input_price=0.0,
+    output_price=0.0,
+)
+"""
+Default ModelInfo when model is unknown.
+
+This ModelInfo is returned by `get_model_info` when a specific model
+is not found within a supported hosting provider's catalog. It provides
+a fallback with negative max_tokens and context_window to indicate
+the absence of specific model details.
+"""
 
 anthropic_models: Dict[str, ModelInfo] = {
     "claude-3-5-sonnet-20241022": ModelInfo(
@@ -146,18 +157,18 @@ anthropic_models["claude-3-haiku-latest"] = anthropic_models["claude-3-haiku-202
 
 # TODO: Add fetch for token, context window, image support
 ollama_default_model_info: ModelInfo = ModelInfo(
-    max_tokens=8192,
-    context_window=200_000,
-    supports_images=True,
-    supports_prompt_cache=True,
+    max_tokens=-1,
+    context_window=-1,
+    supports_images=False,
+    supports_prompt_cache=False,
     input_price=0.0,
     output_price=0.0,
 )
 
 # TODO: Add fetch for token, context window, image support
 openrouter_default_model_info: ModelInfo = ModelInfo(
-    max_tokens=8192,
-    context_window=200_000,
+    max_tokens=-1,
+    context_window=-1,
     supports_images=False,
     supports_prompt_cache=False,
     input_price=0.0,
