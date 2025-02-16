@@ -1,6 +1,6 @@
 import pytest
 
-from local_operator.model.registry import ModelInfo, calculate_cost, get_model_info
+from local_operator.model.registry import ModelInfo, get_model_info
 
 
 def test_model_info_price_must_be_non_negative() -> None:
@@ -12,20 +12,6 @@ def test_model_info_price_must_be_non_negative() -> None:
     # Should not raise an error
     ModelInfo(input_price=0, output_price=0)
     ModelInfo(input_price=1, output_price=1)
-
-
-def test_calculate_cost() -> None:
-    """Test that the calculate_cost function works correctly."""
-    model_info = ModelInfo(input_price=1, output_price=2)
-    input_tokens = 1000
-    output_tokens = 2000
-    expected_cost = (input_tokens / 1_000_000) * model_info.input_price + (
-        output_tokens / 1_000_000
-    ) * model_info.output_price
-    assert calculate_cost(model_info, input_tokens, output_tokens) == pytest.approx(expected_cost)
-
-    # Test with zero tokens
-    assert calculate_cost(model_info, 0, 0) == 0.0
 
 
 def test_get_model_info() -> None:
