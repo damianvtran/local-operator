@@ -26,14 +26,16 @@ def mock_successful_response():
 
 @pytest.fixture
 def mock_requests_get():
-    with patch("local_operator.model.requests.get") as mock_get:
+    with patch("local_operator.model.configure.requests.get") as mock_get:
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = {"data": [{"id": "test-model"}]}
         yield mock_get
 
 
 def test_configure_model_deepseek(mock_credential_manager):
-    with patch("local_operator.model.ChatOpenAI", return_value=MagicMock()) as mock_chat_openai:
+    with patch(
+        "local_operator.model.configure.ChatOpenAI", return_value=MagicMock()
+    ) as mock_chat_openai:
         model, api_key = configure_model("deepseek", "deepseek-chat", mock_credential_manager)
         assert model is not None
         mock_chat_openai.assert_called_once()
@@ -47,7 +49,9 @@ def test_configure_model_deepseek(mock_credential_manager):
 
 
 def test_configure_model_openai(mock_credential_manager):
-    with patch("local_operator.model.ChatOpenAI", return_value=MagicMock()) as mock_chat_openai:
+    with patch(
+        "local_operator.model.configure.ChatOpenAI", return_value=MagicMock()
+    ) as mock_chat_openai:
         model, api_key = configure_model("openai", "gpt-4", mock_credential_manager)
         assert model is not None
         mock_chat_openai.assert_called_once()
@@ -61,7 +65,9 @@ def test_configure_model_openai(mock_credential_manager):
 
 
 def test_configure_model_ollama(mock_credential_manager):
-    with patch("local_operator.model.ChatOllama", return_value=MagicMock()) as mock_chat_ollama:
+    with patch(
+        "local_operator.model.configure.ChatOllama", return_value=MagicMock()
+    ) as mock_chat_ollama:
         model, api_key = configure_model("ollama", "llama2", mock_credential_manager)
         assert model is not None
         mock_chat_ollama.assert_called_once()
@@ -90,7 +96,9 @@ def test_configure_model_deepseek_fallback():
     credential_manager = MagicMock(spec=CredentialManager)
     credential_manager.get_credential = MagicMock(return_value=None)
     credential_manager.prompt_for_credential = MagicMock(return_value=SecretStr("prompted_key"))
-    with patch("local_operator.model.ChatOpenAI", return_value=MagicMock()) as mock_chat_openai:
+    with patch(
+        "local_operator.model.configure.ChatOpenAI", return_value=MagicMock()
+    ) as mock_chat_openai:
         model, api_key = configure_model("deepseek", "deepseek-chat", credential_manager)
         assert model is not None
         mock_chat_openai.assert_called_once()
@@ -104,7 +112,7 @@ def test_configure_model_deepseek_fallback():
 
 def test_configure_model_anthropic(mock_credential_manager):
     with patch(
-        "local_operator.model.ChatAnthropic", return_value=MagicMock()
+        "local_operator.model.configure.ChatAnthropic", return_value=MagicMock()
     ) as mock_chat_anthropic:
         model, api_key = configure_model("anthropic", "claude-x", mock_credential_manager)
         assert model is not None
@@ -123,7 +131,7 @@ def test_configure_model_anthropic(mock_credential_manager):
 
 def test_configure_model_anthropic_default(mock_credential_manager):
     with patch(
-        "local_operator.model.ChatAnthropic", return_value=MagicMock()
+        "local_operator.model.configure.ChatAnthropic", return_value=MagicMock()
     ) as mock_chat_anthropic:
         model, api_key = configure_model("anthropic", "", mock_credential_manager)
         assert model is not None
@@ -139,7 +147,7 @@ def test_configure_model_anthropic_fallback():
         return_value=SecretStr("fallback_anthropic_key")
     )
     with patch(
-        "local_operator.model.ChatAnthropic", return_value=MagicMock()
+        "local_operator.model.configure.ChatAnthropic", return_value=MagicMock()
     ) as mock_chat_anthropic:
         model, api_key = configure_model("anthropic", "claude-x", credential_manager)
         assert model is not None
@@ -153,7 +161,9 @@ def test_configure_model_anthropic_fallback():
 
 
 def test_configure_model_kimi_default(mock_credential_manager):
-    with patch("local_operator.model.ChatOpenAI", return_value=MagicMock()) as mock_chat_openai:
+    with patch(
+        "local_operator.model.configure.ChatOpenAI", return_value=MagicMock()
+    ) as mock_chat_openai:
         model, api_key = configure_model("kimi", "", mock_credential_manager)
         assert model is not None
         call_args = mock_chat_openai.call_args
@@ -163,7 +173,9 @@ def test_configure_model_kimi_default(mock_credential_manager):
 
 
 def test_configure_model_kimi_explicit(mock_credential_manager):
-    with patch("local_operator.model.ChatOpenAI", return_value=MagicMock()) as mock_chat_openai:
+    with patch(
+        "local_operator.model.configure.ChatOpenAI", return_value=MagicMock()
+    ) as mock_chat_openai:
         model, api_key = configure_model("kimi", "custom-kimi-model", mock_credential_manager)
         assert model is not None
         call_args = mock_chat_openai.call_args
@@ -177,7 +189,9 @@ def test_configure_model_kimi_fallback():
     credential_manager.prompt_for_credential = MagicMock(
         return_value=SecretStr("fallback_kimi_key")
     )
-    with patch("local_operator.model.ChatOpenAI", return_value=MagicMock()) as mock_chat_openai:
+    with patch(
+        "local_operator.model.configure.ChatOpenAI", return_value=MagicMock()
+    ) as mock_chat_openai:
         model, api_key = configure_model("kimi", "custom-kimi-model", credential_manager)
         assert model is not None
         call_args = mock_chat_openai.call_args
@@ -190,7 +204,9 @@ def test_configure_model_kimi_fallback():
 
 
 def test_configure_model_alibaba_default(mock_credential_manager):
-    with patch("local_operator.model.ChatOpenAI", return_value=MagicMock()) as mock_chat_openai:
+    with patch(
+        "local_operator.model.configure.ChatOpenAI", return_value=MagicMock()
+    ) as mock_chat_openai:
         model, api_key = configure_model("alibaba", "", mock_credential_manager)
         assert model is not None
         call_args = mock_chat_openai.call_args
@@ -207,7 +223,9 @@ def test_configure_model_alibaba_fallback():
     credential_manager.prompt_for_credential = MagicMock(
         return_value=SecretStr("fallback_alibaba_key")
     )
-    with patch("local_operator.model.ChatOpenAI", return_value=MagicMock()) as mock_chat_openai:
+    with patch(
+        "local_operator.model.configure.ChatOpenAI", return_value=MagicMock()
+    ) as mock_chat_openai:
         model, api_key = configure_model("alibaba", "custom-alibaba-model", credential_manager)
         assert model is not None
         call_args = mock_chat_openai.call_args
@@ -225,7 +243,9 @@ def test_configure_model_openai_fallback():
     credential_manager.prompt_for_credential = MagicMock(
         return_value=SecretStr("fallback_openai_key")
     )
-    with patch("local_operator.model.ChatOpenAI", return_value=MagicMock()) as mock_chat_openai:
+    with patch(
+        "local_operator.model.configure.ChatOpenAI", return_value=MagicMock()
+    ) as mock_chat_openai:
         model, api_key = configure_model("openai", "custom-openai-model", credential_manager)
         assert model is not None
         call_args = mock_chat_openai.call_args
@@ -245,7 +265,7 @@ def test_configure_model_ollama_missing_model(mock_credential_manager):
 
 def test_configure_model_google_default(mock_credential_manager):
     with patch(
-        "local_operator.model.ChatGoogleGenerativeAI", return_value=MagicMock()
+        "local_operator.model.configure.ChatGoogleGenerativeAI", return_value=MagicMock()
     ) as mock_chat_google:
         model, api_key = configure_model("google", "", mock_credential_manager)
         assert model is not None
@@ -261,7 +281,7 @@ def test_configure_model_google_fallback():
         return_value=SecretStr("fallback_google_key")
     )
     with patch(
-        "local_operator.model.ChatGoogleGenerativeAI", return_value=MagicMock()
+        "local_operator.model.configure.ChatGoogleGenerativeAI", return_value=MagicMock()
     ) as mock_chat_google:
         model, api_key = configure_model("google", "custom-google-model", credential_manager)
         assert model is not None
@@ -275,7 +295,9 @@ def test_configure_model_google_fallback():
 
 
 def test_configure_model_mistral_default(mock_credential_manager):
-    with patch("local_operator.model.ChatOpenAI", return_value=MagicMock()) as mock_chat_openai:
+    with patch(
+        "local_operator.model.configure.ChatOpenAI", return_value=MagicMock()
+    ) as mock_chat_openai:
         model, api_key = configure_model("mistral", "", mock_credential_manager)
         assert model is not None
         call_args = mock_chat_openai.call_args
@@ -290,7 +312,9 @@ def test_configure_model_mistral_fallback():
     credential_manager.prompt_for_credential = MagicMock(
         return_value=SecretStr("fallback_mistral_key")
     )
-    with patch("local_operator.model.ChatOpenAI", return_value=MagicMock()) as mock_chat_openai:
+    with patch(
+        "local_operator.model.configure.ChatOpenAI", return_value=MagicMock()
+    ) as mock_chat_openai:
         model, api_key = configure_model("mistral", "custom-mistral-model", credential_manager)
         assert model is not None
         call_args = mock_chat_openai.call_args
