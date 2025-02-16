@@ -5,7 +5,7 @@ from pydantic import SecretStr
 
 from local_operator.credentials import CredentialManager
 from local_operator.mocks import ChatNoop
-from local_operator.model import configure_model
+from local_operator.model.configure import configure_model
 
 
 @pytest.fixture

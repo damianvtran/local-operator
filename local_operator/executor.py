@@ -25,7 +25,7 @@ from local_operator.console import (
     print_task_interrupted,
     spinner,
 )
-from local_operator.model import ModelType
+from local_operator.model.configure import ModelType
 from local_operator.prompts import (
     SafetyCheckSystemPrompt,
     SafetyCheckUserPrompt,

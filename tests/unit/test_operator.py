@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from local_operator.executor import LocalCodeExecutor
-from local_operator.model import configure_model
+from local_operator.model.configure import configure_model
 from local_operator.operator import Operator, OperatorType
 from local_operator.tools import ToolRegistry
 from local_operator.types import ResponseJsonSchema
