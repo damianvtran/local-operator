@@ -268,17 +268,17 @@ def create_operator(request_hosting: str, request_model: str) -> Operator:
     if not request_hosting:
         raise ValueError("Hosting is not set")
 
-    model_instance, _ = configure_model(
-        credential_manager=credential_manager,
+    model_configuration = configure_model(
         hosting=request_hosting,
-        model=request_model,
+        model_name=request_model,
+        credential_manager=credential_manager,
     )
 
-    if not model_instance:
+    if not model_configuration.instance:
         raise ValueError("No model instance configured")
 
     executor = LocalCodeExecutor(
-        model=model_instance,
+        model_configuration=model_configuration,
         max_conversation_history=100,
         detail_conversation_length=10,
         can_prompt_user=False,
@@ -287,7 +287,7 @@ def create_operator(request_hosting: str, request_model: str) -> Operator:
     operator = Operator(
         executor=executor,
         credential_manager=credential_manager,
-        model_instance=executor.model,
+        model_configuration=model_configuration,
         config_manager=config_manager,
         type=OperatorType.SERVER,
         agent_registry=agent_registry,
@@ -345,6 +345,7 @@ async def chat_endpoint(request: ChatRequest):
     try:
         # Create a new executor for this request using the provided hosting and model
         operator = create_operator(request.hosting, request.model)
+        model_instance = operator.executor.model_configuration.instance
 
         if request.context and len(request.context) > 0:
             # Override the default system prompt with the provided context
@@ -357,10 +358,10 @@ async def chat_endpoint(request: ChatRequest):
 
         # Configure model options if provided
         if request.options:
-            temperature = request.options.temperature or operator.executor.model.temperature
+            temperature = request.options.temperature or model_instance.temperature
             if temperature is not None:
-                operator.model.temperature = temperature
-            operator.model.top_p = request.options.top_p or operator.executor.model.top_p
+                model_instance.temperature = temperature
+            model_instance.top_p = request.options.top_p or model_instance.top_p
 
         response_json = await operator.handle_user_input(request.prompt)
         if response_json is not None:
@@ -456,7 +457,7 @@ async def chat_with_agent(
 
         # Create a new executor for this request using the provided hosting and model
         operator = create_operator(request.hosting, request.model)
-
+        model_instance = operator.executor.model_configuration.instance
         # Apply the retrieved agent to the operator and executor
         operator.current_agent = agent_obj
         setattr(operator.executor, "current_agent", agent_obj)
@@ -472,10 +473,10 @@ async def chat_with_agent(
 
         # Configure model options if provided
         if request.options:
-            temperature = request.options.temperature or operator.executor.model.temperature
+            temperature = request.options.temperature or model_instance.temperature
             if temperature is not None:
-                operator.model.temperature = temperature
-            operator.model.top_p = request.options.top_p or operator.executor.model.top_p
+                model_instance.temperature = temperature
+            model_instance.top_p = request.options.top_p or model_instance.top_p
 
         response_json = await operator.handle_user_input(request.prompt)
         response_content = response_json.response if response_json is not None else ""

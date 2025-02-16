@@ -12,22 +12,23 @@ from local_operator.types import ResponseJsonSchema
 
 
 @pytest.fixture
-def mock_model():
-    model = AsyncMock()
-    model.ainvoke = AsyncMock()
-    return model
+def mock_model_config():
+    model_configuration = MagicMock()
+    model_configuration.instance = AsyncMock()
+    model_configuration.instance.ainvoke = AsyncMock()
+    return model_configuration
 
 
 @pytest.fixture
-def executor(mock_model):
-    executor = LocalCodeExecutor(mock_model)
+def executor(mock_model_config):
+    executor = LocalCodeExecutor(model_configuration=mock_model_config)
     executor.conversation_history = []
     executor.tool_registry = ToolRegistry()
     return executor
 
 
 @pytest.fixture
-def cli_operator(mock_model, executor):
+def cli_operator(mock_model_config, executor):
     credential_manager = MagicMock()
     credential_manager.get_credential = MagicMock(return_value="test_key")
 
@@ -40,7 +41,7 @@ def cli_operator(mock_model, executor):
     operator = Operator(
         executor=executor,
         credential_manager=credential_manager,
-        model_instance=mock_model,
+        model_configuration=mock_model_config,
         config_manager=config_manager,
         type=OperatorType.CLI,
         agent_registry=agent_registry,
@@ -53,7 +54,7 @@ def cli_operator(mock_model, executor):
     return operator
 
 
-def test_cli_operator_init(mock_model, executor):
+def test_cli_operator_init(mock_model_config, executor):
     credential_manager = MagicMock()
     credential_manager.get_credential = MagicMock(return_value="test_key")
 
@@ -66,7 +67,7 @@ def test_cli_operator_init(mock_model, executor):
     operator = Operator(
         executor=executor,
         credential_manager=credential_manager,
-        model_instance=mock_model,
+        model_configuration=mock_model_config,
         config_manager=config_manager,
         type=OperatorType.CLI,
         agent_registry=agent_registry,
@@ -74,13 +75,13 @@ def test_cli_operator_init(mock_model, executor):
         training_mode=False,
     )
 
-    assert operator.model == mock_model
+    assert operator.model_configuration == mock_model_config
     assert operator.credential_manager == credential_manager
     assert operator.executor is not None
 
 
 @pytest.mark.asyncio
-async def test_cli_operator_chat(cli_operator, mock_model):
+async def test_cli_operator_chat(cli_operator, mock_model_config):
     mock_response = ResponseJsonSchema(
         previous_step_success=True,
         previous_goal="",
@@ -92,7 +93,7 @@ async def test_cli_operator_chat(cli_operator, mock_model):
         learnings="",
         plan="",
     )
-    mock_model.ainvoke.return_value.content = mock_response.model_dump_json()
+    mock_model_config.instance.ainvoke.return_value.content = mock_response.model_dump_json()
     cli_operator._agent_should_exit = MagicMock(return_value=True)
 
     with patch("builtins.input", return_value="exit"):
@@ -240,11 +241,11 @@ async def test_operator_print_hello_world(cli_operator):
     """Test that operator correctly handles 'print hello world' command and output
     using ChatMock."""
     # Configure mock model
-    mock_model, _ = configure_model("test", "", None)
+    mock_model_config = configure_model("test", "", None)
 
-    mock_executor = LocalCodeExecutor(mock_model)
+    mock_executor = LocalCodeExecutor(mock_model_config)
     cli_operator.executor = mock_executor
-    cli_operator.model = mock_model
+    cli_operator.model_configuration = mock_model_config
 
     # Execute command and get response
     await cli_operator.handle_user_input("print hello world")

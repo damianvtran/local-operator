@@ -25,7 +25,7 @@ from local_operator.console import (
     print_task_interrupted,
     spinner,
 )
-from local_operator.model.configure import ModelType
+from local_operator.model.configure import ModelConfiguration
 from local_operator.prompts import (
     SafetyCheckSystemPrompt,
     SafetyCheckUserPrompt,
@@ -137,7 +137,7 @@ class ExecutorTokenMetrics(BaseModel):
 class LocalCodeExecutor:
     context: Dict[str, Any]
     conversation_history: List[ConversationRecord]
-    model: ModelType
+    model_configuration: ModelConfiguration
     step_counter: int
     max_conversation_history: int
     detail_conversation_length: int
@@ -170,7 +170,7 @@ class LocalCodeExecutor:
 
     def __init__(
         self,
-        model: ModelType,
+        model_configuration: ModelConfiguration,
         max_conversation_history: int = 100,
         detail_conversation_length: int = 10,
         can_prompt_user: bool = True,
@@ -194,7 +194,7 @@ class LocalCodeExecutor:
         """
         self.context = {}
         self.conversation_history = conversation_history
-        self.model = model
+        self.model_configuration = model_configuration
         self.max_conversation_history = max_conversation_history
         self.detail_conversation_length = detail_conversation_length
         self.can_prompt_user = can_prompt_user
@@ -263,10 +263,10 @@ class LocalCodeExecutor:
             str: The lowercase name of the model. For OpenAI models, returns the model_name
                 attribute. For other models, returns the string representation of the model.
         """
-        if isinstance(self.model, ChatOpenAI):
-            return self.model.model_name.lower()
+        if isinstance(self.model_configuration.instance, ChatOpenAI):
+            return self.model_configuration.instance.model_name.lower()
         else:
-            return str(self.model.model).lower()
+            return str(self.model_configuration.instance.model).lower()
 
     def get_token_metrics(self) -> ExecutorTokenMetrics:
         """Get the total token metrics for the current session."""
@@ -397,10 +397,12 @@ class LocalCodeExecutor:
             Exception: If there is an error during model invocation.
         """
         messages_list = [msg.dict() for msg in messages]
+        model_instance = self.model_configuration.instance
+
         # Use get_openai_callback for OpenAI models to track token usage and cost
-        if isinstance(self.model, ChatOpenAI):
+        if isinstance(model_instance, ChatOpenAI):
             with get_openai_callback() as cb:
-                response = await self.model.ainvoke(messages_list)
+                response = await model_instance.ainvoke(messages_list)
                 if cb is not None:
                     self.token_metrics.total_cost += cb.total_cost
                     self.token_metrics.total_prompt_tokens += cb.prompt_tokens
@@ -408,7 +410,7 @@ class LocalCodeExecutor:
         else:
             # For other models, invoke the model directly
             self.token_metrics.total_prompt_tokens += self.get_invoke_token_count(messages)
-            response = await self.model.ainvoke(messages_list)
+            response = await model_instance.ainvoke(messages_list)
 
         return response
 

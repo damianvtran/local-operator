@@ -19,8 +19,8 @@ class ModelInfo(BaseModel):
         description (Optional[str]): Description of the model.
     """
 
-    input_price: float
-    output_price: float
+    input_price: float = 0.0
+    output_price: float = 0.0
     max_tokens: Optional[int] = None
     context_window: Optional[int] = None
     supports_images: Optional[bool] = None
