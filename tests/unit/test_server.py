@@ -7,6 +7,9 @@ from httpx import ASGITransport, AsyncClient
 from local_operator import server as srv
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.executor import ExecutorInitError
+from local_operator.mocks import ChatMock
+from local_operator.model.configure import ModelConfiguration
+from local_operator.model.registry import ModelInfo
 from local_operator.server import AgentCreate, AgentUpdate, ChatRequest, app
 from local_operator.types import (
     ConversationRecord,
@@ -23,7 +26,13 @@ class DummyResponse:
 
 class DummyExecutor:
     def __init__(self):
-        self.model = self
+        self.model_configuration = ModelConfiguration(
+            hosting="test",
+            name="test-model",
+            instance=ChatMock(),
+            info=ModelInfo(),
+            api_key=None,
+        )
         self.conversation_history = []
 
     async def invoke_model(self, conversation_history):

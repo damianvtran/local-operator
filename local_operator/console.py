@@ -3,6 +3,7 @@ import itertools
 import os
 import sys
 from enum import Enum
+from typing import Any
 
 from local_operator.agents import AgentData
 from local_operator.config import ConfigManager
@@ -15,6 +16,7 @@ class ExecutionSection(Enum):
     CODE = "code"
     RESULT = "result"
     FOOTER = "footer"
+    TOKEN_USAGE = "token_usage"
 
 
 def wrap_text_to_width(text: str, max_width: int, first_line_prefix: str = "") -> list[str]:
@@ -240,7 +242,11 @@ def print_agent_response(step: int, content: str) -> None:
 
 
 def print_execution_section(
-    section: ExecutionSection | str, *, step: int | None = None, content: str = ""
+    section: ExecutionSection | str,
+    *,
+    step: int | None = None,
+    content: str = "",
+    data: dict[str, Any] | None = None,
 ) -> None:
     """
     Print a section of the execution output.
@@ -270,6 +276,31 @@ def print_execution_section(
         print(content)
     elif section == ExecutionSection.RESULT:
         print("\n\033[1;36m│ Result:\033[0m " + content)
+    elif section == ExecutionSection.TOKEN_USAGE:
+        try:
+            if not isinstance(data, dict):
+                raise ValueError("Data must be a dictionary.")
+
+            prompt_tokens = data.get("prompt_tokens", 0)
+            completion_tokens = data.get("completion_tokens", 0)
+            total_cost = data.get("cost", 0.0)
+
+            if prompt_tokens == 0 and completion_tokens == 0 and total_cost == 0.0:
+                print(
+                    "\n\033[1;36m│ Token Usage: \033[0m\033[1;33mToken usage data"
+                    "unavailable.\033[0m"
+                )
+            else:
+                cost_str = f"Cost: ${total_cost:.6f} 💰  " if total_cost > 0 else ""
+                print(
+                    "\n\033[1;36m│ Token Usage: \033[0m"
+                    f"\033[1;33mPrompt: {prompt_tokens} ⬆️  Completion: {completion_tokens} ⬇️  "
+                    f"{cost_str}\033[0m"
+                )
+
+        except Exception:
+            # Don't display if there is no token usage data
+            pass
     elif section == ExecutionSection.FOOTER:
         print("\033[1;36m╰══════════════════════════════════════════════════╯\033[0m")
 

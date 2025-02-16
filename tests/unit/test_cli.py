@@ -15,6 +15,7 @@ from local_operator.cli import (
     main,
     serve_command,
 )
+from local_operator.model.configure import ModelConfiguration
 
 
 @pytest.fixture
@@ -125,7 +126,14 @@ def test_main_success():
         patch("local_operator.cli.ConfigManager") as mock_config_manager_cls,
         patch("local_operator.cli.CredentialManager"),
         patch(
-            "local_operator.cli.configure_model", return_value=[mock_model, SecretStr("test_key")]
+            "local_operator.cli.configure_model",
+            return_value=ModelConfiguration(
+                hosting="deepseek",
+                name="deepseek-chat",
+                instance=mock_model,
+                info=mock_model.info,
+                api_key=SecretStr("test_key"),
+            ),
         ) as mock_configure_model,
         patch("local_operator.cli.LocalCodeExecutor"),
         patch("local_operator.cli.Operator", return_value=mock_operator) as mock_operator_cls,
