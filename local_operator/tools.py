@@ -394,6 +394,20 @@ def search_web_tool(serp_api_client: SerpApiClient) -> Callable[..., Any]:
     """
 
     def search_web(query: str, provider: str = "google", max_results: int = 20) -> SerpApiResponse:
+        """Search the web using the SERP API.
+
+        This tool allows the agent to search the internet for information. The results
+        must be printed to the console.
+
+        Args:
+            query (str): The search query string.
+            provider (str, optional): Search provider to use (e.g., "google", "bing").
+                Defaults to "google".
+            max_results (int, optional): Maximum number of results to return. Defaults to 20.
+
+        Returns:
+            SerpApiResponse: A structured response containing search results.
+        """
         return serp_api_client.search(query, provider, max_results)
 
     return search_web
