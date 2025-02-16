@@ -490,7 +490,7 @@ class SerpApiClient:
         """
         # Build query parameters
         params = {
-            "api_key": self.api_key,
+            "api_key": self.api_key.get_secret_value(),
             "q": query,
             "engine": engine,
             "num": num_results,
@@ -507,8 +507,16 @@ class SerpApiClient:
         try:
             response = requests.get(url)
             if response.status_code != 200:
-                raise RuntimeError(f"SERP API request failed with status {response.status_code}")
+                raise RuntimeError(
+                    f"SERP API request failed with status {response.status_code}, content:"
+                    f" {response.content.decode()}"
+                )
             data = response.json()
             return SerpApiResponse.model_validate(data)
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(
+                f"Failed to execute SERP API search due to a requests error: {str(e)}, Response"
+                f" Body: {e.response.content.decode() if e.response else 'No response body'}"
+            ) from e
         except Exception as e:
-            raise RuntimeError(f"Failed to execute SERP API search: {str(e)}")
+            raise RuntimeError(f"Failed to execute SERP API search: {str(e)}") from e
