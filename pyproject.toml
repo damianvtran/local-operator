@@ -21,6 +21,7 @@ dependencies = [
     "langchain-anthropic",
     "langchain-google-genai",
     "langchain",
+    "langchain-community",
     "python-dotenv",
     "pydantic",
     "tiktoken",
