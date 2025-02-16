@@ -6,8 +6,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List
 
-from langchain.schema import BaseMessage
+from langchain_community.callbacks.manager import get_openai_callback
+from langchain_core.messages import BaseMessage
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel
 from tiktoken import encoding_for_model
 
 from local_operator.agents import AgentData
@@ -118,6 +120,20 @@ def process_json_response(response_str: str) -> ResponseJsonSchema:
     return response_json
 
 
+class ExecutorTokenMetrics(BaseModel):
+    """Tracks token usage and cost metrics for model executions.
+
+    Attributes:
+        total_prompt_tokens (int): Total number of tokens used in prompts across all invocations.
+        total_completion_tokens (int): Total number of tokens generated in completions.
+        total_cost (float): Total monetary cost of all model invocations.
+    """
+
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    total_cost: float = 0.0
+
+
 class LocalCodeExecutor:
     context: Dict[str, Any]
     conversation_history: List[ConversationRecord]
@@ -127,7 +143,7 @@ class LocalCodeExecutor:
     detail_conversation_length: int
     interrupted: bool
     can_prompt_user: bool
-    total_tokens: int
+    token_metrics: ExecutorTokenMetrics
     agent: AgentData | None
     tool_registry: ToolRegistry | None
 
@@ -147,7 +163,8 @@ class LocalCodeExecutor:
         can_prompt_user (bool): Informs the executor about whether the end user has access to the
             terminal (True), or is consuming the service from some remote source where they
             cannot respond via the terminal (False).
-        total_tokens (int): Running count of total tokens consumed by model invocations
+        token_metrics (ExecutorTokenMetrics): Tracks token usage and cost metrics for model
+        executions
         agent (AgentData | None): The agent data for the current conversation
     """
 
@@ -181,7 +198,7 @@ class LocalCodeExecutor:
         self.max_conversation_history = max_conversation_history
         self.detail_conversation_length = detail_conversation_length
         self.can_prompt_user = can_prompt_user
-        self.total_tokens = 0
+        self.token_metrics = ExecutorTokenMetrics()
         self.agent = agent
         self.reset_step_counter()
         self.interrupted = False
@@ -251,6 +268,10 @@ class LocalCodeExecutor:
         else:
             return str(self.model.model).lower()
 
+    def get_token_metrics(self) -> ExecutorTokenMetrics:
+        """Get the total token metrics for the current session."""
+        return self.token_metrics
+
     def get_invoke_token_count(self, messages: List[ConversationRecord]) -> int:
         """Calculate the total number of tokens in a list of conversation messages.
 
@@ -274,7 +295,7 @@ class LocalCodeExecutor:
 
     def get_session_token_usage(self) -> int:
         """Get the total token count for the current session."""
-        return self.total_tokens
+        return self.token_metrics.total_prompt_tokens + self.token_metrics.total_completion_tokens
 
     def initialize_conversation_history(
         self, conversation_history: List[ConversationRecord] = []
@@ -363,9 +384,36 @@ class LocalCodeExecutor:
         return blocks
 
     async def _convert_and_invoke(self, messages: List[ConversationRecord]) -> BaseMessage:
-        """Convert the messages to a list of dictionaries and invoke the model."""
+        """Convert the messages to a list of dictionaries and invoke the model.
+
+        Args:
+            messages (List[ConversationRecord]): A list of conversation records to send to the
+            model.
+
+        Returns:
+            BaseMessage: The model's response.
+
+        Raises:
+            Exception: If there is an error during model invocation.
+        """
         messages_list = [msg.dict() for msg in messages]
-        return await self.model.ainvoke(messages_list)
+        try:
+            # Use get_openai_callback for OpenAI models to track token usage and cost
+            if isinstance(self.model, ChatOpenAI):
+                with get_openai_callback() as cb:
+                    response = await self.model.ainvoke(messages_list)
+                    if cb is not None:
+                        self.token_metrics.total_cost += cb.total_cost
+                        self.token_metrics.total_prompt_tokens += cb.prompt_tokens
+                        self.token_metrics.total_completion_tokens += cb.completion_tokens
+            else:
+                # For other models, invoke the model directly
+                self.token_metrics.total_prompt_tokens += self.get_invoke_token_count(messages)
+                response = await self.model.ainvoke(messages_list)
+
+            return response
+        except Exception as e:
+            raise Exception(f"Error invoking model: {e}") from e
 
     async def invoke_model(
         self, messages: List[ConversationRecord], max_attempts: int = 3
@@ -411,7 +459,9 @@ class LocalCodeExecutor:
                         )
                         combined_message += f"{role_prefix}{msg.content}\n\n"
                     combined_message = combined_message.strip()
-                    response = await self.model.ainvoke(combined_message)
+                    response = await self._convert_and_invoke(
+                        [ConversationRecord(role=ConversationRole.USER, content=combined_message)]
+                    )
                 else:
                     if "o1" in model_name or "o3" in model_name:
                         # OpenAI reasoning models (o1 and o3) expect a combined prompt
@@ -429,7 +479,13 @@ class LocalCodeExecutor:
                             )
                             combined_message += f"{role_prefix}{msg.content}\n\n"
                         combined_message = combined_message.strip()
-                        response = await self.model.ainvoke(combined_message)
+                        response = await self._convert_and_invoke(
+                            [
+                                ConversationRecord(
+                                    role=ConversationRole.USER, content=combined_message
+                                )
+                            ]
+                        )
                     elif "gemini" in model_name or "mistral" in model_name:
                         # Convert system messages to human messages for Google Gemini
                         # or Mistral models.
@@ -439,9 +495,6 @@ class LocalCodeExecutor:
                         response = await self._convert_and_invoke(messages)
                     else:
                         response = await self._convert_and_invoke(messages)
-
-                # Update the total token count
-                self.total_tokens += self.get_invoke_token_count(messages)
 
                 return response
 
@@ -875,6 +928,16 @@ class LocalCodeExecutor:
 
             print_execution_section(ExecutionSection.RESULT, content=result)
             self.context["last_code_result"] = result
+
+            token_metrics = self.get_token_metrics()
+            print_execution_section(
+                ExecutionSection.TOKEN_USAGE,
+                data={
+                    "prompt_tokens": token_metrics.total_prompt_tokens,
+                    "completion_tokens": token_metrics.total_completion_tokens,
+                    "cost": token_metrics.total_cost,
+                },
+            )
 
             print_execution_section(ExecutionSection.FOOTER)
             self.step_counter += 1
