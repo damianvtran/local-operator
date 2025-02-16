@@ -362,19 +362,19 @@ def mock_openrouter_client():
             id="openai/gpt-4o",
             name="GPT-4o",
             description="Mock description before",
-            pricing=MagicMock(prompt=1, completion=2),
+            pricing=MagicMock(prompt=1.0 / 1_000_000, completion=2.0 / 1_000_000),
         ),
         MagicMock(
             id="google/gemini-2.0-flash-001",
             name="Gemini 2.0 Flash",
             description="Mock description",
-            pricing=MagicMock(prompt=5, completion=10),
+            pricing=MagicMock(prompt=5.0 / 1_000_000, completion=10.0 / 1_000_000),
         ),
         MagicMock(
             id="anthropic/claude-3-5-sonnet-latest",
             name="Claude 3.5 Sonnet",
             description="Mock description after",
-            pricing=MagicMock(prompt=15, completion=20),
+            pricing=MagicMock(prompt=15.0 / 1_000_000, completion=20.0 / 1_000_000),
         ),
     ]
     mock_response = MagicMock(data=mock_model_data)
