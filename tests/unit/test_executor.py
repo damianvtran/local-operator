@@ -25,25 +25,26 @@ def normalize_code_block(code: str) -> str:
 
 
 @pytest.fixture
-def mock_model():
-    model = AsyncMock()
-    model.ainvoke = AsyncMock()
-    return model
+def mock_model_config():
+    model_configuration = MagicMock()
+    model_configuration.instance = AsyncMock()
+    model_configuration.instance.ainvoke = AsyncMock()
+    return model_configuration
 
 
 @pytest.fixture
-def executor(mock_model):
+def executor(mock_model_config):
     agent = MagicMock()
     agent.id = "test_agent"
     agent.name = "Test Agent"
     agent.version = "1.0.0"
     agent.security_prompt = ""
 
-    return LocalCodeExecutor(mock_model, agent=agent)
+    return LocalCodeExecutor(mock_model_config, agent=agent)
 
 
 @pytest.fixture
-def cli_operator(mock_model, executor):
+def cli_operator(mock_model_config, executor):
     credential_manager = MagicMock()
     credential_manager.get_credential = MagicMock(return_value="test_key")
 
@@ -56,7 +57,7 @@ def cli_operator(mock_model, executor):
     operator = Operator(
         executor=executor,
         credential_manager=credential_manager,
-        model_instance=mock_model,
+        model_configuration=mock_model_config,
         config_manager=config_manager,
         type=OperatorType.CLI,
         agent_registry=agent_registry,
@@ -360,48 +361,48 @@ def test_extract_code_blocks(executor, case):
 
 
 @pytest.mark.asyncio
-async def test_check_code_safety_safe(executor, mock_model):
-    mock_model.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
+async def test_check_code_safety_safe(executor, mock_model_config):
+    mock_model_config.instance.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
     code = "print('hello')"
     result = await executor.check_code_safety(code)
     assert result == ConfirmSafetyResult.SAFE
-    mock_model.ainvoke.assert_called_once()
+    mock_model_config.instance.ainvoke.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_check_code_safety_unsafe(executor, mock_model):
+async def test_check_code_safety_unsafe(executor, mock_model_config):
     # Test the default path when can_prompt_user is True
-    mock_model.ainvoke.return_value.content = (
+    mock_model_config.instance.ainvoke.return_value.content = (
         "The code is unsafe because it deletes important files\n\n[UNSAFE]"
     )
     code = "x = 1 + 1"
     result = await executor.check_code_safety(code)
     assert result == ConfirmSafetyResult.UNSAFE
-    mock_model.ainvoke.assert_called_once()
+    mock_model_config.instance.ainvoke.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_check_code_safety_override(executor, mock_model):
-    mock_model.ainvoke.return_value.content = (
+async def test_check_code_safety_override(executor, mock_model_config):
+    mock_model_config.instance.ainvoke.return_value.content = (
         "The code is safe with security override\n\n[OVERRIDE]"
     )
     code = "x = 1 + 1"
     result = await executor.check_code_safety(code)
     assert result == ConfirmSafetyResult.OVERRIDE
-    mock_model.ainvoke.assert_called_once()
+    mock_model_config.instance.ainvoke.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_check_code_safety_unsafe_without_prompt(executor, mock_model):
+async def test_check_code_safety_unsafe_without_prompt(executor, mock_model_config):
     # Test the branch when can_prompt_user is False
     executor.can_prompt_user = False
-    mock_model.ainvoke.return_value.content = (
+    mock_model_config.instance.ainvoke.return_value.content = (
         "The code is unsafe because it deletes important files\n\n[UNSAFE]"
     )
     code = "x = 1 + 1"
     result = await executor.check_code_safety(code)
     assert result == ConfirmSafetyResult.UNSAFE
-    mock_model.ainvoke.assert_called_once()
+    mock_model_config.instance.ainvoke.assert_called_once()
 
     # Conversation history is converted to a list of Dict
     assert executor.conversation_history[-1].role == ConversationRole.ASSISTANT
@@ -412,8 +413,8 @@ async def test_check_code_safety_unsafe_without_prompt(executor, mock_model):
 
 
 @pytest.mark.asyncio
-async def test_execute_code_success(executor, mock_model):
-    mock_model.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
+async def test_execute_code_success(executor, mock_model_config):
+    mock_model_config.instance.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
     code = "print('hello')"
 
     with patch("sys.stdout", new_callable=io.StringIO):
@@ -423,8 +424,8 @@ async def test_execute_code_success(executor, mock_model):
 
 
 @pytest.mark.asyncio
-async def test_execute_code_no_output(executor, mock_model):
-    mock_model.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
+async def test_execute_code_no_output(executor, mock_model_config):
+    mock_model_config.instance.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
     code = "x = 1 + 1"  # Code that produces no output
 
     with patch("sys.stdout", new_callable=io.StringIO):
@@ -434,9 +435,9 @@ async def test_execute_code_no_output(executor, mock_model):
 
 
 @pytest.mark.asyncio
-async def test_execute_code_safety_no_prompt(executor, mock_model):
+async def test_execute_code_safety_no_prompt(executor, mock_model_config):
     executor.can_prompt_user = False
-    mock_model.ainvoke.return_value.content = (
+    mock_model_config.instance.ainvoke.return_value.content = (
         "The code is unsafe because it deletes important files\n\n[UNSAFE]"
     )
     code = "import os; os.remove('file.txt')"  # Potentially dangerous code
@@ -453,9 +454,9 @@ async def test_execute_code_safety_no_prompt(executor, mock_model):
 
 
 @pytest.mark.asyncio
-async def test_execute_code_safety_with_prompt(executor, mock_model):
+async def test_execute_code_safety_with_prompt(executor, mock_model_config):
     # Default can_prompt_user is True
-    mock_model.ainvoke.return_value.content = (
+    mock_model_config.instance.ainvoke.return_value.content = (
         "The code is unsafe because it deletes important files\n\n[UNSAFE]"
     )
     code = "import os; os.remove('file.txt')"  # Potentially dangerous code
@@ -475,9 +476,9 @@ async def test_execute_code_safety_with_prompt(executor, mock_model):
 
 
 @pytest.mark.asyncio
-async def test_execute_code_safety_with_prompt_approved(executor, mock_model):
+async def test_execute_code_safety_with_prompt_approved(executor, mock_model_config):
     # Default can_prompt_user is True
-    mock_model.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
+    mock_model_config.instance.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
     code = "x = 1 + 1"
 
     with (
@@ -491,9 +492,9 @@ async def test_execute_code_safety_with_prompt_approved(executor, mock_model):
 
 
 @pytest.mark.asyncio
-async def test_execute_code_safety_with_override(executor, mock_model):
+async def test_execute_code_safety_with_override(executor, mock_model_config):
     # Default can_prompt_user is True
-    mock_model.ainvoke.return_value.content = (
+    mock_model_config.instance.ainvoke.return_value.content = (
         "The code is unsafe but has security override\n\n[OVERRIDE]"
     )
     code = "x = 1 + 1"
@@ -568,7 +569,7 @@ def test_get_confirm_safety_result(case):
 
 
 @pytest.mark.asyncio
-async def test_process_response(executor, mock_model):
+async def test_process_response(executor, mock_model_config):
     response = ResponseJsonSchema(
         previous_step_success=True,
         previous_goal="",
@@ -580,7 +581,7 @@ async def test_process_response(executor, mock_model):
         learnings="",
         plan="",
     )
-    mock_model.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
+    mock_model_config.instance.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
 
     with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
         await executor.process_response(response)
@@ -654,11 +655,13 @@ def test_limit_conversation_history(executor):
 
 
 @pytest.mark.asyncio
-async def test_summarize_old_steps(mock_model):
-    executor = LocalCodeExecutor(model=mock_model, detail_conversation_length=2)
+async def test_summarize_old_steps(mock_model_config):
+    executor = LocalCodeExecutor(
+        model_configuration=mock_model_config, detail_conversation_length=2
+    )
 
     # Mock the summarization response
-    mock_model.ainvoke.return_value.content = "[SUMMARY] This is a summary"
+    mock_model_config.instance.ainvoke.return_value.content = "[SUMMARY] This is a summary"
 
     test_cases = [
         {
@@ -852,7 +855,7 @@ async def test_summarize_old_steps_all_detail(executor):
 async def test_invoke_model_api_error(executor):
     mock_request = MagicMock()
     with patch("asyncio.sleep", AsyncMock(return_value=None)):
-        executor.model.ainvoke.side_effect = APIError(
+        executor.model_configuration.instance.ainvoke.side_effect = APIError(
             message="API Error",
             request=mock_request,
             body={"code": "error_code", "type": "error_type"},
@@ -871,7 +874,7 @@ async def test_invoke_model_api_error(executor):
 @pytest.mark.asyncio
 async def test_invoke_model_rate_limit(executor):
     mock_request = MagicMock()
-    executor.model.ainvoke.side_effect = APIError(
+    executor.model_configuration.instance.ainvoke.side_effect = APIError(
         message="Rate limit exceeded",
         request=mock_request,
         body={"code": "rate_limit_exceeded", "type": "rate_limit_error"},
@@ -891,7 +894,7 @@ async def test_invoke_model_rate_limit(executor):
 @pytest.mark.asyncio
 async def test_invoke_model_context_length(executor):
     mock_request = MagicMock()
-    executor.model.ainvoke.side_effect = APIError(
+    executor.model_configuration.instance.ainvoke.side_effect = APIError(
         message="Maximum context length exceeded",
         request=mock_request,
         body={"code": "context_length_exceeded", "type": "invalid_request_error"},
@@ -910,7 +913,7 @@ async def test_invoke_model_context_length(executor):
 
 @pytest.mark.asyncio
 async def test_invoke_model_general_exception(executor):
-    executor.model.ainvoke.side_effect = Exception("Unexpected error")
+    executor.model_configuration.instance.ainvoke.side_effect = Exception("Unexpected error")
 
     with patch("asyncio.sleep", AsyncMock(return_value=None)):
         with pytest.raises(Exception) as exc_info:
@@ -923,7 +926,7 @@ async def test_invoke_model_general_exception(executor):
 
 @pytest.mark.asyncio
 async def test_invoke_model_timeout(executor):
-    executor.model.ainvoke.side_effect = TimeoutError("Request timed out")
+    executor.model_configuration.instance.ainvoke.side_effect = TimeoutError("Request timed out")
 
     with patch("asyncio.sleep", AsyncMock(return_value=None)):
         with pytest.raises(TimeoutError) as exc_info:

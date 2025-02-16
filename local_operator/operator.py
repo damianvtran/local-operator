@@ -20,7 +20,7 @@ from local_operator.executor import (
     LocalCodeExecutor,
     process_json_response,
 )
-from local_operator.model.configure import ModelType
+from local_operator.model.configure import ModelConfiguration
 from local_operator.tools import index_current_directory
 from local_operator.types import (
     ConversationRecord,
@@ -76,7 +76,7 @@ class Operator:
 
     credential_manager: CredentialManager
     config_manager: ConfigManager
-    model: ModelType
+    model_configuration: ModelConfiguration
     executor: LocalCodeExecutor
     executor_is_processing: bool
     type: OperatorType
@@ -88,7 +88,7 @@ class Operator:
         self,
         executor: LocalCodeExecutor,
         credential_manager: CredentialManager,
-        model_instance: ModelType,
+        model_configuration: ModelConfiguration,
         config_manager: ConfigManager,
         type: OperatorType,
         agent_registry: AgentRegistry,
@@ -100,7 +100,7 @@ class Operator:
         Args:
             executor (LocalCodeExecutor): Executor instance for handling code execution
             credential_manager (CredentialManager): Manager for handling credentials
-            model_instance (ModelType): The configured language model instance
+            model_configuration (ModelConfiguration): The configured language model instance
             config_manager (ConfigManager): Manager for handling configuration
             type (OperatorType): Type of operator (CLI or Server)
             agent_registry (AgentRegistry): Registry for managing AI agents
@@ -118,7 +118,7 @@ class Operator:
         """
         self.credential_manager = credential_manager
         self.config_manager = config_manager
-        self.model = model_instance
+        self.model_configuration = model_configuration
         self.executor = executor
         self.executor_is_processing = False
         self.type = type
@@ -346,7 +346,7 @@ class Operator:
             and not self._agent_requires_user_input(response_json)
             and not self.executor.interrupted
         ):
-            if self.model is None:
+            if self.model_configuration is None:
                 raise ValueError("Model is not initialized")
 
             # Add environment details, etc.
