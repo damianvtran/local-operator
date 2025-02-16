@@ -5,7 +5,11 @@ from pydantic import SecretStr
 
 from local_operator.credentials import CredentialManager
 from local_operator.mocks import ChatNoop
-from local_operator.model.configure import calculate_cost, configure_model
+from local_operator.model.configure import (
+    calculate_cost,
+    configure_model,
+    get_model_info_from_openrouter,
+)
 from local_operator.model.registry import ModelInfo
 
 
@@ -119,7 +123,9 @@ def test_configure_model_anthropic(mock_credential_manager):
     with patch(
         "local_operator.model.configure.ChatAnthropic", return_value=MagicMock()
     ) as mock_chat_anthropic:
-        model_configuration = configure_model("anthropic", "claude-x", mock_credential_manager)
+        model_configuration = configure_model(
+            "anthropic", "claude-3-5-sonnet-latest", mock_credential_manager
+        )
         assert model_configuration is not None
         mock_chat_anthropic.assert_called_once()
         call_args = mock_chat_anthropic.call_args
@@ -128,7 +134,7 @@ def test_configure_model_anthropic(mock_credential_manager):
             == SecretStr("test_key").get_secret_value()
         )
         assert model_configuration.api_key is not None
-        assert call_args.kwargs["model_name"] == "claude-x"
+        assert call_args.kwargs["model_name"] == "claude-3-5-sonnet-latest"
         assert call_args.kwargs["temperature"] == 0.3
         assert call_args.kwargs["timeout"] is None
         assert call_args.kwargs["stop"] is None
@@ -154,7 +160,9 @@ def test_configure_model_anthropic_fallback():
     with patch(
         "local_operator.model.configure.ChatAnthropic", return_value=MagicMock()
     ) as mock_chat_anthropic:
-        model_configuration = configure_model("anthropic", "claude-x", credential_manager)
+        model_configuration = configure_model(
+            "anthropic", "claude-3-5-sonnet-latest", credential_manager
+        )
         assert model_configuration is not None
         mock_chat_anthropic.assert_called_once()
         call_args = mock_chat_anthropic.call_args
@@ -172,7 +180,6 @@ def test_configure_model_kimi_default(mock_credential_manager):
         model_configuration = configure_model("kimi", "", mock_credential_manager)
         assert model_configuration is not None
         call_args = mock_chat_openai.call_args
-        assert call_args.kwargs["model"] == "moonshot-v1-32k"
         assert call_args.kwargs["base_url"] == "https://api.moonshot.cn/v1"
         assert model_configuration.api_key is not None
 
@@ -181,10 +188,10 @@ def test_configure_model_kimi_explicit(mock_credential_manager):
     with patch(
         "local_operator.model.configure.ChatOpenAI", return_value=MagicMock()
     ) as mock_chat_openai:
-        model_configuration = configure_model("kimi", "custom-kimi-model", mock_credential_manager)
+        model_configuration = configure_model("kimi", "moonshot-v1-8k", mock_credential_manager)
         assert model_configuration is not None
         call_args = mock_chat_openai.call_args
-        assert call_args.kwargs["model"] == "custom-kimi-model"
+        assert call_args.kwargs["model"] == "moonshot-v1-8k"
         assert model_configuration.api_key is not None
 
 
@@ -197,7 +204,7 @@ def test_configure_model_kimi_fallback():
     with patch(
         "local_operator.model.configure.ChatOpenAI", return_value=MagicMock()
     ) as mock_chat_openai:
-        model_configuration = configure_model("kimi", "custom-kimi-model", credential_manager)
+        model_configuration = configure_model("kimi", "moonshot-v1-8k", credential_manager)
         assert model_configuration is not None
         call_args = mock_chat_openai.call_args
         assert (
@@ -205,7 +212,7 @@ def test_configure_model_kimi_fallback():
             == SecretStr("fallback_kimi_key").get_secret_value()
         )
         assert model_configuration.api_key is not None
-        assert call_args.kwargs["model"] == "custom-kimi-model"
+        assert call_args.kwargs["model"] == "moonshot-v1-8k"
 
 
 def test_configure_model_alibaba_default(mock_credential_manager):
@@ -231,7 +238,7 @@ def test_configure_model_alibaba_fallback():
     with patch(
         "local_operator.model.configure.ChatOpenAI", return_value=MagicMock()
     ) as mock_chat_openai:
-        model_configuration = configure_model("alibaba", "custom-alibaba-model", credential_manager)
+        model_configuration = configure_model("alibaba", "qwen-plus", credential_manager)
         assert model_configuration is not None
         call_args = mock_chat_openai.call_args
         assert (
@@ -239,7 +246,7 @@ def test_configure_model_alibaba_fallback():
             == SecretStr("fallback_alibaba_key").get_secret_value()
         )
         assert model_configuration.api_key is not None
-        assert call_args.kwargs["model"] == "custom-alibaba-model"
+        assert call_args.kwargs["model"] == "qwen-plus"
 
 
 def test_configure_model_openai_fallback():
@@ -251,7 +258,7 @@ def test_configure_model_openai_fallback():
     with patch(
         "local_operator.model.configure.ChatOpenAI", return_value=MagicMock()
     ) as mock_chat_openai:
-        model_configuration = configure_model("openai", "custom-openai-model", credential_manager)
+        model_configuration = configure_model("openai", "gpt-4o", credential_manager)
         assert model_configuration is not None
         call_args = mock_chat_openai.call_args
         assert (
@@ -259,7 +266,7 @@ def test_configure_model_openai_fallback():
             == SecretStr("fallback_openai_key").get_secret_value()
         )
         assert model_configuration.api_key is not None
-        assert call_args.kwargs["model"] == "custom-openai-model"
+        assert call_args.kwargs["model"] == "gpt-4o"
 
 
 def test_configure_model_ollama_missing_model(mock_credential_manager):
@@ -275,7 +282,7 @@ def test_configure_model_google_default(mock_credential_manager):
         model_configuration = configure_model("google", "", mock_credential_manager)
         assert model_configuration is not None
         call_args = mock_chat_google.call_args
-        assert call_args.kwargs["model"] == "gemini-2.0-flash"
+        assert call_args.kwargs["model"] == "gemini-2.0-flash-001"
         assert model_configuration.api_key is not None
 
 
@@ -288,7 +295,7 @@ def test_configure_model_google_fallback():
     with patch(
         "local_operator.model.configure.ChatGoogleGenerativeAI", return_value=MagicMock()
     ) as mock_chat_google:
-        model_configuration = configure_model("google", "custom-google-model", credential_manager)
+        model_configuration = configure_model("google", "gemini-2.0-flash-001", credential_manager)
         assert model_configuration is not None
         call_args = mock_chat_google.call_args
         assert (
@@ -296,7 +303,7 @@ def test_configure_model_google_fallback():
             == SecretStr("fallback_google_key").get_secret_value()
         )
         assert model_configuration.api_key is not None
-        assert call_args.kwargs["model"] == "custom-google-model"
+        assert call_args.kwargs["model"] == "gemini-2.0-flash-001"
 
 
 def test_configure_model_mistral_default(mock_credential_manager):
@@ -320,7 +327,7 @@ def test_configure_model_mistral_fallback():
     with patch(
         "local_operator.model.configure.ChatOpenAI", return_value=MagicMock()
     ) as mock_chat_openai:
-        model_configuration = configure_model("mistral", "custom-mistral-model", credential_manager)
+        model_configuration = configure_model("mistral", "mistral-large-latest", credential_manager)
         assert model_configuration is not None
         call_args = mock_chat_openai.call_args
         assert (
@@ -328,7 +335,7 @@ def test_configure_model_mistral_fallback():
             == SecretStr("fallback_mistral_key").get_secret_value()
         )
         assert model_configuration.api_key is not None
-        assert call_args.kwargs["model"] == "custom-mistral-model"
+        assert call_args.kwargs["model"] == "mistral-large-latest"
 
 
 def test_calculate_cost() -> None:
@@ -343,3 +350,50 @@ def test_calculate_cost() -> None:
 
     # Test with zero tokens
     assert calculate_cost(model_info, 0, 0) == 0.0
+
+
+@pytest.fixture
+def mock_openrouter_client():
+    """Mocks the OpenRouter client to return a predefined model list."""
+    client = MagicMock()
+    # Define a mock response that mimics the OpenRouter API's list_models endpoint
+    mock_model_data = [
+        MagicMock(
+            id="openai/gpt-4o",
+            name="GPT-4o",
+            description="Mock description before",
+            pricing=MagicMock(prompt=1, completion=2),
+        ),
+        MagicMock(
+            id="google/gemini-2.0-flash-001",
+            name="Gemini 2.0 Flash",
+            description="Mock description",
+            pricing=MagicMock(prompt=5, completion=10),
+        ),
+        MagicMock(
+            id="anthropic/claude-3-5-sonnet-latest",
+            name="Claude 3.5 Sonnet",
+            description="Mock description after",
+            pricing=MagicMock(prompt=15, completion=20),
+        ),
+    ]
+    mock_response = MagicMock(data=mock_model_data)
+    client.list_models.return_value = mock_response
+    return client
+
+
+def test_get_model_info_from_openrouter(mock_openrouter_client):
+    """Tests retrieving model info from OpenRouter when a match is found."""
+    model_info = get_model_info_from_openrouter(
+        mock_openrouter_client, "google/gemini-2.0-flash-001"
+    )
+    assert model_info.input_price == 5
+    assert model_info.output_price == 10
+
+
+def test_get_model_info_from_openrouter_no_match(mock_openrouter_client):
+    """Tests retrieving model info from OpenRouter when no match is found."""
+    with pytest.raises(
+        ValueError, match="Model not found from openrouter models API: non-existent-model"
+    ):
+        get_model_info_from_openrouter(mock_openrouter_client, "non-existent-model")

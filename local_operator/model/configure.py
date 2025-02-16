@@ -7,8 +7,14 @@ from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
+from local_operator.clients.openrouter import OpenRouterClient
+from local_operator.credentials import CredentialManager
 from local_operator.mocks import ChatMock, ChatNoop
-from local_operator.model.registry import ModelInfo
+from local_operator.model.registry import (
+    ModelInfo,
+    get_model_info,
+    openrouter_default_model_info,
+)
 
 ModelType = Union[ChatOpenAI, ChatOllama, ChatAnthropic, ChatGoogleGenerativeAI, ChatMock, ChatNoop]
 
@@ -154,16 +160,49 @@ def validate_model(hosting: str, model: str, api_key: SecretStr) -> bool:
     return False
 
 
-def configure_model(hosting: str, model_name: str, credential_manager) -> ModelConfiguration:
+def get_model_info_from_openrouter(client: OpenRouterClient, model_name: str) -> ModelInfo:
+    """
+    Retrieves model information from OpenRouter based on the model name.
+
+    Args:
+        client (OpenRouterClient): The OpenRouter client instance.
+        model_name (str): The name of the model to retrieve information for.
+
+    Returns:
+        ModelInfo: The model information retrieved from OpenRouter.
+
+    Raises:
+        ValueError: If the model is not found on OpenRouter.
+        RuntimeError: If there is an error retrieving the model information.
+    """
+    models = client.list_models()
+    for model in models.data:
+        if model.id == model_name:
+            model_info = openrouter_default_model_info
+            model_info.input_price = model.pricing.prompt
+            model_info.output_price = model.pricing.completion
+            model_info.description = model.description
+            return model_info
+
+    raise ValueError(f"Model not found from openrouter models API: {model_name}")
+
+
+def configure_model(
+    hosting: str,
+    model_name: str,
+    credential_manager: CredentialManager,
+    model_info_client: Optional[OpenRouterClient] = None,
+) -> ModelConfiguration:
     """Configure and return the appropriate model based on hosting platform.
 
     Args:
         hosting (str): Hosting platform (deepseek, openai, anthropic, ollama, or noop)
         model_name (str): Model name to use
         credential_manager: CredentialManager instance for API key management
+        model_info_client: OpenRouterClient instance for model info
 
     Returns:
-        tuple[ModelType, Optional[SecretStr]]: Tuple containing configured model instance and API
+        ModelConfiguration: Config object containing the configured model instance and API
         key if applicable
 
     Raises:
@@ -281,7 +320,7 @@ def configure_model(hosting: str, model_name: str, credential_manager) -> ModelC
 
     elif hosting == "google":
         if not model_name:
-            model_name = "gemini-2.0-flash"
+            model_name = "gemini-2.0-flash-001"
         api_key = credential_manager.get_credential("GOOGLE_AI_STUDIO_API_KEY")
         if not api_key:
             api_key = credential_manager.prompt_for_credential("GOOGLE_AI_STUDIO_API_KEY")
@@ -315,11 +354,21 @@ def configure_model(hosting: str, model_name: str, credential_manager) -> ModelC
     else:
         raise ValueError(f"Unsupported hosting platform: {hosting}")
 
+    model_info: ModelInfo
+
+    if model_info_client:
+        if hosting == "openrouter":
+            model_info = get_model_info_from_openrouter(model_info_client, model_name)
+        else:
+            raise ValueError(f"Model info client not supported for hosting: {hosting}")
+    else:
+        model_info = get_model_info(hosting, model_name)
+
     return ModelConfiguration(
         hosting=hosting,
         name=model_name,
         instance=configured_model,
-        info=ModelInfo(),
+        info=model_info,
         api_key=api_key,
     )
 
