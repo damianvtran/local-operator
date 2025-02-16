@@ -241,7 +241,7 @@ async def test_operator_print_hello_world(cli_operator):
     """Test that operator correctly handles 'print hello world' command and output
     using ChatMock."""
     # Configure mock model
-    mock_model_config = configure_model("test", "", None)
+    mock_model_config = configure_model("test", "", MagicMock())
 
     mock_executor = LocalCodeExecutor(mock_model_config)
     cli_operator.executor = mock_executor

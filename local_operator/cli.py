@@ -21,12 +21,14 @@ import os
 import traceback
 from importlib.metadata import version
 from pathlib import Path
+from typing import Optional
 
 import uvicorn
 from pydantic import SecretStr
 
 from local_operator.admin import add_admin_tools
 from local_operator.agents import AgentEditFields, AgentRegistry
+from local_operator.clients.openrouter import OpenRouterClient
 from local_operator.clients.serpapi import SerpApiClient
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
@@ -433,7 +435,16 @@ def main() -> int:
         else:
             conversation_history = []
 
-        model_configuration = configure_model(hosting, model_name, credential_manager)
+        model_info_client: Optional[OpenRouterClient] = None
+
+        if hosting == "openrouter":
+            model_info_client = OpenRouterClient(
+                credential_manager.get_credential("OPENROUTER_API_KEY")
+            )
+
+        model_configuration = configure_model(
+            hosting, model_name, credential_manager, model_info_client
+        )
 
         if not model_configuration.instance:
             error_msg = (

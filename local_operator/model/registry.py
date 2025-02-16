@@ -51,12 +51,20 @@ def get_model_info(hosting: str, model: str) -> ModelInfo:
     Raises:
         ValueError: If the hosting provider is unsupported or the model is not found.
     """
+
     try:
         if hosting == "anthropic":
             if model in anthropic_models:
                 return anthropic_models[model]
             else:
                 raise ValueError(f"Model {model} not found for Anthropic hosting.")
+        elif hosting == "ollama":
+            return ollama_default_model_info
+        elif hosting == "deepseek":
+            if model in deepseek_models:
+                return deepseek_models[model]
+            else:
+                raise ValueError(f"Model {model} not found for DeepSeek hosting.")
         elif hosting == "google":
             if model in google_models:
                 return google_models[model]
@@ -71,6 +79,11 @@ def get_model_info(hosting: str, model: str) -> ModelInfo:
                 return qwen_models[model]
             else:
                 raise ValueError(f"Model {model} not found for Alibaba hosting.")
+        elif hosting == "kimi":
+            if model in kimi_models:
+                return kimi_models[model]
+            else:
+                raise ValueError(f"Model {model} not found for Kimi hosting.")
         elif hosting == "mistral":
             if model in mistral_models:
                 return mistral_models[model]
@@ -127,15 +140,28 @@ anthropic_models: Dict[str, ModelInfo] = {
     ),
 }
 
-openrouter_default_model_info: ModelInfo = ModelInfo(
+anthropic_models["claude-3-5-sonnet-latest"] = anthropic_models["claude-3-5-sonnet-20241022"]
+anthropic_models["claude-3-opus-latest"] = anthropic_models["claude-3-opus-20240229"]
+anthropic_models["claude-3-haiku-latest"] = anthropic_models["claude-3-haiku-20240307"]
+
+ollama_default_model_info: ModelInfo = ModelInfo(
     max_tokens=8192,
     context_window=200_000,
     supports_images=True,
     supports_prompt_cache=True,
-    input_price=3.0,
-    output_price=15.0,
-    cache_writes_price=3.75,
-    cache_reads_price=0.3,
+    input_price=0.0,
+    output_price=0.0,
+)
+
+openrouter_default_model_info: ModelInfo = ModelInfo(
+    max_tokens=8192,
+    context_window=200_000,
+    supports_images=False,
+    supports_prompt_cache=False,
+    input_price=0.0,
+    output_price=0.0,
+    cache_writes_price=0.0,
+    cache_reads_price=0.0,
 )
 
 openai_model_info_sane_defaults: ModelInfo = ModelInfo(
@@ -213,6 +239,8 @@ google_models: Dict[str, ModelInfo] = {
         output_price=0,
     ),
 }
+
+google_models["gemini-2.0-flash"] = google_models["gemini-2.0-flash-001"]
 
 deepseek_models: Dict[str, ModelInfo] = {
     "deepseek-chat": ModelInfo(
@@ -515,6 +543,8 @@ mistral_models: Dict[str, ModelInfo] = {
     ),
 }
 
+mistral_models["mistral-large-latest"] = mistral_models["mistral-large-2411"]
+
 litellm_model_info_sane_defaults: ModelInfo = ModelInfo(
     max_tokens=-1,
     context_window=128_000,
@@ -523,3 +553,68 @@ litellm_model_info_sane_defaults: ModelInfo = ModelInfo(
     input_price=0,
     output_price=0,
 )
+
+YUAN_TO_USD = 0.14
+
+kimi_models: Dict[str, ModelInfo] = {
+    "moonshot-v1-8k": ModelInfo(
+        max_tokens=8192,
+        context_window=8192,
+        supports_images=False,
+        supports_prompt_cache=False,
+        input_price=12.00 * YUAN_TO_USD,
+        output_price=12.00 * YUAN_TO_USD,
+        cache_writes_price=24.00 * YUAN_TO_USD,
+        cache_reads_price=0.02 * YUAN_TO_USD,
+    ),
+    "moonshot-v1-32k": ModelInfo(
+        max_tokens=8192,
+        context_window=32_768,
+        supports_images=False,
+        supports_prompt_cache=False,
+        input_price=24.00 * YUAN_TO_USD,
+        output_price=24.00 * YUAN_TO_USD,
+        cache_writes_price=24.00 * YUAN_TO_USD,
+        cache_reads_price=0.02 * YUAN_TO_USD,
+    ),
+    "moonshot-v1-128k": ModelInfo(
+        max_tokens=8192,
+        context_window=131_072,
+        supports_images=False,
+        supports_prompt_cache=False,
+        input_price=60.00 * YUAN_TO_USD,
+        output_price=60.00 * YUAN_TO_USD,
+        cache_writes_price=24.00 * YUAN_TO_USD,
+        cache_reads_price=0.02 * YUAN_TO_USD,
+    ),
+    "moonshot-v1-8k-vision-preview": ModelInfo(
+        max_tokens=8192,
+        context_window=8192,
+        supports_images=True,
+        supports_prompt_cache=False,
+        input_price=12.00 * YUAN_TO_USD,
+        output_price=12.00 * YUAN_TO_USD,
+        cache_writes_price=24.00 * YUAN_TO_USD,
+        cache_reads_price=0.02 * YUAN_TO_USD,
+    ),
+    "moonshot-v1-32k-vision-preview": ModelInfo(
+        max_tokens=8192,
+        context_window=32_768,
+        supports_images=True,
+        supports_prompt_cache=False,
+        input_price=24.00 * YUAN_TO_USD,
+        output_price=24.00 * YUAN_TO_USD,
+        cache_writes_price=24.00 * YUAN_TO_USD,
+        cache_reads_price=0.02 * YUAN_TO_USD,
+    ),
+    "moonshot-v1-128k-vision-preview": ModelInfo(
+        max_tokens=8192,
+        context_window=131_072,
+        supports_images=True,
+        supports_prompt_cache=False,
+        input_price=60.00 * YUAN_TO_USD,
+        output_price=60.00 * YUAN_TO_USD,
+        cache_writes_price=24.00 * YUAN_TO_USD,
+        cache_reads_price=0.02 * YUAN_TO_USD,
+    ),
+}
