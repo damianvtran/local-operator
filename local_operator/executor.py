@@ -397,23 +397,20 @@ class LocalCodeExecutor:
             Exception: If there is an error during model invocation.
         """
         messages_list = [msg.dict() for msg in messages]
-        try:
-            # Use get_openai_callback for OpenAI models to track token usage and cost
-            if isinstance(self.model, ChatOpenAI):
-                with get_openai_callback() as cb:
-                    response = await self.model.ainvoke(messages_list)
-                    if cb is not None:
-                        self.token_metrics.total_cost += cb.total_cost
-                        self.token_metrics.total_prompt_tokens += cb.prompt_tokens
-                        self.token_metrics.total_completion_tokens += cb.completion_tokens
-            else:
-                # For other models, invoke the model directly
-                self.token_metrics.total_prompt_tokens += self.get_invoke_token_count(messages)
+        # Use get_openai_callback for OpenAI models to track token usage and cost
+        if isinstance(self.model, ChatOpenAI):
+            with get_openai_callback() as cb:
                 response = await self.model.ainvoke(messages_list)
+                if cb is not None:
+                    self.token_metrics.total_cost += cb.total_cost
+                    self.token_metrics.total_prompt_tokens += cb.prompt_tokens
+                    self.token_metrics.total_completion_tokens += cb.completion_tokens
+        else:
+            # For other models, invoke the model directly
+            self.token_metrics.total_prompt_tokens += self.get_invoke_token_count(messages)
+            response = await self.model.ainvoke(messages_list)
 
-            return response
-        except Exception as e:
-            raise Exception(f"Error invoking model: {e}") from e
+        return response
 
     async def invoke_model(
         self, messages: List[ConversationRecord], max_attempts: int = 3
