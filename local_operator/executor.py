@@ -420,13 +420,10 @@ class LocalCodeExecutor:
 
         # Use the lookup table to get the cost per million tokens since the openai callback
         # doesn't always return cost information.
-        self.token_metrics.total_cost += (
-            calculate_cost(
-                self.model_configuration.info,
-                new_tokens_prompt,
-                new_tokens_completion,
-            )
-            / 1_000_000
+        self.token_metrics.total_cost += calculate_cost(
+            self.model_configuration.info,
+            new_tokens_prompt,
+            new_tokens_completion,
         )
 
         return response

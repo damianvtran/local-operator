@@ -179,8 +179,10 @@ def get_model_info_from_openrouter(client: OpenRouterClient, model_name: str) ->
     for model in models.data:
         if model.id == model_name:
             model_info = openrouter_default_model_info
-            model_info.input_price = model.pricing.prompt
-            model_info.output_price = model.pricing.completion
+            # Openrouter returns the price per million tokens, so we need to convert it to
+            # the price per token.
+            model_info.input_price = model.pricing.prompt * 1_000_000
+            model_info.output_price = model.pricing.completion * 1_000_000
             model_info.description = model.description
             return model_info
 
@@ -389,8 +391,8 @@ def calculate_cost(model_info: ModelInfo, input_tokens: int, output_tokens: int)
         ValueError: If there is an error during cost calculation.
     """
     try:
-        input_cost = (input_tokens / 1_000_000) * model_info.input_price
-        output_cost = (output_tokens / 1_000_000) * model_info.output_price
+        input_cost = (float(input_tokens) / 1_000_000.0) * model_info.input_price
+        output_cost = (float(output_tokens) / 1_000_000.0) * model_info.output_price
         total_cost = input_cost + output_cost
         return total_cost
     except Exception as e:
