@@ -144,6 +144,7 @@ anthropic_models["claude-3-5-sonnet-latest"] = anthropic_models["claude-3-5-sonn
 anthropic_models["claude-3-opus-latest"] = anthropic_models["claude-3-opus-20240229"]
 anthropic_models["claude-3-haiku-latest"] = anthropic_models["claude-3-haiku-20240307"]
 
+# TODO: Add fetch for token, context window, image support
 ollama_default_model_info: ModelInfo = ModelInfo(
     max_tokens=8192,
     context_window=200_000,
@@ -153,6 +154,7 @@ ollama_default_model_info: ModelInfo = ModelInfo(
     output_price=0.0,
 )
 
+# TODO: Add fetch for token, context window, image support
 openrouter_default_model_info: ModelInfo = ModelInfo(
     max_tokens=8192,
     context_window=200_000,
