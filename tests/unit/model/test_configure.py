@@ -5,7 +5,8 @@ from pydantic import SecretStr
 
 from local_operator.credentials import CredentialManager
 from local_operator.mocks import ChatNoop
-from local_operator.model.configure import configure_model
+from local_operator.model.configure import calculate_cost, configure_model
+from local_operator.model.registry import ModelInfo
 
 
 @pytest.fixture
@@ -324,3 +325,17 @@ def test_configure_model_mistral_fallback():
         )
         assert api_key is not None
         assert call_args.kwargs["model"] == "custom-mistral-model"
+
+
+def test_calculate_cost() -> None:
+    """Test that the calculate_cost function works correctly."""
+    model_info = ModelInfo(input_price=1, output_price=2)
+    input_tokens = 1000
+    output_tokens = 2000
+    expected_cost = (input_tokens / 1_000_000) * model_info.input_price + (
+        output_tokens / 1_000_000
+    ) * model_info.output_price
+    assert calculate_cost(model_info, input_tokens, output_tokens) == pytest.approx(expected_cost)
+
+    # Test with zero tokens
+    assert calculate_cost(model_info, 0, 0) == 0.0
