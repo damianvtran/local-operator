@@ -21,17 +21,19 @@ import os
 import traceback
 from importlib.metadata import version
 from pathlib import Path
+from typing import Optional
 
 import uvicorn
 from pydantic import SecretStr
 
 from local_operator.admin import add_admin_tools
 from local_operator.agents import AgentEditFields, AgentRegistry
+from local_operator.clients.openrouter import OpenRouterClient
 from local_operator.clients.serpapi import SerpApiClient
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
-from local_operator.model import configure_model, validate_model
+from local_operator.model.configure import configure_model, validate_model
 from local_operator.operator import Operator, OperatorType
 from local_operator.tools import ToolRegistry
 
@@ -419,7 +421,7 @@ def main() -> int:
                 print("\033[1;32m╰──────────────────────────────────────────────────\033[0m\n")
 
         hosting = config_manager.get_config_value("hosting")
-        model = config_manager.get_config_value("model_name")
+        model_name = config_manager.get_config_value("model_name")
 
         if agent:
             # Get conversation history if agent name provided
@@ -429,28 +431,37 @@ def main() -> int:
             if agent.hosting:
                 hosting = agent.hosting
             if agent.model:
-                model = agent.model
+                model_name = agent.model
         else:
             conversation_history = []
 
-        model_instance, model_api_key = configure_model(hosting, model, credential_manager)
+        model_info_client: Optional[OpenRouterClient] = None
 
-        if not model_instance:
+        if hosting == "openrouter":
+            model_info_client = OpenRouterClient(
+                credential_manager.get_credential("OPENROUTER_API_KEY")
+            )
+
+        model_configuration = configure_model(
+            hosting, model_name, credential_manager, model_info_client
+        )
+
+        if not model_configuration.instance:
             error_msg = (
                 f"\n\033[1;31mError: Model not found for hosting: "
-                f"{hosting} and model: {model}\033[0m"
+                f"{hosting} and model: {model_name}\033[0m"
             )
             print(error_msg)
             return -1
 
-        validate_model(hosting, model, model_api_key or SecretStr(""))
+        validate_model(hosting, model_name, model_configuration.api_key or SecretStr(""))
 
         training_mode = False
         if args.train:
             training_mode = True
 
         executor = LocalCodeExecutor(
-            model_instance,
+            model_configuration=model_configuration,
             detail_conversation_length=config_manager.get_config_value("detail_length", 10),
             conversation_history=conversation_history,
             agent=agent,
@@ -460,7 +471,7 @@ def main() -> int:
             executor=executor,
             credential_manager=credential_manager,
             config_manager=config_manager,
-            model_instance=model_instance,
+            model_configuration=model_configuration,
             type=OperatorType.CLI,
             agent_registry=agent_registry,
             current_agent=agent,

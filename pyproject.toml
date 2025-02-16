@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.2.16"
+version = "0.2.17"
 description = "A Python-based agent for local command execution"
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damianvtran@gmail.com" }]
@@ -21,6 +21,7 @@ dependencies = [
     "langchain-anthropic",
     "langchain-google-genai",
     "langchain",
+    "langchain-community",
     "python-dotenv",
     "pydantic",
     "tiktoken",

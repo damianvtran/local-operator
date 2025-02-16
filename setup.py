@@ -15,6 +15,7 @@ setup(
         "langchain-anthropic>=0.3.3",
         "langchain-google-genai>=2.0.8",
         "langchain>=0.3.14",
+        "langchain-community>=0.3.14",
         "python-dotenv>=1.0.1",
         "pydantic>=2.10.6",
         "tiktoken>=0.8.0",

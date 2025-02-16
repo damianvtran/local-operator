@@ -7,9 +7,50 @@ from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
+from local_operator.clients.openrouter import OpenRouterClient
+from local_operator.credentials import CredentialManager
 from local_operator.mocks import ChatMock, ChatNoop
+from local_operator.model.registry import (
+    ModelInfo,
+    get_model_info,
+    openrouter_default_model_info,
+)
 
 ModelType = Union[ChatOpenAI, ChatOllama, ChatAnthropic, ChatGoogleGenerativeAI, ChatMock, ChatNoop]
+
+
+class ModelConfiguration:
+    """
+    Configuration class for language models.
+
+    Attributes:
+        hosting (str): The hosting provider name
+        name (str): The model name
+        instance (ModelType): An instance of the language model (e.g., ChatOpenAI,
+        ChatOllama).
+        info (ModelInfo): Information about the model, such as pricing and rate limits.
+        api_key (Optional[SecretStr]): API key for the model.
+    """
+
+    hosting: str
+    name: str
+    instance: ModelType
+    info: ModelInfo
+    api_key: Optional[SecretStr] = None
+
+    def __init__(
+        self,
+        hosting: str,
+        name: str,
+        instance: ModelType,
+        info: ModelInfo,
+        api_key: Optional[SecretStr] = None,
+    ):
+        self.hosting = hosting
+        self.name = name
+        self.instance = instance
+        self.info = info
+        self.api_key = api_key
 
 
 def _check_model_exists_payload(hosting: str, model: str, response_data: Dict[str, Any]) -> bool:
@@ -119,18 +160,51 @@ def validate_model(hosting: str, model: str, api_key: SecretStr) -> bool:
     return False
 
 
+def get_model_info_from_openrouter(client: OpenRouterClient, model_name: str) -> ModelInfo:
+    """
+    Retrieves model information from OpenRouter based on the model name.
+
+    Args:
+        client (OpenRouterClient): The OpenRouter client instance.
+        model_name (str): The name of the model to retrieve information for.
+
+    Returns:
+        ModelInfo: The model information retrieved from OpenRouter.
+
+    Raises:
+        ValueError: If the model is not found on OpenRouter.
+        RuntimeError: If there is an error retrieving the model information.
+    """
+    models = client.list_models()
+    for model in models.data:
+        if model.id == model_name:
+            model_info = openrouter_default_model_info
+            # Openrouter returns the price per million tokens, so we need to convert it to
+            # the price per token.
+            model_info.input_price = model.pricing.prompt * 1_000_000
+            model_info.output_price = model.pricing.completion * 1_000_000
+            model_info.description = model.description
+            return model_info
+
+    raise ValueError(f"Model not found from openrouter models API: {model_name}")
+
+
 def configure_model(
-    hosting: str, model: str, credential_manager
-) -> tuple[ModelType, Optional[SecretStr]]:
+    hosting: str,
+    model_name: str,
+    credential_manager: CredentialManager,
+    model_info_client: Optional[OpenRouterClient] = None,
+) -> ModelConfiguration:
     """Configure and return the appropriate model based on hosting platform.
 
     Args:
         hosting (str): Hosting platform (deepseek, openai, anthropic, ollama, or noop)
-        model (str): Model name to use
+        model_name (str): Model name to use
         credential_manager: CredentialManager instance for API key management
+        model_info_client: OpenRouterClient instance for model info
 
     Returns:
-        tuple[ModelType, Optional[SecretStr]]: Tuple containing configured model instance and API
+        ModelConfiguration: Config object containing the configured model instance and API
         key if applicable
 
     Raises:
@@ -141,17 +215,27 @@ def configure_model(
 
     # Early return for test and noop cases
     if hosting == "test":
-        return ChatMock(), None
+        return ModelConfiguration(
+            hosting=hosting,
+            name=model_name,
+            instance=ChatMock(),
+            info=ModelInfo(),
+        )
     if hosting == "noop":
-        return ChatNoop(), None
+        return ModelConfiguration(
+            hosting=hosting,
+            name=model_name,
+            instance=ChatNoop(),
+            info=ModelInfo(),
+        )
 
     configured_model = None
     api_key: Optional[SecretStr] = None
 
     if hosting == "deepseek":
         base_url = "https://api.deepseek.com/v1"
-        if not model:
-            model = "deepseek-chat"
+        if not model_name:
+            model_name = "deepseek-chat"
         api_key = credential_manager.get_credential("DEEPSEEK_API_KEY")
         if not api_key:
             api_key = credential_manager.prompt_for_credential("DEEPSEEK_API_KEY")
@@ -159,32 +243,32 @@ def configure_model(
             api_key=api_key,
             temperature=0.3,
             base_url=base_url,
-            model=model,
+            model=model_name,
         )
 
     elif hosting == "openai":
-        if not model:
-            model = "gpt-4o"
+        if not model_name:
+            model_name = "gpt-4o"
         api_key = credential_manager.get_credential("OPENAI_API_KEY")
         if not api_key:
             api_key = credential_manager.prompt_for_credential("OPENAI_API_KEY")
-        temperature = 1.0 if model.startswith(("o1", "o3")) else 0.3
+        temperature = 1.0 if model_name.startswith(("o1", "o3")) else 0.3
         configured_model = ChatOpenAI(
             api_key=api_key,
             temperature=temperature,
-            model=model,
+            model=model_name,
         )
 
     elif hosting == "openrouter":
-        if not model:
-            model = "deepseek/deepseek-chat"
+        if not model_name:
+            model_name = "deepseek/deepseek-chat"
         api_key = credential_manager.get_credential("OPENROUTER_API_KEY")
         if not api_key:
             api_key = credential_manager.prompt_for_credential("OPENROUTER_API_KEY")
         configured_model = ChatOpenAI(
             api_key=api_key,
             temperature=0.3,
-            model=model,
+            model=model_name,
             base_url="https://openrouter.ai/api/v1",
             default_headers={
                 "HTTP-Referer": "https://local-operator.com",
@@ -193,8 +277,8 @@ def configure_model(
         )
 
     elif hosting == "anthropic":
-        if not model:
-            model = "claude-3-5-sonnet-latest"
+        if not model_name:
+            model_name = "claude-3-5-sonnet-latest"
         api_key = credential_manager.get_credential("ANTHROPIC_API_KEY")
         if not api_key:
             api_key = credential_manager.prompt_for_credential("ANTHROPIC_API_KEY")
@@ -205,71 +289,111 @@ def configure_model(
         configured_model = ChatAnthropic(
             api_key=api_key,
             temperature=0.3,
-            model_name=model,
+            model_name=model_name,
             timeout=None,
             stop=None,
         )
 
     elif hosting == "kimi":
-        if not model:
-            model = "moonshot-v1-32k"
+        if not model_name:
+            model_name = "moonshot-v1-32k"
         api_key = credential_manager.get_credential("KIMI_API_KEY")
         if not api_key:
             api_key = credential_manager.prompt_for_credential("KIMI_API_KEY")
         configured_model = ChatOpenAI(
             api_key=api_key,
             temperature=0.3,
-            model=model,
+            model=model_name,
             base_url="https://api.moonshot.cn/v1",
         )
 
     elif hosting == "alibaba":
-        if not model:
-            model = "qwen-plus"
+        if not model_name:
+            model_name = "qwen-plus"
         api_key = credential_manager.get_credential("ALIBABA_CLOUD_API_KEY")
         if not api_key:
             api_key = credential_manager.prompt_for_credential("ALIBABA_CLOUD_API_KEY")
         configured_model = ChatOpenAI(
             api_key=api_key,
             temperature=0.3,
-            model=model,
+            model=model_name,
             base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
         )
 
     elif hosting == "google":
-        if not model:
-            model = "gemini-2.0-flash"
+        if not model_name:
+            model_name = "gemini-2.0-flash-001"
         api_key = credential_manager.get_credential("GOOGLE_AI_STUDIO_API_KEY")
         if not api_key:
             api_key = credential_manager.prompt_for_credential("GOOGLE_AI_STUDIO_API_KEY")
         configured_model = ChatGoogleGenerativeAI(
             api_key=api_key,
             temperature=0.3,
-            model=model,
+            model=model_name,
         )
 
     elif hosting == "mistral":
-        if not model:
-            model = "mistral-large-latest"
+        if not model_name:
+            model_name = "mistral-large-latest"
         api_key = credential_manager.get_credential("MISTRAL_API_KEY")
         if not api_key:
             api_key = credential_manager.prompt_for_credential("MISTRAL_API_KEY")
         configured_model = ChatOpenAI(
             api_key=api_key,
             temperature=0.3,
-            model=model,
+            model=model_name,
             base_url="https://api.mistral.ai/v1",
         )
 
     elif hosting == "ollama":
-        if not model:
+        if not model_name:
             raise ValueError("Model is required for ollama hosting")
         configured_model = ChatOllama(
-            model=model,
+            model=model_name,
             temperature=0.3,
         )
 
     else:
         raise ValueError(f"Unsupported hosting platform: {hosting}")
 
-    return configured_model, api_key
+    model_info: ModelInfo
+
+    if model_info_client:
+        if hosting == "openrouter":
+            model_info = get_model_info_from_openrouter(model_info_client, model_name)
+        else:
+            raise ValueError(f"Model info client not supported for hosting: {hosting}")
+    else:
+        model_info = get_model_info(hosting, model_name)
+
+    return ModelConfiguration(
+        hosting=hosting,
+        name=model_name,
+        instance=configured_model,
+        info=model_info,
+        api_key=api_key,
+    )
+
+
+def calculate_cost(model_info: ModelInfo, input_tokens: int, output_tokens: int) -> float:
+    """
+    Calculates the cost of a request based on token usage and model pricing.
+
+    Args:
+        model_info (ModelInfo): The pricing information for the model.
+        input_tokens (int): The number of input tokens used in the request.
+        output_tokens (int): The number of output tokens generated by the request.
+
+    Returns:
+        float: The total cost of the request.
+
+    Raises:
+        ValueError: If there is an error during cost calculation.
+    """
+    try:
+        input_cost = (float(input_tokens) / 1_000_000.0) * model_info.input_price
+        output_cost = (float(output_tokens) / 1_000_000.0) * model_info.output_price
+        total_cost = input_cost + output_cost
+        return total_cost
+    except Exception as e:
+        raise ValueError(f"Error calculating cost: {e}") from e
