@@ -20,7 +20,7 @@ from local_operator.executor import (
     LocalCodeExecutor,
     process_json_response,
 )
-from local_operator.model import ModelType
+from local_operator.model.configure import ModelType
 from local_operator.tools import index_current_directory
 from local_operator.types import (
     ConversationRecord,
