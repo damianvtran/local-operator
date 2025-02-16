@@ -25,7 +25,7 @@ from local_operator.console import (
     print_task_interrupted,
     spinner,
 )
-from local_operator.model.configure import ModelConfiguration
+from local_operator.model.configure import ModelConfiguration, calculate_cost
 from local_operator.prompts import (
     SafetyCheckSystemPrompt,
     SafetyCheckUserPrompt,
@@ -399,18 +399,35 @@ class LocalCodeExecutor:
         messages_list = [msg.dict() for msg in messages]
         model_instance = self.model_configuration.instance
 
+        new_tokens_prompt = 0
+        new_tokens_completion = 0
+
         # Use get_openai_callback for OpenAI models to track token usage and cost
         if isinstance(model_instance, ChatOpenAI):
             with get_openai_callback() as cb:
                 response = await model_instance.ainvoke(messages_list)
                 if cb is not None:
-                    self.token_metrics.total_cost += cb.total_cost
-                    self.token_metrics.total_prompt_tokens += cb.prompt_tokens
-                    self.token_metrics.total_completion_tokens += cb.completion_tokens
+                    new_tokens_prompt = cb.prompt_tokens
+                    new_tokens_completion = cb.completion_tokens
         else:
             # For other models, invoke the model directly
-            self.token_metrics.total_prompt_tokens += self.get_invoke_token_count(messages)
+            new_tokens_prompt = self.get_invoke_token_count(messages)
+            new_tokens_completion = 0
             response = await model_instance.ainvoke(messages_list)
+
+        self.token_metrics.total_prompt_tokens += new_tokens_prompt
+        self.token_metrics.total_completion_tokens += new_tokens_completion
+
+        # Use the lookup table to get the cost per million tokens since the openai callback
+        # doesn't always return cost information.
+        self.token_metrics.total_cost += (
+            calculate_cost(
+                self.model_configuration.info,
+                new_tokens_prompt,
+                new_tokens_completion,
+            )
+            / 1_000_000
+        )
 
         return response
 
