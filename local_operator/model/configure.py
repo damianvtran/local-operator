@@ -142,7 +142,6 @@ def validate_model(hosting: str, model: str, api_key: SecretStr) -> bool:
             "https://generativelanguage.googleapis.com/v1/models",
             headers={"x-goog-api-key": api_key.get_secret_value()},
         )
-        print(response.json())
     elif hosting == "mistral":
         response = requests.get(
             "https://api.mistral.ai/v1/models",
@@ -151,7 +150,6 @@ def validate_model(hosting: str, model: str, api_key: SecretStr) -> bool:
     elif hosting == "ollama":
         # Ollama is local, so just check if model exists
         response = requests.get("http://localhost:11434/api/tags")
-        print(response.json())
     else:
         return True
 
