@@ -287,13 +287,13 @@ def print_execution_section(
 
             if prompt_tokens == 0 and completion_tokens == 0 and total_cost == 0.0:
                 print(
-                    "\n\033[1;36m│ Token Usage: \033[0m\033[1;33mToken usage data"
+                    "\n\033[1;36m│ Session Usage: \033[0m\033[1;33mToken usage data"
                     "unavailable.\033[0m"
                 )
             else:
-                cost_str = f"Cost: ${total_cost:.6f} 💰  " if total_cost > 0 else ""
+                cost_str = f"Cost: {total_cost:.4f} USD 💰  " if total_cost > 0 else ""
                 print(
-                    "\n\033[1;36m│ Token Usage: \033[0m"
+                    "\n\033[1;36m│ Session Usage: \033[0m"
                     f"\033[1;33mPrompt: {prompt_tokens} ⬆️  Completion: {completion_tokens} ⬇️  "
                     f"{cost_str}\033[0m"
                 )
