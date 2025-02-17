@@ -19,6 +19,7 @@ from local_operator.console import (
     format_agent_output,
     format_error_output,
     format_success_output,
+    log_action_error,
     log_error_and_retry_message,
     log_retry_error,
     print_agent_response,
@@ -34,6 +35,7 @@ from local_operator.prompts import (
 )
 from local_operator.tools import ToolRegistry
 from local_operator.types import (
+    ActionType,
     ConversationRecord,
     ConversationRole,
     ResponseJsonSchema,
@@ -980,44 +982,122 @@ class LocalCodeExecutor:
             )
         )
 
-        # Extract code blocks from the agent response
-        code_block = response.code
-        if code_block:
-            print_execution_section(ExecutionSection.HEADER, step=self.step_counter)
-            print_execution_section(ExecutionSection.CODE, content=code_block)
+        action_output = await self.perform_action(response)
+        if action_output:
+            return action_output
 
-            # Phase 3: Execute the code block
-            spinner_task = asyncio.create_task(spinner("Executing code"))
-            try:
-                result = await self.execute_code(code_block)
-            finally:
-                spinner_task.cancel()
-                try:
-                    await spinner_task
-                except asyncio.CancelledError:
-                    pass
+        return ProcessResponseOutput(
+            status=ProcessResponseStatus.SUCCESS,
+            message="Action completed",
+        )
 
-            if "code execution cancelled by user" in result:
-                return ProcessResponseOutput(
-                    status=ProcessResponseStatus.CANCELLED,
-                    message="Code execution cancelled by user",
-                )
+    async def perform_action(self, response: ResponseJsonSchema) -> ProcessResponseOutput | None:
+        """Perform an action based on the action JSON schema.
 
-            print_execution_section(ExecutionSection.RESULT, content=result)
-            self.context["last_code_result"] = result
-
-            token_metrics = self.get_token_metrics()
-            print_execution_section(
-                ExecutionSection.TOKEN_USAGE,
-                data={
-                    "prompt_tokens": token_metrics.total_prompt_tokens,
-                    "completion_tokens": token_metrics.total_completion_tokens,
-                    "cost": token_metrics.total_cost,
-                },
+        Args:
+            response (ResponseJsonSchema): The response to perform the action on
+        """
+        if response.action not in [
+            ActionType.CODE,
+            ActionType.CHECK,
+            ActionType.WRITE,
+            ActionType.EDIT,
+            ActionType.READ,
+        ]:
+            return ProcessResponseOutput(
+                status=ProcessResponseStatus.SUCCESS,
+                message="Action completed",
             )
 
-            print_execution_section(ExecutionSection.FOOTER)
-            self.step_counter += 1
+        print_execution_section(ExecutionSection.HEADER, step=self.step_counter)
+        spinner_task = asyncio.create_task(spinner(f"Executing: {str(response.action)}"))
+
+        try:
+            if response.action == ActionType.CODE or response.action == ActionType.CHECK:
+                code_block = response.code
+                if code_block:
+                    print_execution_section(ExecutionSection.CODE, content=code_block)
+
+                    result = await self.execute_code(code_block)
+
+                    if "code execution cancelled by user" in result:
+                        return ProcessResponseOutput(
+                            status=ProcessResponseStatus.CANCELLED,
+                            message="Code execution cancelled by user",
+                        )
+
+                    print_execution_section(ExecutionSection.RESULT, content=result)
+                    self.context["last_code_result"] = result
+                else:
+                    raise ValueError("Code block is required for CODE or CHECK action")
+
+            elif response.action == ActionType.WRITE:
+                file_path = response.file_path
+                content = response.content
+                if file_path and content:
+                    print_execution_section(
+                        ExecutionSection.WRITE, file_path=file_path, content=content
+                    )
+
+                    result = await self.write_file(file_path, content)
+
+                    print_execution_section(ExecutionSection.RESULT, content=result)
+                    self.context["last_write_result"] = result
+                else:
+                    raise ValueError("File path and content are required for WRITE action")
+
+            elif response.action == ActionType.EDIT:
+                file_path = response.file_path
+                content = response.content
+                replacements = response.replacements
+                if file_path and replacements:
+                    print_execution_section(
+                        ExecutionSection.EDIT,
+                        file_path=file_path,
+                        replacements=replacements,
+                    )
+
+                    result = await self.edit_file(file_path, content, replacements)
+
+                    print_execution_section(ExecutionSection.RESULT, content=result)
+                    self.context["last_edit_result"] = result
+                else:
+                    raise ValueError("File path and replacements are required for EDIT action")
+
+            elif response.action == ActionType.READ:
+                file_path = response.file_path
+                if file_path:
+                    print_execution_section(ExecutionSection.READ, file_path=file_path)
+                    result = await self.read_file(file_path)
+                else:
+                    raise ValueError("File path is required for READ action")
+        except Exception as e:
+            log_action_error(e, str(response.action))
+            self.append_to_history(
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content=f"Error: {str(e)}",
+                )
+            )
+        finally:
+            spinner_task.cancel()
+            try:
+                await spinner_task
+            except asyncio.CancelledError:
+                pass
+
+        token_metrics = self.get_token_metrics()
+        print_execution_section(
+            ExecutionSection.TOKEN_USAGE,
+            data={
+                "prompt_tokens": token_metrics.total_prompt_tokens,
+                "completion_tokens": token_metrics.total_completion_tokens,
+                "cost": token_metrics.total_cost,
+            },
+        )
+
+        print_execution_section(ExecutionSection.FOOTER)
+        self.step_counter += 1
 
         # Phase 4: Summarize old conversation steps
         spinner_task = asyncio.create_task(spinner("Summarizing conversation"))
@@ -1031,10 +1111,107 @@ class LocalCodeExecutor:
             except asyncio.CancelledError:
                 pass
 
-        return ProcessResponseOutput(
-            status=ProcessResponseStatus.SUCCESS,
-            message="Code execution complete",
-        )
+    async def read_file(self, file_path: str) -> str:
+        """Read the contents of a file.
+
+        Args:
+            file_path (str): The path to the file to read
+
+        Returns:
+            str: The contents of the file
+
+        Raises:
+            FileNotFoundError: If the file does not exist
+            OSError: If there is an error reading the file
+        """
+        try:
+            file_content = ""
+            with open(file_path, "r") as f:
+                file_content = f.read()
+
+            self.append_to_history(
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content=f"Contents of {file_path}:\n\n{file_content}",
+                )
+            )
+
+            return f"Successfully read file: {file_path}"
+        except FileNotFoundError as e:
+            raise e
+        except OSError as e:
+            raise e
+
+    async def write_file(self, file_path: str, content: str) -> str:
+        """Write content to a file.
+
+        Args:
+            file_path (str): The path to the file to write
+            content (str): The content to write to the file
+
+        Returns:
+            str: A message indicating the file has been written
+
+        Raises:
+            OSError: If there is an error writing to the file
+        """
+        try:
+            with open(file_path, "w") as f:
+                f.write(content)
+
+            self.append_to_history(
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content=f"Successfully wrote to file: {file_path}",
+                )
+            )
+
+            return f"Successfully wrote to file: {file_path}"
+        except OSError as e:
+            raise e
+
+    async def edit_file(
+        self, file_path: str, content: str, replacements: List[Dict[str, str]]
+    ) -> str:
+        """Edit a file by applying a series of find and replace operations.
+
+        Args:
+            file_path (str): The path to the file to edit
+            content (str): The original content of the file
+            replacements (List[Dict[str, str]]): A list of dictionaries, where each dictionary
+                contains a "find" key and a "replace" key. The "find" key specifies the string
+                to find, and the "replace" key specifies the string to replace it with.
+
+        Returns:
+            str: A message indicating the file has been edited
+
+        Raises:
+            FileNotFoundError: If the file does not exist
+            OSError: If there is an error reading or writing to the file
+        """
+        try:
+            original_content = content
+
+            for replacement in replacements:
+                find = replacement["find"]
+                replace = replacement["replace"]
+                original_content = original_content.replace(find, replace)
+
+            with open(file_path, "w") as f:
+                f.write(original_content)
+
+            self.append_to_history(
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content=f"Successfully edited file: {file_path}",
+                )
+            )
+            return f"Successfully edited file: {file_path}"
+
+        except FileNotFoundError as e:
+            raise e
+        except OSError as e:
+            raise e
 
     def _limit_conversation_history(self) -> None:
         """Limit the conversation history to the maximum number of messages."""

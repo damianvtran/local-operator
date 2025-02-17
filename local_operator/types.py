@@ -1,7 +1,7 @@
 """Types module containing enums and type definitions used throughout the local-operator package."""
 
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
@@ -21,6 +21,24 @@ class ConversationRole(str, Enum):
     FUNCTION = "function"  # Function call messages in LangChain
     TOOL = "tool"  # Tool/plugin response messages in LangChain
     CHAT = "chat"  # Generic chat messages in LangChain
+
+
+class ActionType(str, Enum):
+    """Enum representing the different types of actions that can be taken in a conversation.
+
+    Used to track the type of action being taken in a conversation.
+    """
+
+    PLAN = "PLAN"
+    ANALYZE = "ANALYZE"
+    CODE = "CODE"
+    WRITE = "WRITE"
+    EDIT = "EDIT"
+    CHECK = "CHECK"
+    DONE = "DONE"
+    ASK = "ASK"
+    BYE = "BYE"
+    READ = "READ"
 
 
 class ConversationRecord(BaseModel):
@@ -112,6 +130,9 @@ class ResponseJsonSchema(BaseModel):
     next_goal: str
     response: str
     code: str
-    action: str
+    content: str
+    file_path: str
+    replacements: List[Dict[str, str]]
+    action: ActionType
     learnings: str
     plan: str
