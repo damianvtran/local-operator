@@ -256,17 +256,15 @@ def test_log_retry_error_without_extra_message(monkeypatch):
     assert "Another attempt will be made" not in result
 
 
-def test_format_agent_output():
+def test_format_agent_output() -> None:
+    """
+    Test the format_agent_output function to ensure it correctly strips control tags
+    and removes empty lines from the agent's raw text output.
+    """
     # Prepare raw text with control tokens and blank lines.
     raw_text = "Hello\n[ASK]World\n\n[DONE]Goodbye"
     formatted = format_agent_output(raw_text)
-    expected_lines = [
-        "\033[1;36m│\033[0m Hello",
-        "\033[1;36m│\033[0m World",
-        "\033[1;36m│\033[0m ",
-        "\033[1;36m│\033[0m Goodbye",
-    ]
-    expected_output = "\n".join(expected_lines)
+    expected_output = "Hello\nWorld\nGoodbye"
     assert formatted == expected_output
 
 
