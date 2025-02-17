@@ -177,7 +177,7 @@ def log_retry_error(error: Exception, attempt: int, max_retries: int) -> None:
 
 def format_agent_output(text: str) -> str:
     """
-    Format agent output by adding a colored sidebar to each line and stripping control tags.
+    Format agent output by stripping control tags.
 
     Args:
         text (str): Raw agent output text.
