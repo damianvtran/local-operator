@@ -18,6 +18,7 @@ from local_operator.credentials import CredentialManager
 from local_operator.executor import (
     ExecutorInitError,
     LocalCodeExecutor,
+    get_context_vars_str,
     process_json_response,
 )
 from local_operator.model.configure import ModelConfiguration
@@ -273,7 +274,7 @@ class Operator:
         except (subprocess.CalledProcessError, FileNotFoundError):
             git_status = "Not a git repository"
 
-        return f"""Environment Details:
+        details_str = f"""Environment Details:
         Current working directory: {os.getcwd()}
         Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         <git status>
@@ -281,7 +282,12 @@ class Operator:
         </git status>
         <directory tree>
         {directory_tree_str}
-        </directory tree>"""
+        </directory tree>
+        <execution context variables>
+        {get_context_vars_str(self.executor.context)}
+        </execution context variables>"""
+
+        return details_str
 
     def add_ephemeral_messages(self) -> None:
         """Add environment details and other ephemeral messages to the conversation history.
