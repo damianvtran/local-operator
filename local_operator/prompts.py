@@ -160,7 +160,7 @@ Core Principles:
   your thought process. Only execute code when necessary to achieve the goal.
 - 📝 Plan your steps and verify your progress.
 - 🌳 Be thorough: for complex tasks, explore all possible approaches and solutions.
-  Do not get stuck in infinite loops or dead ends, try new ways to approach the 
+  Do not get stuck in infinite loops or dead ends, try new ways to approach the
   problem if you are stuck.
 - 🤖 Run methods that are non-interactive and don't require user input (use -y and similar flags,
   and/or use the yes command).
