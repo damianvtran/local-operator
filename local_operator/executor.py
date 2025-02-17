@@ -173,16 +173,12 @@ def get_context_vars_str(context_vars: Dict[str, Any]) -> str:
 
             formatted_value_str = f"{async_prefix}{key}({', '.join(args)}) -> {return_type}: {doc}"
 
-        value_lines = formatted_value_str.splitlines()
-        truncated_value = "\n".join(value_lines[:1000])
+        if len(formatted_value_str) > 100000:
+            formatted_value_str = (
+                f"{formatted_value_str[:100000]} ... (truncated due to length limits)"
+            )
 
-        if len(value_lines) > 1000:
-            truncated_value += "\n... (truncated to 1000 lines)"
-
-        if len(truncated_value) > 50000:
-            truncated_value = f"{truncated_value[:50000]} ... (truncated due to length limits)"
-
-        entry = f"{key}: {truncated_value}\n"
+        entry = f"{key}: {formatted_value_str}\n"
         context_vars_str += entry
 
     return context_vars_str
