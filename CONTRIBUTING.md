@@ -102,7 +102,7 @@ pytest
 ```
 
 - Keep tests in the tests/ directory
-- Aim for 60%+ test coverage for new features
+- Aim for 80%+ test coverage for new features
 - Mark async tests with `@pytest.mark.asyncio`
 
 ## Contribution Workflow
