@@ -2,7 +2,7 @@ import asyncio
 
 from langchain_core.messages import BaseMessage
 
-from local_operator.types import ConversationRole, ResponseJsonSchema
+from local_operator.types import ActionType, ConversationRole, ResponseJsonSchema
 
 USER_MOCK_RESPONSES = {
     "hello": ResponseJsonSchema(
@@ -12,9 +12,12 @@ USER_MOCK_RESPONSES = {
         next_goal="",
         response="Hello! I am the test model.",
         code="",
-        action="DONE",
+        action=ActionType.DONE,
         learnings="",
         plan="",
+        content="",
+        file_path="",
+        replacements=[],
     ),
     "print hello world": ResponseJsonSchema(
         previous_step_success=True,
@@ -23,9 +26,12 @@ USER_MOCK_RESPONSES = {
         next_goal="",
         response='Sure, I will execute a simple Python script to print "Hello World".',
         code='print("Hello World")',
-        action="CONTINUE",
+        action=ActionType.CODE,
         learnings="",
         plan="",
+        content="",
+        file_path="",
+        replacements=[],
     ),
 }
 
@@ -37,9 +43,12 @@ SYSTEM_MOCK_RESPONSES = {
         next_goal="",
         response="I have printed 'Hello World' to the console.",
         code="",
-        action="DONE",
+        action=ActionType.DONE,
         learnings="",
         plan="",
+        content="",
+        file_path="",
+        replacements=[],
     )
 }
 

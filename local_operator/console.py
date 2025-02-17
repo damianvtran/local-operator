@@ -17,6 +17,9 @@ class ExecutionSection(Enum):
     RESULT = "result"
     FOOTER = "footer"
     TOKEN_USAGE = "token_usage"
+    WRITE = "write"
+    EDIT = "edit"
+    READ = "read"
 
 
 def wrap_text_to_width(text: str, max_width: int, first_line_prefix: str = "") -> list[str]:
@@ -144,6 +147,20 @@ async def spinner(text: str):
             break
 
 
+def log_action_error(error: Exception, action: str) -> None:
+    """
+    Log an error that occurred during an action.
+
+    Args:
+        error (Exception): The error that occurred.
+        action (str): The action that occurred.
+    """
+    print(f"\n\033[1;31m✗ Error during {action}:\033[0m")
+    print("\033[1;34m╞══════════════════════════════════════════════════╡\033[0m")
+    print(f"\033[1;36m│ Error:\033[0m\n{str(error)}")
+    print("\033[1;34m╞══════════════════════════════════════════════════╡\033[0m")
+
+
 def log_error_and_retry_message(error: Exception) -> None:
     """
     Print a formatted error message and notify that a retry attempt is about to be made.
@@ -245,6 +262,8 @@ def print_execution_section(
     step: int | None = None,
     content: str = "",
     data: dict[str, Any] | None = None,
+    file_path: str | None = None,
+    replacements: list[dict[str, str]] | None = None,
 ) -> None:
     """
     Print a section of the execution output.
@@ -272,6 +291,16 @@ def print_execution_section(
     elif section == ExecutionSection.CODE:
         print("\n\033[1;36m│ Executing:\033[0m")
         print(content)
+    elif section == ExecutionSection.WRITE:
+        print(f"\n\033[1;36m│ Writing to file: {file_path}\033[0m")
+        print(content)
+    elif section == ExecutionSection.EDIT:
+        print(f"\n\033[1;36m│ Editing file: {file_path}\033[0m")
+        print("\n\033[1;36m│ Replacements:\033[0m")
+        for replacement in replacements or []:
+            print(f"\n\033[1;36m│ {replacement['find']} -> {replacement['replace']}\033[0m")
+    elif section == ExecutionSection.READ:
+        print(f"\n\033[1;36m│ Reading file: {file_path}\033[0m")
     elif section == ExecutionSection.RESULT:
         print("\n\033[1;36m│ Result:\033[0m " + content)
     elif section == ExecutionSection.TOKEN_USAGE:

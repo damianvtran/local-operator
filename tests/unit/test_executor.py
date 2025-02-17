@@ -15,6 +15,7 @@ from local_operator.executor import (
 )
 from local_operator.operator import Operator, OperatorType
 from local_operator.types import (
+    ActionType,
     ConversationRecord,
     ConversationRole,
     ResponseJsonSchema,
@@ -579,9 +580,12 @@ async def test_process_response(executor, mock_model_config):
         next_goal="",
         response="Here's some code:",
         code="print('hello world')",
-        action="CONTINUE",
+        action=ActionType.CODE,
         learnings="",
         plan="",
+        content="",
+        file_path="",
+        replacements=[],
     )
     mock_model_config.instance.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
 
