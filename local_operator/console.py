@@ -185,9 +185,7 @@ def format_agent_output(text: str) -> str:
     Returns:
         str: The formatted text.
     """
-    lines = [f"\033[1;36m│\033[0m {line}" for line in text.split("\n")]
-    output = "\n".join(lines)
-    output = output.replace("[ASK]", "").replace("[DONE]", "").replace("[BYE]", "").strip()
+    output = text.replace("[ASK]", "").replace("[DONE]", "").replace("[BYE]", "").strip()
     # Remove any empty (or whitespace-only) lines.
     lines = [line for line in output.split("\n") if line.strip()]
     return "\n".join(lines)
