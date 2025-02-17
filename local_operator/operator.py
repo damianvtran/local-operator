@@ -274,8 +274,15 @@ class Operator:
         except (subprocess.CalledProcessError, FileNotFoundError):
             git_status = "Not a git repository"
 
+        try:
+            cwd = os.getcwd()
+        except FileNotFoundError:
+            # Potentially the current folder has been deleted
+            # the agent will need to move to a valid directory
+            cwd = "Unknown or deleted directory, please move to a valid directory"
+
         details_str = f"""Environment Details:
-        Current working directory: {os.getcwd()}
+        Current working directory: {cwd}
         Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         <git status>
         {git_status}
