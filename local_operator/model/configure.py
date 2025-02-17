@@ -261,7 +261,7 @@ def configure_model(
 
     elif hosting == "openrouter":
         if not model_name:
-            model_name = "deepseek/deepseek-chat"
+            model_name = "google/gemini-2.0-flash-001"
         api_key = credential_manager.get_credential("OPENROUTER_API_KEY")
         if not api_key:
             api_key = credential_manager.prompt_for_credential("OPENROUTER_API_KEY")

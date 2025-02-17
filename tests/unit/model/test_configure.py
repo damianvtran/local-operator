@@ -1,6 +1,8 @@
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 from pydantic import SecretStr
 
 from local_operator.credentials import CredentialManager
@@ -9,6 +11,7 @@ from local_operator.model.configure import (
     calculate_cost,
     configure_model,
     get_model_info_from_openrouter,
+    validate_model,
 )
 from local_operator.model.registry import ModelInfo
 
@@ -397,3 +400,284 @@ def test_get_model_info_from_openrouter_no_match(mock_openrouter_client):
         ValueError, match="Model not found from openrouter models API: non-existent-model"
     ):
         get_model_info_from_openrouter(mock_openrouter_client, "non-existent-model")
+
+
+@pytest.mark.parametrize(
+    "hosting, model, status_code, response_json, expected_result, expected_url, expected_headers",
+    [
+        (
+            "openai",
+            "test_model",
+            200,
+            {"data": [{"id": "test_model"}]},
+            True,
+            "https://api.openai.com/v1/models",
+            {"Authorization": "Bearer test_key"},
+        ),
+        (
+            "openai",
+            "test_model",
+            404,
+            {},
+            False,
+            "https://api.openai.com/v1/models",
+            {"Authorization": "Bearer test_key"},
+        ),
+        (
+            "openai",
+            "test_model",
+            200,
+            {"data": []},
+            False,
+            "https://api.openai.com/v1/models",
+            {"Authorization": "Bearer test_key"},
+        ),
+        (
+            "ollama",
+            "test_model",
+            200,
+            {"models": [{"name": "test_model"}]},
+            True,
+            "http://localhost:11434/api/tags",
+            None,
+        ),
+        ("ollama", "test_model", 404, {}, False, "http://localhost:11434/api/tags", None),
+        (
+            "deepseek",
+            "test_model",
+            200,
+            {"data": [{"id": "test_model"}]},
+            True,
+            "https://api.deepseek.com/v1/models",
+            {"Authorization": "Bearer test_key"},
+        ),
+        (
+            "deepseek",
+            "test_model",
+            404,
+            {},
+            False,
+            "https://api.deepseek.com/v1/models",
+            {"Authorization": "Bearer test_key"},
+        ),
+        (
+            "openrouter",
+            "test_model",
+            200,
+            {"data": [{"id": "test_model"}]},
+            True,
+            "https://openrouter.ai/api/v1/models",
+            {"Authorization": "Bearer test_key"},
+        ),
+        (
+            "openrouter",
+            "test_model",
+            404,
+            {},
+            False,
+            "https://openrouter.ai/api/v1/models",
+            {"Authorization": "Bearer test_key"},
+        ),
+        (
+            "anthropic",
+            "test_model",
+            200,
+            {"data": [{"id": "test_model"}]},
+            True,
+            "https://api.anthropic.com/v1/models",
+            {"x-api-key": "test_key", "anthropic-version": "2023-06-01"},
+        ),
+        (
+            "anthropic",
+            "test-model-latest",
+            200,
+            {"data": [{"id": "test-model-1234"}]},
+            True,
+            "https://api.anthropic.com/v1/models",
+            {"x-api-key": "test_key", "anthropic-version": "2023-06-01"},
+        ),
+        (
+            "anthropic",
+            "test_model",
+            404,
+            {},
+            False,
+            "https://api.anthropic.com/v1/models",
+            {"x-api-key": "test_key", "anthropic-version": "2023-06-01"},
+        ),
+        (
+            "kimi",
+            "test_model",
+            200,
+            {"data": [{"id": "test_model"}]},
+            True,
+            "https://api.moonshot.cn/v1/models",
+            {"Authorization": "Bearer test_key"},
+        ),
+        (
+            "kimi",
+            "test_model",
+            404,
+            {},
+            False,
+            "https://api.moonshot.cn/v1/models",
+            {"Authorization": "Bearer test_key"},
+        ),
+        (
+            "alibaba",
+            "test_model",
+            200,
+            {"data": [{"id": "test_model"}]},
+            True,
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models",
+            {"Authorization": "Bearer test_key"},
+        ),
+        (
+            "alibaba",
+            "test_model",
+            404,
+            {},
+            False,
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models",
+            {"Authorization": "Bearer test_key"},
+        ),
+        (
+            "google",
+            "test_model",
+            200,
+            {"models": [{"name": "test_model"}]},
+            True,
+            "https://generativelanguage.googleapis.com/v1/models",
+            {"x-goog-api-key": "test_key"},
+        ),
+        (
+            "google",
+            "test_model",
+            404,
+            {},
+            False,
+            "https://generativelanguage.googleapis.com/v1/models",
+            {"x-goog-api-key": "test_key"},
+        ),
+        (
+            "mistral",
+            "test_model",
+            200,
+            {"data": [{"id": "test_model"}]},
+            True,
+            "https://api.mistral.ai/v1/models",
+            {"Authorization": "Bearer test_key"},
+        ),
+        (
+            "mistral",
+            "test_model",
+            404,
+            {},
+            False,
+            "https://api.mistral.ai/v1/models",
+            {"Authorization": "Bearer test_key"},
+        ),
+    ],
+)
+def test_validate_model(
+    mock_requests_get: MagicMock,
+    hosting: str,
+    model: str,
+    status_code: int,
+    response_json: dict[str, Any],
+    expected_result: bool,
+    expected_url: str,
+    expected_headers: dict[str, Any] | None,
+) -> None:
+    """Tests validate_model with various scenarios.
+
+    Args:
+        mock_requests_get: Mock for requests.get.
+        hosting: Hosting provider.
+        model: Model name.
+        status_code: HTTP status code.
+        response_json: Response JSON.
+        expected_result: Expected boolean result.
+        expected_url: Expected API URL.
+        expected_headers: Expected headers for the API request.
+    """
+    mock_response = MagicMock()
+    mock_response.status_code = status_code
+    mock_response.json.return_value = response_json
+    mock_requests_get.return_value = mock_response
+
+    api_key = SecretStr("test_key")
+
+    if status_code >= 500:
+        mock_requests_get.side_effect = requests.exceptions.RequestException("API error")
+        with pytest.raises(requests.exceptions.RequestException, match="API error"):
+            validate_model(hosting, model, api_key)
+    else:
+        result = validate_model(hosting, model, api_key)
+        assert result == expected_result
+
+        if expected_headers:
+            mock_requests_get.assert_called_once_with(expected_url, headers=expected_headers)
+        else:
+            mock_requests_get.assert_called_once_with(expected_url)
+
+
+@patch("local_operator.model.configure.requests.get")
+def test_validate_model_failure(mock_get):
+    """Tests validate_model when the API call fails."""
+    mock_response = MagicMock()
+    mock_response.status_code = 404
+    mock_get.return_value = mock_response
+
+    api_key = SecretStr("test_key")
+    result = validate_model("openai", "test_model", api_key)
+    assert result is False
+
+
+@patch("local_operator.model.configure.requests.get")
+def test_validate_model_exception(mock_get):
+    """Tests validate_model when an exception is raised during the API call."""
+    mock_get.side_effect = requests.exceptions.RequestException("API error")
+
+    api_key = SecretStr("test_key")
+    with pytest.raises(requests.exceptions.RequestException, match="API error"):
+        validate_model("openai", "test_model", api_key)
+
+
+@patch("local_operator.model.configure.requests.get")
+def test_validate_model_no_model_found(mock_get):
+    """Tests validate_model when the model is not found in the API response."""
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"data": []}  # No models in the response
+    mock_get.return_value = mock_response
+
+    api_key = SecretStr("test_key")
+    result = validate_model("openai", "test_model", api_key)
+    assert result is False
+
+
+@patch("local_operator.model.configure.requests.get")
+def test_validate_model_ollama_success(mock_get):
+    """Tests validate_model for ollama when the API call is successful."""
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"models": [{"name": "test_model"}]}
+    mock_get.return_value = mock_response
+
+    api_key = SecretStr("test_key")  # API key is not used for Ollama
+    result = validate_model("ollama", "test_model", api_key)
+    assert result is True
+
+
+@patch("local_operator.model.configure.requests.get")
+def test_validate_model_ollama_failure(mock_get):
+    """Tests validate_model for ollama when the API call fails."""
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"models": []}
+    mock_get.return_value = mock_response
+
+    api_key = SecretStr("test_key")  # API key is not used for Ollama
+    result = validate_model("ollama", "test_model", api_key)
+    assert result is False
