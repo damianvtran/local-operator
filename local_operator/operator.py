@@ -6,7 +6,7 @@ import subprocess
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Dict, List, Tuple
 
 from langchain_core.messages import BaseMessage
 from pydantic import ValidationError
@@ -18,6 +18,7 @@ from local_operator.credentials import CredentialManager
 from local_operator.executor import (
     ExecutorInitError,
     LocalCodeExecutor,
+    get_context_vars_str,
     process_json_response,
 )
 from local_operator.model.configure import ModelConfiguration
@@ -256,46 +257,6 @@ class Operator:
 
         return directory_tree_str
 
-    def _get_context_vars_str(self, context_vars: Dict[str, Any]) -> str:
-        """Get the context variables as a string, limiting each value to 1000 lines.
-
-        This function converts a dictionary of context variables into a string
-        representation, limiting the output to a maximum of 1000 lines per value
-        to prevent excessive output.  It also ignores built-in variables and other
-        common uninteresting variables.
-
-        Args:
-            context_vars (Dict[str, Any]): A dictionary of context variables.
-
-        Returns:
-            str: A string representation of the context variables, with each value
-                 limited to a maximum of 1000 lines.
-        """
-        context_vars_str = ""
-        ignored_keys = {"__builtins__", "__doc__", "__file__", "__name__", "__package__"}
-        total_length = 0
-
-        for key, value in context_vars.items():
-            if key in ignored_keys:
-                continue
-
-            value_str = str(value)
-            value_lines = value_str.splitlines()
-            truncated_value = "\n".join(value_lines[:1000])
-
-            if len(value_lines) > 1000:
-                truncated_value += "\n... (truncated to 1000 lines)"
-
-            entry = f"{key}: {truncated_value}\n"
-
-            if total_length + len(entry) < 50000:
-                context_vars_str += entry
-                total_length += len(entry)
-            else:
-                context_vars_str += f"{key}: ... (truncated due to length limits)\n"
-
-        return context_vars_str
-
     def get_environment_details(self) -> str:
         """Get environment details."""
         directory_index = index_current_directory()
@@ -323,7 +284,7 @@ class Operator:
         {directory_tree_str}
         </directory tree>
         <context variables>
-        {self._get_context_vars_str(self.executor.context)}
+        {get_context_vars_str(self.executor.context)}
         </context variables>"""
 
         print(details_str)

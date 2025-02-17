@@ -1,6 +1,7 @@
 import io
 import textwrap
 from pathlib import Path
+from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -10,6 +11,7 @@ from local_operator.executor import (
     ConfirmSafetyResult,
     LocalCodeExecutor,
     get_confirm_safety_result,
+    get_context_vars_str,
 )
 from local_operator.operator import Operator, OperatorType
 from local_operator.types import (
@@ -1039,3 +1041,76 @@ def test_get_conversation_working_directory(executor, test_case):
     executor.conversation_history = test_case["conversation"]
     result = executor.get_conversation_working_directory()
     assert result == test_case["expected"]
+
+
+@pytest.mark.parametrize(
+    "context_vars, function_name, expected_output",
+    [
+        (
+            {"a": 1, "b": "hello", "c": [1, 2, 3]},
+            "",
+            "a: 1\nb: hello\nc: [1, 2, 3]\n",
+        ),
+        (
+            {"__builtins__": None, "a": 1},
+            "",
+            "a: 1\n",
+        ),
+        (
+            {},
+            "",
+            "",
+        ),
+        (
+            {},
+            "function_1",
+            "function_1: function_1(x: _empty) -> _empty: No description available\n",
+        ),
+        (
+            {},
+            "function_2",
+            "function_2: function_2(x: _empty) -> _empty: This is a docstring\n",
+        ),
+        (
+            {},
+            "function_3",
+            "function_3: async function_3(x: _empty) -> _empty: No description available\n",
+        ),
+        (
+            {"a": 1, "b": "hello", "c": [1, 2, 3]},
+            "function_1",
+            "a: 1\nb: hello\nc: [1, 2, 3]\nfunction_1: function_1(x: _empty) -> _empty: "
+            "No description available\n",
+        ),
+    ],
+)
+def test_get_context_vars_str(
+    context_vars: Dict[str, Any], function_name: str, expected_output: str
+) -> None:
+    """
+    Test the get_context_vars_str function with various inputs.
+
+    Args:
+        context_vars: A dictionary representing the context variables.
+        expected_output: The expected string representation of the context variables.
+    """
+
+    def function_1(x):
+        return x * 2
+
+    def function_2(x):
+        """This is a docstring"""
+        return x * 2
+
+    async def function_3(x):
+        return x * 2
+
+    if function_name == "function_1":
+        context_vars["function_1"] = function_1
+    elif function_name == "function_2":
+        context_vars["function_2"] = function_2
+    elif function_name == "function_3":
+        context_vars["function_3"] = function_3
+
+    result = get_context_vars_str(context_vars)
+    assert result == expected_output
