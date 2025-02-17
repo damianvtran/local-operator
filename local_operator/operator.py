@@ -283,9 +283,9 @@ class Operator:
         <directory tree>
         {directory_tree_str}
         </directory tree>
-        <context variables>
+        <execution context variables>
         {get_context_vars_str(self.executor.context)}
-        </context variables>"""
+        </execution context variables>"""
 
         return details_str
 
