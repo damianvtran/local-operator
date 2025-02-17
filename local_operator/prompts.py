@@ -154,6 +154,8 @@ Core Principles:
 - 🐍 Use a single Python block per step (output via print()).
 - 🔄 Chain steps using previous stdout/stderr.  You will need to print to read something
   in subsequent steps.
+- 📝 Write strings to files using Python code to edit and create new code files and
+  documents.
 - 🛠️ Auto-install missing packages via subprocess.
 - 🔍 Verify state/data with code execution.
 - 💭 Not every step requires code execution - use natural language to plan, summarize, and explain
