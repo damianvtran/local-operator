@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import io
 import os
 import sys
@@ -118,6 +119,69 @@ def process_json_response(response_str: str) -> ResponseJsonSchema:
     response_json = ResponseJsonSchema.model_validate_json(response_content)
 
     return response_json
+
+
+def get_context_vars_str(context_vars: Dict[str, Any]) -> str:
+    """Get the context variables as a string, limiting each value to 1000 lines.
+
+    This function converts a dictionary of context variables into a string
+    representation, limiting the output to a maximum of 1000 lines per value
+    to prevent excessive output.  It also ignores built-in variables and other
+    common uninteresting variables.
+
+    Args:
+        context_vars (Dict[str, Any]): A dictionary of context variables.
+
+    Returns:
+        str: A string representation of the context variables, with each value
+              limited to a maximum of 1000 lines.
+    """
+    context_vars_str = ""
+    ignored_keys = {"__builtins__", "__doc__", "__file__", "__name__", "__package__"}
+
+    for key, value in context_vars.items():
+        if key in ignored_keys:
+            continue
+
+        value_str = str(value)
+        formatted_value_str = value_str
+
+        if callable(value):
+            doc = value.__doc__ or "No description available"
+            # Get first line of docstring
+            doc = doc.split("\n")[0].strip()
+
+            sig = inspect.signature(value)
+            args = []
+            for p in sig.parameters.values():
+                arg_type = (
+                    p.annotation.__name__
+                    if hasattr(p.annotation, "__name__")
+                    else str(p.annotation)
+                )
+                args.append(f"{p.name}: {arg_type}")
+
+            return_type = (
+                sig.return_annotation.__name__
+                if hasattr(sig.return_annotation, "__name__")
+                else str(sig.return_annotation)
+            )
+
+            # Check if function is async
+            is_async = inspect.iscoroutinefunction(value)
+            async_prefix = "async " if is_async else ""
+
+            formatted_value_str = f"{async_prefix}{key}({', '.join(args)}) -> {return_type}: {doc}"
+
+        if len(formatted_value_str) > 100000:
+            formatted_value_str = (
+                f"{formatted_value_str[:100000]} ... (truncated due to length limits)"
+            )
+
+        entry = f"{key}: {formatted_value_str}\n"
+        context_vars_str += entry
+
+    return context_vars_str
 
 
 class ExecutorTokenMetrics(BaseModel):
