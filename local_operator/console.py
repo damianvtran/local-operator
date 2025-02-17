@@ -291,7 +291,7 @@ def print_execution_section(
                     "unavailable.\033[0m"
                 )
             else:
-                cost_str = f"Cost: {total_cost:.4f} USD 💰  " if total_cost > 0 else ""
+                cost_str = f"Cost: ${total_cost:.4f} USD 💰  " if total_cost > 0 else ""
                 print(
                     "\n\033[1;36m│ Session Usage: \033[0m"
                     f"\033[1;33mPrompt: {prompt_tokens} ⬆️  Completion: {completion_tokens} ⬇️  "
