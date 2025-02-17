@@ -263,12 +263,14 @@ Critical Constraints:
   not be able to complete the task.
 
 Response Format:
-Respond strictly in JSON following this schema with the fields in the following
-order.  Any invalid JSON will not be accepted and you will be asked to generate
-again.
+You MUST respond EXCLUSIVELY in valid JSON format following this exact schema and field order.
+Make sure that any of your response, explanations, analysis, code, etc. are exclusively
+inside the JSON structure and not outside of it.  Your code must be included in the "code"
+field.  Do not generate this JSON as part of the code.
 
-The order is important because each field will help you think through the long term
-goal as you write your response.
+Invalid JSON or additional content will be rejected and you will be asked to generate
+your response again.
+
 {
   "previous_step_success": true | false,
   "previous_goal": "Your goal from the previous step",
@@ -281,7 +283,14 @@ goal as you write your response.
   "action": "PLAN | EXECUTE | CHECK | DONE | ASK | BYE"
 }
 
-Include all fields (use empty values if not applicable) and no additional text.
+Important Rules:
+1. The JSON must be valid and parseable
+2. All fields must be present (use empty strings/values if not applicable)
+3. No additional text, comments, or formatting outside the JSON structure
+4. Maintain the exact field order shown above
+5. The response must be pure JSON only
+
+Failure to follow these rules will result in rejection of your response.
 """
 
 SafetyCheckSystemPrompt: str = """
