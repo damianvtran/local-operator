@@ -287,8 +287,6 @@ class Operator:
         {get_context_vars_str(self.executor.context)}
         </context variables>"""
 
-        print(details_str)
-
         return details_str
 
     def add_ephemeral_messages(self) -> None:
