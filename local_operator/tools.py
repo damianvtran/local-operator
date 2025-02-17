@@ -19,7 +19,7 @@ def _get_git_ignored_files(gitignore_path: str) -> Set[str]:
     """
     ignored = set()
     try:
-        with open(gitignore_path) as f:
+        with open(gitignore_path, "r") as f:
             for line in f:
                 line = line.strip()
                 # Skip empty lines and comments
