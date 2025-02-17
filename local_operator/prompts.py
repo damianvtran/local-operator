@@ -201,11 +201,12 @@ Response Flow:
      to consolidate knowledge for next steps.
    - CODE: write code to achieve the user's goal.  This code will be executed as-is
      by the system.  Include the code as-is in the "code" field.
+   - READ: read the contents of a file.  Specify the file path to read, this will be
+     printed to the console.  Always read files before writing or editing if they
+     exist.
    - WRITE: write text to a file.  Specify the file path and the content to write, this
      will replace the file if it already exists.  Include the file content as-is in the
      "content" field.
-   - READ: read the contents of a file.  Specify the file path to read, this will be
-     printed to the console.
    - EDIT: edit a file.  Specify the file path to edit and the search strings to find.
      Each search string should be accompanied by a replacement string.
    - CHECK: validate and test previous outputs.
