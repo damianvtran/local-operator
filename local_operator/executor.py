@@ -1034,7 +1034,7 @@ class LocalCodeExecutor:
             elif response.action == ActionType.WRITE:
                 file_path = response.file_path
                 content = response.content
-                if file_path and content:
+                if file_path:
                     print_execution_section(
                         ExecutionSection.WRITE, file_path=file_path, content=content
                     )
@@ -1044,7 +1044,7 @@ class LocalCodeExecutor:
                     print_execution_section(ExecutionSection.RESULT, content=result)
                     self.context["last_write_result"] = result
                 else:
-                    raise ValueError("File path and content are required for WRITE action")
+                    raise ValueError("File path is required for WRITE action")
 
             elif response.action == ActionType.EDIT:
                 file_path = response.file_path
