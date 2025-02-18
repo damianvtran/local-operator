@@ -40,6 +40,14 @@ class ActionType(str, Enum):
     BYE = "BYE"
     READ = "READ"
 
+    def __str__(self) -> str:
+        """Return the string representation of the ActionType enum.
+
+        Returns:
+            str: The value of the ActionType enum.
+        """
+        return self.value
+
 
 class ConversationRecord(BaseModel):
     """A record of a conversation with an AI model.

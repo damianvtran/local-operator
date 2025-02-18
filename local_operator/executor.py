@@ -1010,7 +1010,7 @@ class LocalCodeExecutor:
             )
 
         print_execution_section(ExecutionSection.HEADER, step=self.step_counter)
-        spinner_task = asyncio.create_task(spinner(f"Executing: {str(response.action)}"))
+        spinner_task = asyncio.create_task(spinner(f"Executing {str(response.action).lower()}"))
 
         try:
             if response.action == ActionType.CODE or response.action == ActionType.CHECK:
@@ -1027,7 +1027,6 @@ class LocalCodeExecutor:
                         )
 
                     print_execution_section(ExecutionSection.RESULT, content=result)
-                    self.context["last_code_result"] = result
                 else:
                     raise ValueError("Code block is required for CODE or CHECK action")
 
@@ -1042,7 +1041,6 @@ class LocalCodeExecutor:
                     result = await self.write_file(file_path, content)
 
                     print_execution_section(ExecutionSection.RESULT, content=result)
-                    self.context["last_write_result"] = result
                 else:
                     raise ValueError("File path is required for WRITE action")
 
@@ -1060,7 +1058,6 @@ class LocalCodeExecutor:
                     result = await self.edit_file(file_path, content, replacements)
 
                     print_execution_section(ExecutionSection.RESULT, content=result)
-                    self.context["last_edit_result"] = result
                 else:
                     raise ValueError("File path and replacements are required for EDIT action")
 
@@ -1195,7 +1192,7 @@ class LocalCodeExecutor:
             for replacement in replacements:
                 find = replacement["find"]
                 replace = replacement["replace"]
-                original_content = original_content.replace(find, replace)
+                original_content = original_content.replace(find, replace, count=1)
 
             with open(file_path, "w") as f:
                 f.write(original_content)
