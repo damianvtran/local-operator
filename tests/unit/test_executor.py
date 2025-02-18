@@ -807,9 +807,9 @@ async def test_summarize_old_steps(mock_model_config):
                 ),
                 ConversationRecord(
                     role=ConversationRole.USER,
-                    content="user msg",
+                    content="[SUMMARY] This is a summary",
                     should_summarize=True,
-                    summarized=False,
+                    summarized=True,
                 ),
                 ConversationRecord(
                     role=ConversationRole.ASSISTANT,
