@@ -281,7 +281,7 @@ class Operator:
             # the agent will need to move to a valid directory
             cwd = "Unknown or deleted directory, please move to a valid directory"
 
-        details_str = f"""Environment Details:
+        details_str = f"""<environment details>
         Current working directory: {cwd}
         Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         <git status>
@@ -292,7 +292,8 @@ class Operator:
         </directory tree>
         <execution context variables>
         {get_context_vars_str(self.executor.context)}
-        </execution context variables>"""
+        </execution context variables>
+        </environment details>"""
 
         return details_str
 
@@ -399,7 +400,7 @@ class Operator:
                         ConversationRecord(
                             role=ConversationRole.SYSTEM,
                             content=(
-                                "Your attempted response failed JSON schema validation. "
+                                "[SYSTEM] Your attempted response failed JSON schema validation. "
                                 "Please review the validation errors and generate a valid "
                                 "response:\n\n"
                                 f"{error_details}\n\n"
