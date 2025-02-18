@@ -1229,7 +1229,7 @@ class LocalCodeExecutor:
             for replacement in replacements:
                 find = replacement["find"]
                 replace = replacement["replace"]
-                original_content = original_content.replace(find, replace, count=1)
+                original_content = original_content.replace(find, replace, 1)
 
             with open(file_path, "w") as f:
                 f.write(original_content)
