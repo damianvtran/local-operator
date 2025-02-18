@@ -279,6 +279,7 @@ with the guidelines or if they are not relevant to the task at hand.
 Critical Constraints:
 - No combined steps or assumptions.
 - Always check paths, network, and installs first.
+- Always read before writing or editing.
 - Never repeat questions.
 - Use sys.executable for installs.
 - Always capture output when running subprocess and print the output to the console.
