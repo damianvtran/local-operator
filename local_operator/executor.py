@@ -119,9 +119,8 @@ def process_json_response(response_str: str) -> ResponseJsonSchema:
     if start_index != -1:
         response_content = response_content[start_index + len(start_tag) :]
 
-    end_index = response_content.rfind(end_tag)
-    if end_index != -1:
-        response_content = response_content[:end_index]
+    if response_content.endswith(end_tag):
+        response_content = response_content[: -len(end_tag)]
 
     # Validate the JSON response
     response_json = ResponseJsonSchema.model_validate_json(response_content)
