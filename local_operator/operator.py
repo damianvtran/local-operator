@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from local_operator.agents import AgentData, AgentRegistry
 from local_operator.config import ConfigManager
-from local_operator.console import print_cli_banner, spinner
+from local_operator.console import format_agent_output, print_cli_banner, spinner
 from local_operator.credentials import CredentialManager
 from local_operator.executor import (
     ExecutorInitError,
@@ -22,6 +22,7 @@ from local_operator.executor import (
     process_json_response,
 )
 from local_operator.model.configure import ModelConfiguration
+from local_operator.prompts import PlanSystemPrompt, create_system_prompt
 from local_operator.tools import index_current_directory
 from local_operator.types import (
     ConversationRecord,
@@ -325,6 +326,49 @@ class Operator:
             )
         )
 
+    async def generate_plan(self) -> str:
+        """Generate a plan for the agent to follow."""
+        system_prompt = create_system_prompt(self.executor.tool_registry, PlanSystemPrompt)
+
+        messages = [
+            ConversationRecord(
+                role=ConversationRole.SYSTEM,
+                content=system_prompt,
+            ),
+        ]
+
+        messages.extend(self.executor.conversation_history[1:])
+
+        messages.append(
+            ConversationRecord(
+                role=ConversationRole.SYSTEM,
+                content="Please come up with a detailed plan of actions to achieve the goal "
+                "before proceeding with the execution phase.  Your plan will be used to "
+                "perform actions in the next steps.",
+            )
+        )
+
+        response = await self.executor.invoke_model(messages)
+
+        response_content = (
+            response.content if isinstance(response.content, str) else str(response.content)
+        )
+
+        self.executor.conversation_history.extend(
+            [
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content=response_content,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.USER,
+                    content="Please proceed according to the plan",
+                ),
+            ]
+        )
+
+        return response_content
+
     async def handle_user_input(self, user_input: str) -> ResponseJsonSchema | None:
         """Process user input and generate agent responses.
 
@@ -354,6 +398,22 @@ class Operator:
         response: BaseMessage | None = None
         self.executor.reset_step_counter()
         self.executor_is_processing = True
+        self.add_ephemeral_messages()
+
+        spinner_task = asyncio.create_task(spinner("Generating plan"))
+        try:
+            plan = await self.generate_plan()
+
+            formatted_plan = format_agent_output(plan)
+            print("\n\033[1;36m╭─ Agent Plan ──────────────────────────────────────\033[0m")
+            print(f"\033[1;36m│\033[0m {formatted_plan}")
+            print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
+        finally:
+            spinner_task.cancel()
+            try:
+                await spinner_task
+            except asyncio.CancelledError:
+                pass
 
         while (
             not self._agent_is_done(response_json)

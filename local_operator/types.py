@@ -29,7 +29,7 @@ class ActionType(str, Enum):
     Used to track the type of action being taken in a conversation.
     """
 
-    PLAN = "PLAN"
+    RESEARCH = "RESEARCH"
     ANALYZE = "ANALYZE"
     CODE = "CODE"
     WRITE = "WRITE"

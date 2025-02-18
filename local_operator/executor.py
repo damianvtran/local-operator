@@ -968,6 +968,13 @@ class LocalCodeExecutor:
         # Phase 1: Check for interruption
         if self.interrupted:
             print_task_interrupted()
+            self.append_to_history(
+                ConversationRecord(
+                    role=ConversationRole.USER,
+                    content="Let's stop this task for now, I will provide further "
+                    "instructions shortly.",
+                )
+            )
             return ProcessResponseOutput(
                 status=ProcessResponseStatus.INTERRUPTED,
                 message="Task interrupted by user",

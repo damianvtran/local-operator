@@ -264,8 +264,6 @@ async def test_operator_print_hello_world(cli_operator):
     # Configure mock model
     mock_model_config = configure_model("test", "", MagicMock())
 
-    mock_executor = LocalCodeExecutor(mock_model_config)
-    cli_operator.executor = mock_executor
     cli_operator.model_configuration = mock_model_config
 
     # Execute command and get response
