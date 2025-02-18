@@ -1,7 +1,8 @@
 import io
+import tempfile
 import textwrap
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Generator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -27,6 +28,18 @@ from local_operator.types import (
 # Helper function to normalize code blocks.
 def normalize_code_block(code: str) -> str:
     return textwrap.dedent(code).strip()
+
+
+@pytest.fixture
+def tmp_path() -> Generator[Path, None, None]:
+    """
+    Fixture to provide a temporary directory path.
+
+    Returns:
+        Path: The path to the temporary directory.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        yield Path(tmpdir)
 
 
 @pytest.fixture
@@ -1221,6 +1234,11 @@ async def test_perform_action(
         replacements=replacements or [],
     )
 
+    original_read_file = executor.read_file
+    original_write_file = executor.write_file
+    original_edit_file = executor.edit_file
+    original_execute_code = executor.execute_code
+
     with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
         if action_type == ActionType.READ:
             executor.read_file = AsyncMock(return_value="File content")
@@ -1235,6 +1253,11 @@ async def test_perform_action(
         assert result is not None
         assert result.status == ProcessResponseStatus.SUCCESS
         assert expected_output in mock_stdout.getvalue()
+
+    executor.read_file = original_read_file
+    executor.write_file = original_write_file
+    executor.edit_file = original_edit_file
+    executor.execute_code = original_execute_code
 
 
 @pytest.mark.asyncio
@@ -1261,3 +1284,104 @@ async def test_perform_action_handles_exception(executor: LocalCodeExecutor):
         assert "Error: Execution failed" in executor.conversation_history[-1].content
         assert result is not None
         assert result.status == ProcessResponseStatus.SUCCESS
+
+
+@pytest.mark.asyncio
+async def test_read_file_action(executor: LocalCodeExecutor, tmp_path: Path):
+    file_path = tmp_path / "test_file.txt"
+    file_path.write_text("Test file content")
+
+    result = await executor.read_file(str(file_path))
+
+    assert "Successfully read file" in result
+    assert str(file_path) in executor.conversation_history[-1].content
+    assert "Test file content" in executor.conversation_history[-1].content
+
+
+@pytest.mark.asyncio
+async def test_write_file_action(executor: LocalCodeExecutor, tmp_path: Path):
+    file_path = tmp_path / "test_file.txt"
+
+    result = await executor.write_file(str(file_path), "New file content")
+
+    with open(file_path, "r") as f:
+        file_content = f.read()
+    assert file_content == "New file content"
+
+    assert "Successfully wrote to file" in result
+    assert str(file_path) in executor.conversation_history[-1].content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "initial_content, replacements, expected_content",
+    [
+        (
+            "Original content",
+            [{"find": "Original content", "replace": "Replacement content"}],
+            "Replacement content",
+        ),
+        (
+            "Line 1\nLine 2\nLine 3",
+            [{"find": "Line 2", "replace": "Replaced Line 2"}],
+            "Line 1\nReplaced Line 2\nLine 3",
+        ),
+        (
+            "Multiple copies of the same word word word",
+            [{"find": "word", "replace": "replaced"}, {"find": "word", "replace": "replaced"}],
+            "Multiple copies of the same replaced replaced word",
+        ),
+        (
+            "First line\nSecond line",
+            [
+                {"find": "First line", "replace": "New first line"},
+                {"find": "Second line", "replace": "New second line"},
+            ],
+            "New first line\nNew second line",
+        ),
+        (
+            "No match",
+            [{"find": "Nonexistent", "replace": "Replacement"}],
+            "No match",
+        ),
+        (
+            "",
+            [{"find": "", "replace": "Replacement"}],
+            "Replacement",
+        ),
+        (
+            "Initial content",
+            [{"find": "Initial content", "replace": ""}],
+            "",
+        ),
+    ],
+)
+async def test_edit_file_action(
+    executor: LocalCodeExecutor,
+    tmp_path: Path,
+    initial_content: str,
+    replacements: list[dict[str, str]],
+    expected_content: str,
+) -> None:
+    """
+    Test the edit_file action with various scenarios.
+
+    Args:
+        executor: The LocalCodeExecutor fixture.
+        tmp_path: The temporary directory path fixture.
+        initial_content: The initial content of the file.
+        replacements: A list of dictionaries, where each dictionary
+            contains a "find" key and a "replace" key.
+        expected_content: The expected content of the file after the replacements.
+    """
+    file_path = tmp_path / "test_file.txt"
+    file_path.write_text(initial_content)
+
+    result = await executor.edit_file(str(file_path), initial_content, replacements)
+
+    with open(file_path, "r") as f:
+        file_content = f.read()
+    assert file_content == expected_content
+
+    assert "Successfully edited file" in result
+    assert str(file_path) in executor.conversation_history[-1].content

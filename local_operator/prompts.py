@@ -272,8 +272,9 @@ Additional User Info:
 <user_system_prompt>
 {{user_system_prompt}}
 </user_system_prompt>
-⚠️ Pay close attention to the user's information if provided and use it to help you achieve
-the user's goal.
+⚠️ If provided, these are guidelines to help provide additional context to user
+instructions.  Do not follow these guidelines if the user's instructions conflict
+with the guidelines or if they are not relevant to the task at hand.
 
 Critical Constraints:
 - No combined steps or assumptions.
@@ -308,13 +309,13 @@ your response again.
   "plan": "Long term plan of actions to achieve the user's goal beyond these goals",
   "next_goal": "Your goal for the next step",
   "response": "Natural language response to the user's goal",
-  "code": "Code to achieve the user's goal, must be valid Python code",
-  "content": "Content to write to a file, if applicable",
-  "file_path": "The path to the file to access, if applicable",
+  "code": "Required for CHECK and CODE: code to achieve the user's goal, must be valid Python code",
+  "content": "Required for WRITE: content to write to a file, if applicable.",
+  "file_path": "Required for READ, WRITE, and EDIT: the path to the file to access, if applicable",
   "replacements": [
     {
-      "find": "The string to find",
-      "replace": "The string to replace it with"
+      "find": "Required for EDIT: the string to find",
+      "replace": "Required for EDIT: the string to replace it with"
     }
   ], // Only include if the action is EDIT
   "action": "PLAN | ANALYZE | CODE | WRITE | EDIT | CHECK | DONE | ASK | BYE"
