@@ -867,12 +867,10 @@ class LocalCodeExecutor:
             else stderr.getvalue() or "[No error output]"
         )
 
-        self.context["last_code_output"] = output
-        self.context["last_code_error"] = error_output
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.SYSTEM,
-                content=f"Code execution output:\n{output}\nError output:\n{error_output}",
+                content=f"Code execution output:\n{output}\n" f"Error output:\n{error_output}",
                 should_summarize=True,
             )
         )
