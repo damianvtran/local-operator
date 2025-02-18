@@ -987,20 +987,27 @@ class LocalCodeExecutor:
             )
         )
 
-        action_output = await self.perform_action(response)
-        if action_output:
-            return action_output
+        result = await self.perform_action(response)
 
-        return ProcessResponseOutput(
-            status=ProcessResponseStatus.SUCCESS,
-            message="Action completed",
-        )
+        return result
 
-    async def perform_action(self, response: ResponseJsonSchema) -> ProcessResponseOutput | None:
-        """Perform an action based on the action JSON schema.
+    async def perform_action(self, response: ResponseJsonSchema) -> ProcessResponseOutput:
+        """
+        Perform an action based on the provided ResponseJsonSchema.
+
+        This method determines the action to be performed based on the 'action' field
+        of the response. It supports actions such as executing code, writing to a file,
+        editing a file, and reading a file. Each action is handled differently, with
+        appropriate logging and execution steps.
 
         Args:
-            response (ResponseJsonSchema): The response to perform the action on
+            response: The response object containing details about the action to be performed,
+                      including the action type, code, file path, and content.
+
+        Returns:
+            A ProcessResponseOutput object indicating the status and any relevant messages
+            resulting from the action. Returns None if the action is not one of the supported types
+            (CODE, CHECK, WRITE, EDIT, READ), indicating that no action was taken.
         """
         if response.action not in [
             ActionType.CODE,
@@ -1014,24 +1021,32 @@ class LocalCodeExecutor:
                 message="Action completed",
             )
 
-        print_execution_section(ExecutionSection.HEADER, step=self.step_counter)
+        print_execution_section(
+            ExecutionSection.HEADER, step=self.step_counter, action=response.action
+        )
         spinner_task = asyncio.create_task(spinner(f"Executing {str(response.action).lower()}"))
+
+        result_message = ""
 
         try:
             if response.action == ActionType.CODE or response.action == ActionType.CHECK:
                 code_block = response.code
                 if code_block:
-                    print_execution_section(ExecutionSection.CODE, content=code_block)
+                    print_execution_section(
+                        ExecutionSection.CODE, content=code_block, action=response.action
+                    )
 
-                    result = await self.execute_code(code_block)
+                    result_message = await self.execute_code(code_block)
 
-                    if "code execution cancelled by user" in result:
+                    if "code execution cancelled by user" in result_message:
                         return ProcessResponseOutput(
                             status=ProcessResponseStatus.CANCELLED,
                             message="Code execution cancelled by user",
                         )
 
-                    print_execution_section(ExecutionSection.RESULT, content=result)
+                    print_execution_section(
+                        ExecutionSection.RESULT, content=result_message, action=response.action
+                    )
                 else:
                     raise ValueError("Code block is required for CODE or CHECK action")
 
@@ -1040,12 +1055,16 @@ class LocalCodeExecutor:
                 content = response.content
                 if file_path:
                     print_execution_section(
-                        ExecutionSection.WRITE, file_path=file_path, content=content
+                        ExecutionSection.WRITE,
+                        file_path=file_path,
+                        content=content,
+                        action=response.action,
                     )
 
-                    result = await self.write_file(file_path, content)
-
-                    print_execution_section(ExecutionSection.RESULT, content=result)
+                    result_message = await self.write_file(file_path, content)
+                    print_execution_section(
+                        ExecutionSection.RESULT, content=result_message, action=response.action
+                    )
                 else:
                     raise ValueError("File path is required for WRITE action")
 
@@ -1058,19 +1077,26 @@ class LocalCodeExecutor:
                         ExecutionSection.EDIT,
                         file_path=file_path,
                         replacements=replacements,
+                        action=response.action,
                     )
 
-                    result = await self.edit_file(file_path, content, replacements)
+                    result_message = await self.edit_file(file_path, content, replacements)
 
-                    print_execution_section(ExecutionSection.RESULT, content=result)
+                    print_execution_section(
+                        ExecutionSection.RESULT, content=result_message, action=response.action
+                    )
                 else:
                     raise ValueError("File path and replacements are required for EDIT action")
 
             elif response.action == ActionType.READ:
                 file_path = response.file_path
                 if file_path:
-                    print_execution_section(ExecutionSection.READ, file_path=file_path)
-                    result = await self.read_file(file_path)
+                    print_execution_section(
+                        ExecutionSection.READ,
+                        file_path=file_path,
+                        action=response.action,
+                    )
+                    result_message = await self.read_file(file_path)
                 else:
                     raise ValueError("File path is required for READ action")
         except Exception as e:
@@ -1096,9 +1122,10 @@ class LocalCodeExecutor:
                 "completion_tokens": token_metrics.total_completion_tokens,
                 "cost": token_metrics.total_cost,
             },
+            action=response.action,
         )
 
-        print_execution_section(ExecutionSection.FOOTER)
+        print_execution_section(ExecutionSection.FOOTER, action=response.action)
         self.step_counter += 1
 
         # Phase 4: Summarize old conversation steps
@@ -1112,6 +1139,13 @@ class LocalCodeExecutor:
                 await spinner_task
             except asyncio.CancelledError:
                 pass
+
+        output = ProcessResponseOutput(
+            status=ProcessResponseStatus.SUCCESS,
+            message=result_message if result_message else "Action completed",
+        )
+
+        return output
 
     async def read_file(self, file_path: str) -> str:
         """Read the contents of a file.
