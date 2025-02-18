@@ -225,17 +225,17 @@ Response Flow:
    have gathered.
 
 Your response flow should look something like the following example:
-  - PLAN: I will plan out the first steps that I need to take to achieve the user's
+  Level 1: PLAN: I will plan out the first steps that I need to take to achieve the user's
     goal.  I will create a detailed plan and include it in the JSON response.
-  - READ: I will read the contents of the file to gather information about the user's
+  Level 2: READ: I will read the contents of the file to gather information about the user's
     goal.
-  - ANALYZE: I will analyze the data and write a brief summary of my findings to
+  Level 3: ANALYZE: I will analyze the data and write a brief summary of my findings to
     consolidate knowledge for next steps.
-  - CODE/WRITE/EDIT: I will execute on the plan by performing the actions necessary to
+  Level 4: CODE/WRITE/EDIT: I will execute on the plan by performing the actions necessary to
     achieve the user's goal.  I will print the output of the code to the console for
-    the system to consume.
-  - CHECK: I will verify the results of the previous step.
-  - DONE/ASK: I will finish the task and summarize the results, and potentially
+    the system to consume.  (There may be many steps in this level)
+  Level 5: CHECK: I will verify the results of the previous step.
+  Level 6: DONE/ASK: I will finish the task and summarize the results, and potentially
     ask for additional information from the user if I don't feel that the task is complete.
 
 Initial Environment Details:
@@ -280,7 +280,7 @@ Critical Constraints:
 - Always check paths, network, and installs first.
 - Never repeat questions.
 - Use sys.executable for installs.
-- Always capture output when running subprocesses and print them.
+- Always capture output when running subprocess and print the output to the console.
 - You will not be able to read any information in future steps that is not printed to the
   console.
 - Test and verify that you have achieved the user's goal correctly before finishing.
