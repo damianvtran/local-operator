@@ -319,10 +319,6 @@ class LocalCodeExecutor:
             if msg.summarized:
                 continue
 
-            # Leave the user prompts intact
-            if msg.role == ConversationRole.USER:
-                continue
-
             summary = await self._summarize_conversation_step(msg)
             msg.content = summary
             msg.summarized = True
@@ -973,6 +969,7 @@ class LocalCodeExecutor:
                     role=ConversationRole.USER,
                     content="Let's stop this task for now, I will provide further "
                     "instructions shortly.",
+                    should_summarize=False,
                 )
             )
             return ProcessResponseOutput(
@@ -989,6 +986,7 @@ class LocalCodeExecutor:
             ConversationRecord(
                 role=ConversationRole.ASSISTANT,
                 content=response.model_dump_json(),
+                should_summarize=True,
             )
         )
 
@@ -1174,6 +1172,7 @@ class LocalCodeExecutor:
                 ConversationRecord(
                     role=ConversationRole.SYSTEM,
                     content=f"Contents of {file_path}:\n\n{file_content}",
+                    should_summarize=True,
                 )
             )
 
@@ -1204,6 +1203,7 @@ class LocalCodeExecutor:
                 ConversationRecord(
                     role=ConversationRole.SYSTEM,
                     content=f"Successfully wrote to file: {file_path}",
+                    should_summarize=True,
                 )
             )
 
@@ -1245,6 +1245,7 @@ class LocalCodeExecutor:
                 ConversationRecord(
                     role=ConversationRole.SYSTEM,
                     content=f"Successfully edited file: {file_path}",
+                    should_summarize=True,
                 )
             )
             return f"Successfully edited file: {file_path}"
