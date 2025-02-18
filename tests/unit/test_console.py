@@ -296,7 +296,7 @@ def test_format_success_output():
         (ActionType.EDIT, 3, "Executing Edit (Step 3)"),
         (ActionType.READ, 4, "Executing Read (Step 4)"),
         (ActionType.CHECK, 5, "Executing Check (Step 5)"),
-        (ActionType.PLAN, 6, "Executing Plan (Step 6)"),
+        (ActionType.RESEARCH, 6, "Executing Research (Step 6)"),
         (ActionType.ANALYZE, 7, "Executing Analyze (Step 7)"),
         (ActionType.DONE, 8, "Executing Done (Step 8)"),
         (ActionType.ASK, 9, "Executing Ask (Step 9)"),
