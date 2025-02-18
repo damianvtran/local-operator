@@ -359,10 +359,12 @@ class Operator:
                 ConversationRecord(
                     role=ConversationRole.ASSISTANT,
                     content=response_content,
+                    should_summarize=True,
                 ),
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content="Please proceed according to the plan",
+                    should_summarize=False,
                 ),
             ]
         )
@@ -391,6 +393,7 @@ class Operator:
             ConversationRecord(
                 role=ConversationRole.USER,
                 content=user_input,
+                should_summarize=False,
             )
         )
 
@@ -456,6 +459,7 @@ class Operator:
                         ConversationRecord(
                             role=ConversationRole.ASSISTANT,
                             content=response_content,
+                            should_summarize=True,
                         ),
                         ConversationRecord(
                             role=ConversationRole.SYSTEM,
@@ -468,6 +472,7 @@ class Operator:
                                 "structure. Please reformat your response to continue with "
                                 "the task."
                             ),
+                            should_summarize=True,
                         ),
                     ]
                 )
