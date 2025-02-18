@@ -7,6 +7,7 @@ from typing import Any
 
 from local_operator.agents import AgentData
 from local_operator.config import ConfigManager
+from local_operator.types import ActionType
 
 
 class ExecutionSection(Enum):
@@ -264,6 +265,7 @@ def print_execution_section(
     data: dict[str, Any] | None = None,
     file_path: str | None = None,
     replacements: list[dict[str, str]] | None = None,
+    action: ActionType | None = None,
 ) -> None:
     """
     Print a section of the execution output.
@@ -285,9 +287,10 @@ def print_execution_section(
             raise ValueError("Unknown section type. Choose from: header, code, result, footer.")
 
     if section == ExecutionSection.HEADER:
+        action_str = str(action).title() if action else ""
         if step is None:
             raise ValueError("Step must be provided for header section.")
-        print(f"\n\033[1;36m╭─ Executing Code Blocks (Step {step}) ──────────────────\033[0m")
+        print(f"\n\033[1;36m╭─ Executing {action_str} (Step {step}) ──────────────────\033[0m")
     elif section == ExecutionSection.CODE:
         print("\n\033[1;36m│ Executing:\033[0m")
         print(content)

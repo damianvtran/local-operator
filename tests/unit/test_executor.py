@@ -10,8 +10,10 @@ from openai import APIError
 from local_operator.executor import (
     ConfirmSafetyResult,
     LocalCodeExecutor,
+    ProcessResponseStatus,
     get_confirm_safety_result,
     get_context_vars_str,
+    process_json_response,
 )
 from local_operator.operator import Operator, OperatorType
 from local_operator.types import (
@@ -592,7 +594,7 @@ async def test_process_response(executor, mock_model_config):
     with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
         await executor.process_response(response)
         output = mock_stdout.getvalue()
-        assert "Executing Code Blocks" in output
+        assert "Executing Code" in output
         assert "hello world" in output
 
 
@@ -1118,3 +1120,144 @@ def test_get_context_vars_str(
 
     result = get_context_vars_str(context_vars)
     assert result == expected_output
+
+
+@pytest.mark.parametrize(
+    "response_str, expected_code, expected_action",
+    [
+        (
+            '{"previous_step_success": true, "previous_goal": "", '
+            '"current_goal": "Print hello world", "next_goal": "", '
+            '"response": "Here\'s some code:", "code": "print(\'hello world\')", '
+            '"action": "CODE", "learnings": "", "plan": "", "content": "", '
+            '"file_path": "", "replacements": []}',
+            "print('hello world')",
+            ActionType.CODE,
+        ),
+        (
+            '```json\n{"previous_step_success": true, "previous_goal": "", '
+            '"current_goal": "Print hello world", "next_goal": "", '
+            '"response": "Here\'s some code:", "code": "print(\'hello world\')", '
+            '"action": "CODE", "learnings": "", "plan": "", "content": "", '
+            '"file_path": "", "replacements": []}\n```',
+            "print('hello world')",
+            ActionType.CODE,
+        ),
+        (
+            '```json\n{"previous_step_success": true, "previous_goal": "", '
+            '"current_goal": "Write a file", "next_goal": "", '
+            '"response": "I will write a file", "code": "", "action": "WRITE", '
+            '"learnings": "", "plan": "", "content": "file content", '
+            '"file_path": "output.txt", "replacements": []}\n```',
+            "",
+            ActionType.WRITE,
+        ),
+        (
+            'Some text before ```json\n{"previous_step_success": true, "previous_goal": "", '
+            '"current_goal": "Print hello world", "next_goal": "", '
+            '"response": "Here\'s some code:", "code": "print(\'hello world\')", '
+            '"action": "CODE", "learnings": "", "plan": "", "content": "", '
+            '"file_path": "", "replacements": []}\n```',
+            "print('hello world')",
+            ActionType.CODE,
+        ),
+    ],
+)
+def test_process_json_response(
+    response_str: str, expected_code: str, expected_action: ActionType
+) -> None:
+    """
+    Test the process_json_response function with various inputs.
+
+    Args:
+        response_str: A JSON string representing the response from the language model.
+        expected_code: The expected code extracted from the JSON response.
+        expected_action: The expected action type extracted from the JSON response.
+    """
+    response = process_json_response(response_str)
+    assert response.code == expected_code
+    assert response.action == expected_action
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "action_type, code, file_path, content, replacements, expected_output",
+    [
+        (ActionType.CODE, "print('hello')", None, None, None, "Executing Code"),
+        (ActionType.CHECK, "x = 1", None, None, None, "Executing Check"),
+        (ActionType.WRITE, None, "test.txt", "test content", None, "Executing Write"),
+        (
+            ActionType.EDIT,
+            None,
+            "test.txt",
+            "new content",
+            [{"old": "old", "new": "new"}],
+            "Executing Edit",
+        ),
+        (ActionType.READ, None, "test.txt", None, None, "Executing Read"),
+    ],
+)
+async def test_perform_action(
+    executor: LocalCodeExecutor,
+    action_type: ActionType,
+    code: str | None,
+    file_path: str | None,
+    content: str | None,
+    replacements: list[dict[str, str]] | None,
+    expected_output: str,
+) -> None:
+    response = ResponseJsonSchema(
+        previous_step_success=True,
+        previous_goal="",
+        current_goal="Test goal",
+        next_goal="",
+        response="Test response",
+        code=code or "",
+        action=action_type,
+        learnings="",
+        plan="",
+        content=content or "",
+        file_path=file_path or "",
+        replacements=replacements or [],
+    )
+
+    with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        if action_type == ActionType.READ:
+            executor.read_file = AsyncMock(return_value="File content")
+        elif action_type == ActionType.WRITE:
+            executor.write_file = AsyncMock(return_value="File written")
+        elif action_type == ActionType.EDIT:
+            executor.edit_file = AsyncMock(return_value="File edited")
+        else:
+            executor.execute_code = AsyncMock(return_value="Code executed")
+
+        result = await executor.perform_action(response)
+        assert result is not None
+        assert result.status == ProcessResponseStatus.SUCCESS
+        assert expected_output in mock_stdout.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_perform_action_handles_exception(executor: LocalCodeExecutor):
+    response = ResponseJsonSchema(
+        previous_step_success=True,
+        previous_goal="",
+        current_goal="Test goal",
+        next_goal="",
+        response="Test response",
+        code="invalid code",
+        action=ActionType.CODE,
+        learnings="",
+        plan="",
+        content="",
+        file_path="",
+        replacements=[],
+    )
+
+    executor.execute_code = AsyncMock(side_effect=Exception("Execution failed"))
+
+    with patch("sys.stdout", new_callable=io.StringIO):
+        result = await executor.perform_action(response)
+        assert "Error: Execution failed" in executor.conversation_history[-1].content
+        assert result is not None
+        assert result.status == ProcessResponseStatus.SUCCESS

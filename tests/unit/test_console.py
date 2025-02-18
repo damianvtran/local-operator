@@ -18,6 +18,7 @@ from local_operator.console import (
     print_task_interrupted,
     spinner,
 )
+from local_operator.types import ActionType
 
 
 @pytest.fixture
@@ -287,12 +288,29 @@ def test_format_success_output():
     assert stderr_text in output
 
 
-def test_print_execution_section_header(monkeypatch):
-    output = io.StringIO()
+@pytest.mark.parametrize(
+    "action_type, step, expected_output",
+    [
+        (ActionType.CODE, 1, "Executing Code (Step 1)"),
+        (ActionType.WRITE, 2, "Executing Write (Step 2)"),
+        (ActionType.EDIT, 3, "Executing Edit (Step 3)"),
+        (ActionType.READ, 4, "Executing Read (Step 4)"),
+        (ActionType.CHECK, 5, "Executing Check (Step 5)"),
+        (ActionType.PLAN, 6, "Executing Plan (Step 6)"),
+        (ActionType.ANALYZE, 7, "Executing Analyze (Step 7)"),
+        (ActionType.DONE, 8, "Executing Done (Step 8)"),
+        (ActionType.ASK, 9, "Executing Ask (Step 9)"),
+        (ActionType.BYE, 10, "Executing Bye (Step 10)"),
+    ],
+)
+def test_print_execution_section_header(
+    monkeypatch: pytest.MonkeyPatch, action_type: ActionType, step: int, expected_output: str
+) -> None:
+    output: io.StringIO = io.StringIO()
     monkeypatch.setattr(sys, "stdout", output)
-    print_execution_section("header", step=1)
-    result = output.getvalue()
-    assert "Executing Code Blocks (Step 1)" in result
+    print_execution_section("header", step=step, action=action_type)
+    result: str = output.getvalue()
+    assert expected_output in result
     assert "╭─" in result
 
 
@@ -300,7 +318,7 @@ def test_print_execution_section_code(monkeypatch):
     output = io.StringIO()
     monkeypatch.setattr(sys, "stdout", output)
     test_code = "print('Hello')"
-    print_execution_section("code", content=test_code)
+    print_execution_section("code", content=test_code, action=ActionType.CODE)
     result = output.getvalue()
     assert "Executing:" in result
     assert "print('Hello')" in result
@@ -310,7 +328,7 @@ def test_print_execution_section_result(monkeypatch):
     output = io.StringIO()
     monkeypatch.setattr(sys, "stdout", output)
     test_result = "Result is 42"
-    print_execution_section("result", content=test_result)
+    print_execution_section("result", content=test_result, action=ActionType.CODE)
     result = output.getvalue()
     assert "Result:" in result
     assert "Result is 42" in result
@@ -319,7 +337,7 @@ def test_print_execution_section_result(monkeypatch):
 def test_print_execution_section_footer(monkeypatch):
     output = io.StringIO()
     monkeypatch.setattr(sys, "stdout", output)
-    print_execution_section("footer")
+    print_execution_section("footer", action=ActionType.CODE)
     result = output.getvalue()
     assert "╰" in result
 
