@@ -112,10 +112,16 @@ def process_json_response(response_str: str) -> ResponseJsonSchema:
         ValidationError: If the JSON response does not match the expected schema.
     """
     response_content = response_str
-    if response_content.startswith("```json"):
-        response_content = response_content[7:]
-    if response_content.endswith("```"):
-        response_content = response_content[:-3]
+    start_tag = "```json"
+    end_tag = "```"
+
+    start_index = response_content.find(start_tag)
+    if start_index != -1:
+        response_content = response_content[start_index + len(start_tag) :]
+
+    end_index = response_content.rfind(end_tag)
+    if end_index != -1:
+        response_content = response_content[:end_index]
 
     # Validate the JSON response
     response_json = ResponseJsonSchema.model_validate_json(response_content)
