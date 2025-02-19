@@ -1012,12 +1012,10 @@ class LocalCodeExecutor:
             resulting from the action. Returns None if the action is not one of the supported types
             (CODE, CHECK, WRITE, EDIT, READ), indicating that no action was taken.
         """
-        if response.action not in [
-            ActionType.CODE,
-            ActionType.CHECK,
-            ActionType.WRITE,
-            ActionType.EDIT,
-            ActionType.READ,
+        if response.action in [
+            ActionType.DONE,
+            ActionType.BYE,
+            ActionType.ASK,
         ]:
             return ProcessResponseOutput(
                 status=ProcessResponseStatus.SUCCESS,
@@ -1032,28 +1030,7 @@ class LocalCodeExecutor:
         result_message = ""
 
         try:
-            if response.action == ActionType.CODE or response.action == ActionType.CHECK:
-                code_block = response.code
-                if code_block:
-                    print_execution_section(
-                        ExecutionSection.CODE, content=code_block, action=response.action
-                    )
-
-                    result_message = await self.execute_code(code_block)
-
-                    if "code execution cancelled by user" in result_message:
-                        return ProcessResponseOutput(
-                            status=ProcessResponseStatus.CANCELLED,
-                            message="Code execution cancelled by user",
-                        )
-
-                    print_execution_section(
-                        ExecutionSection.RESULT, content=result_message, action=response.action
-                    )
-                else:
-                    raise ValueError("Code block is required for CODE or CHECK action")
-
-            elif response.action == ActionType.WRITE:
+            if response.action == ActionType.WRITE:
                 file_path = response.file_path
                 content = response.content if response.content else response.code
                 if file_path:
@@ -1101,6 +1078,27 @@ class LocalCodeExecutor:
                     result_message = await self.read_file(file_path)
                 else:
                     raise ValueError("File path is required for READ action")
+
+            else:
+                code_block = response.code
+                if code_block:
+                    print_execution_section(
+                        ExecutionSection.CODE, content=code_block, action=response.action
+                    )
+
+                    result_message = await self.execute_code(code_block)
+
+                    if "code execution cancelled by user" in result_message:
+                        return ProcessResponseOutput(
+                            status=ProcessResponseStatus.CANCELLED,
+                            message="Code execution cancelled by user",
+                        )
+
+                    print_execution_section(
+                        ExecutionSection.RESULT, content=result_message, action=response.action
+                    )
+                elif response.action == ActionType.CHECK or response.action == ActionType.CODE:
+                    raise ValueError('"code" field is required for CODE or CHECK actions')
         except Exception as e:
             log_action_error(e, str(response.action))
             self.append_to_history(
