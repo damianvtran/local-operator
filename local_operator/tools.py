@@ -394,7 +394,7 @@ def search_web_tool(serp_api_client: SerpApiClient) -> Callable[..., Any]:
     """
 
     def search_web(query: str, provider: str = "google", max_results: int = 20) -> SerpApiResponse:
-        """Search the web using the SERP API.
+        """Search the web using the SERP API and return the results.
 
         This tool allows the agent to search the internet for information. The results
         must be printed to the console.
@@ -429,7 +429,6 @@ class ToolRegistry:
 
     def __init__(self):
         """Initialize an empty tool registry."""
-        # Initialize _tools first before calling super().__init__()
         super().__init__()
         object.__setattr__(self, "_tools", {})
 
