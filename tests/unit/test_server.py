@@ -12,6 +12,7 @@ from local_operator.model.configure import ModelConfiguration
 from local_operator.model.registry import ModelInfo
 from local_operator.server import AgentCreate, AgentUpdate, ChatRequest, app
 from local_operator.types import (
+    ActionType,
     ConversationRecord,
     ConversationRole,
     ResponseJsonSchema,
@@ -69,7 +70,10 @@ class DummyOperator:
             next_goal="",
             response="dummy operator response",
             code="",
-            action="DONE",
+            content="",
+            file_path="",
+            replacements=[],
+            action=ActionType.DONE,
             learnings="",
             plan="",
         )
