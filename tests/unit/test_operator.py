@@ -8,7 +8,7 @@ from local_operator.executor import LocalCodeExecutor
 from local_operator.model.configure import configure_model
 from local_operator.operator import Operator, OperatorType
 from local_operator.tools import ToolRegistry
-from local_operator.types import ResponseJsonSchema
+from local_operator.types import ActionType, ResponseJsonSchema
 
 
 @pytest.fixture
@@ -89,7 +89,10 @@ async def test_cli_operator_chat(cli_operator, mock_model_config):
         next_goal="",
         response="I'm done",
         code="",
-        action="DONE",
+        content="",
+        file_path="",
+        replacements=[],
+        action=ActionType.DONE,
         learnings="",
         plan="",
     )
@@ -117,7 +120,10 @@ def test_agent_is_done(cli_operator):
                 next_goal="",
                 response="",
                 code="",
-                action="DONE",
+                content="",
+                file_path="",
+                replacements=[],
+                action=ActionType.DONE,
                 learnings="",
                 plan="",
             ),
@@ -132,7 +138,10 @@ def test_agent_is_done(cli_operator):
                 next_goal="",
                 response="",
                 code="",
-                action="CONTINUE",
+                content="",
+                file_path="",
+                replacements=[],
+                action=ActionType.CODE,
                 learnings="",
                 plan="",
             ),
@@ -166,7 +175,10 @@ def test_agent_requires_user_input(cli_operator):
                 next_goal="",
                 response="",
                 code="",
-                action="ASK",
+                content="",
+                file_path="",
+                replacements=[],
+                action=ActionType.ASK,
                 learnings="",
                 plan="",
             ),
@@ -181,7 +193,10 @@ def test_agent_requires_user_input(cli_operator):
                 next_goal="",
                 response="",
                 code="",
-                action="CONTINUE",
+                content="",
+                file_path="",
+                replacements=[],
+                action=ActionType.DONE,
                 learnings="",
                 plan="",
             ),
@@ -207,7 +222,10 @@ def test_agent_should_exit(cli_operator):
                 next_goal="",
                 response="",
                 code="",
-                action="BYE",
+                content="",
+                file_path="",
+                replacements=[],
+                action=ActionType.BYE,
                 learnings="",
                 plan="",
             ),
@@ -222,7 +240,10 @@ def test_agent_should_exit(cli_operator):
                 next_goal="",
                 response="",
                 code="",
-                action="CONTINUE",
+                content="",
+                file_path="",
+                replacements=[],
+                action=ActionType.CODE,
                 learnings="",
                 plan="",
             ),
@@ -244,6 +265,7 @@ async def test_operator_print_hello_world(cli_operator):
     mock_model_config = configure_model("test", "", MagicMock())
 
     mock_executor = LocalCodeExecutor(mock_model_config)
+    mock_executor.tool_registry = ToolRegistry()
     cli_operator.executor = mock_executor
     cli_operator.model_configuration = mock_model_config
 
@@ -261,7 +283,7 @@ async def test_operator_print_hello_world(cli_operator):
     assert last_message_content.current_goal == "Complete task"
     assert last_message_content.response == "I have printed 'Hello World' to the console."
     assert last_message_content.code == ""
-    assert last_message_content.action == "DONE"
+    assert last_message_content.action == ActionType.DONE
 
 
 def test_get_environment_details(cli_operator, monkeypatch, tmp_path):

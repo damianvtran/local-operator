@@ -2,7 +2,7 @@ import asyncio
 
 from langchain_core.messages import BaseMessage
 
-from local_operator.types import ConversationRole, ResponseJsonSchema
+from local_operator.types import ActionType, ConversationRole, ResponseJsonSchema
 
 USER_MOCK_RESPONSES = {
     "hello": ResponseJsonSchema(
@@ -12,20 +12,26 @@ USER_MOCK_RESPONSES = {
         next_goal="",
         response="Hello! I am the test model.",
         code="",
-        action="DONE",
+        action=ActionType.DONE,
         learnings="",
         plan="",
+        content="",
+        file_path="",
+        replacements=[],
     ),
-    "print hello world": ResponseJsonSchema(
+    "please proceed according to the plan": ResponseJsonSchema(
         previous_step_success=True,
         previous_goal="",
-        current_goal="Print Hello World",
+        current_goal="",
         next_goal="",
         response='Sure, I will execute a simple Python script to print "Hello World".',
         code='print("Hello World")',
-        action="CONTINUE",
+        action=ActionType.CODE,
         learnings="",
         plan="",
+        content="",
+        file_path="",
+        replacements=[],
     ),
 }
 
@@ -37,10 +43,16 @@ SYSTEM_MOCK_RESPONSES = {
         next_goal="",
         response="I have printed 'Hello World' to the console.",
         code="",
-        action="DONE",
+        action=ActionType.DONE,
         learnings="",
         plan="",
-    )
+        content="",
+        file_path="",
+        replacements=[],
+    ),
+    "Please come up with a detailed plan of actions to achieve the goal "
+    "before proceeding with the execution phase.  Your plan will be used to "
+    "perform actions in the next steps.": "Sure, I will create a plan to print 'Hello World'.",
 }
 
 
@@ -115,7 +127,11 @@ class ChatMock:
             if closest_match:
                 response = USER_MOCK_RESPONSES[closest_match]
                 return BaseMessage(
-                    content=response.model_dump_json(),
+                    content=(
+                        response.model_dump_json()
+                        if isinstance(response, ResponseJsonSchema)
+                        else response
+                    ),
                     type=ConversationRole.ASSISTANT.value,
                 )
         else:
@@ -128,7 +144,20 @@ class ChatMock:
 
         # Pass through the last message if no match found
         return BaseMessage(
-            content=messages[-1].get("content", ""),
+            content=ResponseJsonSchema(
+                previous_step_success=False,
+                previous_goal="",
+                current_goal="",
+                next_goal="",
+                response=f"No mock response for message: {user_message}",
+                code="",
+                action=ActionType.DONE,
+                learnings="",
+                plan="",
+                content="",
+                file_path="",
+                replacements=[],
+            ).model_dump_json(),
             type=ConversationRole.ASSISTANT.value,
         )
 
