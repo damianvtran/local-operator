@@ -33,6 +33,20 @@ USER_MOCK_RESPONSES = {
         file_path="",
         replacements=[],
     ),
+    "Please proceed according to the plan": ResponseJsonSchema(
+        previous_step_success=True,
+        previous_goal="",
+        current_goal="",
+        next_goal="",
+        response='Sure, I will execute a simple Python script to print "Hello World".',
+        code='print("Hello World")',
+        action=ActionType.CODE,
+        learnings="",
+        plan="",
+        content="",
+        file_path="",
+        replacements=[],
+    ),
 }
 
 SYSTEM_MOCK_RESPONSES = {
@@ -137,7 +151,20 @@ class ChatMock:
 
         # Pass through the last message if no match found
         return BaseMessage(
-            content=messages[-1].get("content", ""),
+            content=ResponseJsonSchema(
+                previous_step_success=False,
+                previous_goal="",
+                current_goal="",
+                next_goal="",
+                response=f"No mock response for message: {user_message}",
+                code="",
+                action=ActionType.DONE,
+                learnings="",
+                plan="",
+                content="",
+                file_path="",
+                replacements=[],
+            ).model_dump_json(),
             type=ConversationRole.ASSISTANT.value,
         )
 
