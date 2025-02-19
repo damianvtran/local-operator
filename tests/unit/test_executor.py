@@ -1314,22 +1314,25 @@ async def test_write_file_action(executor: LocalCodeExecutor, tmp_path: Path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "initial_content, replacements, expected_content",
+    "initial_content, replacements, expected_content, should_raise",
     [
         (
             "Original content",
             [{"find": "Original content", "replace": "Replacement content"}],
             "Replacement content",
+            False,
         ),
         (
             "Line 1\nLine 2\nLine 3",
             [{"find": "Line 2", "replace": "Replaced Line 2"}],
             "Line 1\nReplaced Line 2\nLine 3",
+            False,
         ),
         (
             "Multiple copies of the same word word word",
             [{"find": "word", "replace": "replaced"}, {"find": "word", "replace": "replaced"}],
             "Multiple copies of the same replaced replaced word",
+            False,
         ),
         (
             "First line\nSecond line",
@@ -1338,21 +1341,25 @@ async def test_write_file_action(executor: LocalCodeExecutor, tmp_path: Path):
                 {"find": "Second line", "replace": "New second line"},
             ],
             "New first line\nNew second line",
+            False,
         ),
         (
             "No match",
             [{"find": "Nonexistent", "replace": "Replacement"}],
             "No match",
+            True,
         ),
         (
             "",
             [{"find": "", "replace": "Replacement"}],
             "Replacement",
+            False,
         ),
         (
             "Initial content",
             [{"find": "Initial content", "replace": ""}],
             "",
+            False,
         ),
     ],
 )
@@ -1362,6 +1369,7 @@ async def test_edit_file_action(
     initial_content: str,
     replacements: list[dict[str, str]],
     expected_content: str,
+    should_raise: bool,
 ) -> None:
     """
     Test the edit_file action with various scenarios.
@@ -1373,15 +1381,19 @@ async def test_edit_file_action(
         replacements: A list of dictionaries, where each dictionary
             contains a "find" key and a "replace" key.
         expected_content: The expected content of the file after the replacements.
+        should_raise: A boolean indicating whether the test should raise an exception.
     """
     file_path = tmp_path / "test_file.txt"
     file_path.write_text(initial_content)
 
-    result = await executor.edit_file(str(file_path), initial_content, replacements)
-
-    with open(file_path, "r") as f:
-        file_content = f.read()
-    assert file_content == expected_content
-
-    assert "Successfully edited file" in result
-    assert str(file_path) in executor.conversation_history[-1].content
+    if should_raise:
+        with pytest.raises(ValueError):
+            await executor.edit_file(str(file_path), replacements)
+    else:
+        result = await executor.edit_file(str(file_path), replacements)
+        with open(file_path, "r") as f:
+            file_content = f.read()
+        assert file_content == expected_content
+        assert result is not None
+        assert "Successfully edited file" in result
+        assert str(file_path) in executor.conversation_history[-1].content
