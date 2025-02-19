@@ -133,7 +133,7 @@ def get_context_vars_str(context_vars: Dict[str, Any]) -> str:
 
     This function converts a dictionary of context variables into a string
     representation, limiting the output to a maximum of 1000 lines per value
-    to prevent excessive output.  It also ignores built-in variables and other
+    to prevent excessive output. It also ignores built-in variables and other
     common uninteresting variables.
 
     Args:
@@ -154,31 +154,36 @@ def get_context_vars_str(context_vars: Dict[str, Any]) -> str:
         formatted_value_str = value_str
 
         if callable(value):
-            doc = value.__doc__ or "No description available"
-            # Get first line of docstring
-            doc = doc.split("\n")[0].strip()
+            try:
+                doc = value.__doc__ or "No description available"
+                # Get first line of docstring
+                doc = doc.split("\n")[0].strip()
 
-            sig = inspect.signature(value)
-            args = []
-            for p in sig.parameters.values():
-                arg_type = (
-                    p.annotation.__name__
-                    if hasattr(p.annotation, "__name__")
-                    else str(p.annotation)
+                sig = inspect.signature(value)
+                args = []
+                for p in sig.parameters.values():
+                    arg_type = (
+                        p.annotation.__name__
+                        if hasattr(p.annotation, "__name__")
+                        else str(p.annotation)
+                    )
+                    args.append(f"{p.name}: {arg_type}")
+
+                return_type = (
+                    sig.return_annotation.__name__
+                    if hasattr(sig.return_annotation, "__name__")
+                    else str(sig.return_annotation)
                 )
-                args.append(f"{p.name}: {arg_type}")
 
-            return_type = (
-                sig.return_annotation.__name__
-                if hasattr(sig.return_annotation, "__name__")
-                else str(sig.return_annotation)
-            )
+                # Check if function is async
+                is_async = inspect.iscoroutinefunction(value)
+                async_prefix = "async " if is_async else ""
 
-            # Check if function is async
-            is_async = inspect.iscoroutinefunction(value)
-            async_prefix = "async " if is_async else ""
-
-            formatted_value_str = f"{async_prefix}{key}({', '.join(args)}) -> {return_type}: {doc}"
+                formatted_value_str = (
+                    f"{async_prefix}{key}({', '.join(args)}) -> {return_type}: {doc}"
+                )
+            except ValueError:
+                formatted_value_str = value_str
 
         if len(formatted_value_str) > 100000:
             formatted_value_str = (
