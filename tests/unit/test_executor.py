@@ -1,6 +1,7 @@
 import io
 import tempfile
 import textwrap
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Generator
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1101,6 +1102,11 @@ def test_get_conversation_working_directory(executor, test_case):
             "a: 1\nb: hello\nc: [1, 2, 3]\nfunction_1: function_1(x: _empty) -> _empty: "
             "No description available\n",
         ),
+        (
+            {"time": datetime(2024, 1, 1, 12, 0, 0)},
+            "",
+            "time: 2024-01-01 12:00:00\n",
+        ),
     ],
 )
 def test_get_context_vars_str(
@@ -1111,6 +1117,7 @@ def test_get_context_vars_str(
 
     Args:
         context_vars: A dictionary representing the context variables.
+        function_name: The name of the function to add to the context variables.
         expected_output: The expected string representation of the context variables.
     """
 
