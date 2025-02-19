@@ -1055,7 +1055,7 @@ class LocalCodeExecutor:
 
             elif response.action == ActionType.WRITE:
                 file_path = response.file_path
-                content = response.content
+                content = response.content if response.content else response.code
                 if file_path:
                     print_execution_section(
                         ExecutionSection.WRITE,
@@ -1073,7 +1073,6 @@ class LocalCodeExecutor:
 
             elif response.action == ActionType.EDIT:
                 file_path = response.file_path
-                content = response.content
                 replacements = response.replacements
                 if file_path and replacements:
                     print_execution_section(
@@ -1083,7 +1082,7 @@ class LocalCodeExecutor:
                         action=response.action,
                     )
 
-                    result_message = await self.edit_file(file_path, content, replacements)
+                    result_message = await self.edit_file(file_path, replacements)
 
                     print_execution_section(
                         ExecutionSection.RESULT, content=result_message, action=response.action
@@ -1163,24 +1162,19 @@ class LocalCodeExecutor:
             FileNotFoundError: If the file does not exist
             OSError: If there is an error reading the file
         """
-        try:
-            file_content = ""
-            with open(file_path, "r") as f:
-                file_content = f.read()
+        file_content = ""
+        with open(file_path, "r") as f:
+            file_content = f.read()
 
-            self.append_to_history(
-                ConversationRecord(
-                    role=ConversationRole.SYSTEM,
-                    content=f"Contents of {file_path}:\n\n{file_content}",
-                    should_summarize=True,
-                )
+        self.append_to_history(
+            ConversationRecord(
+                role=ConversationRole.SYSTEM,
+                content=f"Contents of {file_path}:\n\n{file_content}",
+                should_summarize=True,
             )
+        )
 
-            return f"Successfully read file: {file_path}"
-        except FileNotFoundError as e:
-            raise e
-        except OSError as e:
-            raise e
+        return f"Successfully read file: {file_path}"
 
     async def write_file(self, file_path: str, content: str) -> str:
         """Write content to a file.
@@ -1195,30 +1189,24 @@ class LocalCodeExecutor:
         Raises:
             OSError: If there is an error writing to the file
         """
-        try:
-            with open(file_path, "w") as f:
-                f.write(content)
+        with open(file_path, "w") as f:
+            f.write(content)
 
-            self.append_to_history(
-                ConversationRecord(
-                    role=ConversationRole.SYSTEM,
-                    content=f"Successfully wrote to file: {file_path}",
-                    should_summarize=True,
-                )
+        self.append_to_history(
+            ConversationRecord(
+                role=ConversationRole.SYSTEM,
+                content=f"Successfully wrote to file: {file_path}",
+                should_summarize=True,
             )
+        )
 
-            return f"Successfully wrote to file: {file_path}"
-        except OSError as e:
-            raise e
+        return f"Successfully wrote to file: {file_path}"
 
-    async def edit_file(
-        self, file_path: str, content: str, replacements: List[Dict[str, str]]
-    ) -> str:
+    async def edit_file(self, file_path: str, replacements: List[Dict[str, str]]) -> str:
         """Edit a file by applying a series of find and replace operations.
 
         Args:
             file_path (str): The path to the file to edit
-            content (str): The original content of the file
             replacements (List[Dict[str, str]]): A list of dictionaries, where each dictionary
                 contains a "find" key and a "replace" key. The "find" key specifies the string
                 to find, and the "replace" key specifies the string to replace it with.
@@ -1228,32 +1216,33 @@ class LocalCodeExecutor:
 
         Raises:
             FileNotFoundError: If the file does not exist
+            ValueError: If the find string is not found in the file
             OSError: If there is an error reading or writing to the file
         """
-        try:
-            original_content = content
+        original_content = ""
+        with open(file_path, "r") as f:
+            original_content = f.read()
 
-            for replacement in replacements:
-                find = replacement["find"]
-                replace = replacement["replace"]
-                original_content = original_content.replace(find, replace, 1)
+        for replacement in replacements:
+            find = replacement["find"]
+            replace = replacement["replace"]
 
-            with open(file_path, "w") as f:
-                f.write(original_content)
+            if find not in original_content:
+                raise ValueError(f"Find string '{find}' not found in file {file_path}")
 
-            self.append_to_history(
-                ConversationRecord(
-                    role=ConversationRole.SYSTEM,
-                    content=f"Successfully edited file: {file_path}",
-                    should_summarize=True,
-                )
+            original_content = original_content.replace(find, replace, 1)
+
+        with open(file_path, "w") as f:
+            f.write(original_content)
+
+        self.append_to_history(
+            ConversationRecord(
+                role=ConversationRole.SYSTEM,
+                content=f"Successfully edited file: {file_path}",
+                should_summarize=True,
             )
-            return f"Successfully edited file: {file_path}"
-
-        except FileNotFoundError as e:
-            raise e
-        except OSError as e:
-            raise e
+        )
+        return f"Successfully edited file: {file_path}"
 
     def _limit_conversation_history(self) -> None:
         """Limit the conversation history to the maximum number of messages."""
