@@ -19,21 +19,7 @@ USER_MOCK_RESPONSES = {
         file_path="",
         replacements=[],
     ),
-    "print hello world": ResponseJsonSchema(
-        previous_step_success=True,
-        previous_goal="",
-        current_goal="Print Hello World",
-        next_goal="",
-        response='Sure, I will execute a simple Python script to print "Hello World".',
-        code='print("Hello World")',
-        action=ActionType.CODE,
-        learnings="",
-        plan="",
-        content="",
-        file_path="",
-        replacements=[],
-    ),
-    "Please proceed according to the plan": ResponseJsonSchema(
+    "please proceed according to the plan": ResponseJsonSchema(
         previous_step_success=True,
         previous_goal="",
         current_goal="",
@@ -63,7 +49,10 @@ SYSTEM_MOCK_RESPONSES = {
         content="",
         file_path="",
         replacements=[],
-    )
+    ),
+    "Please come up with a detailed plan of actions to achieve the goal "
+    "before proceeding with the execution phase.  Your plan will be used to "
+    "perform actions in the next steps.": "Sure, I will create a plan to print 'Hello World'.",
 }
 
 
@@ -138,7 +127,11 @@ class ChatMock:
             if closest_match:
                 response = USER_MOCK_RESPONSES[closest_match]
                 return BaseMessage(
-                    content=response.model_dump_json(),
+                    content=(
+                        response.model_dump_json()
+                        if isinstance(response, ResponseJsonSchema)
+                        else response
+                    ),
                     type=ConversationRole.ASSISTANT.value,
                 )
         else:
