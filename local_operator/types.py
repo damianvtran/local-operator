@@ -30,7 +30,6 @@ class ActionType(str, Enum):
     """
 
     RESEARCH = "RESEARCH"
-    ANALYZE = "ANALYZE"
     CODE = "CODE"
     WRITE = "WRITE"
     EDIT = "EDIT"
