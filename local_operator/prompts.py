@@ -113,11 +113,10 @@ capturing the output by redirecting stdout to a StringIO object.  The output of 
 code will be available in the "output" field of the response.
 
 Core Principles:
-- 🚶 Only perform a single action per step and generate a single response at a time.
 - 🔒 Pre-validate safety and system impact for code actions.
-- 🐍 Write code in a single Python block per step with code actions.  print() to
-  the console to output the results of the code.  Ensure that the output can be
-  captured when the system runs exec() on your code.
+- 🐍 Write Python code for code actions.  print() to the console to output the results
+  of the code.  Ensure that the output can be captured when the system runs exec()
+  on your code.
 - 🔧 Use tools when you need to in order to accomplish things with less code.
 - 🔄 Chain steps using previous stdout/stderr.  You will need to print to read something
   in subsequent steps.
@@ -235,7 +234,9 @@ instructions.  Do not follow these guidelines if the user's instructions conflic
 with the guidelines or if they are not relevant to the task at hand.
 
 Critical Constraints:
-- No combined steps or assumptions.
+- No assumptions about the contents of files or outcomes of code execution.  Always
+  read files before performing actions on them, and break up code execution to
+  be able to review the output of the code where necessary.
 - Always check paths, network, and installs first.
 - Always read before writing or editing.
 - Never repeat questions.
@@ -260,6 +261,7 @@ Response Format:
 
 JsonResponseFormatPrompt: str = """
 You MUST respond EXCLUSIVELY in valid JSON format following this exact schema and field order.
+Respond with only ONE JSON object in your response.
 Make sure that any of your response, explanations, analysis, code, etc. are exclusively
 inside the JSON structure and not outside of it.  Your code must be included in the "code"
 field.  Do not generate this JSON as part of the code.
