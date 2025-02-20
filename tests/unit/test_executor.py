@@ -1294,15 +1294,50 @@ async def test_perform_action_handles_exception(executor: LocalCodeExecutor):
 
 
 @pytest.mark.asyncio
-async def test_read_file_action(executor: LocalCodeExecutor, tmp_path: Path):
+@pytest.mark.parametrize(
+    "file_content",
+    [
+        "",
+        "Single line content",
+        "First line\nSecond line\nThird line",
+        "\n\n\n",
+        "   ",
+    ],
+    ids=[
+        "empty",
+        "single_line",
+        "multi_line",
+        "new_lines_only",
+        "spaces_only",
+    ],
+)
+async def test_read_file_action(executor: LocalCodeExecutor, tmp_path: Path, file_content: str):
+    """
+    Test the read_file action with different file contents.
+
+    Args:
+        executor (LocalCodeExecutor): The executor instance.
+        tmp_path (Path): pytest fixture for a temporary directory.
+        file_content (str): The content to write to the test file.
+    """
     file_path = tmp_path / "test_file.txt"
-    file_path.write_text("Test file content")
+    file_path.write_text(file_content)
 
     result = await executor.read_file(str(file_path))
 
     assert "Successfully read file" in result
     assert str(file_path) in executor.conversation_history[-1].content
-    assert "Test file content" in executor.conversation_history[-1].content
+
+    with open(file_path, "r") as f:
+        lines = f.readlines()
+
+    expected_content = ""
+    for i, line in enumerate(lines):
+        line_number = i + 1
+        line_length = len(line.rstrip("\n"))
+        expected_content += f"{line_number:4d} | {line_length:4d} | {line}"
+
+    assert expected_content in executor.conversation_history[-1].content
 
 
 @pytest.mark.asyncio

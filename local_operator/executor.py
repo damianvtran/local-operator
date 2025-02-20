@@ -1153,26 +1153,34 @@ class LocalCodeExecutor:
         return output
 
     async def read_file(self, file_path: str) -> str:
-        """Read the contents of a file.
+        """Read the contents of a file and include line numbers and lengths.
 
         Args:
             file_path (str): The path to the file to read
 
         Returns:
-            str: The contents of the file
+            str: A message indicating the file has been read
 
         Raises:
             FileNotFoundError: If the file does not exist
             OSError: If there is an error reading the file
         """
+        with open(file_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
         file_content = ""
-        with open(file_path, "r") as f:
-            file_content = f.read()
+        for i, line in enumerate(lines):
+            line_number = i + 1
+            line_length = len(line.rstrip("\n"))
+            file_content += f"{line_number:4d} | {line_length:4d} | {line}"
 
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.SYSTEM,
-                content=f"Contents of {file_path}:\n\n{file_content}",
+                content=(
+                    f"Contents of {file_path}:\n\nLine | Length | Content\n"
+                    f"BEGIN\n{file_content}\nEND"
+                ),
                 should_summarize=True,
             )
         )
