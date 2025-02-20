@@ -1335,8 +1335,6 @@ async def test_read_file_action(executor: LocalCodeExecutor, tmp_path: Path, fil
         line_length = len(line.rstrip("\n"))
         expected_content += f"{line_number:4d} | {line_length:4d} | {line}"
 
-    print(executor.conversation_history[-1].content)
-
     assert expected_content in executor.conversation_history[-1].content
 
 
