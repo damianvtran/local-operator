@@ -1301,12 +1301,14 @@ async def test_perform_action_handles_exception(executor: LocalCodeExecutor):
         "Single line content",
         "First line\nSecond line\nThird line",
         "\n\n\n",
+        "   ",
     ],
     ids=[
         "empty",
         "single_line",
         "multi_line",
         "new_lines_only",
+        "spaces_only",
     ],
 )
 async def test_read_file_action(executor: LocalCodeExecutor, tmp_path: Path, file_content: str):
@@ -1332,6 +1334,8 @@ async def test_read_file_action(executor: LocalCodeExecutor, tmp_path: Path, fil
         line_number = i + 1
         line_length = len(line.rstrip("\n"))
         expected_content += f"{line_number:4d} | {line_length:4d} | {line}"
+
+    print(executor.conversation_history[-1].content)
 
     assert expected_content in executor.conversation_history[-1].content
 

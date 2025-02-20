@@ -1177,7 +1177,10 @@ class LocalCodeExecutor:
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.SYSTEM,
-                content=f"Contents of {file_path}:\n\n{file_content}",
+                content=(
+                    f"Contents of {file_path}:\n\nLine | Length | Content\n"
+                    "BEGIN\n{file_content}\nEND"
+                ),
                 should_summarize=True,
             )
         )
