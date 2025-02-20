@@ -1328,8 +1328,10 @@ async def test_read_file_action(executor: LocalCodeExecutor, tmp_path: Path, fil
     assert "Successfully read file" in result
     assert str(file_path) in executor.conversation_history[-1].content
 
+    with open(file_path, "r") as f:
+        lines = f.readlines()
+
     expected_content = ""
-    lines = file_content.splitlines(keepends=True)
     for i, line in enumerate(lines):
         line_number = i + 1
         line_length = len(line.rstrip("\n"))

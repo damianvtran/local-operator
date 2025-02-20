@@ -1179,7 +1179,7 @@ class LocalCodeExecutor:
                 role=ConversationRole.SYSTEM,
                 content=(
                     f"Contents of {file_path}:\n\nLine | Length | Content\n"
-                    "BEGIN\n{file_content}\nEND"
+                    f"BEGIN\n{file_content}\nEND"
                 ),
                 should_summarize=True,
             )
