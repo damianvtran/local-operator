@@ -185,9 +185,9 @@ def get_context_vars_str(context_vars: Dict[str, Any]) -> str:
             except ValueError:
                 formatted_value_str = value_str
 
-        if len(formatted_value_str) > 100000:
+        if len(formatted_value_str) > 10000:
             formatted_value_str = (
-                f"{formatted_value_str[:100000]} ... (truncated due to length limits)"
+                f"{formatted_value_str[:10000]} ... (truncated due to length limits)"
             )
 
         entry = f"{key}: {formatted_value_str}\n"
