@@ -363,7 +363,11 @@ class Operator:
                 ),
                 ConversationRecord(
                     role=ConversationRole.USER,
-                    content="Please proceed according to the plan",
+                    content=(
+                        "Please proceed according to the plan.  Choose appropriate actions "
+                        "and follow the JSON schema for your response.  Do not include any "
+                        "other text or comments aside from the JSON object."
+                    ),
                     should_summarize=False,
                 ),
             ]
@@ -470,7 +474,8 @@ class Operator:
                                 f"{error_details}\n\n"
                                 "Your response must exactly match the expected JSON schema "
                                 "structure. Please reformat your response to continue with "
-                                "the task."
+                                "the task.  Do not include any other text or comments aside "
+                                "from the JSON object."
                             ),
                             should_summarize=True,
                         ),
