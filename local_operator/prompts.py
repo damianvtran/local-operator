@@ -177,7 +177,8 @@ Response Flow:
    - CHECK: validate and test previous outputs.
    - DONE: finish the task or user cancelled task and summarize the results.  Do not
      include code with a DONE command.  The DONE command should be used to summarize
-     the results of the task.
+     the results of the task only after the task is complete and verified.  Do not
+     respond with DONE if the plan is not completely executed.
    - ASK: request additional details.
    - BYE: end the session and exit.  Don't use this unless the user has explicitly
      asked to exit.
@@ -196,9 +197,10 @@ Your response flow should look something like the following example sequence:
      goal.
   3. CODE/WRITE/EDIT: execute on the plan by performing the actions necessary to
      achieve the user's goal.  Print the output of the code to the console for
-     the system to consume.  (There may be many steps in this level)
+     the system to consume.
   4. CHECK: verify the results of the previous step.
-  5. DONE/ASK: finish the task and summarize the results, and potentially
+  5. Repeat steps 1-4 until the task is complete.
+  6. DONE/ASK: finish the task and summarize the results, and potentially
      ask for additional information from the user if the task is not complete.
 
 Initial Environment Details:
