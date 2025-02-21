@@ -269,15 +269,16 @@ class LocalCodeExecutor:
             agent: The agent data for the current conversation.
         """
         self.context = {}
-        self.conversation_history = conversation_history
         self.model_configuration = model_configuration
+        self.conversation_history = conversation_history
         self.max_conversation_history = max_conversation_history
         self.detail_conversation_length = detail_conversation_length
         self.can_prompt_user = can_prompt_user
         self.token_metrics = ExecutorTokenMetrics()
         self.agent = agent
-        self.reset_step_counter()
         self.interrupted = False
+
+        self.reset_step_counter()
 
     def reset_step_counter(self):
         """Reset the step counter."""
@@ -372,19 +373,31 @@ class LocalCodeExecutor:
     def initialize_conversation_history(
         self, conversation_history: List[ConversationRecord] = []
     ) -> None:
-        """Initialize the conversation history."""
-        if len(self.conversation_history) != 0:
-            raise ExecutorInitError("Conversation history already initialized")
+        """Initialize the conversation history with a system prompt.
+
+        The system prompt is always included as the first message in the history.
+        If an existing conversation history is provided, it is appended to the
+        system prompt, excluding the first message of the provided history (assumed
+        to be a redundant system prompt).
+
+        Args:
+            conversation_history (List[ConversationRecord], optional):
+                A list of existing conversation records to initialize the history with.
+                Defaults to an empty list.
+        """
+        system_prompt = create_system_prompt(self.tool_registry)
+
+        history = [
+            ConversationRecord(
+                role=ConversationRole.SYSTEM,
+                content=system_prompt,
+            )
+        ]
 
         if len(conversation_history) == 0:
-            self.conversation_history = [
-                ConversationRecord(
-                    role=ConversationRole.SYSTEM,
-                    content=create_system_prompt(self.tool_registry),
-                )
-            ]
+            self.conversation_history = history
         else:
-            self.conversation_history = conversation_history
+            self.conversation_history = history + conversation_history[1:]
 
     def extract_code_blocks(self, text: str) -> List[str]:
         """Extract Python code blocks from text using markdown-style syntax.

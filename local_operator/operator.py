@@ -16,7 +16,6 @@ from local_operator.config import ConfigManager
 from local_operator.console import format_agent_output, print_cli_banner, spinner
 from local_operator.credentials import CredentialManager
 from local_operator.executor import (
-    ExecutorInitError,
     LocalCodeExecutor,
     get_context_vars_str,
     process_json_response,
@@ -532,11 +531,7 @@ class Operator:
             ResponseJsonSchema | None: The processed response from the language model,
                 or None if no valid response was generated
         """
-        try:
-            self.executor.initialize_conversation_history()
-        except ExecutorInitError:
-            # Conversation history already initialized
-            pass
+        self.executor.initialize_conversation_history()
 
         result = await self.handle_user_input(command)
         return result
@@ -563,11 +558,7 @@ class Operator:
         """
         print_cli_banner(self.config_manager, self.current_agent, self.training_mode)
 
-        try:
-            self.executor.initialize_conversation_history()
-        except ExecutorInitError:
-            # Conversation history already initialized
-            pass
+        self.executor.initialize_conversation_history()
 
         while True:
             self.executor_is_processing = False
