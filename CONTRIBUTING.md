@@ -6,17 +6,24 @@ Thank you for your interest in contributing to Local Operator! We welcome all co
 
 ```shell
 .
+├── CONTRIBUTING.md              # Contribution guidelines
+├── LICENSE                      # Project license
 ├── docs                         # Documentation files and resources
 ├── local_operator
 │   ├── admin.py                 # Tools for managing agents and conversations
 │   ├── agents.py                # Agent data structures and registry management
 │   ├── cli.py                   # Command line interface implementation
+│   ├── clients                  # API clients for external services
+│   │   ├── openrouter.py        # OpenRouter API client
+│   │   └── serpapi.py           # SerpAPI client
 │   ├── config.py                # Configuration management and settings
 │   ├── console.py               # Terminal output formatting and display
 │   ├── credentials.py           # Secure storage of API keys and credentials
 │   ├── executor.py              # Code execution with safety checks
 │   ├── mocks.py                 # Mock objects for testing
-│   ├── model.py                 # Language model interface implementations
+│   ├── model                    # Language model configurations
+│   │   ├── configure.py         # Model configuration settings
+│   │   └── registry.py          # Model pricing, context limits, and configuration
 │   ├── operator.py              # Core environment manager for model interactions
 │   ├── prompts.py               # System prompts and message templates
 │   ├── server.py                # HTTP API server implementation
