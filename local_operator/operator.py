@@ -358,7 +358,7 @@ class Operator:
                 ConversationRecord(
                     role=ConversationRole.ASSISTANT,
                     content=response_content,
-                    should_summarize=True,
+                    should_summarize=False,
                 ),
                 ConversationRecord(
                     role=ConversationRole.USER,
