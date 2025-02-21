@@ -2,6 +2,7 @@ import asyncio
 import itertools
 import os
 import sys
+import traceback
 from enum import Enum
 from typing import Any
 
@@ -149,8 +150,7 @@ async def spinner(text: str):
 
 
 def log_action_error(error: Exception, action: str) -> None:
-    """
-    Log an error that occurred during an action.
+    """Log an error that occurred during an action, including the traceback.
 
     Args:
         error (Exception): The error that occurred.
@@ -159,12 +159,13 @@ def log_action_error(error: Exception, action: str) -> None:
     print(f"\n\033[1;31m✗ Error during {action}:\033[0m")
     print("\033[1;34m╞══════════════════════════════════════════════════╡\033[0m")
     print(f"\033[1;36m│ Error:\033[0m\n{str(error)}")
+    traceback_str = traceback.format_exc()
+    print(f"\033[1;36m│ Traceback:\033[0m\n{traceback_str}")
     print("\033[1;34m╞══════════════════════════════════════════════════╡\033[0m")
 
 
 def log_error_and_retry_message(error: Exception) -> None:
-    """
-    Print a formatted error message and notify that a retry attempt is about to be made.
+    """Print a formatted error message with traceback and notify of a retry attempt.
 
     Args:
         error (Exception): The error to display.
@@ -172,6 +173,8 @@ def log_error_and_retry_message(error: Exception) -> None:
     print("\n\033[1;31m✗ Error during execution:\033[0m")
     print("\033[1;34m╞══════════════════════════════════════════════════╡\033[0m")
     print(f"\033[1;36m│ Error:\033[0m\n{str(error)}")
+    traceback_str = traceback.format_exc()
+    print(f"\033[1;36m│ Traceback:\033[0m\n{traceback_str}")
     print("\033[1;34m╞══════════════════════════════════════════════════╡\033[0m")
     print("\033[1;36m│ Attempting to fix the error...\033[0m")
     print("\033[1;34m╰══════════════════════════════════════════════════╯\033[0m")

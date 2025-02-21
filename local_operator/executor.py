@@ -3,6 +3,7 @@ import inspect
 import io
 import os
 import sys
+import traceback
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List
@@ -917,13 +918,16 @@ class LocalCodeExecutor:
         return format_error_output(initial_error, max_retries)
 
     def _record_initial_error(self, error: Exception) -> None:
-        """Record the initial execution error in conversation history.
+        """Record the initial execution error, including the traceback, in conversation history.
 
         Args:
-            error (Exception): The error that occurred during initial execution
+            error (Exception): The error that occurred during initial execution.
         """
+        traceback_str = traceback.format_exc()
+
         msg = (
-            f"The initial execution failed with error: {str(error)}. "
+            f"The initial execution failed with error: {str(error)}.\n"
+            f"Traceback:\n{traceback_str}\n"
             "Review the code and make corrections to run successfully."
         )
         self.append_to_history(
@@ -934,14 +938,16 @@ class LocalCodeExecutor:
         )
 
     def _record_retry_error(self, error: Exception, attempt: int) -> None:
-        """Record retry attempt errors in conversation history.
+        """Record retry attempt errors, including the traceback, in conversation history.
 
         Args:
-            error (Exception): The error that occurred during retry
-            attempt (int): The current retry attempt number
+            error (Exception): The error that occurred during the retry attempt.
+            attempt (int): The current retry attempt number.
         """
+        traceback_str = traceback.format_exc()
         msg = (
-            f"The code execution failed with error (attempt {attempt + 1}): {str(error)}. "
+            f"The code execution failed with error (attempt {attempt + 1}): {str(error)}.\n"
+            f"Traceback:\n{traceback_str}\n"
             "Please review and make corrections to the code to fix this error and try again."
         )
         self.append_to_history(
