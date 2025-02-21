@@ -180,7 +180,7 @@ Response Flow:
    - EDIT: edit a file.  Specify the file path to edit and the search strings to find.
      Each search string should be accompanied by a replacement string.
    - CHECK: validate and test previous outputs.
-   - DONE: mark the entire plan and completed, or user cancelled task.  Summarize the 
+   - DONE: mark the entire plan and completed, or user cancelled task.  Summarize the
      results.  Do not include code with a DONE command.  The DONE command should be used
      to summarize the results of the task only after the task is complete and verified.
      Do not respond with DONE if the plan is not completely executed.
