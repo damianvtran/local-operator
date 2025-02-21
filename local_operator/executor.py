@@ -937,6 +937,7 @@ class LocalCodeExecutor:
             ConversationRecord(
                 role=ConversationRole.USER,
                 content=msg,
+                should_summarize=True,
             )
         )
 
@@ -957,6 +958,7 @@ class LocalCodeExecutor:
             ConversationRecord(
                 role=ConversationRole.USER,
                 content=msg,
+                should_summarize=True,
             )
         )
 
@@ -977,6 +979,7 @@ class LocalCodeExecutor:
             ConversationRecord(
                 role=ConversationRole.ASSISTANT,
                 content=response_json.model_dump_json(),
+                should_summarize=True,
             )
         )
 
@@ -1132,6 +1135,7 @@ class LocalCodeExecutor:
                 ConversationRecord(
                     role=ConversationRole.SYSTEM,
                     content=f"Error: {str(e)}",
+                    should_summarize=True,
                 )
             )
         finally:
