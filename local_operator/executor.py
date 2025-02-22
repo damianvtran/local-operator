@@ -406,8 +406,15 @@ class LocalCodeExecutor:
     def load_conversation_history(self, new_conversation_history: List[ConversationRecord]) -> None:
         """Load a conversation history into the executor from a previous session.
 
+        This method initializes the conversation history by prepending the system prompt
+        and then appending the provided conversation history, excluding the initial system
+        prompt from the loaded history (to avoid duplication).
+
         Args:
-            new_conversation_history (List[ConversationRecord]): The conversation history to load.
+            new_conversation_history (List[ConversationRecord]): The conversation history to load,
+                typically retrieved from a previous session. It is expected that the first record
+                in this list is a system prompt, which will be replaced by the current
+                system prompt.
         """
         system_prompt = create_system_prompt(self.tool_registry)
 
