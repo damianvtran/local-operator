@@ -333,6 +333,7 @@ class Operator:
             ConversationRecord(
                 role=ConversationRole.SYSTEM,
                 content=system_prompt,
+                is_system_prompt=True,
             ),
         ]
 

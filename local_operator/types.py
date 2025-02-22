@@ -68,6 +68,7 @@ class ConversationRecord(BaseModel):
     should_summarize: Optional[bool] = True
     ephemeral: Optional[bool] = False
     summarized: Optional[bool] = False
+    is_system_prompt: Optional[bool] = False
 
     def dict(self, *args, **kwargs) -> Dict[str, Any]:
         """Convert the conversation record to a dictionary format compatible with LangChain.
@@ -81,6 +82,7 @@ class ConversationRecord(BaseModel):
             "should_summarize": str(self.should_summarize),
             "ephemeral": str(self.ephemeral),
             "summarized": str(self.summarized),
+            "is_system_prompt": str(self.is_system_prompt),
         }
 
     def to_dict(self) -> Dict[str, Any]:
@@ -95,6 +97,7 @@ class ConversationRecord(BaseModel):
             "should_summarize": str(self.should_summarize),
             "ephemeral": str(self.ephemeral),
             "summarized": str(self.summarized),
+            "is_system_prompt": str(self.is_system_prompt),
         }
 
     @classmethod
@@ -113,6 +116,7 @@ class ConversationRecord(BaseModel):
             should_summarize=data.get("should_summarize", "true").lower() == "true",
             ephemeral=data.get("ephemeral", "false").lower() == "true",
             summarized=data.get("summarized", "false").lower() == "true",
+            is_system_prompt=data.get("is_system_prompt", "false").lower() == "true",
         )
 
 

@@ -391,17 +391,22 @@ class LocalCodeExecutor:
 
         system_prompt = create_system_prompt(self.tool_registry)
 
-        if len(new_conversation_history) == 0:
-            history = [
-                ConversationRecord(
-                    role=ConversationRole.SYSTEM,
-                    content=system_prompt,
-                )
-            ]
-        else:
-            history = new_conversation_history
+        history = [
+            ConversationRecord(
+                role=ConversationRole.SYSTEM,
+                content=system_prompt,
+                is_system_prompt=True,
+            )
+        ]
 
-        self.conversation_history = history
+        if len(new_conversation_history) == 0:
+            self.conversation_history = history
+        else:
+            # Remove the system prompt from the loaded history if it exists
+            filtered_history = [
+                record for record in new_conversation_history if not record.is_system_prompt
+            ]
+            self.conversation_history = history + filtered_history
 
     def load_conversation_history(self, new_conversation_history: List[ConversationRecord]) -> None:
         """Load a conversation history into the executor from a previous session.
@@ -422,10 +427,16 @@ class LocalCodeExecutor:
             ConversationRecord(
                 role=ConversationRole.SYSTEM,
                 content=system_prompt,
+                is_system_prompt=True,
             )
         ]
 
-        self.conversation_history = history + new_conversation_history[1:]
+        # Remove the system prompt from the loaded history if it exists
+        filtered_history = [
+            record for record in new_conversation_history if not record.is_system_prompt
+        ]
+
+        self.conversation_history = history + filtered_history
 
     def extract_code_blocks(self, text: str) -> List[str]:
         """Extract Python code blocks from text using markdown-style syntax.
