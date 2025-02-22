@@ -125,6 +125,7 @@ class ResponseJsonSchema(BaseModel):
 
     Attributes:
         previous_step_success (bool): Whether the previous step was successful
+        previous_step_issue (str): A precise description of the issue with the previous step.
         previous_goal (str): The goal that was attempted in the previous step
         current_goal (str): The goal being attempted in the current step
         next_goal (str): The planned goal for the next step
@@ -136,6 +137,7 @@ class ResponseJsonSchema(BaseModel):
     """
 
     previous_step_success: bool
+    previous_step_issue: str
     previous_goal: str
     current_goal: str
     next_goal: str
