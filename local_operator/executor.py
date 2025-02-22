@@ -789,20 +789,6 @@ class LocalCodeExecutor:
             return format_success_output((output, error_output))
         except Exception as e:
             output, error_output = self._capture_and_record_output(new_stdout, new_stderr)
-            traceback_str = traceback.format_exc()
-            error_msg = (
-                f"Code execution error:\n{str(e)}\n"
-                f"Output:\n{output}\n"
-                f"Error output:\n{error_output}\n"
-                f"Traceback:\n{traceback_str}"
-            )
-            self.append_to_history(
-                ConversationRecord(
-                    role=ConversationRole.SYSTEM,
-                    content=error_msg,
-                    should_summarize=True,
-                )
-            )
             raise e
         finally:
             sys.stdout, sys.stderr = old_stdout, old_stderr
