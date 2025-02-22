@@ -372,7 +372,7 @@ class LocalCodeExecutor:
         return self.token_metrics.total_prompt_tokens + self.token_metrics.total_completion_tokens
 
     def initialize_conversation_history(
-        self, conversation_history: List[ConversationRecord] = []
+        self, new_conversation_history: List[ConversationRecord] = []
     ) -> None:
         """Initialize the conversation history with a system prompt.
 
@@ -382,9 +382,32 @@ class LocalCodeExecutor:
         to be a redundant system prompt).
 
         Args:
-            conversation_history (List[ConversationRecord], optional):
+            new_conversation_history (List[ConversationRecord], optional):
                 A list of existing conversation records to initialize the history with.
                 Defaults to an empty list.
+        """
+        if len(self.conversation_history) != 0:
+            raise ValueError("Conversation history already initialized")
+
+        system_prompt = create_system_prompt(self.tool_registry)
+
+        if len(new_conversation_history) == 0:
+            history = [
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content=system_prompt,
+                )
+            ]
+        else:
+            history = new_conversation_history
+
+        self.conversation_history = history
+
+    def load_conversation_history(self, new_conversation_history: List[ConversationRecord]) -> None:
+        """Load a conversation history into the executor from a previous session.
+
+        Args:
+            new_conversation_history (List[ConversationRecord]): The conversation history to load.
         """
         system_prompt = create_system_prompt(self.tool_registry)
 
@@ -395,13 +418,7 @@ class LocalCodeExecutor:
             )
         ]
 
-        if len(conversation_history) == 0:
-            if len(self.conversation_history) > 0:
-                self.conversation_history = history + self.conversation_history[1:]
-            else:
-                self.conversation_history = history
-        else:
-            self.conversation_history = history + conversation_history[1:]
+        self.conversation_history = history + new_conversation_history[1:]
 
     def extract_code_blocks(self, text: str) -> List[str]:
         """Extract Python code blocks from text using markdown-style syntax.
