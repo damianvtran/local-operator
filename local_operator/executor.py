@@ -396,7 +396,10 @@ class LocalCodeExecutor:
         ]
 
         if len(conversation_history) == 0:
-            self.conversation_history = history
+            if len(self.conversation_history) > 0:
+                self.conversation_history = history + self.conversation_history[1:]
+            else:
+                self.conversation_history = history
         else:
             self.conversation_history = history + conversation_history[1:]
 
