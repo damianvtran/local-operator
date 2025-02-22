@@ -76,6 +76,7 @@ class DummyOperator:
             action=ActionType.DONE,
             learnings="",
             plan="",
+            previous_step_issue="",
         )
 
         self.executor.conversation_history.append(

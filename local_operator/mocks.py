@@ -18,6 +18,7 @@ USER_MOCK_RESPONSES = {
         content="",
         file_path="",
         replacements=[],
+        previous_step_issue="",
     ),
     "please proceed according to the plan": ResponseJsonSchema(
         previous_step_success=True,
@@ -32,6 +33,7 @@ USER_MOCK_RESPONSES = {
         content="",
         file_path="",
         replacements=[],
+        previous_step_issue="",
     ),
 }
 
@@ -49,6 +51,7 @@ SYSTEM_MOCK_RESPONSES = {
         content="",
         file_path="",
         replacements=[],
+        previous_step_issue="",
     ),
     "Please come up with a detailed plan of actions to achieve the goal "
     "before proceeding with the execution phase.  Your plan will be used to "
@@ -157,6 +160,7 @@ class ChatMock:
                 content="",
                 file_path="",
                 replacements=[],
+                previous_step_issue="",
             ).model_dump_json(),
             type=ConversationRole.ASSISTANT.value,
         )

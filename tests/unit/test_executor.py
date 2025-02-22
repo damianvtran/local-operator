@@ -611,6 +611,7 @@ async def test_process_response(executor, mock_model_config):
         content="",
         file_path="",
         replacements=[],
+        previous_step_issue="",
     )
     mock_model_config.instance.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
 
@@ -1248,6 +1249,7 @@ async def test_perform_action(
         content=content or "",
         file_path=file_path or "",
         replacements=replacements or [],
+        previous_step_issue="",
     )
 
     original_read_file = executor.read_file
@@ -1291,6 +1293,7 @@ async def test_perform_action_handles_exception(executor: LocalCodeExecutor):
         content="",
         file_path="",
         replacements=[],
+        previous_step_issue="",
     )
 
     executor.execute_code = AsyncMock(side_effect=Exception("Execution failed"))
