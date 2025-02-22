@@ -463,7 +463,6 @@ def main() -> int:
         executor = LocalCodeExecutor(
             model_configuration=model_configuration,
             detail_conversation_length=config_manager.get_config_value("detail_length", 10),
-            conversation_history=conversation_history,
             agent=agent,
         )
 
@@ -481,7 +480,9 @@ def main() -> int:
         tool_registry = build_tool_registry(
             executor, agent_registry, config_manager, credential_manager
         )
+
         executor.set_tool_registry(tool_registry)
+        executor.load_conversation_history(conversation_history)
 
         # Start the async chat interface or execute single command
         if args.subcommand == "exec":

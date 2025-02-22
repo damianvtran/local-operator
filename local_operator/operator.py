@@ -531,7 +531,11 @@ class Operator:
             ResponseJsonSchema | None: The processed response from the language model,
                 or None if no valid response was generated
         """
-        self.executor.initialize_conversation_history()
+        try:
+            self.executor.initialize_conversation_history()
+        except ValueError:
+            # Conversation history already initialized
+            pass
 
         result = await self.handle_user_input(command)
         return result
@@ -558,7 +562,11 @@ class Operator:
         """
         print_cli_banner(self.config_manager, self.current_agent, self.training_mode)
 
-        self.executor.initialize_conversation_history()
+        try:
+            self.executor.initialize_conversation_history()
+        except ValueError:
+            # Conversation history already initialized
+            pass
 
         while True:
             self.executor_is_processing = False
