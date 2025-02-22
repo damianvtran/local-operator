@@ -18,6 +18,7 @@ from local_operator.executor import (
     process_json_response,
 )
 from local_operator.operator import Operator, OperatorType
+from local_operator.tools import ToolRegistry
 from local_operator.types import (
     ActionType,
     ConversationRecord,
@@ -52,14 +53,22 @@ def mock_model_config():
 
 
 @pytest.fixture
-def executor(mock_model_config):
+def test_tool_registry():
+    """Fixture for an empty tool registry."""
+    return ToolRegistry()
+
+
+@pytest.fixture
+def executor(mock_model_config, test_tool_registry):
     agent = MagicMock()
     agent.id = "test_agent"
     agent.name = "Test Agent"
     agent.version = "1.0.0"
     agent.security_prompt = ""
 
-    return LocalCodeExecutor(mock_model_config, agent=agent)
+    mock_executor = LocalCodeExecutor(mock_model_config, agent=agent)
+    mock_executor.tool_registry = test_tool_registry
+    return mock_executor
 
 
 @pytest.fixture
@@ -1439,3 +1448,177 @@ async def test_edit_file_action(
         assert result is not None
         assert "Successfully edited file" in result
         assert str(file_path) in executor.conversation_history[-1].content
+
+
+@pytest.mark.parametrize(
+    "initial_history, expected_history",
+    [
+        (
+            [],
+            [
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="SYSTEM_PROMPT",
+                    is_system_prompt=True,
+                )
+            ],
+        ),
+        (
+            [
+                ConversationRecord(role=ConversationRole.USER, content="User message 1"),
+                ConversationRecord(role=ConversationRole.ASSISTANT, content="Assistant message 1"),
+            ],
+            [
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="SYSTEM_PROMPT",
+                    is_system_prompt=True,
+                ),
+                ConversationRecord(role=ConversationRole.USER, content="User message 1"),
+                ConversationRecord(role=ConversationRole.ASSISTANT, content="Assistant message 1"),
+            ],
+        ),
+        (
+            [
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="Old system prompt",
+                    is_system_prompt=True,
+                ),
+                ConversationRecord(role=ConversationRole.USER, content="User message 1"),
+            ],
+            [
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="SYSTEM_PROMPT",
+                    is_system_prompt=True,
+                ),
+                ConversationRecord(role=ConversationRole.USER, content="User message 1"),
+            ],
+        ),
+        (
+            [
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="SYSTEM_PROMPT",
+                    is_system_prompt=True,
+                ),
+                ConversationRecord(role=ConversationRole.USER, content="User message 1"),
+            ],
+            [
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="SYSTEM_PROMPT",
+                    is_system_prompt=True,
+                ),
+                ConversationRecord(role=ConversationRole.USER, content="User message 1"),
+            ],
+        ),
+    ],
+    ids=[
+        "empty_history",
+        "user_and_assistant_messages",
+        "old_system_prompt",
+        "existing_system_prompt",
+    ],
+)
+def test_initialize_conversation_history(executor, initial_history, expected_history):
+    """
+    Test the initialize_conversation_history method.
+
+    Args:
+        executor: The LocalCodeExecutor fixture.
+        initial_history: The initial conversation history.
+        expected_history: The expected conversation history after initialization.
+    """
+    executor.conversation_history = []
+
+    with patch("local_operator.executor.create_system_prompt", return_value="SYSTEM_PROMPT"):
+        executor.initialize_conversation_history(initial_history)
+        assert executor.conversation_history == expected_history
+
+
+@pytest.mark.parametrize(
+    "initial_history, new_history, expected_history",
+    [
+        (
+            [],
+            [],
+            [
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="SYSTEM_PROMPT",
+                    is_system_prompt=True,
+                ),
+            ],
+        ),
+        (
+            [],
+            [
+                ConversationRecord(role=ConversationRole.USER, content="User message 1"),
+                ConversationRecord(role=ConversationRole.ASSISTANT, content="Assistant message 1"),
+            ],
+            [
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="SYSTEM_PROMPT",
+                    is_system_prompt=True,
+                ),
+                ConversationRecord(role=ConversationRole.USER, content="User message 1"),
+                ConversationRecord(role=ConversationRole.ASSISTANT, content="Assistant message 1"),
+            ],
+        ),
+        (
+            [],
+            [
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="Old system prompt",
+                    is_system_prompt=True,
+                ),
+                ConversationRecord(role=ConversationRole.USER, content="User message 1"),
+            ],
+            [
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="SYSTEM_PROMPT",
+                    is_system_prompt=True,
+                ),
+                ConversationRecord(role=ConversationRole.USER, content="User message 1"),
+            ],
+        ),
+        (
+            [ConversationRecord(role=ConversationRole.USER, content="Existing user message")],
+            [],
+            [
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="SYSTEM_PROMPT",
+                    is_system_prompt=True,
+                ),
+            ],
+        ),
+    ],
+    ids=[
+        "empty_histories",
+        "new_history_with_user_and_assistant",
+        "new_history_with_old_system_prompt",
+        "initial_history_with_existing_user_message",
+    ],
+)
+def test_load_conversation_history(executor, initial_history, new_history, expected_history):
+    """
+    Test the load_conversation_history method.
+
+    Args:
+        executor: The LocalCodeExecutor fixture.
+        initial_history: The initial conversation history.
+        new_history: The new conversation history to load.
+        expected_history: The expected conversation history after loading.
+    """
+    executor.conversation_history = []
+
+    with patch("local_operator.executor.create_system_prompt", return_value="SYSTEM_PROMPT"):
+        executor.conversation_history = initial_history
+        executor.load_conversation_history(new_history)
+        assert executor.conversation_history == expected_history
