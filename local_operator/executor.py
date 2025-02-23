@@ -2,10 +2,11 @@ import asyncio
 import inspect
 import io
 import os
+import subprocess
 import sys
-import traceback
 from enum import Enum
 from pathlib import Path
+from traceback import print_exception
 from typing import Any, Dict, List
 
 from langchain_community.callbacks.manager import get_openai_callback
@@ -205,6 +206,7 @@ def annotate_code(code: str, error_line: int | None = None) -> str | None:
 
     Args:
         code (str): The code to annotate.
+        error_line (int | None): The line number where the error occurred, if any.
 
     Returns:
         str: The annotated code, with each line prepended by its line number
@@ -245,14 +247,19 @@ def get_annotated_error_traceback(code: str, error: Exception) -> Exception:
     The traceback is annotated with line numbers and character lengths.
 
     Args:
+        code (str): The code that generated the error
         error (Exception): The exception to get the annotated traceback from.
 
     Returns:
         Exception: The annotated traceback string.
     """
     lineno = None
-    if hasattr(error, "__traceback__") and error.__traceback__:
-        lineno = error.__traceback__.tb_lineno
+    tb = error.__traceback__
+    while tb is not None:
+        if tb.tb_frame.f_code.co_filename == "<agent_generated_code>":
+            lineno = tb.tb_lineno
+            break
+        tb = tb.tb_next
 
     annotated_code = annotate_code(code, error_line=lineno)
     error_message = (
@@ -265,8 +272,12 @@ def get_annotated_error_traceback(code: str, error: Exception) -> Exception:
         + "END\n"
     )
 
-    augmented_exception = type(error)(error_message).with_traceback(error.__traceback__)
-    return augmented_exception
+    if isinstance(error, subprocess.CalledProcessError):
+        return type(error)(error.returncode, error.cmd, error_message).with_traceback(
+            error.__traceback__
+        )
+
+    return type(error)(error_message).with_traceback(error.__traceback__)
 
 
 class ExecutorTokenMetrics(BaseModel):
@@ -910,12 +921,14 @@ class LocalCodeExecutor:
 
         Args:
             code (str): The Python code to execute
-            timeout (int): Unused parameter kept for compatibility
 
         Raises:
             Exception: Any exceptions raised during code execution
         """
         old_stdin = sys.stdin
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+
         try:
             # Redirect stdin to /dev/null to ignore input requests
             with open(os.devnull) as devnull:
@@ -942,11 +955,6 @@ class LocalCodeExecutor:
                         if "__temp_async_fn" in self.context:
                             del self.context["__temp_async_fn"]
                         if "__temp_coro" in self.context:
-                            try:
-                                # Just try to await any remaining coroutine
-                                await self.context["__temp_coro"]
-                            except Exception:
-                                pass  # Ignore errors from cleanup await
                             del self.context["__temp_coro"]
                 else:
                     # Regular synchronous code
@@ -959,7 +967,10 @@ class LocalCodeExecutor:
         except Exception as e:
             raise e
         finally:
+            # Restore all standard streams
             sys.stdin = old_stdin
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
 
     def _capture_and_record_output(
         self, stdout: io.StringIO, stderr: io.StringIO, format_for_ui: bool = False
@@ -1030,11 +1041,10 @@ class LocalCodeExecutor:
         Args:
             error (Exception): The error that occurred during initial execution.
         """
-        traceback_str = traceback.format_exc()
+        traceback_str = print_exception(error)
 
         msg = (
             f"The initial execution failed with an error.\n"
-            f"Error:\n{str(error)}\n"
             f"Traceback:\n{traceback_str}\n"
             "Review the code and make corrections to run successfully."
         )
@@ -1053,11 +1063,10 @@ class LocalCodeExecutor:
             error (Exception): The error that occurred during the retry attempt.
             attempt (int): The current retry attempt number.
         """
-        traceback_str = traceback.format_exc()
+        traceback_str = print_exception(error)
 
         msg = (
             f"The code execution failed with an error (attempt {attempt + 1}).\n"
-            f"Error:\n{str(error)}\n"
             f"Traceback:\n{traceback_str}\n"
             "Please review and make corrections to the code to fix this error and try again."
         )
