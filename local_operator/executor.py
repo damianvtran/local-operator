@@ -197,6 +197,78 @@ def get_context_vars_str(context_vars: Dict[str, Any]) -> str:
     return context_vars_str
 
 
+def annotate_code(code: str, error_line: int | None = None) -> str | None:
+    """Annotate the code with line numbers and content lengths.
+
+    This function takes a string of code, splits it into lines, and then
+    prepends each line with its line number and character length.
+
+    Args:
+        code (str): The code to annotate.
+
+    Returns:
+        str: The annotated code, with each line prepended by its line number
+             and character length, or None if the input code is empty.
+
+    Example:
+        >>> code = "def foo():\\n    print('bar')\\n"
+        >>> annotate_code(code)
+        '   1 |     9 | def foo():\\n   2 |    15 |     print('bar')\\n'
+    """
+    if not code:
+        return None
+
+    lines = code.splitlines(keepends=True)
+    annotated_code = ""
+
+    for i, line in enumerate(lines):
+        line_number = i + 1
+        line_length = len(line) - (len(line.rstrip("\r\n")) - len(line))
+
+        if error_line is not None:
+            if line_number == error_line:
+                error_indicator = " err >> | "
+            else:
+                error_indicator = "        | "
+        else:
+            error_indicator = ""
+
+        annotated_code += f"{error_indicator}{line_number:>4} | {line_length:>4} | {line}"
+
+    return annotated_code
+
+
+def get_annotated_error_traceback(code: str, error: Exception) -> Exception:
+    """Get an annotated traceback for an error.
+
+    This function takes an exception and returns a string containing the annotated traceback.
+    The traceback is annotated with line numbers and character lengths.
+
+    Args:
+        error (Exception): The exception to get the annotated traceback from.
+
+    Returns:
+        Exception: The annotated traceback string.
+    """
+    lineno = None
+    if hasattr(error, "__traceback__") and error.__traceback__:
+        lineno = error.__traceback__.tb_lineno
+
+    annotated_code = annotate_code(code, error_line=lineno)
+    error_message = (
+        str(error)
+        + "\nAgent Generated Code:\n"
+        + "Line | Length | Content\n"
+        + "----------------------\n"
+        + "BEGIN\n"
+        + f"{annotated_code}\n"
+        + "END\n"
+    )
+
+    augmented_exception = type(error)(error_message).with_traceback(error.__traceback__)
+    return augmented_exception
+
+
 class ExecutorTokenMetrics(BaseModel):
     """Tracks token usage and cost metrics for model executions.
 
@@ -856,12 +928,15 @@ class LocalCodeExecutor:
                     )
                     # Add code to get and run the coroutine
                     async_code += "\n__temp_coro = __temp_async_fn()"
-
                     try:
                         # Execute the async function definition
-                        exec(async_code, self.context)
+                        compiled_code = compile(async_code, "<agent_generated_code>", "exec")
+                        exec(compiled_code, self.context)
                         # Run the coroutine
                         await self.context["__temp_coro"]
+                    except Exception as e:
+                        augmented_exception = get_annotated_error_traceback(code, e)
+                        raise augmented_exception from None
                     finally:
                         # Clean up even if there was an error
                         if "__temp_async_fn" in self.context:
@@ -875,7 +950,12 @@ class LocalCodeExecutor:
                             del self.context["__temp_coro"]
                 else:
                     # Regular synchronous code
-                    exec(code, self.context)
+                    try:
+                        compiled_code = compile(code, "<agent_generated_code>", "exec")
+                        exec(compiled_code, self.context)
+                    except Exception as e:
+                        augmented_exception = get_annotated_error_traceback(code, e)
+                        raise augmented_exception from None
         except Exception as e:
             raise e
         finally:
@@ -953,7 +1033,8 @@ class LocalCodeExecutor:
         traceback_str = traceback.format_exc()
 
         msg = (
-            f"The initial execution failed with error: {str(error)}.\n"
+            f"The initial execution failed with an error.\n"
+            f"Error:\n{str(error)}\n"
             f"Traceback:\n{traceback_str}\n"
             "Review the code and make corrections to run successfully."
         )
@@ -973,8 +1054,10 @@ class LocalCodeExecutor:
             attempt (int): The current retry attempt number.
         """
         traceback_str = traceback.format_exc()
+
         msg = (
-            f"The code execution failed with error (attempt {attempt + 1}): {str(error)}.\n"
+            f"The code execution failed with an error (attempt {attempt + 1}).\n"
+            f"Error:\n{str(error)}\n"
             f"Traceback:\n{traceback_str}\n"
             "Please review and make corrections to the code to fix this error and try again."
         )
@@ -1216,20 +1299,24 @@ class LocalCodeExecutor:
             OSError: If there is an error reading the file
         """
         with open(file_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+            file_content = f.read()
 
-        file_content = ""
-        for i, line in enumerate(lines):
-            line_number = i + 1
-            line_length = len(line.rstrip("\n"))
-            file_content += f"{line_number:4d} | {line_length:4d} | {line}"
+        annotated_content = annotate_code(file_content)
+
+        if not annotated_content:
+            annotated_content = "[File is empty]"
 
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.SYSTEM,
                 content=(
-                    f"Contents of {file_path}:\n\nLine | Length | Content\n"
-                    f"BEGIN\n{file_content}\nEND"
+                    f"Contents of {file_path}:\n"
+                    f"\n"
+                    f"Line | Length | Content\n"
+                    f"----------------------\n"
+                    f"BEGIN\n"
+                    f"{annotated_content}\n"
+                    f"END"
                 ),
                 should_summarize=True,
             )
