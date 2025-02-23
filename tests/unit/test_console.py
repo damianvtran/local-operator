@@ -284,7 +284,7 @@ def test_format_success_output():
     assert "✓ Code Execution Complete" in output
     assert "│ Output:" in output
     assert stdout_text in output
-    assert "│ Error Output:" in output
+    assert "│ Error/Warning Output:" in output
     assert stderr_text in output
 
 

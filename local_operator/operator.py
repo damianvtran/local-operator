@@ -2,11 +2,8 @@ import asyncio
 import os
 import readline
 import signal
-import subprocess
-from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Tuple
 
 from langchain_core.messages import BaseMessage
 from pydantic import ValidationError
@@ -15,14 +12,9 @@ from local_operator.agents import AgentData, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.console import format_agent_output, print_cli_banner, spinner
 from local_operator.credentials import CredentialManager
-from local_operator.executor import (
-    LocalCodeExecutor,
-    get_context_vars_str,
-    process_json_response,
-)
+from local_operator.executor import LocalCodeExecutor, process_json_response
 from local_operator.model.configure import ModelConfiguration
 from local_operator.prompts import PlanSystemPrompt, create_system_prompt
-from local_operator.tools import index_current_directory
 from local_operator.types import (
     ConversationRecord,
     ConversationRole,
@@ -196,135 +188,6 @@ class Operator:
 
         return response.action == "BYE"
 
-    def _format_directory_tree(self, directory_index: Dict[str, List[Tuple[str, str, int]]]) -> str:
-        """
-        Format a directory index into a human-readable tree structure with icons and file sizes.
-
-        Args:
-            directory_index: Dictionary mapping directory paths to lists of
-                (filename, file_type, size) tuples
-
-        Returns:
-            str: Formatted directory tree string with icons, file types, and human-readable sizes
-        """
-        directory_tree_str = ""
-        total_files = 0
-
-        for path, files in directory_index.items():
-            # Add directory name with forward slash
-            directory_tree_str += f"📁 {path}/\n"
-
-            # Add files under directory (limited to 30)
-            file_list = list(files)
-            shown_files = file_list[:30]
-            has_more_files = len(file_list) > 30
-
-            for filename, file_type, size in shown_files:
-                # Format size to be human readable
-                if size < 1024:
-                    size_str = f"{size}B"
-                elif size < 1024 * 1024:
-                    size_str = f"{size/1024:.1f}KB"
-                else:
-                    size_str = f"{size/(1024*1024):.1f}MB"
-
-                # Add icon based on file type
-                icon = {
-                    "code": "📄",
-                    "doc": "📝",
-                    "image": "🖼️",
-                    "config": "🔑",
-                    "other": "📎",
-                }.get(file_type, "📎")
-
-                # Add indented file info
-                directory_tree_str += f"  {icon} {filename} ({file_type}, {size_str})\n"
-
-                total_files += 1
-                if total_files >= 300:
-                    directory_tree_str += "\n... and more files\n"
-                    break
-
-            if has_more_files:
-                remaining_files = len(file_list) - 30
-                directory_tree_str += f"  ... and {remaining_files} more files\n"
-
-            if total_files >= 300:
-                break
-
-        if total_files == 0:
-            directory_tree_str = "No files in the current directory"
-
-        return directory_tree_str
-
-    def get_environment_details(self) -> str:
-        """Get environment details."""
-        directory_index = index_current_directory()
-        directory_tree_str = self._format_directory_tree(directory_index)
-
-        # Get git status
-        try:
-            git_status = (
-                subprocess.check_output(["git", "status"], stderr=subprocess.DEVNULL)
-                .decode()
-                .strip()
-            )
-            if not git_status:
-                git_status = "Clean working directory"
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            git_status = "Not a git repository"
-
-        try:
-            cwd = os.getcwd()
-        except FileNotFoundError:
-            # Potentially the current folder has been deleted
-            # the agent will need to move to a valid directory
-            cwd = "Unknown or deleted directory, please move to a valid directory"
-
-        details_str = f"""<environment details>
-        Current working directory: {cwd}
-        Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-        <git status>
-        {git_status}
-        </git status>
-        <directory tree>
-        {directory_tree_str}
-        </directory tree>
-        <execution context variables>
-        {get_context_vars_str(self.executor.context)}
-        </execution context variables>
-        </environment details>"""
-
-        return details_str
-
-    def add_ephemeral_messages(self) -> None:
-        """Add environment details and other ephemeral messages to the conversation history.
-
-        This method performs two main tasks:
-        1. Removes any messages marked as ephemeral (temporary) from the conversation history
-        2. Appends the current environment details as a system message to provide context
-
-        Ephemeral messages are identified by having an 'ephemeral' field set to 'true' in their
-        dictionary representation. These messages are meant to be temporary and are removed
-        before the next model invocation.
-
-        The method updates self.executor.conversation_history in-place.
-        """
-
-        # Remove ephemeral messages from conversation history
-        self.executor.remove_ephemeral_messages()
-
-        # Add environment details to the latest message
-        environment_details = self.get_environment_details()
-        self.executor.append_to_history(
-            ConversationRecord(
-                role=ConversationRole.SYSTEM,
-                content=environment_details,
-                should_summarize=False,
-                ephemeral=True,
-            )
-        )
-
     async def generate_plan(self) -> str:
         """Generate a plan for the agent to follow."""
         system_prompt = create_system_prompt(self.executor.tool_registry, PlanSystemPrompt)
@@ -406,7 +269,7 @@ class Operator:
         response: BaseMessage | None = None
         self.executor.reset_step_counter()
         self.executor_is_processing = True
-        self.add_ephemeral_messages()
+        self.executor.update_ephemeral_messages()
 
         spinner_task = asyncio.create_task(spinner("Generating plan"))
         try:
@@ -432,7 +295,7 @@ class Operator:
                 raise ValueError("Model is not initialized")
 
             # Add environment details, etc.
-            self.add_ephemeral_messages()
+            self.executor.update_ephemeral_messages()
 
             spinner_task = asyncio.create_task(spinner("Generating response"))
             try:

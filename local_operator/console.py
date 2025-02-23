@@ -243,7 +243,7 @@ def format_success_output(output: tuple[str, str]) -> str:
         "\n\033[1;32m✓ Code Execution Complete\033[0m\n"
         "\033[1;34m╞══════════════════════════════════════════════════╡\n"
         f"\033[1;36m│ Output:\033[0m\n{stdout}\n"
-        f"\033[1;36m│ Error Output:\033[0m\n{stderr}"
+        f"\033[1;36m│ Error/Warning Output:\033[0m\n{stderr}"
     )
 
 
