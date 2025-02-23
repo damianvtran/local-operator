@@ -4,10 +4,11 @@ import io
 import os
 import subprocess
 import sys
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from traceback import format_exception
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from langchain_community.callbacks.manager import get_openai_callback
 from langchain_core.messages import BaseMessage
@@ -35,7 +36,7 @@ from local_operator.prompts import (
     SafetyCheckUserPrompt,
     create_system_prompt,
 )
-from local_operator.tools import ToolRegistry
+from local_operator.tools import ToolRegistry, index_current_directory
 from local_operator.types import (
     ActionType,
     ConversationRecord,
@@ -998,7 +999,12 @@ class LocalCodeExecutor:
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.SYSTEM,
-                content=f"Code execution output:\n{output}\n" f"Error output:\n{error_output}",
+                content=f"Here are the results of the last code execution:\n\n"
+                f"Stdout:\n{output}\n"
+                f"Stderr:\n{error_output}\n"
+                "Please review the results and continue according to the plan. "
+                "If you need to run the code again, please do so with the necessary "
+                "changes or improvements.",
                 should_summarize=True,
             )
         )
@@ -1019,6 +1025,8 @@ class LocalCodeExecutor:
         self._record_initial_error(initial_error)
         log_error_and_retry_message(initial_error)
 
+        self.update_ephemeral_messages()
+
         for attempt in range(max_retries):
             try:
                 new_code = await self._get_corrected_code()
@@ -1026,6 +1034,7 @@ class LocalCodeExecutor:
                     return await self._execute_with_output(new_code)
             except Exception as retry_error:
                 self._record_retry_error(retry_error, attempt)
+                self.update_ephemeral_messages()
                 log_retry_error(retry_error, attempt, max_retries)
 
         return format_error_output(initial_error, max_retries)
@@ -1042,8 +1051,11 @@ class LocalCodeExecutor:
             f"The initial execution failed with an error.\n"
             f"Error details:\n{traceback_str}\n"
             "Debug the code you submitted and make all necessary corrections "
-            "to fix the error and run successfully.  The system will then run your "
-            "corrected code."
+            "to fix the error and run successfully.  Pick up from where you left "
+            "off and try to avoid re-running code that has already succeeded.  "
+            "Use the environment details to determine which variables are available "
+            "and correct, which are not.  After fixing the issue please continue with the "
+            "tasks according to the plan."
         )
         self.append_to_history(
             ConversationRecord(
@@ -1066,8 +1078,11 @@ class LocalCodeExecutor:
             f"The code execution failed with an error (attempt {attempt + 1}).\n"
             f"Error details:\n{traceback_str}\n"
             "Debug the code you submitted and make all necessary corrections "
-            "to fix the error and run successfully.  The system will then run your "
-            "corrected code."
+            "to fix the error and run successfully.  Pick up from where you left "
+            "off and try to avoid re-running code that has already succeeded.  "
+            "Use the environment details to determine which variables are available "
+            "and correct, which are not.  After fixing the issue please continue with the "
+            "tasks according to the plan."
         )
         self.append_to_history(
             ConversationRecord(
@@ -1478,3 +1493,132 @@ class LocalCodeExecutor:
     def remove_ephemeral_messages(self) -> None:
         """Remove ephemeral messages from the conversation history."""
         self.conversation_history = [msg for msg in self.conversation_history if not msg.ephemeral]
+
+    def _format_directory_tree(self, directory_index: Dict[str, List[Tuple[str, str, int]]]) -> str:
+        """
+        Format a directory index into a human-readable tree structure with icons and file sizes.
+
+        Args:
+            directory_index: Dictionary mapping directory paths to lists of
+                (filename, file_type, size) tuples
+
+        Returns:
+            str: Formatted directory tree string with icons, file types, and human-readable sizes
+        """
+        directory_tree_str = ""
+        total_files = 0
+
+        for path, files in directory_index.items():
+            # Add directory name with forward slash
+            directory_tree_str += f"📁 {path}/\n"
+
+            # Add files under directory (limited to 30)
+            file_list = list(files)
+            shown_files = file_list[:30]
+            has_more_files = len(file_list) > 30
+
+            for filename, file_type, size in shown_files:
+                # Format size to be human readable
+                if size < 1024:
+                    size_str = f"{size}B"
+                elif size < 1024 * 1024:
+                    size_str = f"{size/1024:.1f}KB"
+                else:
+                    size_str = f"{size/(1024*1024):.1f}MB"
+
+                # Add icon based on file type
+                icon = {
+                    "code": "📄",
+                    "doc": "📝",
+                    "image": "🖼️",
+                    "config": "🔑",
+                    "other": "📎",
+                }.get(file_type, "📎")
+
+                # Add indented file info
+                directory_tree_str += f"  {icon} {filename} ({file_type}, {size_str})\n"
+
+                total_files += 1
+                if total_files >= 300:
+                    directory_tree_str += "\n... and more files\n"
+                    break
+
+            if has_more_files:
+                remaining_files = len(file_list) - 30
+                directory_tree_str += f"  ... and {remaining_files} more files\n"
+
+            if total_files >= 300:
+                break
+
+        if total_files == 0:
+            directory_tree_str = "No files in the current directory"
+
+        return directory_tree_str
+
+    def get_environment_details(self) -> str:
+        """Get environment details."""
+        directory_index = index_current_directory()
+        directory_tree_str = self._format_directory_tree(directory_index)
+
+        # Get git status
+        try:
+            git_status = (
+                subprocess.check_output(["git", "status"], stderr=subprocess.DEVNULL)
+                .decode()
+                .strip()
+            )
+            if not git_status:
+                git_status = "Clean working directory"
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            git_status = "Not a git repository"
+
+        try:
+            cwd = os.getcwd()
+        except FileNotFoundError:
+            # Potentially the current folder has been deleted
+            # the agent will need to move to a valid directory
+            cwd = "Unknown or deleted directory, please move to a valid directory"
+
+        details_str = f"""<environment details>
+        Current working directory: {cwd}
+        Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        <git status>
+        {git_status}
+        </git status>
+        <directory tree>
+        {directory_tree_str}
+        </directory tree>
+        <execution context variables>
+        {get_context_vars_str(self.context)}
+        </execution context variables>
+        </environment details>"""
+
+        return details_str
+
+    def update_ephemeral_messages(self) -> None:
+        """Add environment details and other ephemeral messages to the conversation history.
+
+        This method performs two main tasks:
+        1. Removes any messages marked as ephemeral (temporary) from the conversation history
+        2. Appends the current environment details as a system message to provide context
+
+        Ephemeral messages are identified by having an 'ephemeral' field set to 'true' in their
+        dictionary representation. These messages are meant to be temporary and are removed
+        before the next model invocation.
+
+        The method updates self.executor.conversation_history in-place.
+        """
+
+        # Remove ephemeral messages from conversation history
+        self.remove_ephemeral_messages()
+
+        # Add environment details to the latest message
+        environment_details = self.get_environment_details()
+        self.append_to_history(
+            ConversationRecord(
+                role=ConversationRole.SYSTEM,
+                content=environment_details,
+                should_summarize=False,
+                ephemeral=True,
+            )
+        )

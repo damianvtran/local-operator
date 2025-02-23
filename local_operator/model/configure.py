@@ -265,7 +265,8 @@ def configure_model(
             api_key = credential_manager.prompt_for_credential("OPENROUTER_API_KEY")
         configured_model = ChatOpenAI(
             api_key=api_key,
-            temperature=0.3,
+            temperature=0.7,
+            top_p=0.5,
             model=model_name,
             base_url="https://openrouter.ai/api/v1",
             default_headers={
