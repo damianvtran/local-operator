@@ -1156,7 +1156,7 @@ def test_get_context_vars_str(
     "response_str, expected_code, expected_action",
     [
         (
-            '{"previous_step_success": true, "previous_goal": "", '
+            '{"previous_step_success": true, "previous_step_issue": "", "previous_goal": "", '
             '"current_goal": "Print hello world", "next_goal": "", '
             '"response": "Here\'s some code:", "code": "print(\'hello world\')", '
             '"action": "CODE", "learnings": "", "plan": "", "content": "", '
@@ -1165,25 +1165,28 @@ def test_get_context_vars_str(
             ActionType.CODE,
         ),
         (
-            '```json\n{"previous_step_success": true, "previous_goal": "", '
-            '"current_goal": "Print hello world", "next_goal": "", '
-            '"response": "Here\'s some code:", "code": "print(\'hello world\')", '
-            '"action": "CODE", "learnings": "", "plan": "", "content": "", '
+            '```json\n{"previous_step_success": true, "previous_step_issue": "", '
+            '"previous_goal": "", "current_goal": "Print hello world", '
+            '"next_goal": "", "response": "Here\'s some code:", '
+            '"code": "print(\'hello world\')", "action": "CODE", '
+            '"learnings": "", "plan": "", "content": "", '
             '"file_path": "", "replacements": []}\n```',
             "print('hello world')",
             ActionType.CODE,
         ),
         (
-            '```json\n{"previous_step_success": true, "previous_goal": "", '
-            '"current_goal": "Write a file", "next_goal": "", '
-            '"response": "I will write a file", "code": "", "action": "WRITE", '
-            '"learnings": "", "plan": "", "content": "file content", '
+            '```json\n{"previous_step_success": true, "previous_step_issue": "", '
+            '"previous_goal": "", "current_goal": "Write a file", '
+            '"next_goal": "", "response": "I will write a file", '
+            '"code": "", "action": "WRITE", "learnings": "", '
+            '"plan": "", "content": "file content", '
             '"file_path": "output.txt", "replacements": []}\n```',
             "",
             ActionType.WRITE,
         ),
         (
-            'Some text before ```json\n{"previous_step_success": true, "previous_goal": "", '
+            'Some text before ```json\n{"previous_step_success": true, '
+            '"previous_step_issue": "", "previous_goal": "", '
             '"current_goal": "Print hello world", "next_goal": "", '
             '"response": "Here\'s some code:", "code": "print(\'hello world\')", '
             '"action": "CODE", "learnings": "", "plan": "", "content": "", '
