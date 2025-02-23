@@ -1346,8 +1346,10 @@ async def test_read_file_action(executor: LocalCodeExecutor, tmp_path: Path, fil
     expected_content = ""
     for i, line in enumerate(lines):
         line_number = i + 1
-        line_length = len(line.rstrip("\n"))
-        expected_content += f"{line_number:4d} | {line_length:4d} | {line}"
+        line_length = len(line) - (
+            len(line.rstrip("\r\n")) - len(line)
+        )  # Handle different line endings
+        expected_content += f"{line_number:>4} | {line_length:>4} | {line}"
 
     assert expected_content in executor.conversation_history[-1].content
 

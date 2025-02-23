@@ -341,10 +341,11 @@ class Operator:
 
         messages.append(
             ConversationRecord(
-                role=ConversationRole.SYSTEM,
-                content="Please come up with a detailed plan of actions to achieve the goal "
-                "before proceeding with the execution phase.  Your plan will be used to "
-                "perform actions in the next steps.",
+                role=ConversationRole.USER,
+                content="Please come up with a detailed writeup for a plan of actions to "
+                "achieve the goal before proceeding with the execution phase.  Your plan "
+                "will be used to perform actions in the next steps.  Respond in natural "
+                "language format, not JSON or code.",
             )
         )
 
