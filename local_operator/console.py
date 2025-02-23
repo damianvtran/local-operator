@@ -2,8 +2,8 @@ import asyncio
 import itertools
 import os
 import sys
-import traceback
 from enum import Enum
+from traceback import print_exception
 from typing import Any
 
 from local_operator.agents import AgentData
@@ -156,10 +156,9 @@ def log_action_error(error: Exception, action: str) -> None:
         error (Exception): The error that occurred.
         action (str): The action that occurred.
     """
-    traceback_str = traceback.format_exc()
+    traceback_str = print_exception(error)
     print(f"\n\033[1;31m✗ Error during {action}:\033[0m")
     print("\033[1;34m╞══════════════════════════════════════════════════╡\033[0m")
-    print(f"\033[1;36m│ Error:\033[0m\n{str(error)}")
     print(f"\033[1;36m│ Traceback:\033[0m\n{traceback_str}")
     print("\033[1;34m╞══════════════════════════════════════════════════╡\033[0m")
 
@@ -170,10 +169,9 @@ def log_error_and_retry_message(error: Exception) -> None:
     Args:
         error (Exception): The error to display.
     """
-    traceback_str = traceback.format_exc()
+    traceback_str = print_exception(error)
     print("\n\033[1;31m✗ Error during execution:\033[0m")
     print("\033[1;34m╞══════════════════════════════════════════════════╡\033[0m")
-    print(f"\033[1;36m│ Error:\033[0m\n{str(error)}")
     print(f"\033[1;36m│ Traceback:\033[0m\n{traceback_str}")
     print("\033[1;34m╞══════════════════════════════════════════════════╡\033[0m")
     print("\033[1;36m│ Attempting to fix the error...\033[0m")
@@ -189,10 +187,9 @@ def log_retry_error(error: Exception, attempt: int, max_retries: int) -> None:
         attempt (int): The current retry attempt number.
         max_retries (int): The maximum number of retry attempts allowed.
     """
-    traceback_str = traceback.format_exc()
+    traceback_str = print_exception(error)
     print(f"\n\033[1;31m✗ Error during execution (attempt {attempt + 1}):\033[0m")
     print("\033[1;34m╞══════════════════════════════════════════════════╡\033[0m")
-    print(f"\033[1;36m│ Error:\033[0m\n{str(error)}")
     print(f"\033[1;36m│ Traceback:\033[0m\n{traceback_str}")
     if attempt < max_retries - 1:
         print("\033[1;36m│\033[0m \033[1;33mAnother attempt will be made...\033[0m")
@@ -224,11 +221,10 @@ def format_error_output(error: Exception, max_retries: int) -> str:
     Returns:
         str: Formatted error message string
     """
-    traceback_str = traceback.format_exc()
+    traceback_str = print_exception(error)
     return (
         f"\n\033[1;31m✗ Code Execution Failed after {max_retries} attempts\033[0m\n"
         f"\033[1;34m╞══════════════════════════════════════════════════╡\n"
-        f"\033[1;36m│ Error:\033[0m\n{str(error)}\n"
         f"\033[1;36m│ Traceback:\033[0m\n{traceback_str}"
     )
 
