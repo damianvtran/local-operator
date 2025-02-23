@@ -6,7 +6,7 @@ import subprocess
 import sys
 from enum import Enum
 from pathlib import Path
-from traceback import print_exception
+from traceback import format_exception
 from typing import Any, Dict, List
 
 from langchain_community.callbacks.manager import get_openai_callback
@@ -926,8 +926,6 @@ class LocalCodeExecutor:
             Exception: Any exceptions raised during code execution
         """
         old_stdin = sys.stdin
-        old_stdout = sys.stdout
-        old_stderr = sys.stderr
 
         try:
             # Redirect stdin to /dev/null to ignore input requests
@@ -967,10 +965,7 @@ class LocalCodeExecutor:
         except Exception as e:
             raise e
         finally:
-            # Restore all standard streams
             sys.stdin = old_stdin
-            sys.stdout = old_stdout
-            sys.stderr = old_stderr
 
     def _capture_and_record_output(
         self, stdout: io.StringIO, stderr: io.StringIO, format_for_ui: bool = False
@@ -1041,12 +1036,14 @@ class LocalCodeExecutor:
         Args:
             error (Exception): The error that occurred during initial execution.
         """
-        traceback_str = print_exception(error)
+        traceback_str = "".join(format_exception(error))
 
         msg = (
             f"The initial execution failed with an error.\n"
-            f"Traceback:\n{traceback_str}\n"
-            "Review the code and make corrections to run successfully."
+            f"Error details:\n{traceback_str}\n"
+            "Debug the code you submitted and make all necessary corrections "
+            "to fix the error and run successfully.  The system will then run your "
+            "corrected code."
         )
         self.append_to_history(
             ConversationRecord(
@@ -1063,12 +1060,14 @@ class LocalCodeExecutor:
             error (Exception): The error that occurred during the retry attempt.
             attempt (int): The current retry attempt number.
         """
-        traceback_str = print_exception(error)
+        traceback_str = "".join(format_exception(error))
 
         msg = (
             f"The code execution failed with an error (attempt {attempt + 1}).\n"
-            f"Traceback:\n{traceback_str}\n"
-            "Please review and make corrections to the code to fix this error and try again."
+            f"Error details:\n{traceback_str}\n"
+            "Debug the code you submitted and make all necessary corrections "
+            "to fix the error and run successfully.  The system will then run your "
+            "corrected code."
         )
         self.append_to_history(
             ConversationRecord(
