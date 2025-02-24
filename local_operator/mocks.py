@@ -109,9 +109,7 @@ class ChatMock:
         code_execution_response = ""
         code_execution_response_index = -1
         for index, msg in reversed(list(enumerate(messages))):
-            if msg.get(
-                "role"
-            ) == ConversationRole.SYSTEM.value and "Code execution output" in msg.get(
+            if msg.get("role") == ConversationRole.SYSTEM.value and "<stdout>" in msg.get(
                 "content", ""
             ):
                 code_execution_response = msg.get("content", "")
