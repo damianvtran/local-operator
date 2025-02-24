@@ -8,6 +8,7 @@ from pydantic import SecretStr
 from local_operator.credentials import CredentialManager
 from local_operator.mocks import ChatNoop
 from local_operator.model.configure import (
+    DEFAULT_TEMPERATURE,
     calculate_cost,
     configure_model,
     get_model_info_from_openrouter,
@@ -138,7 +139,7 @@ def test_configure_model_anthropic(mock_credential_manager):
         )
         assert model_configuration.api_key is not None
         assert call_args.kwargs["model_name"] == "claude-3-5-sonnet-latest"
-        assert call_args.kwargs["temperature"] == 0.3
+        assert call_args.kwargs["temperature"] == DEFAULT_TEMPERATURE
         assert call_args.kwargs["timeout"] is None
         assert call_args.kwargs["stop"] is None
 
@@ -151,6 +152,7 @@ def test_configure_model_anthropic_default(mock_credential_manager):
         assert model_configuration is not None
         call_args = mock_chat_anthropic.call_args
         assert call_args.kwargs["model_name"] == "claude-3-5-sonnet-latest"
+        assert call_args.kwargs["temperature"] == DEFAULT_TEMPERATURE
         assert model_configuration.api_key is not None
 
 

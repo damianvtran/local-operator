@@ -18,6 +18,11 @@ from local_operator.model.registry import (
 
 ModelType = Union[ChatOpenAI, ChatOllama, ChatAnthropic, ChatGoogleGenerativeAI, ChatMock, ChatNoop]
 
+DEFAULT_TEMPERATURE = 0.7
+"""Default temperature value for language models."""
+DEFAULT_TOP_P = 0.5
+"""Default top_p value for language models."""
+
 
 class ModelConfiguration:
     """
@@ -239,7 +244,8 @@ def configure_model(
             api_key = credential_manager.prompt_for_credential("DEEPSEEK_API_KEY")
         configured_model = ChatOpenAI(
             api_key=api_key,
-            temperature=0.3,
+            temperature=DEFAULT_TEMPERATURE,
+            top_p=DEFAULT_TOP_P,
             base_url=base_url,
             model=model_name,
         )
@@ -250,10 +256,11 @@ def configure_model(
         api_key = credential_manager.get_credential("OPENAI_API_KEY")
         if not api_key:
             api_key = credential_manager.prompt_for_credential("OPENAI_API_KEY")
-        temperature = 1.0 if model_name.startswith(("o1", "o3")) else 0.3
+        temperature = 1.0 if model_name.startswith(("o1", "o3")) else DEFAULT_TEMPERATURE
         configured_model = ChatOpenAI(
             api_key=api_key,
             temperature=temperature,
+            top_p=DEFAULT_TOP_P,
             model=model_name,
         )
 
@@ -265,7 +272,8 @@ def configure_model(
             api_key = credential_manager.prompt_for_credential("OPENROUTER_API_KEY")
         configured_model = ChatOpenAI(
             api_key=api_key,
-            temperature=0.3,
+            temperature=DEFAULT_TEMPERATURE,
+            top_p=DEFAULT_TOP_P,
             model=model_name,
             base_url="https://openrouter.ai/api/v1",
             default_headers={
@@ -286,7 +294,8 @@ def configure_model(
 
         configured_model = ChatAnthropic(
             api_key=api_key,
-            temperature=0.3,
+            temperature=DEFAULT_TEMPERATURE,
+            top_p=DEFAULT_TOP_P,
             model_name=model_name,
             timeout=None,
             stop=None,
@@ -300,7 +309,8 @@ def configure_model(
             api_key = credential_manager.prompt_for_credential("KIMI_API_KEY")
         configured_model = ChatOpenAI(
             api_key=api_key,
-            temperature=0.3,
+            temperature=DEFAULT_TEMPERATURE,
+            top_p=DEFAULT_TOP_P,
             model=model_name,
             base_url="https://api.moonshot.cn/v1",
         )
@@ -313,7 +323,8 @@ def configure_model(
             api_key = credential_manager.prompt_for_credential("ALIBABA_CLOUD_API_KEY")
         configured_model = ChatOpenAI(
             api_key=api_key,
-            temperature=0.3,
+            temperature=DEFAULT_TEMPERATURE,
+            top_p=DEFAULT_TOP_P,
             model=model_name,
             base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
         )
@@ -326,7 +337,8 @@ def configure_model(
             api_key = credential_manager.prompt_for_credential("GOOGLE_AI_STUDIO_API_KEY")
         configured_model = ChatGoogleGenerativeAI(
             api_key=api_key,
-            temperature=0.3,
+            temperature=DEFAULT_TEMPERATURE,
+            top_p=DEFAULT_TOP_P,
             model=model_name,
         )
 
@@ -338,7 +350,8 @@ def configure_model(
             api_key = credential_manager.prompt_for_credential("MISTRAL_API_KEY")
         configured_model = ChatOpenAI(
             api_key=api_key,
-            temperature=0.3,
+            temperature=DEFAULT_TEMPERATURE,
+            top_p=DEFAULT_TOP_P,
             model=model_name,
             base_url="https://api.mistral.ai/v1",
         )
@@ -348,7 +361,8 @@ def configure_model(
             raise ValueError("Model is required for ollama hosting")
         configured_model = ChatOllama(
             model=model_name,
-            temperature=0.3,
+            temperature=DEFAULT_TEMPERATURE,
+            top_p=DEFAULT_TOP_P,
         )
 
     else:

@@ -280,12 +280,28 @@ def test_format_error_output():
 def test_format_success_output():
     stdout_text = "Output text"
     stderr_text = "Error text"
-    output = format_success_output((stdout_text, stderr_text))
+    log_text = "Log text"
+    output = format_success_output((stdout_text, stderr_text, log_text))
     assert "✓ Code Execution Complete" in output
     assert "│ Output:" in output
     assert stdout_text in output
-    assert "│ Error Output:" in output
+    assert "│ Error/Warning Output:" in output
     assert stderr_text in output
+    assert "│ Log Output:" in output
+    assert log_text in output
+
+
+def test_format_success_output_no_logs():
+    stdout_text = "Output text"
+    stderr_text = "Error text"
+    log_text = ""
+    output = format_success_output((stdout_text, stderr_text, log_text))
+    assert "✓ Code Execution Complete" in output
+    assert "│ Output:" in output
+    assert stdout_text in output
+    assert "│ Error/Warning Output:" in output
+    assert stderr_text in output
+    assert "│ Log Output:" not in output
 
 
 @pytest.mark.parametrize(
