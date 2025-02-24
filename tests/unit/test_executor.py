@@ -1,4 +1,5 @@
 import io
+import subprocess
 import tempfile
 import textwrap
 from datetime import datetime
@@ -1194,6 +1195,36 @@ def test_get_context_vars_str(
             "print('hello world')",
             ActionType.CODE,
         ),
+        (
+            'Text before {"previous_step_success": true, "previous_step_issue": "", '
+            '"previous_goal": "", "current_goal": "Print hello world", '
+            '"next_goal": "", "response": "Here\'s some code:", '
+            '"code": "print(\'hello world\')", "action": "CODE", '
+            '"learnings": "", "plan": "", "content": "", '
+            '"file_path": "", "replacements": []}',
+            "print('hello world')",
+            ActionType.CODE,
+        ),
+        (
+            '{"previous_step_success": true, "previous_step_issue": "", '
+            '"previous_goal": "", "current_goal": "Print hello world", '
+            '"next_goal": "", "response": "Here\'s some code:", '
+            '"code": "print(\'hello world\')", "action": "CODE", '
+            '"learnings": "", "plan": "", "content": "", '
+            '"file_path": "", "replacements": []} Text after',
+            "print('hello world')",
+            ActionType.CODE,
+        ),
+        (
+            'Text before {"previous_step_success": true, "previous_step_issue": "", '
+            '"previous_goal": "", "current_goal": "Print hello world", '
+            '"next_goal": "", "response": "Here\'s some code:", '
+            '"code": "print(\'hello world\')", "action": "CODE", '
+            '"learnings": "", "plan": "", "content": "", '
+            '"file_path": "", "replacements": []} Text after',
+            "print('hello world')",
+            ActionType.CODE,
+        ),
     ],
 )
 def test_process_json_response(
@@ -1630,3 +1661,89 @@ def test_load_conversation_history(executor, initial_history, new_history, expec
         executor.conversation_history = initial_history
         executor.load_conversation_history(new_history)
         assert executor.conversation_history == expected_history
+
+
+def test_get_environment_details(executor, monkeypatch, tmp_path):
+    """Test that get_environment_details returns correct environment information."""
+    # Mock directory indexing
+    mock_index = {
+        ".": [
+            ("test.py", "code", 1024),
+            ("doc.txt", "doc", 500),
+            ("image.png", "image", 2048576),
+            ("other.bin", "other", 750),
+        ]
+    }
+    monkeypatch.setattr("local_operator.executor.index_current_directory", lambda: mock_index)
+
+    # Mock git status
+    def mock_check_output(*args, **kwargs):
+        if args[0][0] == "git" and args[0][1] == "status":
+            return b"On branch main\nnothing to commit, working tree clean\n"
+        raise subprocess.CalledProcessError(1, args[0])
+
+    monkeypatch.setattr("local_operator.executor.subprocess.check_output", mock_check_output)
+
+    # Mock current working directory and datetime
+    monkeypatch.setattr("local_operator.executor.os.getcwd", lambda: str(tmp_path))
+    fixed_datetime = datetime(2024, 1, 1, 12, 0, 0)
+    monkeypatch.setattr("local_operator.executor.datetime", MagicMock(now=lambda: fixed_datetime))
+
+    # Mock context variables
+    executor.context = {"test_var": "test_value"}
+
+    # Get environment details
+    env_details = executor.get_environment_details()
+
+    # Verify output contains expected information
+    assert str(tmp_path) in env_details
+    assert "2024-01-01 12:00:00" in env_details
+    assert "On branch main" in env_details
+    assert "nothing to commit, working tree clean" in env_details
+    assert "test_var: test_value" in env_details
+
+    # Verify directory tree formatting
+    assert "📁 ./" in env_details
+    assert "📄 test.py (code, 1.0KB)" in env_details
+    assert "📝 doc.txt (doc, 500B)" in env_details
+    assert "🖼️ image.png (image, 2.0MB)" in env_details
+    assert "📎 other.bin (other, 750B)" in env_details
+
+
+def test_get_environment_details_no_git(executor, monkeypatch, tmp_path):
+    """Test get_environment_details when not in a git repository."""
+    # Mock directory indexing with empty directory
+    monkeypatch.setattr("local_operator.executor.index_current_directory", lambda: {})
+
+    # Mock git branch check to fail
+    def mock_check_output(*args, **kwargs):
+        raise subprocess.CalledProcessError(128, "git")
+
+    monkeypatch.setattr("subprocess.check_output", mock_check_output)
+
+    # Mock current working directory
+    monkeypatch.setattr("os.getcwd", lambda: str(tmp_path))
+
+    env_details = executor.get_environment_details()
+
+    assert "Not a git repository" in env_details
+
+
+def test_get_environment_details_large_directory(executor, monkeypatch):
+    """Test get_environment_details handles large directories correctly."""
+    # Create mock directory with >300 files
+    mock_files = [("file{}.txt".format(i), "doc", 100) for i in range(1000)]
+    mock_index = {f"dir{i}": mock_files[i * 100 : (i + 1) * 100] for i in range(10)}
+    monkeypatch.setattr("local_operator.executor.index_current_directory", lambda: mock_index)
+
+    # Mock git branch
+    def mock_check_output(*args, **kwargs):
+        return b"main\n"
+
+    monkeypatch.setattr("subprocess.check_output", mock_check_output)
+
+    env_details = executor.get_environment_details()
+
+    # Verify file count limits are enforced
+    assert "... and more files" in env_details
+    assert "... and 70 more files" in env_details

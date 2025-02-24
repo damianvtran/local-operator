@@ -229,22 +229,27 @@ def format_error_output(error: Exception, max_retries: int) -> str:
     )
 
 
-def format_success_output(output: tuple[str, str]) -> str:
+def format_success_output(output: tuple[str, str, str]) -> str:
     """Format successful execution output with ANSI color codes.
 
     Args:
-        output (tuple[str, str]): Tuple containing (stdout output, stderr output)
+        output (tuple[str, str, str]): Tuple containing (stdout output, stderr output, log output)
 
     Returns:
         str: Formatted string with colored success message and execution output
     """
-    stdout, stderr = output
-    return (
+    stdout, stderr, log_output = output
+    print_str = (
         "\n\033[1;32m✓ Code Execution Complete\033[0m\n"
         "\033[1;34m╞══════════════════════════════════════════════════╡\n"
         f"\033[1;36m│ Output:\033[0m\n{stdout}\n"
-        f"\033[1;36m│ Error Output:\033[0m\n{stderr}"
+        f"\033[1;36m│ Error/Warning Output:\033[0m\n{stderr}"
     )
+
+    if log_output:
+        print_str += f"\n\033[1;36m│ Log Output:\033[0m\n{log_output}"
+
+    return print_str
 
 
 def print_agent_response(step: int, content: str) -> None:
