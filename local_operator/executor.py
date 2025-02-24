@@ -106,7 +106,7 @@ def process_json_response(response_str: str) -> ResponseJsonSchema:
 
     Args:
         response_str (str): Raw response string from the model, which may be wrapped in
-            markdown-style JSON code block delimiters (```json).
+            markdown-style JSON code block delimiters (```json) or provided as a plain JSON object.
 
     Returns:
         ResponseJsonSchema: Validated response object containing the model's output.
@@ -114,8 +114,11 @@ def process_json_response(response_str: str) -> ResponseJsonSchema:
 
     Raises:
         ValidationError: If the JSON response does not match the expected schema.
+        ValueError: If no valid JSON object can be extracted from the response.
     """
     response_content = response_str
+
+    # Check for markdown code block format
     start_tag = "```json"
     end_tag = "```"
 
@@ -123,8 +126,19 @@ def process_json_response(response_str: str) -> ResponseJsonSchema:
     if start_index != -1:
         response_content = response_content[start_index + len(start_tag) :]
 
-    if response_content.endswith(end_tag):
-        response_content = response_content[: -len(end_tag)]
+        end_index = response_content.find(end_tag)
+        if end_index != -1:
+            response_content = response_content[:end_index]
+    else:
+        # If no code block, try to extract JSON object directly
+        # Look for the first { and the last }
+        first_brace = response_content.find("{")
+        last_brace = response_content.rfind("}")
+
+        if first_brace != -1 and last_brace != -1 and first_brace < last_brace:
+            response_content = response_content[first_brace : last_brace + 1]
+
+    response_content = response_content.strip()
 
     # Validate the JSON response
     response_json = ResponseJsonSchema.model_validate_json(response_content)
