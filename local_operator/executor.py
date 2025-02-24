@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import io
+import logging
 import os
 import subprocess
 import sys
@@ -905,17 +906,38 @@ class LocalCodeExecutor:
         new_stdout, new_stderr = io.StringIO(), io.StringIO()
         sys.stdout, sys.stderr = new_stdout, new_stderr
 
+        # Get root logger and store original handlers
+        root_logger = logging.getLogger()
+        original_handlers = root_logger.handlers.copy()
+
+        # Add StringIO handler for capturing log output
+        log_capture = io.StringIO()
+        log_handler = logging.StreamHandler(log_capture)
+        root_logger.addHandler(log_handler)
+
         try:
             await self._run_code(code)
-            output, error_output = self._capture_and_record_output(new_stdout, new_stderr)
-            return format_success_output((output, error_output))
+            log_output = log_capture.getvalue()
+
+            output, error_output = self._capture_and_record_output(
+                new_stdout, new_stderr, log_output
+            )
+            return format_success_output((output, error_output, log_output))
         except Exception as e:
-            output, error_output = self._capture_and_record_output(new_stdout, new_stderr)
+            # Add captured log output to error output if any
+            log_output = log_capture.getvalue()
+            output, error_output = self._capture_and_record_output(
+                new_stdout, new_stderr, log_output
+            )
             raise e
         finally:
             sys.stdout, sys.stderr = old_stdout, old_stderr
             new_stdout.close()
             new_stderr.close()
+            log_capture.close()
+
+            # Restore original logging handlers
+            root_logger.handlers = original_handlers
 
     async def _run_code(self, code: str) -> None:
         """Run code in the main thread.
@@ -969,13 +991,14 @@ class LocalCodeExecutor:
             sys.stdin = old_stdin
 
     def _capture_and_record_output(
-        self, stdout: io.StringIO, stderr: io.StringIO, format_for_ui: bool = False
+        self, stdout: io.StringIO, stderr: io.StringIO, log_output: str, format_for_ui: bool = False
     ) -> tuple[str, str]:
         """Capture stdout/stderr output and record it in conversation history.
 
         Args:
             stdout (io.StringIO): Buffer containing standard output
             stderr (io.StringIO): Buffer containing error output
+            log_output (str): Buffer containing log output
             format_for_ui (bool): Whether to format the output for a UI chat
             interface.  This will include markdown formatting and other
             UI-friendly features.
@@ -995,6 +1018,11 @@ class LocalCodeExecutor:
             if format_for_ui and stderr.getvalue()
             else stderr.getvalue() or "[No error output]"
         )
+        log_output = (
+            f"```shell\n{log_output}\n```"
+            if format_for_ui and log_output
+            else log_output or "[No logger output]"
+        )
 
         self.append_to_history(
             ConversationRecord(
@@ -1002,6 +1030,7 @@ class LocalCodeExecutor:
                 content=f"Here are the results of the last code execution:\n"
                 f"<stdout>\n{output}\n</stdout>\n"
                 f"<stderr>\n{error_output}\n</stderr>\n"
+                f"<logger>\n{log_output}\n</logger>\n"
                 "Please review the results and continue according to the plan. "
                 "If you need to run the code again, please do so with the necessary "
                 "changes or improvements.",
