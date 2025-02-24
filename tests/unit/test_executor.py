@@ -1195,6 +1195,36 @@ def test_get_context_vars_str(
             "print('hello world')",
             ActionType.CODE,
         ),
+        (
+            'Text before {"previous_step_success": true, "previous_step_issue": "", '
+            '"previous_goal": "", "current_goal": "Print hello world", '
+            '"next_goal": "", "response": "Here\'s some code:", '
+            '"code": "print(\'hello world\')", "action": "CODE", '
+            '"learnings": "", "plan": "", "content": "", '
+            '"file_path": "", "replacements": []}',
+            "print('hello world')",
+            ActionType.CODE,
+        ),
+        (
+            '{"previous_step_success": true, "previous_step_issue": "", '
+            '"previous_goal": "", "current_goal": "Print hello world", '
+            '"next_goal": "", "response": "Here\'s some code:", '
+            '"code": "print(\'hello world\')", "action": "CODE", '
+            '"learnings": "", "plan": "", "content": "", '
+            '"file_path": "", "replacements": []} Text after',
+            "print('hello world')",
+            ActionType.CODE,
+        ),
+        (
+            'Text before {"previous_step_success": true, "previous_step_issue": "", '
+            '"previous_goal": "", "current_goal": "Print hello world", '
+            '"next_goal": "", "response": "Here\'s some code:", '
+            '"code": "print(\'hello world\')", "action": "CODE", '
+            '"learnings": "", "plan": "", "content": "", '
+            '"file_path": "", "replacements": []} Text after',
+            "print('hello world')",
+            ActionType.CODE,
+        ),
     ],
 )
 def test_process_json_response(
