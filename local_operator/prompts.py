@@ -324,9 +324,20 @@ Make sure that any of your response, explanations, analysis, code, etc. are excl
 inside the JSON structure and not outside of it.  Your code must be included in the "code"
 field.  Do not generate this JSON as part of the code.
 
-Invalid JSON or additional content will be rejected and you will be asked to generate
-your response again.
+Important Rules:
+1. The JSON must be valid and parseable
+2. All fields must be present (use empty strings/arrays/values if not applicable)
+3. No additional text, comments, or formatting outside the JSON structure
+4. Maintain the exact field order shown above
+5. The response must be pure JSON only
 
+Failure to follow these rules will result in rejection of your response.
+
+Invalid JSON or additional content will be rejected and you will be asked to generate
+your response again.  Only respond with your JSON response between the <response_format>
+and </response_format> tags.
+
+<response_format>
 {
   "previous_step_success": true | false, // False for the first step
   "previous_step_issue": "A precise description of the issue with the previous step, "
@@ -354,15 +365,7 @@ your response again.
   ], // Only include if the action is EDIT
   "action": "RESEARCH | CODE | WRITE | EDIT | CHECK | DONE | ASK | BYE"
 }
-
-Important Rules:
-1. The JSON must be valid and parseable
-2. All fields must be present (use empty strings/arrays/values if not applicable)
-3. No additional text, comments, or formatting outside the JSON structure
-4. Maintain the exact field order shown above
-5. The response must be pure JSON only
-
-Failure to follow these rules will result in rejection of your response.
+</response_format>
 """
 
 PlanSystemPrompt: str = """
