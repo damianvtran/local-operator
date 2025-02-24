@@ -999,9 +999,9 @@ class LocalCodeExecutor:
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.SYSTEM,
-                content=f"Here are the results of the last code execution:\n\n"
-                f"Stdout:\n{output}\n"
-                f"Stderr:\n{error_output}\n"
+                content=f"Here are the results of the last code execution:\n"
+                f"<stdout>\n{output}\n</stdout>\n"
+                f"<stderr>\n{error_output}\n</stderr>\n"
                 "Please review the results and continue according to the plan. "
                 "If you need to run the code again, please do so with the necessary "
                 "changes or improvements.",
