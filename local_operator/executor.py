@@ -894,7 +894,6 @@ class LocalCodeExecutor:
 
         Args:
             code (str): The Python code to execute
-            timeout (int, optional): Maximum execution time in seconds. Defaults to 30.
 
         Returns:
             str: Formatted string containing execution output and any error messages
@@ -909,11 +908,32 @@ class LocalCodeExecutor:
         # Get root logger and store original handlers
         root_logger = logging.getLogger()
         original_handlers = root_logger.handlers.copy()
+        original_level = root_logger.level
 
-        # Add StringIO handler for capturing log output
+        # Create a custom handler that safely handles closed file errors
+        class SafeStreamHandler(logging.StreamHandler[io.StringIO]):
+            def emit(self, record):
+                try:
+                    super().emit(record)
+                except ValueError as e:
+                    if "I/O operation on closed file" not in str(e):
+                        raise
+
+        # Remove existing handlers and set new handler
+        root_logger.handlers = []
         log_capture = io.StringIO()
-        log_handler = logging.StreamHandler(log_capture)
+        log_handler = SafeStreamHandler(log_capture)
+        log_handler.setLevel(logging.WARNING)
         root_logger.addHandler(log_handler)
+        root_logger.setLevel(logging.WARNING)
+
+        # Also handle specific loggers that might cause issues (like Prophet)
+        for logger_name in ["prophet", "cmdstanpy"]:
+            specific_logger = logging.getLogger(logger_name)
+            if specific_logger:
+                specific_logger.handlers = []
+                specific_logger.addHandler(log_handler)
+                specific_logger.propagate = False
 
         try:
             await self._run_code(code)
@@ -936,8 +956,16 @@ class LocalCodeExecutor:
             new_stderr.close()
             log_capture.close()
 
-            # Restore original logging handlers
+            # Restore original logging configuration
             root_logger.handlers = original_handlers
+            root_logger.setLevel(original_level)
+
+            # Restore specific loggers
+            for logger_name in ["prophet", "cmdstanpy"]:
+                specific_logger = logging.getLogger(logger_name)
+                if specific_logger:
+                    specific_logger.handlers = []
+                    specific_logger.propagate = True
 
     async def _run_code(self, code: str) -> None:
         """Run code in the main thread.
@@ -1074,11 +1102,13 @@ class LocalCodeExecutor:
         Args:
             error (Exception): The error that occurred during initial execution.
         """
+        error_value = str(error)
         traceback_str = "".join(format_exception(error))
 
         msg = (
             f"The initial execution failed with an error.\n"
-            f"Error details:\n{traceback_str}\n"
+            f"<error_string>\n{error_value}\n</error_string>\n"
+            f"<error_traceback>\n{traceback_str}\n</error_traceback>\n"
             "Debug the code you submitted and make all necessary corrections "
             "to fix the error and run successfully.  Pick up from where you left "
             "off and try to avoid re-running code that has already succeeded.  "
@@ -1101,11 +1131,13 @@ class LocalCodeExecutor:
             error (Exception): The error that occurred during the retry attempt.
             attempt (int): The current retry attempt number.
         """
+        error_value = str(error)
         traceback_str = "".join(format_exception(error))
 
         msg = (
             f"The code execution failed with an error (attempt {attempt + 1}).\n"
-            f"Error details:\n{traceback_str}\n"
+            f"<error_string>\n{error_value}\n</error_string>\n"
+            f"<error_traceback>\n{traceback_str}\n</error_traceback>\n"
             "Debug the code you submitted and make all necessary corrections "
             "to fix the error and run successfully.  Pick up from where you left "
             "off and try to avoid re-running code that has already succeeded.  "
