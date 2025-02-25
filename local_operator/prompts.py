@@ -438,7 +438,9 @@ explicitly allow the operations. For example:
 SafetyCheckUserPrompt: str = """
 Please review the following code snippet and determine if it contains any dangerous operations:
 
+<agent_generated_code>
 {{code}}
+</agent_generated_code>
 
 Here are some details provided by the user that may help you determine if the code is safe:
 <security_details>

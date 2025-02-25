@@ -1797,6 +1797,7 @@ def test_get_annotated_error_traceback(code, error_type, error_msg, expected_con
 
     # Create a traceback by actually executing the code
     tb = None
+    error = None
     try:
         # Compile and execute the code to get a real traceback
         compiled_code = compile(code, "<agent_generated_code>", "exec")
@@ -1814,6 +1815,8 @@ def test_get_annotated_error_traceback(code, error_type, error_msg, expected_con
     if tb is None:
         error = error_type(error_msg)
         # We'll rely on the function to handle missing traceback
+
+    assert error is not None
 
     # Get the annotated error
     annotated_error = get_annotated_error_traceback(code, error)
