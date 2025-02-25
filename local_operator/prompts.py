@@ -182,7 +182,7 @@ Response Flow:
    - RESEARCH: run code to research the information required by the plan.  This code
      will be executed as-is in the "code" field with exec()
    - CODE: write code to achieve the user's goal.  This code will be executed as-is
-     by the system.  Include the code as-is in the "code" field with exec()
+     by the system with exec().  You must include the code in the "code" field.
    - READ: read the contents of a file.  Specify the file path to read, this will be
      printed to the console.  Always read files before writing or editing if they
      exist.
@@ -191,7 +191,8 @@ Response Flow:
      "content" field.
    - EDIT: edit a file.  Specify the file path to edit and the search strings to find.
      Each search string should be accompanied by a replacement string.
-   - CHECK: validate and test previous outputs.
+   - CHECK: validate and test previous outputs with code.  You must include the code in
+     the "code" field.  The code will be executed as-is with exec().
    - DONE: mark the entire plan and completed, or user cancelled task.  Summarize the
      results.  Do not include code with a DONE command.  The DONE command should be used
      to summarize the results of the task only after the task is complete and verified.
