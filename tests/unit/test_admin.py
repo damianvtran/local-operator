@@ -26,11 +26,13 @@ from local_operator.admin import (
     get_config_tool,
     list_agent_info_tool,
     save_agent_training_tool,
+    save_code_history_to_notebook_tool,
     save_conversation_tool,
     update_config_tool,
 )
 from local_operator.agents import AgentEditFields
 from local_operator.config import Config, ConfigManager
+from local_operator.executor import CodeExecutionResult, ExecutorCodeBlock
 from local_operator.tools import ToolRegistry
 from local_operator.types import ConversationRecord, ConversationRole
 
@@ -329,6 +331,50 @@ def test_update_config_tool(config_manager: ConfigManager) -> None:
     ), f"Expected 'new_value' for 'new_key', got {config.get_value('new_key')}"
 
 
+def test_save_code_history_to_notebook(executor: LocalCodeExecutor, tmp_path: Path) -> None:
+    """
+    Test the save_code_history_to_notebook tool to verify that the code execution history
+    is saved to an IPython notebook file.
+    """
+    file_path = tmp_path / "notebook.ipynb"
+    executor.code_history = [
+        ExecutorCodeBlock(
+            source="print('Hello, world!')",
+            output=CodeExecutionResult(stdout="Hello, world!\n", stderr="", logging="", message=""),
+        ),
+        ExecutorCodeBlock(
+            source="import os\nprint(os.getcwd())",
+            output=CodeExecutionResult(stdout="/path/to/cwd\n", stderr="", logging="", message=""),
+        ),
+    ]
+    save_tool = save_code_history_to_notebook_tool(executor)
+    save_tool(str(file_path))
+
+    assert file_path.exists(), "Notebook file was not created"
+
+    with open(file_path, "r", encoding="utf-8") as f:
+        notebook_data = json.load(f)
+
+    assert "cells" in notebook_data, "Notebook does not contain cells"
+    assert len(notebook_data["cells"]) == 2, "Notebook does not contain the correct number of cells"
+
+    # Verify the content of the first cell
+    first_cell = notebook_data["cells"][0]
+    assert first_cell["cell_type"] == "code", "First cell is not a code cell"
+    assert first_cell["source"] == ["print('Hello, world!')"], "First cell source code is incorrect"
+    assert "Hello, world!" in "".join(
+        first_cell["outputs"][0]["text"]
+    ), "First cell output is incorrect"
+
+    # Verify the content of the second cell
+    second_cell = notebook_data["cells"][1]
+    assert second_cell["cell_type"] == "code", "Second cell is not a code cell"
+    assert "import os" in "".join(second_cell["source"]), "Second cell source code is incorrect"
+    assert "/path/to/cwd" in "".join(
+        second_cell["outputs"][0]["text"]
+    ), "Second cell output is incorrect"
+
+
 def test_add_admin_tools(
     tool_registry: ToolRegistry,
     executor: LocalCodeExecutor,
@@ -351,6 +397,7 @@ def test_add_admin_tools(
         "save_agent_training",
         "open_agents_config",
         "open_settings_config",
+        "save_code_history_to_notebook",
     }
     tools_set = set(tool_registry._tools.keys())
     # Check that all expected tools are present, but allow for additional builtin tools
