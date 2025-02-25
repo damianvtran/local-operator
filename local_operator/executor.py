@@ -1783,8 +1783,22 @@ class LocalCodeExecutor:
 
         # "Heads up display" for the agent
         hud_message = f"""
+        This is your "heads up display" to help you understand the current state of the
+        conversation and the environment.
+
+        Use this information to help you complete the user's request.
+
+        - environment_details: this is information about the files, variables, and other
+          details about the current state of the environment.
         {environment_details}
+
+        - learning_details: this is a notepad of things that you have learned from previous
+          conversations.
         {learning_details}
+
+        - current_plan: this is the current and original plan that you made
+          based on the user's request.  Follow it closely and accurately and make sure
+          that you are making progress towards it.
         {current_plan_details}
         """
 
