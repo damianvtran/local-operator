@@ -1566,9 +1566,11 @@ class LocalCodeExecutor:
         """Remove ephemeral messages from the conversation history."""
         self.conversation_history = [msg for msg in self.conversation_history if not msg.ephemeral]
 
-    def _format_directory_tree(self, directory_index: Dict[str, List[Tuple[str, str, int]]]) -> str:
-        """
-        Format a directory index into a human-readable tree structure with icons and file sizes.
+    def format_directory_tree(self, directory_index: Dict[str, List[Tuple[str, str, int]]]) -> str:
+        """Format a directory index into a human-readable tree structure.
+
+        Creates a formatted tree representation of files and directories with icons
+        and human-readable file sizes.
 
         Args:
             directory_index: Dictionary mapping directory paths to lists of
@@ -1576,7 +1578,25 @@ class LocalCodeExecutor:
 
         Returns:
             str: Formatted directory tree string with icons, file types, and human-readable sizes
+
+        Example:
+            >>> index = {".": [("test.py", "code", 1024)]}
+            >>> format_directory_tree(index)
+            '📁 ./\n  📄 test.py (code, 1.0KB)\n'
         """
+        # File type to icon mapping
+        FILE_TYPE_ICONS = {
+            "code": "��",
+            "doc": "📝",
+            "image": "🖼️",
+            "config": "🔑",
+            "other": "📎",
+        }
+
+        # Constants for limiting output
+        MAX_FILES_PER_DIR = 30
+        MAX_TOTAL_FILES = 300
+
         directory_tree_str = ""
         total_files = 0
 
@@ -1584,42 +1604,31 @@ class LocalCodeExecutor:
             # Add directory name with forward slash
             directory_tree_str += f"📁 {path}/\n"
 
-            # Add files under directory (limited to 30)
+            # Add files under directory (limited to MAX_FILES_PER_DIR)
             file_list = list(files)
-            shown_files = file_list[:30]
-            has_more_files = len(file_list) > 30
+            shown_files = file_list[:MAX_FILES_PER_DIR]
+            has_more_files = len(file_list) > MAX_FILES_PER_DIR
 
             for filename, file_type, size in shown_files:
                 # Format size to be human readable
-                if size < 1024:
-                    size_str = f"{size}B"
-                elif size < 1024 * 1024:
-                    size_str = f"{size/1024:.1f}KB"
-                else:
-                    size_str = f"{size/(1024*1024):.1f}MB"
+                size_str = self._format_file_size(size)
 
-                # Add icon based on file type
-                icon = {
-                    "code": "📄",
-                    "doc": "📝",
-                    "image": "🖼️",
-                    "config": "🔑",
-                    "other": "📎",
-                }.get(file_type, "📎")
+                # Get icon based on file type
+                icon = FILE_TYPE_ICONS.get(file_type, "📎")
 
                 # Add indented file info
                 directory_tree_str += f"  {icon} {filename} ({file_type}, {size_str})\n"
 
                 total_files += 1
-                if total_files >= 300:
+                if total_files >= MAX_TOTAL_FILES:
                     directory_tree_str += "\n... and more files\n"
                     break
 
             if has_more_files:
-                remaining_files = len(file_list) - 30
+                remaining_files = len(file_list) - MAX_FILES_PER_DIR
                 directory_tree_str += f"  ... and {remaining_files} more files\n"
 
-            if total_files >= 300:
+            if total_files >= MAX_TOTAL_FILES:
                 break
 
         if total_files == 0:
@@ -1627,45 +1636,70 @@ class LocalCodeExecutor:
 
         return directory_tree_str
 
+    def _format_file_size(self, size: int) -> str:
+        """Convert file size in bytes to a human-readable format.
+
+        Args:
+            size: File size in bytes
+
+        Returns:
+            str: Human-readable file size (e.g., "1.5KB", "2.0MB")
+        """
+        if size < 1024:
+            return f"{size}B"
+        elif size < 1024 * 1024:
+            return f"{size/1024:.1f}KB"
+        else:
+            return f"{size/(1024*1024):.1f}MB"
+
     def get_environment_details(self) -> str:
-        """Get environment details."""
-        directory_index = index_current_directory()
-        directory_tree_str = self._format_directory_tree(directory_index)
+        """Get detailed information about the current execution environment.
 
-        # Get git status
-        try:
-            git_status = (
-                subprocess.check_output(["git", "status"], stderr=subprocess.DEVNULL)
-                .decode()
-                .strip()
-            )
-            if not git_status:
-                git_status = "Clean working directory"
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            git_status = "Not a git repository"
+        Collects and formats information about the current working directory,
+        git repository status, directory structure, and available execution context
+        variables.
 
+        Returns:
+            str: Formatted string containing environment details
+        """
         try:
             cwd = os.getcwd()
         except FileNotFoundError:
-            # Potentially the current folder has been deleted
-            # the agent will need to move to a valid directory
             cwd = "Unknown or deleted directory, please move to a valid directory"
 
-        details_str = f"""<environment details>
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        git_status = self._get_git_status()
+        directory_tree = self.format_directory_tree(index_current_directory())
+        context_vars = get_context_vars_str(self.context)
+
+        return f"""<environment details>
         Current working directory: {cwd}
-        Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        Current time: {current_time}
         <git status>
         {git_status}
         </git status>
         <directory tree>
-        {directory_tree_str}
+        {directory_tree}
         </directory tree>
         <execution context variables>
-        {get_context_vars_str(self.context)}
+        {context_vars}
         </execution context variables>
         </environment details>"""
 
-        return details_str
+    def _get_git_status(self) -> str:
+        """Get the current git repository status.
+
+        Returns:
+            str: Git status output or a message indicating no git repository
+        """
+        try:
+            return (
+                subprocess.check_output(["git", "status"], stderr=subprocess.DEVNULL)
+                .decode()
+                .strip()
+            ) or "Clean working directory"
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return "Not a git repository"
 
     def update_ephemeral_messages(self) -> None:
         """Add environment details and other ephemeral messages to the conversation history.
