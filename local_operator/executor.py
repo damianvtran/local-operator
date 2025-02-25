@@ -24,7 +24,6 @@ from local_operator.console import (
     format_error_output,
     format_success_output,
     log_action_error,
-    log_error_and_retry_message,
     log_retry_error,
     print_agent_response,
     print_execution_section,
@@ -277,15 +276,21 @@ def get_annotated_error_traceback(code: str, error: Exception) -> Exception:
             break
         tb = tb.tb_next
 
+    error_string = str(error)
+
     annotated_code = annotate_code(code, error_line=lineno)
     error_message = (
-        str(error)
-        + "\nAgent Generated Code:\n"
-        + "Line | Length | Content\n"
-        + "----------------------\n"
-        + "BEGIN\n"
+        "<error_message>\n"
+        + f"{error_string}\n"
+        + "</error_message>\n"
+        + "<agent_generated_code>\n"
+        + "<legend>\n"
+        + "Error Indicator |Line | Length | Content\n"
+        + "</legend>\n"
+        + "<code_block>\n"
         + f"{annotated_code}\n"
-        + "END\n"
+        + "</code_block>\n"
+        + "</agent_generated_code>\n"
     )
 
     if isinstance(error, subprocess.CalledProcessError):
@@ -322,6 +327,8 @@ class LocalCodeExecutor:
     token_metrics: ExecutorTokenMetrics
     agent: AgentData | None
     tool_registry: ToolRegistry | None
+    learnings: List[str]
+    current_plan: str | None
 
     """A class to handle local Python code execution with safety checks and context management.
 
@@ -342,6 +349,8 @@ class LocalCodeExecutor:
         token_metrics (ExecutorTokenMetrics): Tracks token usage and cost metrics for model
         executions
         agent (AgentData | None): The agent data for the current conversation
+        tool_registry (ToolRegistry | None): The tool registry for the current conversation
+        learnings (List[str]): A list of learnings from the current conversation
     """
 
     def __init__(
@@ -352,6 +361,7 @@ class LocalCodeExecutor:
         can_prompt_user: bool = True,
         conversation_history: List[ConversationRecord] = [],
         agent: AgentData | None = None,
+        max_learnings_history: int = 50,
     ):
         """Initialize the LocalCodeExecutor with a language model.
 
@@ -377,6 +387,9 @@ class LocalCodeExecutor:
         self.token_metrics = ExecutorTokenMetrics()
         self.agent = agent
         self.interrupted = False
+        self.learnings = []
+        self.current_plan = None
+        self.max_learnings_history = max_learnings_history
 
         self.reset_step_counter()
 
@@ -786,7 +799,10 @@ class LocalCodeExecutor:
                 ),
                 ConversationRecord(
                     role=ConversationRole.USER,
-                    content=f"Determine a status for the following code:\n\n{code}",
+                    content=(
+                        "Determine a status for the following code:\n\n"
+                        f"<agent_generated_code>\n{code}\n</agent_generated_code>"
+                    ),
                 ),
             ]
 
@@ -828,7 +844,7 @@ class LocalCodeExecutor:
 
         return safety_result
 
-    async def execute_code(self, code: str, max_retries: int = 2) -> str:
+    async def execute_code(self, code: str, max_retries: int = 3) -> str:
         """Execute Python code with safety checks and context management.
 
         Args:
@@ -850,14 +866,41 @@ class LocalCodeExecutor:
                 " prompt\033[0m\n"
             )
 
-        # Try initial execution
-        try:
-            return await self._execute_with_output(code)
-        except Exception as initial_error:
-            return await self._handle_execution_error(initial_error, max_retries)
+        current_code = code
+        final_error: Exception | None = None
+
+        for attempt in range(max_retries):
+            try:
+                return await self._execute_with_output(current_code)
+            except Exception as error:
+                final_error = error
+                if attempt == 0:
+                    self._record_initial_error(error)
+                else:
+                    self._record_retry_error(error, attempt - 1)
+
+                log_retry_error(error, attempt, max_retries)
+
+                self.update_ephemeral_messages()
+
+                if attempt < max_retries - 1:
+                    try:
+                        new_code = await self._get_corrected_code()
+                        if new_code:
+                            current_code = new_code
+                        else:
+                            break
+                    except Exception as retry_error:
+                        log_retry_error(retry_error, attempt, max_retries)
+                        break
+
+        return format_error_output(final_error or Exception("Unknown error occurred"), max_retries)
 
     async def _check_and_confirm_safety(self, code: str) -> ConfirmSafetyResult:
         """Check code safety and get user confirmation if needed.
+
+        Args:
+            code (str): The Python code to check
 
         Returns:
             ConfirmSafetyResult: Result of the safety check
@@ -1082,34 +1125,6 @@ class LocalCodeExecutor:
 
         return output, error_output
 
-    async def _handle_execution_error(self, initial_error: Exception, max_retries: int) -> str:
-        """Handle code execution errors with retry logic.
-
-        Args:
-            initial_error (Exception): The original error that occurred
-            code (str): The Python code that failed
-            max_retries (int): Maximum number of retry attempts
-
-        Returns:
-            str: Final execution output or formatted error message
-        """
-        self._record_initial_error(initial_error)
-        log_error_and_retry_message(initial_error)
-
-        self.update_ephemeral_messages()
-
-        for attempt in range(max_retries):
-            try:
-                new_code = await self._get_corrected_code()
-                if new_code:
-                    return await self._execute_with_output(new_code)
-            except Exception as retry_error:
-                self._record_retry_error(retry_error, attempt)
-                self.update_ephemeral_messages()
-                log_retry_error(retry_error, attempt, max_retries)
-
-        return format_error_output(initial_error, max_retries)
-
     def _record_initial_error(self, error: Exception) -> None:
         """Record the initial execution error, including the traceback, in conversation history.
 
@@ -1213,6 +1228,9 @@ class LocalCodeExecutor:
             )
 
         plain_text_response = response.response
+        new_learnings = response.learnings
+
+        self.add_to_learnings(new_learnings)
 
         # Phase 2: Display agent response
         formatted_response = format_agent_output(plain_text_response)
@@ -1569,9 +1587,11 @@ class LocalCodeExecutor:
         """Remove ephemeral messages from the conversation history."""
         self.conversation_history = [msg for msg in self.conversation_history if not msg.ephemeral]
 
-    def _format_directory_tree(self, directory_index: Dict[str, List[Tuple[str, str, int]]]) -> str:
-        """
-        Format a directory index into a human-readable tree structure with icons and file sizes.
+    def format_directory_tree(self, directory_index: Dict[str, List[Tuple[str, str, int]]]) -> str:
+        """Format a directory index into a human-readable tree structure.
+
+        Creates a formatted tree representation of files and directories with icons
+        and human-readable file sizes.
 
         Args:
             directory_index: Dictionary mapping directory paths to lists of
@@ -1579,7 +1599,25 @@ class LocalCodeExecutor:
 
         Returns:
             str: Formatted directory tree string with icons, file types, and human-readable sizes
+
+        Example:
+            >>> index = {".": [("test.py", "code", 1024)]}
+            >>> format_directory_tree(index)
+            '📁 ./\n  📄 test.py (code, 1.0KB)\n'
         """
+        # File type to icon mapping
+        FILE_TYPE_ICONS = {
+            "code": "📄",
+            "doc": "📝",
+            "image": "🖼️",
+            "config": "🔑",
+            "other": "📎",
+        }
+
+        # Constants for limiting output
+        MAX_FILES_PER_DIR = 30
+        MAX_TOTAL_FILES = 300
+
         directory_tree_str = ""
         total_files = 0
 
@@ -1587,42 +1625,31 @@ class LocalCodeExecutor:
             # Add directory name with forward slash
             directory_tree_str += f"📁 {path}/\n"
 
-            # Add files under directory (limited to 30)
+            # Add files under directory (limited to MAX_FILES_PER_DIR)
             file_list = list(files)
-            shown_files = file_list[:30]
-            has_more_files = len(file_list) > 30
+            shown_files = file_list[:MAX_FILES_PER_DIR]
+            has_more_files = len(file_list) > MAX_FILES_PER_DIR
 
             for filename, file_type, size in shown_files:
                 # Format size to be human readable
-                if size < 1024:
-                    size_str = f"{size}B"
-                elif size < 1024 * 1024:
-                    size_str = f"{size/1024:.1f}KB"
-                else:
-                    size_str = f"{size/(1024*1024):.1f}MB"
+                size_str = self._format_file_size(size)
 
-                # Add icon based on file type
-                icon = {
-                    "code": "📄",
-                    "doc": "📝",
-                    "image": "🖼️",
-                    "config": "🔑",
-                    "other": "📎",
-                }.get(file_type, "📎")
+                # Get icon based on file type
+                icon = FILE_TYPE_ICONS.get(file_type, "📎")
 
                 # Add indented file info
                 directory_tree_str += f"  {icon} {filename} ({file_type}, {size_str})\n"
 
                 total_files += 1
-                if total_files >= 300:
+                if total_files >= MAX_TOTAL_FILES:
                     directory_tree_str += "\n... and more files\n"
                     break
 
             if has_more_files:
-                remaining_files = len(file_list) - 30
+                remaining_files = len(file_list) - MAX_FILES_PER_DIR
                 directory_tree_str += f"  ... and {remaining_files} more files\n"
 
-            if total_files >= 300:
+            if total_files >= MAX_TOTAL_FILES:
                 break
 
         if total_files == 0:
@@ -1630,45 +1657,103 @@ class LocalCodeExecutor:
 
         return directory_tree_str
 
+    def _format_file_size(self, size: int) -> str:
+        """Convert file size in bytes to a human-readable format.
+
+        Args:
+            size: File size in bytes
+
+        Returns:
+            str: Human-readable file size (e.g., "1.5KB", "2.0MB")
+        """
+        if size < 1024:
+            return f"{size}B"
+        elif size < 1024 * 1024:
+            return f"{size/1024:.1f}KB"
+        else:
+            return f"{size/(1024*1024):.1f}MB"
+
     def get_environment_details(self) -> str:
-        """Get environment details."""
-        directory_index = index_current_directory()
-        directory_tree_str = self._format_directory_tree(directory_index)
+        """Get detailed information about the current execution environment.
 
-        # Get git status
-        try:
-            git_status = (
-                subprocess.check_output(["git", "status"], stderr=subprocess.DEVNULL)
-                .decode()
-                .strip()
-            )
-            if not git_status:
-                git_status = "Clean working directory"
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            git_status = "Not a git repository"
+        Collects and formats information about the current working directory,
+        git repository status, directory structure, and available execution context
+        variables.
 
+        Returns:
+            str: Formatted string containing environment details
+        """
         try:
             cwd = os.getcwd()
         except FileNotFoundError:
-            # Potentially the current folder has been deleted
-            # the agent will need to move to a valid directory
             cwd = "Unknown or deleted directory, please move to a valid directory"
 
-        details_str = f"""<environment details>
-        Current working directory: {cwd}
-        Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-        <git status>
-        {git_status}
-        </git status>
-        <directory tree>
-        {directory_tree_str}
-        </directory tree>
-        <execution context variables>
-        {get_context_vars_str(self.context)}
-        </execution context variables>
-        </environment details>"""
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        git_status = self._get_git_status()
+        directory_tree = self.format_directory_tree(index_current_directory())
+        context_vars = get_context_vars_str(self.context)
 
-        return details_str
+        return f"""<environment_details>
+        Current working directory: {cwd}
+        Current time: {current_time}
+        <git_status>
+        {git_status}
+        </git_status>
+        <directory_tree>
+        {directory_tree}
+        </directory_tree>
+        <execution_context_variables>
+        {context_vars}
+        </execution_context_variables>
+        </environment_details>"""
+
+    def _get_git_status(self) -> str:
+        """Get the current git repository status.
+
+        Returns:
+            str: Git status output or a message indicating no git repository
+        """
+        try:
+            return (
+                subprocess.check_output(["git", "status"], stderr=subprocess.DEVNULL)
+                .decode()
+                .strip()
+            ) or "Clean working directory"
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return "Not a git repository"
+
+    def reset_learnings(self) -> None:
+        """Reset the learnings list."""
+        self.learnings = []
+
+    def add_to_learnings(self, learning: str) -> None:
+        """Add a learning to the learnings list.
+
+        Maintains a maximum number of learnings by removing the oldest learning
+        when the list would exceed the maximum length.
+
+        Args:
+            learning: The learning to add to the list
+        """
+        if not learning:
+            return
+
+        self.learnings.append(learning)
+        if len(self.learnings) > self.max_learnings_history:
+            self.learnings.pop(0)
+
+    def get_learning_details(self) -> str:
+        """Get the learning details from the current conversation.
+
+        Returns:
+            str: Formatted string containing learning details
+        """
+        template = f"""
+        <learning_details>
+        {"\n".join([f"- {learning}" for learning in self.learnings])}
+        </learning_details>
+        """
+        return template
 
     def update_ephemeral_messages(self) -> None:
         """Add environment details and other ephemeral messages to the conversation history.
@@ -1689,11 +1774,60 @@ class LocalCodeExecutor:
 
         # Add environment details to the latest message
         environment_details = self.get_environment_details()
+
+        # Add learning details to the latest message
+        learning_details = self.get_learning_details()
+
+        # Add current plan details to the latest message
+        current_plan_details = self.get_current_plan_details()
+
+        # "Heads up display" for the agent
+        hud_message = f"""
+        This is your "heads up display" to help you understand the current state of the
+        conversation and the environment.
+
+        Use this information to help you complete the user's request.
+
+        - environment_details: this is information about the files, variables, and other
+          details about the current state of the environment.
+        {environment_details}
+
+        - learning_details: this is a notepad of things that you have learned from previous
+          conversations.
+        {learning_details}
+
+        - current_plan: this is the current and original plan that you made
+          based on the user's request.  Follow it closely and accurately and make sure
+          that you are making progress towards it.
+        {current_plan_details}
+        """
+
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.SYSTEM,
-                content=environment_details,
+                content=hud_message,
                 should_summarize=False,
                 ephemeral=True,
             )
         )
+
+    def set_current_plan(self, plan: str) -> None:
+        """Set the current plan for the agent.
+
+        Args:
+            plan (str): The current plan for the agent
+        """
+        self.current_plan = plan
+
+    def get_current_plan_details(self) -> str:
+        """Get the current plan details for the agent.
+
+        Returns:
+            str: Formatted string containing current plan details
+        """
+        template = f"""
+        <current_plan>
+        {self.current_plan}
+        </current_plan>
+        """
+        return template

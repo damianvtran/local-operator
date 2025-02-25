@@ -182,7 +182,8 @@ Response Flow:
    - RESEARCH: run code to research the information required by the plan.  This code
      will be executed as-is in the "code" field with exec()
    - CODE: write code to achieve the user's goal.  This code will be executed as-is
-     by the system.  Include the code as-is in the "code" field with exec()
+     by the system with exec().  You must include the code in the "code" field and
+     the code cannot be empty.
    - READ: read the contents of a file.  Specify the file path to read, this will be
      printed to the console.  Always read files before writing or editing if they
      exist.
@@ -191,7 +192,9 @@ Response Flow:
      "content" field.
    - EDIT: edit a file.  Specify the file path to edit and the search strings to find.
      Each search string should be accompanied by a replacement string.
-   - CHECK: validate and test previous outputs.
+   - CHECK: validate and test previous outputs with code.  You must include the code in
+     the "code" field and the code cannot be empty.  The code will be executed as-is
+     with exec().
    - DONE: mark the entire plan and completed, or user cancelled task.  Summarize the
      results.  Do not include code with a DONE command.  The DONE command should be used
      to summarize the results of the task only after the task is complete and verified.
@@ -203,9 +206,10 @@ Response Flow:
 3. In CODE, CHECK, READ, WRITE, and EDIT, the system will execute your code and print
    the output to the console which you can then use to inform your next steps.
 4. Always verify your progress and the results of your work with CHECK.
-5. In DONE, print clear, actionable, human-readable verification and a clear summary of any
-   completed task.  Be specific in your summary and include all the details and data you
-   have gathered.
+5. In DONE, print clear, actionable, human-readable verification and a clear summary
+   of the completed plan and key results.  Be specific in your summary and include all
+   the details and data you have gathered.  Do not respond with DONE if the plan is not
+   completely executed beginning to end.
 
 Your response flow should look something like the following example sequence:
   1. RESEARCH: research the information required by the plan.  Run exploratory
@@ -345,7 +349,9 @@ and </response_format> tags.
   "repeating errors.  Empty for the first step.",
   "previous_goal": "Your goal from the previous step.  Empty for the first step.",
   "learnings": "Aggregated information learned so far from previous steps.  Include
-  detailed information that will help you in future steps.  Empty for the first step.",
+  detailed information that will help you in future steps.  Ensure that this
+  contains useful insights as opposed to simply being anccounting of actions.
+  Empty for the first step.",
   "current_goal": "Your goal for the current step.",
   "plan": "Long term plan of actions to achieve the user's goal beyond these goals.
   This plan should be the same or similar for all steps of the same task, unless
@@ -414,6 +420,7 @@ Here are some details provided by the user:
 Respond with one of the following: [UNSAFE] | [SAFE] | [OVERRIDE]
 
 🚫 Respond "[UNSAFE]" if the code contains:
+- Unsafe usage of API keys or passwords, or any in plain text
 - High risk file deletion
 - Suspicious package installs
 - High risk system commands execution
@@ -434,7 +441,9 @@ explicitly allow the operations. For example:
 SafetyCheckUserPrompt: str = """
 Please review the following code snippet and determine if it contains any dangerous operations:
 
+<agent_generated_code>
 {{code}}
+</agent_generated_code>
 
 Here are some details provided by the user that may help you determine if the code is safe:
 <security_details>
@@ -444,6 +453,7 @@ Here are some details provided by the user that may help you determine if the co
 Respond with one of the following: [UNSAFE] | [SAFE] | [OVERRIDE]
 
 🚫 The code is unsafe if it contains:
+- Unsafe usage of API keys or passwords, or any in plain text
 - High risk file deletion
 - Suspicious package installs
 - High risk system commands execution
