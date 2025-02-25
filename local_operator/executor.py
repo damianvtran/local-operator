@@ -828,7 +828,7 @@ class LocalCodeExecutor:
 
         return safety_result
 
-    async def execute_code(self, code: str, max_retries: int = 2) -> str:
+    async def execute_code(self, code: str, max_retries: int = 3) -> str:
         """Execute Python code with safety checks and context management.
 
         Args:
@@ -850,14 +850,39 @@ class LocalCodeExecutor:
                 " prompt\033[0m\n"
             )
 
-        # Try initial execution
-        try:
-            return await self._execute_with_output(code)
-        except Exception as initial_error:
-            return await self._handle_execution_error(initial_error, max_retries)
+        current_code = code
+        final_error: Exception | None = None
+
+        for attempt in range(max_retries):
+            try:
+                return await self._execute_with_output(current_code)
+            except Exception as error:
+                final_error = error
+                if attempt == 0:
+                    self._record_initial_error(error)
+                else:
+                    self._record_retry_error(error, attempt - 1)
+
+                log_error_and_retry_message(error)
+                self.update_ephemeral_messages()
+
+                if attempt < max_retries - 1:
+                    try:
+                        new_code = await self._get_corrected_code()
+                        if new_code:
+                            current_code = new_code
+                        else:
+                            break
+                    except Exception as retry_error:
+                        log_retry_error(retry_error, attempt, max_retries)
+
+        return format_error_output(final_error or Exception("Unknown error occurred"), max_retries)
 
     async def _check_and_confirm_safety(self, code: str) -> ConfirmSafetyResult:
         """Check code safety and get user confirmation if needed.
+
+        Args:
+            code (str): The Python code to check
 
         Returns:
             ConfirmSafetyResult: Result of the safety check
@@ -1081,34 +1106,6 @@ class LocalCodeExecutor:
         )
 
         return output, error_output
-
-    async def _handle_execution_error(self, initial_error: Exception, max_retries: int) -> str:
-        """Handle code execution errors with retry logic.
-
-        Args:
-            initial_error (Exception): The original error that occurred
-            code (str): The Python code that failed
-            max_retries (int): Maximum number of retry attempts
-
-        Returns:
-            str: Final execution output or formatted error message
-        """
-        self._record_initial_error(initial_error)
-        log_error_and_retry_message(initial_error)
-
-        self.update_ephemeral_messages()
-
-        for attempt in range(max_retries):
-            try:
-                new_code = await self._get_corrected_code()
-                if new_code:
-                    return await self._execute_with_output(new_code)
-            except Exception as retry_error:
-                self._record_retry_error(retry_error, attempt)
-                self.update_ephemeral_messages()
-                log_retry_error(retry_error, attempt, max_retries)
-
-        return format_error_output(initial_error, max_retries)
 
     def _record_initial_error(self, error: Exception) -> None:
         """Record the initial execution error, including the traceback, in conversation history.
