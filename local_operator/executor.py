@@ -340,7 +340,7 @@ class ExecutorCodeBlock(BaseModel):
     """
 
     source: str
-    result: CodeExecutionResult
+    output: CodeExecutionResult
 
 
 class LocalCodeExecutor:
@@ -357,7 +357,7 @@ class LocalCodeExecutor:
     tool_registry: ToolRegistry | None
     learnings: List[str]
     current_plan: str | None
-    code_blocks: List[ExecutorCodeBlock]
+    code_history: List[ExecutorCodeBlock]
 
     """A class to handle local Python code execution with safety checks and context management.
 
@@ -419,7 +419,7 @@ class LocalCodeExecutor:
         self.learnings = []
         self.current_plan = None
         self.max_learnings_history = max_learnings_history
-        self.code_blocks = []
+        self.code_history = []
 
         self.reset_step_counter()
 
@@ -1395,10 +1395,10 @@ class LocalCodeExecutor:
 
                     execution_result = await self.execute_code(code_block)
 
-                    self.code_blocks.append(
+                    self.code_history.append(
                         ExecutorCodeBlock(
                             source=code_block,
-                            result=execution_result,
+                            output=execution_result,
                         )
                     )
 

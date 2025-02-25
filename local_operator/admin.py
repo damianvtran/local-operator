@@ -568,6 +568,92 @@ def open_settings_config_tool(config_manager: ConfigManager) -> Callable[[], Non
     return open_settings_config
 
 
+def save_code_history_to_notebook_tool(executor: LocalCodeExecutor) -> Callable[[str], None]:
+    """Create a tool function that saves code to a notebook in ipynb format.
+
+    This function returns a callable that, when called, saves the executed code blocks
+    along with their outputs into an IPython notebook file (.ipynb). The notebook
+    is saved in JSON format.
+
+    Returns:
+        Callable[[str], None]: A function that saves the code blocks to a notebook file.
+    """
+
+    def save_code_history_to_notebook(file_path: str = "notebook.ipynb") -> None:
+        """Save the code execution history to an IPython notebook file (.ipynb).
+
+        This function retrieves the code blocks and their execution results from the
+        executor, formats them as notebook cells, and saves them to a .ipynb file
+        in JSON format.
+
+        Args:
+            file_path (str): The path to save the notebook to. Defaults to "notebook.ipynb".
+
+        Raises:
+            Exception: If there is an error during notebook creation or file saving.
+        """
+        try:
+            notebook_content = {
+                "cells": [],
+                "metadata": {
+                    "kernelspec": {
+                        "display_name": "Python 3",
+                        "language": "python",
+                        "name": "python3",
+                    },
+                    "language_info": {
+                        "codemirror_mode": {"name": "ipython", "version": 3},
+                        "file_extension": ".py",
+                        "mimetype": "text/x-python",
+                        "name": "python",
+                        "nbconvert_exporter": "python",
+                        "pygments_lexer": "ipython3",
+                        "version": "3.x",
+                    },
+                },
+                "nbformat": 4,
+                "nbformat_minor": 5,
+            }
+
+            code_results = executor.code_history
+            for code_result in code_results:
+                cell_source = code_result.source
+                cell_output = ""
+                if code_result.output.stdout:
+                    cell_output += f"output:\n{code_result.output.stdout}\n"
+                if code_result.output.stderr:
+                    cell_output += f"errors:\n{code_result.output.stderr}\n"
+                if code_result.output.logging:
+                    cell_output += f"logging:\n{code_result.output.logging}\n"
+
+                notebook_content["cells"].append(
+                    {
+                        "cell_type": "code",
+                        "execution_count": None,
+                        "metadata": {},
+                        "outputs": [
+                            {
+                                "name": "stdout",
+                                "output_type": "stream",
+                                "text": cell_output.splitlines(keepends=True),
+                            }
+                        ],
+                        "source": cell_source.splitlines(keepends=True),
+                    }
+                )
+
+            # Save the notebook to a file
+            with open(file_path, "w") as f:
+                json.dump(notebook_content, f, indent=1)
+
+            print(f"Notebook saved to {file_path}")
+
+        except Exception as e:
+            raise Exception(f"Failed to save code to notebook: {str(e)}")
+
+    return save_code_history_to_notebook
+
+
 def add_admin_tools(
     tool_registry: ToolRegistry,
     executor: LocalCodeExecutor,
@@ -632,4 +718,8 @@ def add_admin_tools(
     tool_registry.add_tool(
         "open_settings_config",
         open_settings_config_tool(config_manager),
+    )
+    tool_registry.add_tool(
+        "save_code_history_to_notebook",
+        save_code_history_to_notebook_tool(executor),
     )
