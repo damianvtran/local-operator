@@ -14,6 +14,7 @@ from local_operator.executor import (
     ConfirmSafetyResult,
     LocalCodeExecutor,
     ProcessResponseStatus,
+    get_annotated_error_traceback,
     get_confirm_safety_result,
     get_context_vars_str,
     process_json_response,
@@ -1747,3 +1748,93 @@ def test_get_environment_details_large_directory(executor, monkeypatch):
     # Verify file count limits are enforced
     assert "... and more files" in env_details
     assert "... and 70 more files" in env_details
+
+
+@pytest.mark.parametrize(
+    "code, error_type, error_msg, expected_content",
+    [
+        (
+            "print(undefined_var)",
+            NameError,
+            "name 'undefined_var' is not defined",
+            ["<error_message>", "name 'undefined_var' is not defined", "err >>", "1 |"],
+        ),
+        (
+            "x = 1/0",
+            ZeroDivisionError,
+            "division by zero",
+            ["<error_message>", "division by zero", "err >>", "1 |"],
+        ),
+        (
+            "def func():\n    x = 1\n    return x + y",
+            NameError,
+            "name 'y' is not defined",
+            ["<error_message>", "name 'y' is not defined"],
+        ),
+        (
+            "import nonexistent_module",
+            ModuleNotFoundError,
+            "No module named 'nonexistent_module'",
+            ["<error_message>", "No module named 'nonexistent_module'", "err >>", "1 |"],
+        ),
+        (
+            "x = [1, 2]\nx[5]",
+            IndexError,
+            "list index out of range",
+            ["<error_message>", "list index out of range", "err >>", "2 |"],
+        ),
+    ],
+    ids=[
+        "NameError",
+        "ZeroDivisionError",
+        "NameErrorMultiline",
+        "ModuleNotFoundError",
+        "IndexError",
+    ],
+)
+def test_get_annotated_error_traceback(code, error_type, error_msg, expected_content, monkeypatch):
+    """Test that get_annotated_error_traceback properly formats error tracebacks."""
+
+    # Create a traceback by actually executing the code
+    tb = None
+    try:
+        # Compile and execute the code to get a real traceback
+        compiled_code = compile(code, "<agent_generated_code>", "exec")
+        exec(compiled_code)
+    except Exception as e:
+        if isinstance(e, error_type):
+            tb = e.__traceback__
+            error = e
+        else:
+            # Create an error of the expected type with the real traceback
+            error = error_type(error_msg)
+            error.__traceback__ = e.__traceback__
+
+    # If we didn't get an error (unlikely), create one manually
+    if tb is None:
+        error = error_type(error_msg)
+        # We'll rely on the function to handle missing traceback
+
+    # Get the annotated error
+    annotated_error = get_annotated_error_traceback(code, error)
+
+    # Convert to string for easier assertion
+    error_str = str(annotated_error)
+
+    # Check that all expected content is in the error message
+    for content in expected_content:
+        assert content in error_str
+
+    # Verify the structure of the error message
+    assert "<error_message>" in error_str
+    assert "</error_message>" in error_str
+    assert "<agent_generated_code>" in error_str
+    assert "<legend>" in error_str
+    assert "Error Indicator |Line | Length | Content" in error_str
+    assert "</legend>" in error_str
+    assert "<code_block>" in error_str
+    assert "</code_block>" in error_str
+    assert "</agent_generated_code>" in error_str
+
+    # Verify the error is of the same type as the input error
+    assert isinstance(annotated_error, error_type)
