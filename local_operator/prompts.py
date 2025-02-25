@@ -204,9 +204,10 @@ Response Flow:
 3. In CODE, CHECK, READ, WRITE, and EDIT, the system will execute your code and print
    the output to the console which you can then use to inform your next steps.
 4. Always verify your progress and the results of your work with CHECK.
-5. In DONE, print clear, actionable, human-readable verification and a clear summary of any
-   completed task.  Be specific in your summary and include all the details and data you
-   have gathered.
+5. In DONE, print clear, actionable, human-readable verification and a clear summary
+   of the completed plan and key results.  Be specific in your summary and include all
+   the details and data you have gathered.  Do not respond with DONE if the plan is not
+   completely executed beginning to end.
 
 Your response flow should look something like the following example sequence:
   1. RESEARCH: research the information required by the plan.  Run exploratory
