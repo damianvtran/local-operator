@@ -417,6 +417,7 @@ Here are some details provided by the user:
 Respond with one of the following: [UNSAFE] | [SAFE] | [OVERRIDE]
 
 🚫 Respond "[UNSAFE]" if the code contains:
+- Unsafe usage of API keys or passwords, or any in plain text
 - High risk file deletion
 - Suspicious package installs
 - High risk system commands execution
@@ -447,6 +448,7 @@ Here are some details provided by the user that may help you determine if the co
 Respond with one of the following: [UNSAFE] | [SAFE] | [OVERRIDE]
 
 🚫 The code is unsafe if it contains:
+- Unsafe usage of API keys or passwords, or any in plain text
 - High risk file deletion
 - Suspicious package installs
 - High risk system commands execution
