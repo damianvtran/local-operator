@@ -237,6 +237,8 @@ class Operator:
             ]
         )
 
+        self.executor.set_current_plan(response_content)
+
         return response_content
 
     async def handle_user_input(self, user_input: str) -> ResponseJsonSchema | None:
@@ -264,6 +266,8 @@ class Operator:
                 should_summarize=False,
             )
         )
+
+        self.executor.reset_learnings()
 
         response_json: ResponseJsonSchema | None = None
         response: BaseMessage | None = None

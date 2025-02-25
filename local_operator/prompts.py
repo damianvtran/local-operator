@@ -345,7 +345,9 @@ and </response_format> tags.
   "repeating errors.  Empty for the first step.",
   "previous_goal": "Your goal from the previous step.  Empty for the first step.",
   "learnings": "Aggregated information learned so far from previous steps.  Include
-  detailed information that will help you in future steps.  Empty for the first step.",
+  detailed information that will help you in future steps.  Ensure that this
+  contains useful insights as opposed to simply being anccounting of actions.
+  Empty for the first step.",
   "current_goal": "Your goal for the current step.",
   "plan": "Long term plan of actions to achieve the user's goal beyond these goals.
   This plan should be the same or similar for all steps of the same task, unless

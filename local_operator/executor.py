@@ -276,15 +276,21 @@ def get_annotated_error_traceback(code: str, error: Exception) -> Exception:
             break
         tb = tb.tb_next
 
+    error_string = str(error)
+
     annotated_code = annotate_code(code, error_line=lineno)
     error_message = (
-        str(error)
-        + "\nAgent Generated Code:\n"
-        + "Line | Length | Content\n"
-        + "----------------------\n"
-        + "BEGIN\n"
+        "<error_message>\n"
+        + f"{error_string}\n"
+        + "</error_message>\n"
+        + "<agent_generated_code>\n"
+        + "<legend>\n"
+        + "Error Indicator |Line | Length | Content\n"
+        + "</legend>\n"
+        + "<code_block>\n"
         + f"{annotated_code}\n"
-        + "END\n"
+        + "</code_block>\n"
+        + "</agent_generated_code>\n"
     )
 
     if isinstance(error, subprocess.CalledProcessError):
@@ -321,6 +327,8 @@ class LocalCodeExecutor:
     token_metrics: ExecutorTokenMetrics
     agent: AgentData | None
     tool_registry: ToolRegistry | None
+    learnings: List[str]
+    current_plan: str | None
 
     """A class to handle local Python code execution with safety checks and context management.
 
@@ -341,6 +349,8 @@ class LocalCodeExecutor:
         token_metrics (ExecutorTokenMetrics): Tracks token usage and cost metrics for model
         executions
         agent (AgentData | None): The agent data for the current conversation
+        tool_registry (ToolRegistry | None): The tool registry for the current conversation
+        learnings (List[str]): A list of learnings from the current conversation
     """
 
     def __init__(
@@ -351,6 +361,7 @@ class LocalCodeExecutor:
         can_prompt_user: bool = True,
         conversation_history: List[ConversationRecord] = [],
         agent: AgentData | None = None,
+        max_learnings_history: int = 50,
     ):
         """Initialize the LocalCodeExecutor with a language model.
 
@@ -376,6 +387,9 @@ class LocalCodeExecutor:
         self.token_metrics = ExecutorTokenMetrics()
         self.agent = agent
         self.interrupted = False
+        self.learnings = []
+        self.current_plan = None
+        self.max_learnings_history = max_learnings_history
 
         self.reset_step_counter()
 
@@ -1211,6 +1225,9 @@ class LocalCodeExecutor:
             )
 
         plain_text_response = response.response
+        new_learnings = response.learnings
+
+        self.add_to_learnings(new_learnings)
 
         # Phase 2: Display agent response
         formatted_response = format_agent_output(plain_text_response)
@@ -1673,19 +1690,19 @@ class LocalCodeExecutor:
         directory_tree = self.format_directory_tree(index_current_directory())
         context_vars = get_context_vars_str(self.context)
 
-        return f"""<environment details>
+        return f"""<environment_details>
         Current working directory: {cwd}
         Current time: {current_time}
-        <git status>
+        <git_status>
         {git_status}
-        </git status>
-        <directory tree>
+        </git_status>
+        <directory_tree>
         {directory_tree}
-        </directory tree>
-        <execution context variables>
+        </directory_tree>
+        <execution_context_variables>
         {context_vars}
-        </execution context variables>
-        </environment details>"""
+        </execution_context_variables>
+        </environment_details>"""
 
     def _get_git_status(self) -> str:
         """Get the current git repository status.
@@ -1701,6 +1718,39 @@ class LocalCodeExecutor:
             ) or "Clean working directory"
         except (subprocess.CalledProcessError, FileNotFoundError):
             return "Not a git repository"
+
+    def reset_learnings(self) -> None:
+        """Reset the learnings list."""
+        self.learnings = []
+
+    def add_to_learnings(self, learning: str) -> None:
+        """Add a learning to the learnings list.
+
+        Maintains a maximum number of learnings by removing the oldest learning
+        when the list would exceed the maximum length.
+
+        Args:
+            learning: The learning to add to the list
+        """
+        if not learning:
+            return
+
+        self.learnings.append(learning)
+        if len(self.learnings) > self.max_learnings_history:
+            self.learnings.pop(0)
+
+    def get_learning_details(self) -> str:
+        """Get the learning details from the current conversation.
+
+        Returns:
+            str: Formatted string containing learning details
+        """
+        template = f"""
+        <learning_details>
+        {"\n".join([f"- {learning}" for learning in self.learnings])}
+        </learning_details>
+        """
+        return template
 
     def update_ephemeral_messages(self) -> None:
         """Add environment details and other ephemeral messages to the conversation history.
@@ -1721,11 +1771,46 @@ class LocalCodeExecutor:
 
         # Add environment details to the latest message
         environment_details = self.get_environment_details()
+
+        # Add learning details to the latest message
+        learning_details = self.get_learning_details()
+
+        # Add current plan details to the latest message
+        current_plan_details = self.get_current_plan_details()
+
+        # "Heads up display" for the agent
+        hud_message = f"""
+        {environment_details}
+        {learning_details}
+        {current_plan_details}
+        """
+
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.SYSTEM,
-                content=environment_details,
+                content=hud_message,
                 should_summarize=False,
                 ephemeral=True,
             )
         )
+
+    def set_current_plan(self, plan: str) -> None:
+        """Set the current plan for the agent.
+
+        Args:
+            plan (str): The current plan for the agent
+        """
+        self.current_plan = plan
+
+    def get_current_plan_details(self) -> str:
+        """Get the current plan details for the agent.
+
+        Returns:
+            str: Formatted string containing current plan details
+        """
+        template = f"""
+        <current_plan>
+        {self.current_plan}
+        </current_plan>
+        """
+        return template
