@@ -177,7 +177,7 @@ def log_retry_error(error: Exception, attempt: int, max_retries: int) -> None:
     print("\033[1;34m╞══════════════════════════════════════════════════╡\033[0m")
     print(f"\033[1;36m│ Traceback:\033[0m\n{traceback_str}")
     if attempt < max_retries - 1:
-        print("\033[1;36m│\033[0m \033[1;33mAnother attempt will be made...\033[0m")
+        print("\033[1;36m│\033[0m \033[1;33mAttempting to fix the error...\033[0m")
 
 
 def format_agent_output(text: str) -> str:

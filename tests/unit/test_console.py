@@ -227,7 +227,7 @@ def test_log_retry_error_with_attempts(monkeypatch):
 
     assert "✗ Error during execution (attempt 1):" in result
     assert "Retry error" in result
-    assert "Another attempt will be made" in result
+    assert "Attempting to fix the error" in result
 
 
 def test_log_retry_error_without_extra_message(monkeypatch):
@@ -240,7 +240,7 @@ def test_log_retry_error_without_extra_message(monkeypatch):
 
     assert "✗ Error during execution (attempt 3):" in result
     assert "Final error" in result
-    assert "Another attempt will be made" not in result
+    assert "Attempting to fix the error" not in result
 
 
 def test_format_agent_output() -> None:
