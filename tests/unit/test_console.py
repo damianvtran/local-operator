@@ -10,7 +10,6 @@ from local_operator.console import (
     format_agent_output,
     format_error_output,
     format_success_output,
-    log_error_and_retry_message,
     log_retry_error,
     print_agent_response,
     print_cli_banner,
@@ -218,19 +217,6 @@ async def test_spinner_cancellation(monkeypatch):
     assert output.getvalue().endswith("\r")
 
 
-def test_log_error_and_retry_message(monkeypatch):
-    output = io.StringIO()
-    monkeypatch.setattr(sys, "stdout", output)
-    error = Exception("Test error")
-    log_error_and_retry_message(error)
-    result = output.getvalue()
-
-    # Check for key substrings in the output message.
-    assert "✗ Error during execution:" in result
-    assert "Test error" in result
-    assert "Attempting to fix the error" in result
-
-
 def test_log_retry_error_with_attempts(monkeypatch):
     output = io.StringIO()
     monkeypatch.setattr(sys, "stdout", output)
@@ -241,7 +227,7 @@ def test_log_retry_error_with_attempts(monkeypatch):
 
     assert "✗ Error during execution (attempt 1):" in result
     assert "Retry error" in result
-    assert "Another attempt will be made" in result
+    assert "Attempting to fix the error" in result
 
 
 def test_log_retry_error_without_extra_message(monkeypatch):
@@ -254,7 +240,7 @@ def test_log_retry_error_without_extra_message(monkeypatch):
 
     assert "✗ Error during execution (attempt 3):" in result
     assert "Final error" in result
-    assert "Another attempt will be made" not in result
+    assert "Attempting to fix the error" not in result
 
 
 def test_format_agent_output() -> None:
