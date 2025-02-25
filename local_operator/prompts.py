@@ -2,7 +2,10 @@ import importlib.metadata
 import inspect
 import os
 import platform
+import subprocess
 from pathlib import Path
+
+import psutil
 
 from local_operator.tools import ToolRegistry
 
@@ -475,6 +478,83 @@ explicitly allow the operations. For example:
 """
 
 
+def get_system_details_str() -> str:
+
+    # Get CPU info
+    try:
+        cpu_count = psutil.cpu_count(logical=True)
+        cpu_physical = psutil.cpu_count(logical=False)
+        cpu_info = f"{cpu_physical} physical cores, {cpu_count} logical cores"
+    except ImportError:
+        cpu_info = "Unknown (psutil not installed)"
+
+    # Get memory info
+    try:
+        memory = psutil.virtual_memory()
+        memory_info = f"{memory.total / (1024**3):.2f} GB total"
+    except ImportError:
+        memory_info = "Unknown (psutil not installed)"
+
+    # Get GPU info
+    try:
+        gpu_info = (
+            subprocess.check_output("nvidia-smi -L", shell=True, stderr=subprocess.DEVNULL)
+            .decode("utf-8")
+            .strip()
+        )
+        if not gpu_info:
+            gpu_info = "No NVIDIA GPUs detected"
+    except (ImportError, subprocess.SubprocessError):
+        try:
+            # Try for AMD GPUs
+            gpu_info = (
+                subprocess.check_output(
+                    "rocm-smi --showproductname", shell=True, stderr=subprocess.DEVNULL
+                )
+                .decode("utf-8")
+                .strip()
+            )
+            if not gpu_info:
+                gpu_info = "No AMD GPUs detected"
+        except subprocess.SubprocessError:
+            # Check for Apple Silicon MPS
+            if platform.system() == "Darwin" and platform.machine() == "arm64":
+                try:
+                    # Check for Metal-capable GPU on Apple Silicon without torch
+                    result = (
+                        subprocess.check_output(
+                            "system_profiler SPDisplaysDataType | grep Metal", shell=True
+                        )
+                        .decode("utf-8")
+                        .strip()
+                    )
+                    if "Metal" in result:
+                        gpu_info = "Apple Silicon GPU with Metal support"
+                    else:
+                        gpu_info = "Apple Silicon GPU (Metal support unknown)"
+                except subprocess.SubprocessError:
+                    gpu_info = "Apple Silicon GPU (Metal detection failed)"
+            else:
+                gpu_info = "No GPUs detected or GPU tools not installed"
+
+    system_details = {
+        "os": platform.system(),
+        "release": platform.release(),
+        "version": platform.version(),
+        "architecture": platform.machine(),
+        "machine": platform.machine(),
+        "processor": platform.processor(),
+        "cpu": cpu_info,
+        "memory": memory_info,
+        "gpus": gpu_info,
+        "home_directory": os.path.expanduser("~"),
+    }
+
+    system_details_str = "\n".join(f"{key}: {value}" for key, value in system_details.items())
+
+    return system_details_str
+
+
 def create_system_prompt(
     tool_registry: ToolRegistry | None = None, response_format: str = JsonResponseFormatPrompt
 ) -> str:
@@ -487,16 +567,7 @@ def create_system_prompt(
     else:
         user_system_prompt = ""
 
-    system_details = {
-        "os": platform.system(),
-        "release": platform.release(),
-        "version": platform.version(),
-        "architecture": platform.machine(),
-        "machine": platform.machine(),
-        "processor": platform.processor(),
-        "home_directory": os.path.expanduser("~"),
-    }
-    system_details_str = "\n".join(f"{key}: {value}" for key, value in system_details.items())
+    system_details_str = get_system_details_str()
 
     installed_packages_str = get_installed_packages_str()
 
