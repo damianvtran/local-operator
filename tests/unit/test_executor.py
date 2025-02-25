@@ -448,9 +448,9 @@ async def test_execute_code_success(executor, mock_model_config):
     code = "print('hello')"
 
     with patch("sys.stdout", new_callable=io.StringIO):
-        result = await executor.execute_code(code)
-        assert "✓ Code Execution Complete" in result
-        assert "hello" in result
+        execution_result = await executor.execute_code(code)
+        assert "✓ Code Execution Complete" in execution_result.message
+        assert "hello" in execution_result.message
 
 
 @pytest.mark.asyncio
@@ -459,9 +459,9 @@ async def test_execute_code_no_output(executor, mock_model_config):
     code = "x = 1 + 1"  # Code that produces no output
 
     with patch("sys.stdout", new_callable=io.StringIO):
-        result = await executor.execute_code(code)
-        assert "✓ Code Execution Complete" in result
-        assert "[No output]" in result
+        execution_result = await executor.execute_code(code)
+        assert "✓ Code Execution Complete" in execution_result.message
+        assert "[No output]" in execution_result.message
 
 
 @pytest.mark.asyncio
@@ -473,10 +473,10 @@ async def test_execute_code_safety_no_prompt(executor, mock_model_config):
     code = "import os; os.remove('file.txt')"  # Potentially dangerous code
 
     with patch("sys.stdout", new_callable=io.StringIO):
-        result = await executor.execute_code(code)
+        execution_result = await executor.execute_code(code)
 
         # Should not cancel execution but add warning to conversation history
-        assert "requires further confirmation" in result
+        assert "requires further confirmation" in execution_result.message
         assert len(executor.conversation_history) > 0
         last_message = executor.conversation_history[-1]
         assert last_message.role == ConversationRole.ASSISTANT
@@ -495,10 +495,10 @@ async def test_execute_code_safety_with_prompt(executor, mock_model_config):
         patch("sys.stdout", new_callable=io.StringIO),
         patch("builtins.input", return_value="n"),
     ):  # User responds "n" to safety prompt
-        result = await executor.execute_code(code)
+        execution_result = await executor.execute_code(code)
 
         # Should cancel execution when user declines
-        assert "Code execution canceled by user" in result
+        assert "Code execution canceled by user" in execution_result.message
         assert len(executor.conversation_history) > 0
         last_message = executor.conversation_history[-1]
         assert last_message.role == ConversationRole.USER
@@ -515,10 +515,10 @@ async def test_execute_code_safety_with_prompt_approved(executor, mock_model_con
         patch("sys.stdout", new_callable=io.StringIO),
         patch("builtins.input", return_value="y"),  # User responds "y" to safety prompt
     ):
-        result = await executor.execute_code(code)
+        execution_result = await executor.execute_code(code)
 
         # Should proceed with execution when user approves
-        assert "Code Execution Complete" in result
+        assert "Code Execution Complete" in execution_result.message
 
 
 @pytest.mark.asyncio
@@ -530,10 +530,10 @@ async def test_execute_code_safety_with_override(executor, mock_model_config):
     code = "x = 1 + 1"
 
     with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
-        result = await executor.execute_code(code)
+        execution_result = await executor.execute_code(code)
 
         # Should proceed with execution and log override
-        assert "Code Execution Complete" in result
+        assert "Code Execution Complete" in execution_result.message
         output = mock_stdout.getvalue()
         assert "Code safety override applied" in output
 

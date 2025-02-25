@@ -315,6 +315,34 @@ class ExecutorTokenMetrics(BaseModel):
     total_cost: float = 0.0
 
 
+class CodeExecutionResult(BaseModel):
+    """Represents the result of a code execution.
+
+    Attributes:
+        stdout (str): The standard output from the code execution.
+        stderr (str): The standard error from the code execution.
+        logging (str): Any logging output generated during the code execution.
+        message (str): The message to display to the user about the code execution.
+    """
+
+    stdout: str
+    stderr: str
+    logging: str
+    message: str
+
+
+class ExecutorCodeBlock(BaseModel):
+    """Represents a code block that has been executed, along with its execution results.
+
+    Attributes:
+        source (str): The Python code that was executed.
+        output (str): The result of the code execution.
+    """
+
+    source: str
+    result: CodeExecutionResult
+
+
 class LocalCodeExecutor:
     context: Dict[str, Any]
     conversation_history: List[ConversationRecord]
@@ -329,6 +357,7 @@ class LocalCodeExecutor:
     tool_registry: ToolRegistry | None
     learnings: List[str]
     current_plan: str | None
+    code_blocks: List[ExecutorCodeBlock]
 
     """A class to handle local Python code execution with safety checks and context management.
 
@@ -390,6 +419,7 @@ class LocalCodeExecutor:
         self.learnings = []
         self.current_plan = None
         self.max_learnings_history = max_learnings_history
+        self.code_blocks = []
 
         self.reset_step_counter()
 
@@ -844,7 +874,7 @@ class LocalCodeExecutor:
 
         return safety_result
 
-    async def execute_code(self, code: str, max_retries: int = 3) -> str:
+    async def execute_code(self, code: str, max_retries: int = 3) -> CodeExecutionResult:
         """Execute Python code with safety checks and context management.
 
         Args:
@@ -852,14 +882,24 @@ class LocalCodeExecutor:
             max_retries (int): Maximum number of retry attempts
 
         Returns:
-            str: Execution result message or error message
+            CodeExecutionResult: The result of the code execution
         """
         # First check code safety
         safety_result = await self._check_and_confirm_safety(code)
         if safety_result == ConfirmSafetyResult.UNSAFE:
-            return "Code execution canceled by user"
+            return CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                message="Code execution canceled by user",
+            )
         elif safety_result == ConfirmSafetyResult.CONVERSATION_CONFIRM:
-            return "Code execution requires further confirmation from the user"
+            return CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                message="Code execution requires further confirmation from the user",
+            )
         elif safety_result == ConfirmSafetyResult.OVERRIDE:
             print(
                 "\n\033[1;33m⚠️  Warning: Code safety override applied based on user's security"
@@ -894,7 +934,15 @@ class LocalCodeExecutor:
                         log_retry_error(retry_error, attempt, max_retries)
                         break
 
-        return format_error_output(final_error or Exception("Unknown error occurred"), max_retries)
+        formatted_message = format_error_output(
+            final_error or Exception("Unknown error occurred"), max_retries
+        )
+        return CodeExecutionResult(
+            stdout="",
+            stderr="",
+            logging="",
+            message=formatted_message,
+        )
 
     async def _check_and_confirm_safety(self, code: str) -> ConfirmSafetyResult:
         """Check code safety and get user confirmation if needed.
@@ -946,14 +994,14 @@ class LocalCodeExecutor:
                 return ConfirmSafetyResult.CONVERSATION_CONFIRM
         return safety_result
 
-    async def _execute_with_output(self, code: str) -> str:
+    async def _execute_with_output(self, code: str) -> CodeExecutionResult:
         """Execute code and capture stdout/stderr output.
 
         Args:
             code (str): The Python code to execute
 
         Returns:
-            str: Formatted string containing execution output and any error messages
+            CodeExecutionResult: The result of the code execution
 
         Raises:
             Exception: Re-raises any exceptions that occur during code execution
@@ -999,7 +1047,13 @@ class LocalCodeExecutor:
             output, error_output = self._capture_and_record_output(
                 new_stdout, new_stderr, log_output
             )
-            return format_success_output((output, error_output, log_output))
+            message = format_success_output((output, error_output, log_output))
+            return CodeExecutionResult(
+                stdout=output,
+                stderr=error_output,
+                logging=log_output,
+                message=message,
+            )
         except Exception as e:
             # Add captured log output to error output if any
             log_output = log_capture.getvalue()
@@ -1339,16 +1393,25 @@ class LocalCodeExecutor:
                         ExecutionSection.CODE, content=code_block, action=response.action
                     )
 
-                    result_message = await self.execute_code(code_block)
+                    execution_result = await self.execute_code(code_block)
 
-                    if "code execution cancelled by user" in result_message:
+                    self.code_blocks.append(
+                        ExecutorCodeBlock(
+                            source=code_block,
+                            result=execution_result,
+                        )
+                    )
+
+                    if "code execution cancelled by user" in execution_result.message:
                         return ProcessResponseOutput(
                             status=ProcessResponseStatus.CANCELLED,
                             message="Code execution cancelled by user",
                         )
 
                     print_execution_section(
-                        ExecutionSection.RESULT, content=result_message, action=response.action
+                        ExecutionSection.RESULT,
+                        content=execution_result.message,
+                        action=response.action,
                     )
                 elif response.action == ActionType.CHECK or response.action == ActionType.CODE:
                     raise ValueError('"code" field is required for CODE or CHECK actions')
