@@ -1586,7 +1586,7 @@ class LocalCodeExecutor:
         """
         # File type to icon mapping
         FILE_TYPE_ICONS = {
-            "code": "��",
+            "code": "📄",
             "doc": "📝",
             "image": "🖼️",
             "config": "🔑",
