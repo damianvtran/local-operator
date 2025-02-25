@@ -163,21 +163,6 @@ def log_action_error(error: Exception, action: str) -> None:
     print("\033[1;34m╞══════════════════════════════════════════════════╡\033[0m")
 
 
-def log_error_and_retry_message(error: Exception) -> None:
-    """Print a formatted error message with traceback and notify of a retry attempt.
-
-    Args:
-        error (Exception): The error to display.
-    """
-    traceback_str = "".join(format_exception(error))
-    print("\n\033[1;31m✗ Error during execution:\033[0m")
-    print("\033[1;34m╞══════════════════════════════════════════════════╡\033[0m")
-    print(f"\033[1;36m│ Traceback:\033[0m\n{traceback_str}")
-    print("\033[1;34m╞══════════════════════════════════════════════════╡\033[0m")
-    print("\033[1;36m│ Attempting to fix the error...\033[0m")
-    print("\033[1;34m╰══════════════════════════════════════════════════╯\033[0m")
-
-
 def log_retry_error(error: Exception, attempt: int, max_retries: int) -> None:
     """
     Print a formatted error message for a given retry attempt.

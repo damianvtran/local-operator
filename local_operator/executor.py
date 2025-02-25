@@ -24,7 +24,6 @@ from local_operator.console import (
     format_error_output,
     format_success_output,
     log_action_error,
-    log_error_and_retry_message,
     log_retry_error,
     print_agent_response,
     print_execution_section,
@@ -863,7 +862,8 @@ class LocalCodeExecutor:
                 else:
                     self._record_retry_error(error, attempt - 1)
 
-                log_error_and_retry_message(error)
+                log_retry_error(error, attempt, max_retries)
+
                 self.update_ephemeral_messages()
 
                 if attempt < max_retries - 1:
@@ -875,6 +875,7 @@ class LocalCodeExecutor:
                             break
                     except Exception as retry_error:
                         log_retry_error(retry_error, attempt, max_retries)
+                        break
 
         return format_error_output(final_error or Exception("Unknown error occurred"), max_retries)
 

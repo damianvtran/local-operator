@@ -10,7 +10,6 @@ from local_operator.console import (
     format_agent_output,
     format_error_output,
     format_success_output,
-    log_error_and_retry_message,
     log_retry_error,
     print_agent_response,
     print_cli_banner,
@@ -216,19 +215,6 @@ async def test_spinner_cancellation(monkeypatch):
 
     # The spinner should clear the line on cancellation by writing "\r" at the end.
     assert output.getvalue().endswith("\r")
-
-
-def test_log_error_and_retry_message(monkeypatch):
-    output = io.StringIO()
-    monkeypatch.setattr(sys, "stdout", output)
-    error = Exception("Test error")
-    log_error_and_retry_message(error)
-    result = output.getvalue()
-
-    # Check for key substrings in the output message.
-    assert "✗ Error during execution:" in result
-    assert "Test error" in result
-    assert "Attempting to fix the error" in result
 
 
 def test_log_retry_error_with_attempts(monkeypatch):
