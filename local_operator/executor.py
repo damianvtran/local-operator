@@ -799,7 +799,10 @@ class LocalCodeExecutor:
                 ),
                 ConversationRecord(
                     role=ConversationRole.USER,
-                    content=f"Determine a status for the following code:\n\n{code}",
+                    content=(
+                        "Determine a status for the following code:\n\n"
+                        f"<agent_generated_code>\n{code}\n</agent_generated_code>"
+                    ),
                 ),
             ]
 
