@@ -16,6 +16,43 @@ from local_operator.executor import CodeExecutionResult
 from local_operator.model.configure import ModelConfiguration
 from local_operator.types import ConversationRole
 
+TitleCellTemplate = """
+# 🤖 Local Operator Conversation Notebook 📓
+
+This notebook contains the exported conversation and code execution history from a
+<a href='https://local-operator.com'>Local Operator</a> agent session.
+
+## 📊 Session Information
+
+<table style='width: 80%; border-collapse: collapse;'>
+  <tr><td style='padding: 8px; font-weight: bold;'>📅 Date and Time</td>
+  <td>{current_time}</td></tr>
+  <tr><td style='padding: 8px; font-weight: bold;'>🔢 Local Operator Version</td>
+  <td>{version}</td></tr>
+  <tr><td style='padding: 8px; font-weight: bold;'>🧠 Model</td>
+  <td>{model_info}</td></tr>
+  <tr><td style='padding: 8px; font-weight: bold;'>☁️ Hosting</td>
+  <td>{hosting_info}</td></tr>
+  <tr><td style='padding: 8px; font-weight: bold;'>💬 Max Conversation History</td>
+  <td>{max_conversation_history}</td></tr>
+  <tr><td style='padding: 8px; font-weight: bold;'>📜 Detailed Conversation Length</td>
+  <td>{detail_conversation_length}</td></tr>
+  <tr><td style='padding: 8px; font-weight: bold;'>📚 Learning History Length</td>
+  <td>{max_learnings_history}</td></tr>
+</table>
+
+💡 **Tip:** To reproduce this conversation, you can run Local Operator with the
+same configuration settings listed above.
+"""
+"""
+Template for the title cell of the conversation notebook.
+
+This template is a markdown string that includes placeholders for dynamic information
+such as the current date and time, Local Operator version, model information, hosting
+information, and conversation history lengths.  It provides a summary of the session
+from which the notebook was generated.
+"""
+
 
 def save_code_history_to_notebook(
     code_history: List[CodeExecutionResult],
@@ -81,32 +118,15 @@ def save_code_history_to_notebook(
 
     # Get hosting information
     hosting_info = model_configuration.hosting
-    title_cell_content = [
-        "# 🤖 Local Operator Conversation Notebook 📓\n\n",
-        "This notebook contains the exported conversation and code execution history from a "
-        "<a href='https://local-operator.com'>Local Operator</a> agent session.\n\n",
-        "## 📊 Session Information\n\n",
-        "<table style='width: 80%; border-collapse: collapse;'>\n"
-        f"  <tr><td style='padding: 8px; font-weight: bold;'>📅 Date and Time</td>"
-        f"<td>{current_time}</td></tr>\n"
-        f"  <tr><td style='padding: 8px; font-weight: bold;'>🔢 Local Operator Version</td>"
-        f"<td>{version}</td></tr>\n"
-        f"  <tr><td style='padding: 8px; font-weight: bold;'>🧠 Model</td>"
-        f"<td>{model_info}</td></tr>\n"
-        f"  <tr><td style='padding: 8px; font-weight: bold;'>☁️ Hosting</td>"
-        f"<td>{hosting_info}</td></tr>\n"
-        f"  <tr><td style='padding: 8px; font-weight: bold;'>💬 Max Conversation History</td>"
-        f"<td>{max_conversation_history}</td></tr>\n"
-        f"  <tr><td style='padding: 8px; font-weight: bold;'>📜 Detailed Conversation Length"
-        "</td>"
-        f"<td>{detail_conversation_length}</td></tr>\n"
-        f"  <tr><td style='padding: 8px; font-weight: bold;'>📚 Learning History Length"
-        "</td>"
-        f"<td>{max_learnings_history}</td></tr>\n"
-        "</table>\n\n",
-        "💡 **Tip:** To reproduce this conversation, you can run Local Operator with the "
-        "same configuration settings listed above.",
-    ]
+    title_cell_content = TitleCellTemplate.format(
+        current_time=current_time,
+        version=version,
+        model_info=model_info,
+        hosting_info=hosting_info,
+        max_conversation_history=max_conversation_history,
+        detail_conversation_length=detail_conversation_length,
+        max_learnings_history=max_learnings_history,
+    )
 
     notebook_content["cells"].append(
         {"cell_type": "markdown", "metadata": {}, "source": title_cell_content}
