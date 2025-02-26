@@ -16,7 +16,6 @@ from local_operator.executor import (
     CodeExecutionResult,
     ConfirmSafetyResult,
     LocalCodeExecutor,
-    ProcessResponseStatus,
     get_confirm_safety_result,
     get_context_vars_str,
     process_json_response,
@@ -27,6 +26,7 @@ from local_operator.types import (
     ActionType,
     ConversationRecord,
     ConversationRole,
+    ProcessResponseStatus,
     ResponseJsonSchema,
 )
 
@@ -1858,6 +1858,7 @@ def test_save_code_history_to_notebook(executor: LocalCodeExecutor, tmp_path: Pa
             code="",
             formatted_print="",
             role=ConversationRole.USER,
+            status=ProcessResponseStatus.SUCCESS,
         ),
         CodeExecutionResult(
             stdout="",
@@ -1867,6 +1868,7 @@ def test_save_code_history_to_notebook(executor: LocalCodeExecutor, tmp_path: Pa
             code="",
             formatted_print="",
             role=ConversationRole.ASSISTANT,
+            status=ProcessResponseStatus.SUCCESS,
         ),
         CodeExecutionResult(
             stdout="Hello, world!\n",
@@ -1876,6 +1878,7 @@ def test_save_code_history_to_notebook(executor: LocalCodeExecutor, tmp_path: Pa
             code="print('Hello, world!')",
             message="I will now print 'Hello, world!'",
             role=ConversationRole.ASSISTANT,
+            status=ProcessResponseStatus.SUCCESS,
         ),
         CodeExecutionResult(
             stdout="/path/to/cwd\n",
@@ -1885,6 +1888,7 @@ def test_save_code_history_to_notebook(executor: LocalCodeExecutor, tmp_path: Pa
             code="import os\nprint(os.getcwd())",
             message="I will now print the current working directory",
             role=ConversationRole.ASSISTANT,
+            status=ProcessResponseStatus.SUCCESS,
         ),
     ]
     executor.save_code_history_to_notebook(str(file_path))

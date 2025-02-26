@@ -22,30 +22,9 @@ from local_operator.prompts import PlanSystemPrompt, create_system_prompt
 from local_operator.types import (
     ConversationRecord,
     ConversationRole,
+    ProcessResponseStatus,
     ResponseJsonSchema,
 )
-
-
-class ProcessResponseStatus(Enum):
-    """Status codes for process_response results."""
-
-    SUCCESS = "success"
-    CANCELLED = "cancelled"
-    ERROR = "error"
-    INTERRUPTED = "interrupted"
-
-
-class ProcessResponseOutput:
-    """Output structure for process_response results.
-
-    Attributes:
-        status (ProcessResponseStatus): Status of the response processing
-        message (str): Descriptive message about the processing result
-    """
-
-    def __init__(self, status: ProcessResponseStatus, message: str):
-        self.status = status
-        self.message = message
 
 
 class OperatorType(Enum):
@@ -251,6 +230,7 @@ class Operator:
                 code="",
                 message=response_content,
                 role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.SUCCESS,
             ),
             None,
         )
@@ -291,6 +271,7 @@ class Operator:
                 code="",
                 message=user_input,
                 role=ConversationRole.USER,
+                status=ProcessResponseStatus.SUCCESS,
             ),
             None,
         )
