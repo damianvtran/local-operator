@@ -593,68 +593,7 @@ def save_code_history_to_notebook_tool(executor: LocalCodeExecutor) -> Callable[
             Exception: If there is an error during notebook creation or file saving.
         """
         try:
-            notebook_content = {
-                "cells": [],
-                "metadata": {
-                    "kernelspec": {
-                        "display_name": "Python 3",
-                        "language": "python",
-                        "name": "python3",
-                    },
-                    "language_info": {
-                        "codemirror_mode": {"name": "ipython", "version": 3},
-                        "file_extension": ".py",
-                        "mimetype": "text/x-python",
-                        "name": "python",
-                        "nbconvert_exporter": "python",
-                        "pygments_lexer": "ipython3",
-                        "version": "3.x",
-                    },
-                },
-                "nbformat": 4,
-                "nbformat_minor": 5,
-            }
-
-            code_results = executor.code_history
-            for code_result in code_results:
-                # Add agent response as a markdown cell
-                if code_result.response:
-                    notebook_content["cells"].append(
-                        {
-                            "cell_type": "markdown",
-                            "metadata": {},
-                            "source": code_result.response.splitlines(keepends=True),
-                        }
-                    )
-
-                cell_source = code_result.code
-                cell_output = ""
-                if code_result.stdout:
-                    cell_output += f"Output:\n{code_result.stdout}\n"
-                if code_result.stderr:
-                    cell_output += f"Errors:\n{code_result.stderr}\n"
-                if code_result.logging:
-                    cell_output += f"Logging:\n{code_result.logging}\n"
-
-                notebook_content["cells"].append(
-                    {
-                        "cell_type": "code",
-                        "execution_count": None,
-                        "metadata": {},
-                        "outputs": [
-                            {
-                                "name": "stdout",
-                                "output_type": "stream",
-                                "text": cell_output.splitlines(keepends=True),
-                            }
-                        ],
-                        "source": cell_source.splitlines(keepends=True),
-                    }
-                )
-
-            # Save the notebook to a file
-            with open(file_path, "w") as f:
-                json.dump(notebook_content, f, indent=1)
+            executor.save_code_history_to_notebook(file_path)
 
             print(f"Notebook saved to {file_path}")
 

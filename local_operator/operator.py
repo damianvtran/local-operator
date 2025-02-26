@@ -12,7 +12,11 @@ from local_operator.agents import AgentData, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.console import format_agent_output, print_cli_banner, spinner
 from local_operator.credentials import CredentialManager
-from local_operator.executor import LocalCodeExecutor, process_json_response
+from local_operator.executor import (
+    CodeExecutionResult,
+    LocalCodeExecutor,
+    process_json_response,
+)
 from local_operator.model.configure import ModelConfiguration
 from local_operator.prompts import PlanSystemPrompt, create_system_prompt
 from local_operator.types import (
@@ -238,6 +242,18 @@ class Operator:
         )
 
         self.executor.set_current_plan(response_content)
+        self.executor.add_to_code_history(
+            CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message=response_content,
+                role=ConversationRole.ASSISTANT,
+            ),
+            None,
+        )
 
         return response_content
 
@@ -265,6 +281,18 @@ class Operator:
                 content=user_input,
                 should_summarize=False,
             )
+        )
+        self.executor.add_to_code_history(
+            CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message=user_input,
+                role=ConversationRole.USER,
+            ),
+            None,
         )
 
         self.executor.reset_learnings()

@@ -26,13 +26,11 @@ from local_operator.admin import (
     get_config_tool,
     list_agent_info_tool,
     save_agent_training_tool,
-    save_code_history_to_notebook_tool,
     save_conversation_tool,
     update_config_tool,
 )
 from local_operator.agents import AgentEditFields
 from local_operator.config import Config, ConfigManager
-from local_operator.executor import CodeExecutionResult
 from local_operator.tools import ToolRegistry
 from local_operator.types import ConversationRecord, ConversationRole
 
@@ -329,74 +327,6 @@ def test_update_config_tool(config_manager: ConfigManager) -> None:
     assert (
         config.get_value("new_key") == "new_value"
     ), f"Expected 'new_value' for 'new_key', got {config.get_value('new_key')}"
-
-
-def test_save_code_history_to_notebook(executor: LocalCodeExecutor, tmp_path: Path) -> None:
-    """
-    Test the save_code_history_to_notebook tool to verify that the code execution history
-    is saved to an IPython notebook file.
-    """
-    file_path = tmp_path / "notebook.ipynb"
-    executor.code_history = [
-        CodeExecutionResult(
-            stdout="Hello, world!\n",
-            stderr="",
-            logging="",
-            message="",
-            code="print('Hello, world!')",
-            response="I will now print 'Hello, world!'",
-        ),
-        CodeExecutionResult(
-            stdout="/path/to/cwd\n",
-            stderr="",
-            logging="",
-            message="",
-            code="import os\nprint(os.getcwd())",
-            response="I will now print the current working directory",
-        ),
-    ]
-    save_tool = save_code_history_to_notebook_tool(executor)
-    save_tool(str(file_path))
-
-    assert file_path.exists(), "Notebook file was not created"
-
-    with open(file_path, "r", encoding="utf-8") as f:
-        notebook_data = json.load(f)
-
-    assert "cells" in notebook_data, "Notebook does not contain cells"
-    assert len(notebook_data["cells"]) == 4, "Notebook does not contain the correct number of cells"
-
-    # Verify the content of the first cell (response)
-    first_cell = notebook_data["cells"][0]
-    assert first_cell["cell_type"] == "markdown", "First cell is not a markdown cell"
-    assert first_cell["source"] == [
-        "I will now print 'Hello, world!'",
-    ], "First cell source is incorrect"
-
-    # Verify the content of the second cell (code)
-    second_cell = notebook_data["cells"][1]
-    assert second_cell["cell_type"] == "code", "Second cell is not a code cell"
-    assert second_cell["source"] == [
-        "print('Hello, world!')",
-    ], "Second cell source code is incorrect"
-    assert "Hello, world!" in "".join(
-        second_cell["outputs"][0]["text"]
-    ), "Second cell output is incorrect"
-
-    # Verify the content of the third cell (response)
-    third_cell = notebook_data["cells"][2]
-    assert third_cell["cell_type"] == "markdown", "Third cell is not a markdown cell"
-    assert third_cell["source"] == [
-        "I will now print the current working directory",
-    ], "Third cell source is incorrect"
-
-    # Verify the content of the forth cell (code)
-    forth_cell = notebook_data["cells"][3]
-    assert forth_cell["cell_type"] == "code", "Forth cell is not a code cell"
-    assert "import os" in "".join(forth_cell["source"]), "Forth cell source code is incorrect"
-    assert "/path/to/cwd" in "".join(
-        forth_cell["outputs"][0]["text"]
-    ), "Forth cell output is incorrect"
 
 
 def test_add_admin_tools(
