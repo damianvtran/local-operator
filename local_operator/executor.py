@@ -43,6 +43,8 @@ from local_operator.types import (
     ActionType,
     ConversationRecord,
     ConversationRole,
+    ProcessResponseOutput,
+    ProcessResponseStatus,
     ResponseJsonSchema,
 )
 
@@ -53,28 +55,6 @@ class ExecutorInitError(Exception):
     def __init__(self, message: str = "Failed to initialize executor"):
         self.message = message
         super().__init__(self.message)
-
-
-class ProcessResponseStatus(Enum):
-    """Status codes for process_response results."""
-
-    SUCCESS = "success"
-    CANCELLED = "cancelled"
-    ERROR = "error"
-    INTERRUPTED = "interrupted"
-
-
-class ProcessResponseOutput:
-    """Output structure for process_response results.
-
-    Attributes:
-        status (ProcessResponseStatus): Status of the response processing
-        message (str): Descriptive message about the processing result
-    """
-
-    def __init__(self, status: ProcessResponseStatus, message: str):
-        self.status = status
-        self.message = message
 
 
 class ConfirmSafetyResult(Enum):
@@ -281,6 +261,8 @@ class CodeExecutionResult(BaseModel):
         message (str): The message to display to the user about the code execution.
         code (str): The code that was executed.
         formatted_print (str): The formatted print output from the code execution.
+        role (ConversationRole): The role of the message sender (user/assistant/system)
+        status (ProcessResponseStatus): The status of the code execution
     """
 
     stdout: str
@@ -290,6 +272,7 @@ class CodeExecutionResult(BaseModel):
     code: str
     formatted_print: str
     role: ConversationRole
+    status: ProcessResponseStatus
 
 
 class CodeExecutionError(Exception):
@@ -912,6 +895,7 @@ class LocalCodeExecutor:
                 code=code,
                 formatted_print="",
                 role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.CANCELLED,
             )
         elif safety_result == ConfirmSafetyResult.CONVERSATION_CONFIRM:
             return CodeExecutionResult(
@@ -922,6 +906,7 @@ class LocalCodeExecutor:
                 code=code,
                 formatted_print="",
                 role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.CONFIRMATION_REQUIRED,
             )
         elif safety_result == ConfirmSafetyResult.OVERRIDE:
             print(
@@ -969,6 +954,7 @@ class LocalCodeExecutor:
             code=current_code,
             formatted_print=formatted_print,
             role=ConversationRole.ASSISTANT,
+            status=ProcessResponseStatus.ERROR,
         )
 
     async def _check_and_confirm_safety(self, code: str) -> ConfirmSafetyResult:
@@ -1083,6 +1069,7 @@ class LocalCodeExecutor:
                 code=code,
                 formatted_print=formatted_print,
                 role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.SUCCESS,
             )
         except Exception as e:
             # Add captured log output to error output if any
