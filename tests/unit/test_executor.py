@@ -11,10 +11,10 @@ import pytest
 from openai import APIError
 
 from local_operator.executor import (
+    CodeExecutionError,
     ConfirmSafetyResult,
     LocalCodeExecutor,
     ProcessResponseStatus,
-    get_annotated_error_traceback,
     get_confirm_safety_result,
     get_context_vars_str,
     process_json_response,
@@ -1791,12 +1791,14 @@ def test_get_environment_details_large_directory(executor, monkeypatch):
         "IndexError",
     ],
 )
-def test_get_annotated_error_traceback(code, error_type, error_msg, expected_content, monkeypatch):
-    """Test that get_annotated_error_traceback properly formats error tracebacks."""
+def test_code_execution_error_agent_info_str(
+    code, error_type, error_msg, expected_content, monkeypatch
+):
+    """Test that CodeExecutionError.agent_info_str properly formats error tracebacks."""
 
-    # Create a traceback by actually executing the code
+    # Create a CodeExecutionError by actually executing the code
     tb = None
-    error = None
+    code_execution_error = None
     try:
         # Compile and execute the code to get a real traceback
         compiled_code = compile(code, "<agent_generated_code>", "exec")
@@ -1804,24 +1806,24 @@ def test_get_annotated_error_traceback(code, error_type, error_msg, expected_con
     except Exception as e:
         if isinstance(e, error_type):
             tb = e.__traceback__
-            error = e
+            code_execution_error = CodeExecutionError(str(e), code)
+            code_execution_error.__traceback__ = tb
         else:
             # Create an error of the expected type with the real traceback
-            error = error_type(error_msg)
-            error.__traceback__ = e.__traceback__
+            temp_error = error_type(error_msg)
+            code_execution_error = CodeExecutionError(str(temp_error), code)
+            code_execution_error.__traceback__ = temp_error.__traceback__
 
     # If we didn't get an error (unlikely), create one manually
-    if tb is None:
-        error = error_type(error_msg)
+    if tb is None and code_execution_error is None:
+        temp_error = error_type(error_msg)
+        code_execution_error = CodeExecutionError(str(temp_error), code)
         # We'll rely on the function to handle missing traceback
 
-    assert error is not None
+    assert code_execution_error is not None
 
-    # Get the annotated error
-    annotated_error = get_annotated_error_traceback(code, error)
-
-    # Convert to string for easier assertion
-    error_str = str(annotated_error)
+    # Get the annotated error string
+    error_str = code_execution_error.agent_info_str()
 
     # Check that all expected content is in the error message
     for content in expected_content:
@@ -1837,6 +1839,3 @@ def test_get_annotated_error_traceback(code, error_type, error_msg, expected_con
     assert "<code_block>" in error_str
     assert "</code_block>" in error_str
     assert "</agent_generated_code>" in error_str
-
-    # Verify the error is of the same type as the input error
-    assert isinstance(annotated_error, error_type)
