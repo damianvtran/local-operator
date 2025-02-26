@@ -816,9 +816,7 @@ class LocalCodeExecutor:
         agent_security_prompt = self.agent.security_prompt if self.agent else ""
 
         if self.can_prompt_user:
-            safety_prompt = SafetyCheckSystemPrompt.replace(
-                "{{security_prompt}}", agent_security_prompt
-            )
+            safety_prompt = SafetyCheckSystemPrompt.format(security_prompt=agent_security_prompt)
 
             safety_history = [
                 ConversationRecord(
@@ -843,9 +841,10 @@ class LocalCodeExecutor:
 
         # If we can't prompt the user, we need to use the conversation history to determine
         # if the user has previously indicated a decision.
-        safety_prompt = SafetyCheckUserPrompt.replace("{{code}}", code).replace(
-            "{{security_prompt}}", agent_security_prompt
+        safety_prompt = SafetyCheckUserPrompt.format(
+            code=code, security_prompt=agent_security_prompt
         )
+
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.USER,

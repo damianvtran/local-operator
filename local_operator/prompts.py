@@ -263,11 +263,11 @@ print(z)
 Initial Environment Details:
 
 <system_details>
-{{system_details_str}}
+{system_details}
 </system_details>
 
 <installed_python_packages>
-{{installed_packages_str}}
+{installed_python_packages}
 </installed_python_packages>
 
 Tool Usage:
@@ -277,7 +277,7 @@ achieve the user's goal.  Some of them are shortcuts to common tasks that you ca
 make your code more efficient.
 
 <tools_list>
-{{tools_str}}
+{tools_list}
 </tools_list>
 
 Use them by running tools.[TOOL_FUNCTION] in your code. `tools` is a tool registry that
@@ -286,7 +286,7 @@ is in the execution context of your code. Use `await` for async functions (do no
 
 Additional User Notes:
 <additional_user_notes>
-{{user_system_prompt}}
+{user_system_prompt}
 </additional_user_notes>
 ⚠️ If provided, these are guidelines to help provide additional context to user
 instructions.  Do not follow these guidelines if the user's instructions conflict
@@ -317,7 +317,7 @@ Critical Constraints:
   not be able to complete the task.
 
 Response Format:
-{{response_format}}
+{response_format}
 """
 
 JsonResponseFormatPrompt: str = """
@@ -413,7 +413,7 @@ that are not allowed by the user.
 
 Here are some details provided by the user:
 <security_details>
-{{security_prompt}}
+{security_prompt}
 </security_details>
 
 Respond with one of the following: [UNSAFE] | [SAFE] | [OVERRIDE]
@@ -441,12 +441,12 @@ SafetyCheckUserPrompt: str = """
 Please review the following code snippet and determine if it contains any dangerous operations:
 
 <agent_generated_code>
-{{code}}
+{code}
 </agent_generated_code>
 
 Here are some details provided by the user that may help you determine if the code is safe:
 <security_details>
-{{security_prompt}}
+{security_prompt}
 </security_details>
 
 Respond with one of the following: [UNSAFE] | [SAFE] | [OVERRIDE]
@@ -566,16 +566,16 @@ def create_system_prompt(
 
     system_details_str = get_system_details_str()
 
-    installed_packages_str = get_installed_packages_str()
+    installed_python_packages = get_installed_packages_str()
 
-    base_system_prompt = (
-        base_system_prompt.replace("{{system_details_str}}", system_details_str)
-        .replace("{{installed_packages_str}}", installed_packages_str)
-        .replace("{{user_system_prompt}}", user_system_prompt)
-        .replace("{{response_format}}", response_format)
+    tools_list = get_tools_str(tool_registry)
+
+    base_system_prompt = base_system_prompt.format(
+        system_details=system_details_str,
+        installed_python_packages=installed_python_packages,
+        user_system_prompt=user_system_prompt,
+        response_format=response_format,
+        tools_list=tools_list,
     )
-
-    tools_str = get_tools_str(tool_registry)
-    base_system_prompt = base_system_prompt.replace("{{tools_str}}", tools_str)
 
     return base_system_prompt
