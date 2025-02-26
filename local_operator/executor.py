@@ -1403,8 +1403,8 @@ class LocalCodeExecutor:
                         content=execution_result.message,
                         action=response.action,
                     )
-                elif response.action == ActionType.CHECK or response.action == ActionType.CODE:
-                    raise ValueError('"code" field is required for CODE or CHECK actions')
+                elif response.action == ActionType.CODE:
+                    raise ValueError('"code" field is required for CODE actions')
         except Exception as e:
             log_action_error(e, str(response.action))
             self.append_to_history(

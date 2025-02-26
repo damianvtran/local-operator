@@ -297,11 +297,9 @@ def test_format_success_output_no_logs():
         (ActionType.WRITE, 2, "Executing Write (Step 2)"),
         (ActionType.EDIT, 3, "Executing Edit (Step 3)"),
         (ActionType.READ, 4, "Executing Read (Step 4)"),
-        (ActionType.CHECK, 5, "Executing Check (Step 5)"),
-        (ActionType.RESEARCH, 6, "Executing Research (Step 6)"),
-        (ActionType.DONE, 8, "Executing Done (Step 8)"),
-        (ActionType.ASK, 9, "Executing Ask (Step 9)"),
-        (ActionType.BYE, 10, "Executing Bye (Step 10)"),
+        (ActionType.DONE, 5, "Executing Done (Step 5)"),
+        (ActionType.ASK, 6, "Executing Ask (Step 6)"),
+        (ActionType.BYE, 7, "Executing Bye (Step 7)"),
     ],
 )
 def test_print_execution_section_header(
