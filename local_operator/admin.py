@@ -617,6 +617,16 @@ def save_code_history_to_notebook_tool(executor: LocalCodeExecutor) -> Callable[
 
             code_results = executor.code_history
             for code_result in code_results:
+                # Add agent response as a markdown cell
+                if code_result.response:
+                    notebook_content["cells"].append(
+                        {
+                            "cell_type": "markdown",
+                            "metadata": {},
+                            "source": code_result.response.splitlines(keepends=True),
+                        }
+                    )
+
                 cell_source = code_result.code
                 cell_output = ""
                 if code_result.stdout:
