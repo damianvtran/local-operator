@@ -12,6 +12,7 @@ from openai import APIError
 
 from local_operator.executor import (
     CodeExecutionError,
+    CodeExecutionResult,
     ConfirmSafetyResult,
     LocalCodeExecutor,
     get_confirm_safety_result,
@@ -1293,13 +1294,57 @@ async def test_perform_action(
 
     with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
         if action_type == ActionType.READ:
-            executor.read_file = AsyncMock(return_value="File content")
+            executor.read_file = AsyncMock(
+                return_value=CodeExecutionResult(
+                    stdout="File content",
+                    stderr="",
+                    logging="",
+                    formatted_print="File content",
+                    code="",
+                    message="",
+                    role=ConversationRole.SYSTEM,
+                    status=ProcessResponseStatus.SUCCESS,
+                )
+            )
         elif action_type == ActionType.WRITE:
-            executor.write_file = AsyncMock(return_value="File written")
+            executor.write_file = AsyncMock(
+                return_value=CodeExecutionResult(
+                    stdout="File written",
+                    stderr="",
+                    logging="",
+                    formatted_print="File written",
+                    code="",
+                    message="",
+                    role=ConversationRole.SYSTEM,
+                    status=ProcessResponseStatus.SUCCESS,
+                )
+            )
         elif action_type == ActionType.EDIT:
-            executor.edit_file = AsyncMock(return_value="File edited")
+            executor.edit_file = AsyncMock(
+                return_value=CodeExecutionResult(
+                    stdout="File edited",
+                    stderr="",
+                    logging="",
+                    formatted_print="File edited",
+                    code="",
+                    message="",
+                    role=ConversationRole.SYSTEM,
+                    status=ProcessResponseStatus.SUCCESS,
+                )
+            )
         else:
-            executor.execute_code = AsyncMock(return_value="Code executed")
+            executor.execute_code = AsyncMock(
+                return_value=CodeExecutionResult(
+                    stdout="Code executed",
+                    stderr="",
+                    logging="",
+                    formatted_print="Code executed",
+                    code="",
+                    message="",
+                    role=ConversationRole.SYSTEM,
+                    status=ProcessResponseStatus.SUCCESS,
+                )
+            )
 
         result = await executor.perform_action(response)
         assert result is not None
@@ -1371,7 +1416,7 @@ async def test_read_file_action(executor: LocalCodeExecutor, tmp_path: Path, fil
 
     result = await executor.read_file(str(file_path))
 
-    assert "Successfully read file" in result
+    assert "Successfully read file" in result.formatted_print
     assert str(file_path) in executor.conversation_history[-1].content
 
     with open(file_path, "r") as f:
@@ -1398,7 +1443,7 @@ async def test_write_file_action(executor: LocalCodeExecutor, tmp_path: Path):
         file_content = f.read()
     assert file_content == "New file content"
 
-    assert "Successfully wrote to file" in result
+    assert "Successfully wrote to file" in result.formatted_print
     assert str(file_path) in executor.conversation_history[-1].content
 
 
@@ -1485,7 +1530,7 @@ async def test_edit_file_action(
             file_content = f.read()
         assert file_content == expected_content
         assert result is not None
-        assert "Successfully edited file" in result
+        assert "Successfully edited file" in result.formatted_print
         assert str(file_path) in executor.conversation_history[-1].content
 
 

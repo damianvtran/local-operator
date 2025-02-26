@@ -1352,7 +1352,7 @@ class LocalCodeExecutor:
         )
         spinner_task = asyncio.create_task(spinner(f"Executing {str(response.action).lower()}"))
 
-        result_message = ""
+        execution_result = None
 
         try:
             if response.action == ActionType.WRITE:
@@ -1366,9 +1366,11 @@ class LocalCodeExecutor:
                         action=response.action,
                     )
 
-                    result_message = await self.write_file(file_path, content)
+                    execution_result = await self.write_file(file_path, content)
                     print_execution_section(
-                        ExecutionSection.RESULT, content=result_message, action=response.action
+                        ExecutionSection.RESULT,
+                        content=execution_result.formatted_print,
+                        action=response.action,
                     )
                 else:
                     raise ValueError("File path is required for WRITE action")
@@ -1384,10 +1386,12 @@ class LocalCodeExecutor:
                         action=response.action,
                     )
 
-                    result_message = await self.edit_file(file_path, replacements)
+                    execution_result = await self.edit_file(file_path, replacements)
 
                     print_execution_section(
-                        ExecutionSection.RESULT, content=result_message, action=response.action
+                        ExecutionSection.RESULT,
+                        content=execution_result.formatted_print,
+                        action=response.action,
                     )
                 else:
                     raise ValueError("File path and replacements are required for EDIT action")
@@ -1400,7 +1404,7 @@ class LocalCodeExecutor:
                         file_path=file_path,
                         action=response.action,
                     )
-                    result_message = await self.read_file(file_path)
+                    execution_result = await self.read_file(file_path)
                 else:
                     raise ValueError("File path is required for READ action")
 
@@ -1428,6 +1432,7 @@ class LocalCodeExecutor:
                     )
                 elif response.action == ActionType.CODE:
                     raise ValueError('"code" field is required for CODE actions')
+
         except Exception as e:
             log_action_error(e, str(response.action))
             self.append_to_history(
@@ -1443,6 +1448,9 @@ class LocalCodeExecutor:
                 await spinner_task
             except asyncio.CancelledError:
                 pass
+
+        if execution_result:
+            self.add_to_code_history(execution_result, response)
 
         token_metrics = self.get_token_metrics()
         print_execution_section(
@@ -1472,12 +1480,12 @@ class LocalCodeExecutor:
 
         output = ProcessResponseOutput(
             status=ProcessResponseStatus.SUCCESS,
-            message=result_message if result_message else "Action completed",
+            message=execution_result.message if execution_result else "Action completed",
         )
 
         return output
 
-    async def read_file(self, file_path: str) -> str:
+    async def read_file(self, file_path: str) -> CodeExecutionResult:
         """Read the contents of a file and include line numbers and lengths.
 
         Args:
@@ -1514,9 +1522,18 @@ class LocalCodeExecutor:
             )
         )
 
-        return f"Successfully read file: {file_path}"
+        return CodeExecutionResult(
+            stdout=f"Successfully read file: {file_path}",
+            stderr="",
+            logging="",
+            formatted_print="Successfully read file: {file_path}",
+            code="",
+            message="",
+            role=ConversationRole.SYSTEM,
+            status=ProcessResponseStatus.SUCCESS,
+        )
 
-    async def write_file(self, file_path: str, content: str) -> str:
+    async def write_file(self, file_path: str, content: str) -> CodeExecutionResult:
         """Write content to a file.
 
         Args:
@@ -1540,9 +1557,31 @@ class LocalCodeExecutor:
             )
         )
 
-        return f"Successfully wrote to file: {file_path}"
+        equivalent_code = f"""
+        write_file_content = \"\"\"
+        {content}
+        \"\"\"
 
-    async def edit_file(self, file_path: str, replacements: List[Dict[str, str]]) -> str:
+        with open(file_path, "w") as f:
+            f.write(write_file_content)
+
+            print(f"Successfully wrote to file: {file_path}")
+        """
+
+        return CodeExecutionResult(
+            stdout=f"Successfully wrote to file: {file_path}",
+            stderr="",
+            logging="",
+            formatted_print="Successfully wrote to file: {file_path}",
+            code=equivalent_code,
+            message="",
+            role=ConversationRole.SYSTEM,
+            status=ProcessResponseStatus.SUCCESS,
+        )
+
+    async def edit_file(
+        self, file_path: str, replacements: List[Dict[str, str]]
+    ) -> CodeExecutionResult:
         """Edit a file by applying a series of find and replace operations.
 
         Args:
@@ -1582,7 +1621,16 @@ class LocalCodeExecutor:
                 should_summarize=True,
             )
         )
-        return f"Successfully edited file: {file_path}"
+        return CodeExecutionResult(
+            stdout=f"Successfully edited file: {file_path}",
+            stderr="",
+            logging="",
+            formatted_print="Successfully edited file: {file_path}",
+            code="",
+            message="",
+            role=ConversationRole.SYSTEM,
+            status=ProcessResponseStatus.SUCCESS,
+        )
 
     def _limit_conversation_history(self) -> None:
         """Limit the conversation history to the maximum number of messages."""
