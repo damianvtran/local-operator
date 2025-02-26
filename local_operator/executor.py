@@ -255,52 +255,6 @@ def annotate_code(code: str, error_line: int | None = None) -> str | None:
     return annotated_code
 
 
-def get_annotated_error_traceback(code: str, error: Exception) -> Exception:
-    """Get an annotated traceback for an error.
-
-    This function takes an exception and returns a string containing the annotated traceback.
-    The traceback is annotated with line numbers and character lengths.
-
-    Args:
-        code (str): The code that generated the error
-        error (Exception): The exception to get the annotated traceback from.
-
-    Returns:
-        Exception: The annotated traceback string.
-    """
-    lineno = None
-    tb = error.__traceback__
-    while tb is not None:
-        if tb.tb_frame.f_code.co_filename == "<agent_generated_code>":
-            lineno = tb.tb_lineno
-            break
-        tb = tb.tb_next
-
-    error_string = str(error)
-
-    annotated_code = annotate_code(code, error_line=lineno)
-    error_message = (
-        "<error_message>\n"
-        + f"{error_string}\n"
-        + "</error_message>\n"
-        + "<agent_generated_code>\n"
-        + "<legend>\n"
-        + "Error Indicator |Line | Length | Content\n"
-        + "</legend>\n"
-        + "<code_block>\n"
-        + f"{annotated_code}\n"
-        + "</code_block>\n"
-        + "</agent_generated_code>\n"
-    )
-
-    if isinstance(error, subprocess.CalledProcessError):
-        return type(error)(error.returncode, error.cmd, error_message).with_traceback(
-            error.__traceback__
-        )
-
-    return type(error)(error_message).with_traceback(error.__traceback__)
-
-
 class ExecutorTokenMetrics(BaseModel):
     """Tracks token usage and cost metrics for model executions.
 
@@ -331,6 +285,74 @@ class CodeExecutionResult(BaseModel):
     logging: str
     message: str
     code: str
+
+
+class CodeExecutionError(Exception):
+    """
+    Exception raised when code execution fails.
+
+    Attributes:
+        message (str): The error message.
+        code (str): The code that caused the error.
+    """
+
+    def __init__(self, message: str, code: str):
+        """
+        Initializes a new instance of the CodeExecutionError class.
+
+        Args:
+            message (str): The error message.
+            code (str): The code that caused the error.
+        """
+        self.message = message
+        self.code = code
+        super().__init__(self.message)
+
+    def agent_info_str(self) -> str:
+        """
+        Returns a string representation of the error, including annotated code for debugging.
+
+        This method extracts the line number from the traceback where the error occurred within
+        the agent-generated code, annotates the code with this information, and formats the
+        error message and annotated code into a string suitable for displaying to the agent.
+
+        Returns:
+            str: A formatted string containing the error message and annotated code,
+                 structured with XML-like tags for easy parsing. Includes:
+                 - The error message itself.
+                 - A legend explaining the annotation format.
+                 - The annotated code block, highlighting the error location.
+        """
+        lineno: int | None = None
+        tb = self.__traceback__
+        while tb is not None:
+            if tb.tb_frame.f_code.co_filename == "<agent_generated_code>":
+                lineno = tb.tb_lineno
+                break
+            tb = tb.tb_next
+
+        error_string = self.message
+        annotated_code = annotate_code(self.code, error_line=lineno)
+        traceback_str = "".join(format_exception(self))
+
+        error_info = (
+            "<error_message>\n"
+            + f"{error_string}\n"
+            + "</error_message>\n"
+            + "<error_traceback>\n"
+            + f"{traceback_str}\n"
+            + "</error_traceback>\n"
+            + "<agent_generated_code>\n"
+            + "<legend>\n"
+            + "Error Indicator |Line | Length | Content\n"
+            + "</legend>\n"
+            + "<code_block>\n"
+            + f"{annotated_code}\n"
+            + "</code_block>\n"
+            + "</agent_generated_code>\n"
+        )
+
+        return error_info
 
 
 class LocalCodeExecutor:
@@ -1102,9 +1124,6 @@ class LocalCodeExecutor:
                         exec(compiled_code, self.context)
                         # Run the coroutine
                         await self.context["__temp_coro"]
-                    except Exception as e:
-                        augmented_exception = get_annotated_error_traceback(code, e)
-                        raise augmented_exception from None
                     finally:
                         # Clean up even if there was an error
                         if "__temp_async_fn" in self.context:
@@ -1113,14 +1132,13 @@ class LocalCodeExecutor:
                             del self.context["__temp_coro"]
                 else:
                     # Regular synchronous code
-                    try:
-                        compiled_code = compile(code, "<agent_generated_code>", "exec")
-                        exec(compiled_code, self.context)
-                    except Exception as e:
-                        augmented_exception = get_annotated_error_traceback(code, e)
-                        raise augmented_exception from None
+                    compiled_code = compile(code, "<agent_generated_code>", "exec")
+                    exec(compiled_code, self.context)
         except Exception as e:
-            raise e
+            code_execution_error = CodeExecutionError(message=str(e), code=code).with_traceback(
+                e.__traceback__
+            )
+            raise code_execution_error from None
         finally:
             sys.stdin = old_stdin
 
@@ -1180,13 +1198,17 @@ class LocalCodeExecutor:
         Args:
             error (Exception): The error that occurred during initial execution.
         """
-        error_value = str(error)
-        traceback_str = "".join(format_exception(error))
+        if isinstance(error, CodeExecutionError):
+            error_info = error.agent_info_str()
+        else:
+            error_info = (
+                f"<error_message>\n{str(error)}\n</error_message>\n"
+                f"<error_traceback>\n{''.join(format_exception(error))}\n</error_traceback>\n"
+            )
 
         msg = (
             f"The initial execution failed with an error.\n"
-            f"<error_string>\n{error_value}\n</error_string>\n"
-            f"<error_traceback>\n{traceback_str}\n</error_traceback>\n"
+            f"{error_info}\n"
             "Debug the code you submitted and make all necessary corrections "
             "to fix the error and run successfully.  Pick up from where you left "
             "off and try to avoid re-running code that has already succeeded.  "
@@ -1206,16 +1228,20 @@ class LocalCodeExecutor:
         """Record retry attempt errors, including the traceback, in conversation history.
 
         Args:
-            error (Exception): The error that occurred during the retry attempt.
+            error (CodeExecutionError): The error that occurred during the retry attempt.
             attempt (int): The current retry attempt number.
         """
-        error_value = str(error)
-        traceback_str = "".join(format_exception(error))
+        if isinstance(error, CodeExecutionError):
+            error_info = error.agent_info_str()
+        else:
+            error_info = (
+                f"<error_message>\n{str(error)}\n</error_message>\n"
+                f"<error_traceback>\n{''.join(format_exception(error))}\n</error_traceback>\n"
+            )
 
         msg = (
             f"The code execution failed with an error (attempt {attempt + 1}).\n"
-            f"<error_string>\n{error_value}\n</error_string>\n"
-            f"<error_traceback>\n{traceback_str}\n</error_traceback>\n"
+            f"{error_info}\n"
             "Debug the code you submitted and make all necessary corrections "
             "to fix the error and run successfully.  Pick up from where you left "
             "off and try to avoid re-running code that has already succeeded.  "
