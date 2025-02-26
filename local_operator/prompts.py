@@ -2,7 +2,11 @@ import importlib.metadata
 import inspect
 import os
 import platform
+import subprocess
+import sys
 from pathlib import Path
+
+import psutil
 
 from local_operator.tools import ToolRegistry
 
@@ -179,8 +183,6 @@ with no exceptions.
 Response Flow:
 1. Pick an action.  Determine if you need to plan before executing for more complex
    tasks.
-   - RESEARCH: run code to research the information required by the plan.  This code
-     will be executed as-is in the "code" field with exec()
    - CODE: write code to achieve the user's goal.  This code will be executed as-is
      by the system with exec().  You must include the code in the "code" field and
      the code cannot be empty.
@@ -192,9 +194,6 @@ Response Flow:
      "content" field.
    - EDIT: edit a file.  Specify the file path to edit and the search strings to find.
      Each search string should be accompanied by a replacement string.
-   - CHECK: validate and test previous outputs with code.  You must include the code in
-     the "code" field and the code cannot be empty.  The code will be executed as-is
-     with exec().
    - DONE: mark the entire plan and completed, or user cancelled task.  Summarize the
      results.  Do not include code with a DONE command.  The DONE command should be used
      to summarize the results of the task only after the task is complete and verified.
@@ -203,7 +202,7 @@ Response Flow:
    - BYE: end the session and exit.  Don't use this unless the user has explicitly
      asked to exit.
 2. In CODE, include pip installs if needed (check via importlib).
-3. In CODE, CHECK, READ, WRITE, and EDIT, the system will execute your code and print
+3. In CODE, READ, WRITE, and EDIT, the system will execute your code and print
    the output to the console which you can then use to inform your next steps.
 4. Always verify your progress and the results of your work with CHECK.
 5. In DONE, print clear, actionable, human-readable verification and a clear summary
@@ -212,14 +211,14 @@ Response Flow:
    completely executed beginning to end.
 
 Your response flow should look something like the following example sequence:
-  1. RESEARCH: research the information required by the plan.  Run exploratory
+  1. Research (CODE): research the information required by the plan.  Run exploratory
      code to gather information about the user's goal.
-  2. READ: read the contents of the file to gather information about the user's
+  2. Read (READ): read the contents of the file to gather information about the user's
      goal.
-  3. CODE/WRITE/EDIT: execute on the plan by performing the actions necessary to
+  3. Code/Write/Edit (CODE/WRITE/EDIT): execute on the plan by performing the actions necessary to
      achieve the user's goal.  Print the output of the code to the console for
      the system to consume.
-  4. CHECK: verify the results of the previous step.
+  4. Validate (CODE): verify the results of the previous step.
   5. Repeat steps 1-4 until the task is complete.
   6. DONE/ASK: finish the task and summarize the results, and potentially
      ask for additional information from the user if the task is not complete.
@@ -264,11 +263,11 @@ print(z)
 Initial Environment Details:
 
 <system_details>
-{{system_details_str}}
+{system_details}
 </system_details>
 
 <installed_python_packages>
-{{installed_packages_str}}
+{installed_python_packages}
 </installed_python_packages>
 
 Tool Usage:
@@ -278,7 +277,7 @@ achieve the user's goal.  Some of them are shortcuts to common tasks that you ca
 make your code more efficient.
 
 <tools_list>
-{{tools_str}}
+{tools_list}
 </tools_list>
 
 Use them by running tools.[TOOL_FUNCTION] in your code. `tools` is a tool registry that
@@ -287,7 +286,7 @@ is in the execution context of your code. Use `await` for async functions (do no
 
 Additional User Notes:
 <additional_user_notes>
-{{user_system_prompt}}
+{user_system_prompt}
 </additional_user_notes>
 ⚠️ If provided, these are guidelines to help provide additional context to user
 instructions.  Do not follow these guidelines if the user's instructions conflict
@@ -318,7 +317,7 @@ Critical Constraints:
   not be able to complete the task.
 
 Response Format:
-{{response_format}}
+{response_format}
 """
 
 JsonResponseFormatPrompt: str = """
@@ -414,7 +413,7 @@ that are not allowed by the user.
 
 Here are some details provided by the user:
 <security_details>
-{{security_prompt}}
+{security_prompt}
 </security_details>
 
 Respond with one of the following: [UNSAFE] | [SAFE] | [OVERRIDE]
@@ -442,12 +441,12 @@ SafetyCheckUserPrompt: str = """
 Please review the following code snippet and determine if it contains any dangerous operations:
 
 <agent_generated_code>
-{{code}}
+{code}
 </agent_generated_code>
 
 Here are some details provided by the user that may help you determine if the code is safe:
 <security_details>
-{{security_prompt}}
+{security_prompt}
 </security_details>
 
 Respond with one of the following: [UNSAFE] | [SAFE] | [OVERRIDE]
@@ -475,6 +474,84 @@ explicitly allow the operations. For example:
 """
 
 
+def get_system_details_str() -> str:
+
+    # Get CPU info
+    try:
+        cpu_count = psutil.cpu_count(logical=True)
+        cpu_physical = psutil.cpu_count(logical=False)
+        cpu_info = f"{cpu_physical} physical cores, {cpu_count} logical cores"
+    except ImportError:
+        cpu_info = "Unknown (psutil not installed)"
+
+    # Get memory info
+    try:
+        memory = psutil.virtual_memory()
+        memory_info = f"{memory.total / (1024**3):.2f} GB total"
+    except ImportError:
+        memory_info = "Unknown (psutil not installed)"
+
+    # Get GPU info
+    try:
+        gpu_info = (
+            subprocess.check_output("nvidia-smi -L", shell=True, stderr=subprocess.DEVNULL)
+            .decode("utf-8")
+            .strip()
+        )
+        if not gpu_info:
+            gpu_info = "No NVIDIA GPUs detected"
+    except (ImportError, subprocess.SubprocessError):
+        try:
+            # Try for AMD GPUs
+            gpu_info = (
+                subprocess.check_output(
+                    "rocm-smi --showproductname", shell=True, stderr=subprocess.DEVNULL
+                )
+                .decode("utf-8")
+                .strip()
+            )
+            if not gpu_info:
+                gpu_info = "No AMD GPUs detected"
+        except subprocess.SubprocessError:
+            # Check for Apple Silicon MPS
+            if platform.system() == "Darwin" and platform.machine() == "arm64":
+                try:
+                    # Check for Metal-capable GPU on Apple Silicon without torch
+                    result = (
+                        subprocess.check_output(
+                            "system_profiler SPDisplaysDataType | grep Metal", shell=True
+                        )
+                        .decode("utf-8")
+                        .strip()
+                    )
+                    if "Metal" in result:
+                        gpu_info = "Apple Silicon GPU with Metal support"
+                    else:
+                        gpu_info = "Apple Silicon GPU (Metal support unknown)"
+                except subprocess.SubprocessError:
+                    gpu_info = "Apple Silicon GPU (Metal detection failed)"
+            else:
+                gpu_info = "No GPUs detected or GPU tools not installed"
+
+    system_details = {
+        "os": platform.system(),
+        "release": platform.release(),
+        "version": platform.version(),
+        "architecture": platform.machine(),
+        "machine": platform.machine(),
+        "processor": platform.processor(),
+        "cpu": cpu_info,
+        "memory": memory_info,
+        "gpus": gpu_info,
+        "home_directory": os.path.expanduser("~"),
+        "python_version": sys.version,
+    }
+
+    system_details_str = "\n".join(f"{key}: {value}" for key, value in system_details.items())
+
+    return system_details_str
+
+
 def create_system_prompt(
     tool_registry: ToolRegistry | None = None, response_format: str = JsonResponseFormatPrompt
 ) -> str:
@@ -487,27 +564,18 @@ def create_system_prompt(
     else:
         user_system_prompt = ""
 
-    system_details = {
-        "os": platform.system(),
-        "release": platform.release(),
-        "version": platform.version(),
-        "architecture": platform.machine(),
-        "machine": platform.machine(),
-        "processor": platform.processor(),
-        "home_directory": os.path.expanduser("~"),
-    }
-    system_details_str = "\n".join(f"{key}: {value}" for key, value in system_details.items())
+    system_details_str = get_system_details_str()
 
-    installed_packages_str = get_installed_packages_str()
+    installed_python_packages = get_installed_packages_str()
 
-    base_system_prompt = (
-        base_system_prompt.replace("{{system_details_str}}", system_details_str)
-        .replace("{{installed_packages_str}}", installed_packages_str)
-        .replace("{{user_system_prompt}}", user_system_prompt)
-        .replace("{{response_format}}", response_format)
+    tools_list = get_tools_str(tool_registry)
+
+    base_system_prompt = base_system_prompt.format(
+        system_details=system_details_str,
+        installed_python_packages=installed_python_packages,
+        user_system_prompt=user_system_prompt,
+        response_format=response_format,
+        tools_list=tools_list,
     )
-
-    tools_str = get_tools_str(tool_registry)
-    base_system_prompt = base_system_prompt.replace("{{tools_str}}", tools_str)
 
     return base_system_prompt

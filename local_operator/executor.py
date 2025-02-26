@@ -41,6 +41,8 @@ from local_operator.types import (
     ActionType,
     ConversationRecord,
     ConversationRole,
+    ProcessResponseOutput,
+    ProcessResponseStatus,
     ResponseJsonSchema,
 )
 
@@ -51,28 +53,6 @@ class ExecutorInitError(Exception):
     def __init__(self, message: str = "Failed to initialize executor"):
         self.message = message
         super().__init__(self.message)
-
-
-class ProcessResponseStatus(Enum):
-    """Status codes for process_response results."""
-
-    SUCCESS = "success"
-    CANCELLED = "cancelled"
-    ERROR = "error"
-    INTERRUPTED = "interrupted"
-
-
-class ProcessResponseOutput:
-    """Output structure for process_response results.
-
-    Attributes:
-        status (ProcessResponseStatus): Status of the response processing
-        message (str): Descriptive message about the processing result
-    """
-
-    def __init__(self, status: ProcessResponseStatus, message: str):
-        self.status = status
-        self.message = message
 
 
 class ConfirmSafetyResult(Enum):
@@ -255,52 +235,6 @@ def annotate_code(code: str, error_line: int | None = None) -> str | None:
     return annotated_code
 
 
-def get_annotated_error_traceback(code: str, error: Exception) -> Exception:
-    """Get an annotated traceback for an error.
-
-    This function takes an exception and returns a string containing the annotated traceback.
-    The traceback is annotated with line numbers and character lengths.
-
-    Args:
-        code (str): The code that generated the error
-        error (Exception): The exception to get the annotated traceback from.
-
-    Returns:
-        Exception: The annotated traceback string.
-    """
-    lineno = None
-    tb = error.__traceback__
-    while tb is not None:
-        if tb.tb_frame.f_code.co_filename == "<agent_generated_code>":
-            lineno = tb.tb_lineno
-            break
-        tb = tb.tb_next
-
-    error_string = str(error)
-
-    annotated_code = annotate_code(code, error_line=lineno)
-    error_message = (
-        "<error_message>\n"
-        + f"{error_string}\n"
-        + "</error_message>\n"
-        + "<agent_generated_code>\n"
-        + "<legend>\n"
-        + "Error Indicator |Line | Length | Content\n"
-        + "</legend>\n"
-        + "<code_block>\n"
-        + f"{annotated_code}\n"
-        + "</code_block>\n"
-        + "</agent_generated_code>\n"
-    )
-
-    if isinstance(error, subprocess.CalledProcessError):
-        return type(error)(error.returncode, error.cmd, error_message).with_traceback(
-            error.__traceback__
-        )
-
-    return type(error)(error_message).with_traceback(error.__traceback__)
-
-
 class ExecutorTokenMetrics(BaseModel):
     """Tracks token usage and cost metrics for model executions.
 
@@ -313,6 +247,98 @@ class ExecutorTokenMetrics(BaseModel):
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
     total_cost: float = 0.0
+
+
+class CodeExecutionResult(BaseModel):
+    """Represents the result of a code execution.
+
+    Attributes:
+        stdout (str): The standard output from the code execution.
+        stderr (str): The standard error from the code execution.
+        logging (str): Any logging output generated during the code execution.
+        message (str): The message to display to the user about the code execution.
+        code (str): The code that was executed.
+        formatted_print (str): The formatted print output from the code execution.
+        role (ConversationRole): The role of the message sender (user/assistant/system)
+        status (ProcessResponseStatus): The status of the code execution
+    """
+
+    stdout: str
+    stderr: str
+    logging: str
+    message: str
+    code: str
+    formatted_print: str
+    role: ConversationRole
+    status: ProcessResponseStatus
+
+
+class CodeExecutionError(Exception):
+    """
+    Exception raised when code execution fails.
+
+    Attributes:
+        message (str): The error message.
+        code (str): The code that caused the error.
+    """
+
+    def __init__(self, message: str, code: str):
+        """
+        Initializes a new instance of the CodeExecutionError class.
+
+        Args:
+            message (str): The error message.
+            code (str): The code that caused the error.
+        """
+        self.message = message
+        self.code = code
+        super().__init__(self.message)
+
+    def agent_info_str(self) -> str:
+        """
+        Returns a string representation of the error, including annotated code for debugging.
+
+        This method extracts the line number from the traceback where the error occurred within
+        the agent-generated code, annotates the code with this information, and formats the
+        error message and annotated code into a string suitable for displaying to the agent.
+
+        Returns:
+            str: A formatted string containing the error message and annotated code,
+                 structured with XML-like tags for easy parsing. Includes:
+                 - The error message itself.
+                 - A legend explaining the annotation format.
+                 - The annotated code block, highlighting the error location.
+        """
+        lineno: int | None = None
+        tb = self.__traceback__
+        while tb is not None:
+            if tb.tb_frame.f_code.co_filename == "<agent_generated_code>":
+                lineno = tb.tb_lineno
+                break
+            tb = tb.tb_next
+
+        error_string = self.message
+        annotated_code = annotate_code(self.code, error_line=lineno)
+        traceback_str = "".join(format_exception(self))
+
+        error_info = (
+            "<error_message>\n"
+            + f"{error_string}\n"
+            + "</error_message>\n"
+            + "<error_traceback>\n"
+            + f"{traceback_str}\n"
+            + "</error_traceback>\n"
+            + "<agent_generated_code>\n"
+            + "<legend>\n"
+            + "Error Indicator |Line | Length | Content\n"
+            + "</legend>\n"
+            + "<code_block>\n"
+            + f"{annotated_code}\n"
+            + "</code_block>\n"
+            + "</agent_generated_code>\n"
+        )
+
+        return error_info
 
 
 class LocalCodeExecutor:
@@ -329,6 +355,7 @@ class LocalCodeExecutor:
     tool_registry: ToolRegistry | None
     learnings: List[str]
     current_plan: str | None
+    code_history: List[CodeExecutionResult]
 
     """A class to handle local Python code execution with safety checks and context management.
 
@@ -390,6 +417,7 @@ class LocalCodeExecutor:
         self.learnings = []
         self.current_plan = None
         self.max_learnings_history = max_learnings_history
+        self.code_history = []
 
         self.reset_step_counter()
 
@@ -788,9 +816,7 @@ class LocalCodeExecutor:
         agent_security_prompt = self.agent.security_prompt if self.agent else ""
 
         if self.can_prompt_user:
-            safety_prompt = SafetyCheckSystemPrompt.replace(
-                "{{security_prompt}}", agent_security_prompt
-            )
+            safety_prompt = SafetyCheckSystemPrompt.format(security_prompt=agent_security_prompt)
 
             safety_history = [
                 ConversationRecord(
@@ -815,9 +841,10 @@ class LocalCodeExecutor:
 
         # If we can't prompt the user, we need to use the conversation history to determine
         # if the user has previously indicated a decision.
-        safety_prompt = SafetyCheckUserPrompt.replace("{{code}}", code).replace(
-            "{{security_prompt}}", agent_security_prompt
+        safety_prompt = SafetyCheckUserPrompt.format(
+            code=code, security_prompt=agent_security_prompt
         )
+
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.USER,
@@ -844,7 +871,7 @@ class LocalCodeExecutor:
 
         return safety_result
 
-    async def execute_code(self, code: str, max_retries: int = 3) -> str:
+    async def execute_code(self, code: str, max_retries: int = 3) -> CodeExecutionResult:
         """Execute Python code with safety checks and context management.
 
         Args:
@@ -852,14 +879,32 @@ class LocalCodeExecutor:
             max_retries (int): Maximum number of retry attempts
 
         Returns:
-            str: Execution result message or error message
+            CodeExecutionResult: The result of the code execution
         """
         # First check code safety
         safety_result = await self._check_and_confirm_safety(code)
         if safety_result == ConfirmSafetyResult.UNSAFE:
-            return "Code execution canceled by user"
+            return CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                message="Code execution canceled by user",
+                code=code,
+                formatted_print="",
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.CANCELLED,
+            )
         elif safety_result == ConfirmSafetyResult.CONVERSATION_CONFIRM:
-            return "Code execution requires further confirmation from the user"
+            return CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                message="Code execution requires further confirmation from the user",
+                code=code,
+                formatted_print="",
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.CONFIRMATION_REQUIRED,
+            )
         elif safety_result == ConfirmSafetyResult.OVERRIDE:
             print(
                 "\n\033[1;33m⚠️  Warning: Code safety override applied based on user's security"
@@ -894,7 +939,20 @@ class LocalCodeExecutor:
                         log_retry_error(retry_error, attempt, max_retries)
                         break
 
-        return format_error_output(final_error or Exception("Unknown error occurred"), max_retries)
+        formatted_print = format_error_output(
+            final_error or Exception("Unknown error occurred"), max_retries
+        )
+
+        return CodeExecutionResult(
+            stdout="",
+            stderr="",
+            logging="",
+            message="",
+            code=current_code,
+            formatted_print=formatted_print,
+            role=ConversationRole.ASSISTANT,
+            status=ProcessResponseStatus.ERROR,
+        )
 
     async def _check_and_confirm_safety(self, code: str) -> ConfirmSafetyResult:
         """Check code safety and get user confirmation if needed.
@@ -946,14 +1004,14 @@ class LocalCodeExecutor:
                 return ConfirmSafetyResult.CONVERSATION_CONFIRM
         return safety_result
 
-    async def _execute_with_output(self, code: str) -> str:
+    async def _execute_with_output(self, code: str) -> CodeExecutionResult:
         """Execute code and capture stdout/stderr output.
 
         Args:
             code (str): The Python code to execute
 
         Returns:
-            str: Formatted string containing execution output and any error messages
+            CodeExecutionResult: The result of the code execution
 
         Raises:
             Exception: Re-raises any exceptions that occur during code execution
@@ -999,7 +1057,17 @@ class LocalCodeExecutor:
             output, error_output = self._capture_and_record_output(
                 new_stdout, new_stderr, log_output
             )
-            return format_success_output((output, error_output, log_output))
+            formatted_print = format_success_output((output, error_output, log_output))
+            return CodeExecutionResult(
+                stdout=output,
+                stderr=error_output,
+                logging=log_output,
+                message="",
+                code=code,
+                formatted_print=formatted_print,
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.SUCCESS,
+            )
         except Exception as e:
             # Add captured log output to error output if any
             log_output = log_capture.getvalue()
@@ -1053,9 +1121,6 @@ class LocalCodeExecutor:
                         exec(compiled_code, self.context)
                         # Run the coroutine
                         await self.context["__temp_coro"]
-                    except Exception as e:
-                        augmented_exception = get_annotated_error_traceback(code, e)
-                        raise augmented_exception from None
                     finally:
                         # Clean up even if there was an error
                         if "__temp_async_fn" in self.context:
@@ -1064,14 +1129,13 @@ class LocalCodeExecutor:
                             del self.context["__temp_coro"]
                 else:
                     # Regular synchronous code
-                    try:
-                        compiled_code = compile(code, "<agent_generated_code>", "exec")
-                        exec(compiled_code, self.context)
-                    except Exception as e:
-                        augmented_exception = get_annotated_error_traceback(code, e)
-                        raise augmented_exception from None
+                    compiled_code = compile(code, "<agent_generated_code>", "exec")
+                    exec(compiled_code, self.context)
         except Exception as e:
-            raise e
+            code_execution_error = CodeExecutionError(message=str(e), code=code).with_traceback(
+                e.__traceback__
+            )
+            raise code_execution_error from None
         finally:
             sys.stdin = old_stdin
 
@@ -1131,13 +1195,17 @@ class LocalCodeExecutor:
         Args:
             error (Exception): The error that occurred during initial execution.
         """
-        error_value = str(error)
-        traceback_str = "".join(format_exception(error))
+        if isinstance(error, CodeExecutionError):
+            error_info = error.agent_info_str()
+        else:
+            error_info = (
+                f"<error_message>\n{str(error)}\n</error_message>\n"
+                f"<error_traceback>\n{''.join(format_exception(error))}\n</error_traceback>\n"
+            )
 
         msg = (
             f"The initial execution failed with an error.\n"
-            f"<error_string>\n{error_value}\n</error_string>\n"
-            f"<error_traceback>\n{traceback_str}\n</error_traceback>\n"
+            f"{error_info}\n"
             "Debug the code you submitted and make all necessary corrections "
             "to fix the error and run successfully.  Pick up from where you left "
             "off and try to avoid re-running code that has already succeeded.  "
@@ -1157,16 +1225,20 @@ class LocalCodeExecutor:
         """Record retry attempt errors, including the traceback, in conversation history.
 
         Args:
-            error (Exception): The error that occurred during the retry attempt.
+            error (CodeExecutionError): The error that occurred during the retry attempt.
             attempt (int): The current retry attempt number.
         """
-        error_value = str(error)
-        traceback_str = "".join(format_exception(error))
+        if isinstance(error, CodeExecutionError):
+            error_info = error.agent_info_str()
+        else:
+            error_info = (
+                f"<error_message>\n{str(error)}\n</error_message>\n"
+                f"<error_traceback>\n{''.join(format_exception(error))}\n</error_traceback>\n"
+            )
 
         msg = (
             f"The code execution failed with an error (attempt {attempt + 1}).\n"
-            f"<error_string>\n{error_value}\n</error_string>\n"
-            f"<error_traceback>\n{traceback_str}\n</error_traceback>\n"
+            f"{error_info}\n"
             "Debug the code you submitted and make all necessary corrections "
             "to fix the error and run successfully.  Pick up from where you left "
             "off and try to avoid re-running code that has already succeeded.  "
@@ -1280,7 +1352,7 @@ class LocalCodeExecutor:
         )
         spinner_task = asyncio.create_task(spinner(f"Executing {str(response.action).lower()}"))
 
-        result_message = ""
+        execution_result = None
 
         try:
             if response.action == ActionType.WRITE:
@@ -1294,9 +1366,11 @@ class LocalCodeExecutor:
                         action=response.action,
                     )
 
-                    result_message = await self.write_file(file_path, content)
+                    execution_result = await self.write_file(file_path, content)
                     print_execution_section(
-                        ExecutionSection.RESULT, content=result_message, action=response.action
+                        ExecutionSection.RESULT,
+                        content=execution_result.formatted_print,
+                        action=response.action,
                     )
                 else:
                     raise ValueError("File path is required for WRITE action")
@@ -1312,10 +1386,12 @@ class LocalCodeExecutor:
                         action=response.action,
                     )
 
-                    result_message = await self.edit_file(file_path, replacements)
+                    execution_result = await self.edit_file(file_path, replacements)
 
                     print_execution_section(
-                        ExecutionSection.RESULT, content=result_message, action=response.action
+                        ExecutionSection.RESULT,
+                        content=execution_result.formatted_print,
+                        action=response.action,
                     )
                 else:
                     raise ValueError("File path and replacements are required for EDIT action")
@@ -1328,7 +1404,7 @@ class LocalCodeExecutor:
                         file_path=file_path,
                         action=response.action,
                     )
-                    result_message = await self.read_file(file_path)
+                    execution_result = await self.read_file(file_path)
                 else:
                     raise ValueError("File path is required for READ action")
 
@@ -1339,19 +1415,22 @@ class LocalCodeExecutor:
                         ExecutionSection.CODE, content=code_block, action=response.action
                     )
 
-                    result_message = await self.execute_code(code_block)
+                    execution_result = await self.execute_code(code_block)
 
-                    if "code execution cancelled by user" in result_message:
+                    if "code execution cancelled by user" in execution_result.message:
                         return ProcessResponseOutput(
                             status=ProcessResponseStatus.CANCELLED,
                             message="Code execution cancelled by user",
                         )
 
                     print_execution_section(
-                        ExecutionSection.RESULT, content=result_message, action=response.action
+                        ExecutionSection.RESULT,
+                        content=execution_result.formatted_print,
+                        action=response.action,
                     )
-                elif response.action == ActionType.CHECK or response.action == ActionType.CODE:
-                    raise ValueError('"code" field is required for CODE or CHECK actions')
+                elif response.action == ActionType.CODE:
+                    raise ValueError('"code" field is required for CODE actions')
+
         except Exception as e:
             log_action_error(e, str(response.action))
             self.append_to_history(
@@ -1367,6 +1446,9 @@ class LocalCodeExecutor:
                 await spinner_task
             except asyncio.CancelledError:
                 pass
+
+        if execution_result:
+            self.add_to_code_history(execution_result, response)
 
         token_metrics = self.get_token_metrics()
         print_execution_section(
@@ -1396,12 +1478,12 @@ class LocalCodeExecutor:
 
         output = ProcessResponseOutput(
             status=ProcessResponseStatus.SUCCESS,
-            message=result_message if result_message else "Action completed",
+            message=execution_result.message if execution_result else "Action completed",
         )
 
         return output
 
-    async def read_file(self, file_path: str) -> str:
+    async def read_file(self, file_path: str) -> CodeExecutionResult:
         """Read the contents of a file and include line numbers and lengths.
 
         Args:
@@ -1438,9 +1520,18 @@ class LocalCodeExecutor:
             )
         )
 
-        return f"Successfully read file: {file_path}"
+        return CodeExecutionResult(
+            stdout=f"Successfully read file: {file_path}",
+            stderr="",
+            logging="",
+            formatted_print="Successfully read file: {file_path}",
+            code="",
+            message="",
+            role=ConversationRole.SYSTEM,
+            status=ProcessResponseStatus.SUCCESS,
+        )
 
-    async def write_file(self, file_path: str, content: str) -> str:
+    async def write_file(self, file_path: str, content: str) -> CodeExecutionResult:
         """Write content to a file.
 
         Args:
@@ -1464,9 +1555,31 @@ class LocalCodeExecutor:
             )
         )
 
-        return f"Successfully wrote to file: {file_path}"
+        equivalent_code = f"""
+        write_file_content = \"\"\"
+        {content}
+        \"\"\"
 
-    async def edit_file(self, file_path: str, replacements: List[Dict[str, str]]) -> str:
+        with open(file_path, "w") as f:
+            f.write(write_file_content)
+
+            print(f"Successfully wrote to file: {file_path}")
+        """
+
+        return CodeExecutionResult(
+            stdout=f"Successfully wrote to file: {file_path}",
+            stderr="",
+            logging="",
+            formatted_print="Successfully wrote to file: {file_path}",
+            code=equivalent_code,
+            message="",
+            role=ConversationRole.SYSTEM,
+            status=ProcessResponseStatus.SUCCESS,
+        )
+
+    async def edit_file(
+        self, file_path: str, replacements: List[Dict[str, str]]
+    ) -> CodeExecutionResult:
         """Edit a file by applying a series of find and replace operations.
 
         Args:
@@ -1506,7 +1619,16 @@ class LocalCodeExecutor:
                 should_summarize=True,
             )
         )
-        return f"Successfully edited file: {file_path}"
+        return CodeExecutionResult(
+            stdout=f"Successfully edited file: {file_path}",
+            stderr="",
+            logging="",
+            formatted_print="Successfully edited file: {file_path}",
+            code="",
+            message="",
+            role=ConversationRole.SYSTEM,
+            status=ProcessResponseStatus.SUCCESS,
+        )
 
     def _limit_conversation_history(self) -> None:
         """Limit the conversation history to the maximum number of messages."""
@@ -1831,3 +1953,19 @@ class LocalCodeExecutor:
         </current_plan>
         """
         return template
+
+    def add_to_code_history(
+        self, execution_result: CodeExecutionResult, response: ResponseJsonSchema | None
+    ) -> None:
+        """Add a code execution result to the code history.
+
+        Args:
+            execution_result (CodeExecutionResult): The execution result to add
+            response (ResponseJsonSchema | None): The response from the model
+        """
+        new_code_record = execution_result
+
+        if response:
+            new_code_record.message = response.response
+
+        self.code_history.append(new_code_record)

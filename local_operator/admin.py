@@ -27,11 +27,14 @@ Typical usage example:
 """
 
 import json
+import platform
+import subprocess
 from typing import Any, Callable, Dict, List, Optional
 
 from local_operator.agents import AgentData, AgentEditFields, AgentRegistry
 from local_operator.config import Config, ConfigManager
 from local_operator.executor import LocalCodeExecutor
+from local_operator.notebook import save_code_history_to_notebook
 from local_operator.operator import ConversationRole
 from local_operator.tools import ToolRegistry
 
@@ -342,7 +345,7 @@ def get_agent_info_tool(
     return get_agent_info
 
 
-def save_conversation_tool(
+def save_conversation_raw_json_tool(
     executor: LocalCodeExecutor,
 ) -> Callable[[str], None]:
     """Create a tool function that saves conversation history to disk in JSON format.
@@ -363,8 +366,8 @@ def save_conversation_tool(
         RuntimeError: If there are unexpected issues during the save operation
     """
 
-    def save_conversation(filename: str) -> None:
-        """Save the current Local Operator conversation history to a JSON file.
+    def save_conversation_raw_json(filename: str) -> None:
+        """Save the current Local Operator conversation history to a raw JSON file.
 
         Exports the complete conversation history including all messages between user and agent,
         commands executed, and their results. The file can be used for analysis or to initialize
@@ -398,7 +401,7 @@ def save_conversation_tool(
         except Exception as e:
             raise RuntimeError(f"Error saving conversation: {str(e)}")
 
-    return save_conversation
+    return save_conversation_raw_json
 
 
 def get_config_tool(config_manager: ConfigManager) -> Callable[[], Config]:
@@ -551,9 +554,6 @@ def open_settings_config_tool(config_manager: ConfigManager) -> Callable[[], Non
             if not config_file.exists():
                 raise RuntimeError(f"Settings configuration file not found at {config_file}")
 
-            import platform
-            import subprocess
-
             system = platform.system()
             if system == "Darwin":  # macOS
                 subprocess.run(["open", str(config_file)], check=True)
@@ -566,6 +566,49 @@ def open_settings_config_tool(config_manager: ConfigManager) -> Callable[[], Non
             raise RuntimeError(f"Failed to open settings configuration file: {str(e)}")
 
     return open_settings_config
+
+
+def save_conversation_history_to_notebook_tool(
+    executor: LocalCodeExecutor,
+) -> Callable[[str], None]:
+    """Create a tool function that saves conversation history to a notebook in ipynb format.
+
+    This function returns a callable that, when called, saves the executed code blocks
+    along with their outputs into an IPython notebook file (.ipynb). The notebook
+    is saved in JSON format.
+
+    Returns:
+        Callable[[str], None]: A function that saves the code blocks to a notebook file.
+    """
+
+    def save_conversation_history_to_notebook(file_path: str = "notebook.ipynb") -> None:
+        """Save the conversation history to an IPython notebook file (.ipynb).
+
+        This function retrieves the code blocks and their execution results from the
+        executor, formats them as notebook cells, and saves them to a .ipynb file
+        in JSON format.
+
+        Args:
+            file_path (str): The path to save the notebook to. Defaults to "notebook.ipynb".
+
+        Raises:
+            Exception: If there is an error during notebook creation or file saving.
+        """
+        try:
+            save_code_history_to_notebook(
+                code_history=executor.code_history,
+                model_configuration=executor.model_configuration,
+                max_conversation_history=executor.max_conversation_history,
+                detail_conversation_length=executor.detail_conversation_length,
+                max_learnings_history=executor.max_learnings_history,
+                file_path=file_path,
+            )
+            print(f"Notebook saved to {file_path}")
+
+        except Exception as e:
+            raise Exception(f"Failed to save conversation history to notebook: {str(e)}")
+
+    return save_conversation_history_to_notebook
 
 
 def add_admin_tools(
@@ -583,10 +626,12 @@ def add_admin_tools(
     - edit_agent_tool
     - delete_agent_tool
     - get_agent_info_tool
-    - save_conversation_tool
+    - save_conversation_raw_json_tool
     - get_config_tool
     - update_config_tool
     - open_agents_config_tool
+    - open_settings_config_tool
+    - save_conversation_history_to_notebook_tool
     Args:
         tool_registry: The ToolRegistry instance to add tools to
     """
@@ -610,8 +655,8 @@ def add_admin_tools(
         get_agent_info_tool(agent_registry),
     )
     tool_registry.add_tool(
-        "save_conversation",
-        save_conversation_tool(executor),
+        "save_conversation_raw_json",
+        save_conversation_raw_json_tool(executor),
     )
     tool_registry.add_tool(
         "get_config",
@@ -632,4 +677,8 @@ def add_admin_tools(
     tool_registry.add_tool(
         "open_settings_config",
         open_settings_config_tool(config_manager),
+    )
+    tool_registry.add_tool(
+        "save_conversation_history_to_notebook",
+        save_conversation_history_to_notebook_tool(executor),
     )

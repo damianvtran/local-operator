@@ -18,9 +18,9 @@ from local_operator.model.registry import (
 
 ModelType = Union[ChatOpenAI, ChatOllama, ChatAnthropic, ChatGoogleGenerativeAI, ChatMock, ChatNoop]
 
-DEFAULT_TEMPERATURE = 0.7
+DEFAULT_TEMPERATURE = 0.2
 """Default temperature value for language models."""
-DEFAULT_TOP_P = 0.5
+DEFAULT_TOP_P = 0.9
 """Default top_p value for language models."""
 
 
@@ -279,6 +279,7 @@ def configure_model(
             default_headers={
                 "HTTP-Referer": "https://local-operator.com",
                 "X-Title": "Local Operator",
+                "X-Description": "AI agents doing work for you on your own device",
             },
         )
 
