@@ -23,6 +23,7 @@ setup(
         "fastapi>=0.115.8",
         "playwright>=1.49.1",
         "requests>=2.32.3",
+        "psutil>=6.1.1",
     ],
     python_requires=">=3.12",
     extras_require={
