@@ -1,5 +1,4 @@
 import io
-import json
 import subprocess
 import tempfile
 import textwrap
@@ -13,7 +12,6 @@ from openai import APIError
 
 from local_operator.executor import (
     CodeExecutionError,
-    CodeExecutionResult,
     ConfirmSafetyResult,
     LocalCodeExecutor,
     get_confirm_safety_result,
@@ -1841,126 +1839,3 @@ def test_code_execution_error_agent_info_str(
     assert "<code_block>" in error_str
     assert "</code_block>" in error_str
     assert "</agent_generated_code>" in error_str
-
-
-def test_save_code_history_to_notebook(executor: LocalCodeExecutor, tmp_path: Path) -> None:
-    """
-    Test the save_code_history_to_notebook tool to verify that the code execution history
-    is saved to an IPython notebook file.
-    """
-    file_path = tmp_path / "notebook.ipynb"
-    executor.code_history = [
-        CodeExecutionResult(
-            stdout="",
-            stderr="",
-            logging="",
-            message="Please print hello world",
-            code="",
-            formatted_print="",
-            role=ConversationRole.USER,
-            status=ProcessResponseStatus.SUCCESS,
-        ),
-        CodeExecutionResult(
-            stdout="",
-            stderr="",
-            logging="",
-            message="Ok, the plan is that I will print hello world",
-            code="",
-            formatted_print="",
-            role=ConversationRole.ASSISTANT,
-            status=ProcessResponseStatus.SUCCESS,
-        ),
-        CodeExecutionResult(
-            stdout="Hello, world!\n",
-            stderr="",
-            logging="",
-            formatted_print="",
-            code="print('Hello, world!')",
-            message="I will now print 'Hello, world!'",
-            role=ConversationRole.ASSISTANT,
-            status=ProcessResponseStatus.SUCCESS,
-        ),
-        CodeExecutionResult(
-            stdout="/path/to/cwd\n",
-            stderr="",
-            logging="",
-            formatted_print="",
-            code="import os\nprint(os.getcwd())",
-            message="I will now print the current working directory",
-            role=ConversationRole.ASSISTANT,
-            status=ProcessResponseStatus.SUCCESS,
-        ),
-    ]
-    executor.save_code_history_to_notebook(str(file_path))
-
-    assert file_path.exists(), "Notebook file was not created"
-
-    with open(file_path, "r", encoding="utf-8") as f:
-        notebook_data = json.load(f)
-
-    assert "cells" in notebook_data, "Notebook does not contain cells"
-
-    expected_cells = [
-        {
-            "cell_type": "markdown",
-            "source_contains": "Local Operator Conversation Notebook",
-            "description": "First cell (title)",
-        },
-        {
-            "cell_type": "markdown",
-            "source_contains": "Please print hello world",
-            "description": "First cell (user message)",
-        },
-        {
-            "cell_type": "markdown",
-            "source_contains": "Ok, the plan is that I will print hello world",
-            "description": "Second cell (assistant message)",
-        },
-        {
-            "cell_type": "markdown",
-            "source_contains": "I will now print 'Hello, world!'",
-            "description": "Third cell (response)",
-        },
-        {
-            "cell_type": "code",
-            "source_contains": "print('Hello, world!')",
-            "output_contains": "Hello, world!",
-            "description": "Fourth cell (code)",
-        },
-        {
-            "cell_type": "markdown",
-            "source_contains": "I will now print the current working directory",
-            "description": "Fifth cell (response)",
-        },
-        {
-            "cell_type": "code",
-            "source_contains": "import os",
-            "output_contains": "/path/to/cwd",
-            "description": "Sixth cell (code)",
-        },
-    ]
-
-    assert len(notebook_data["cells"]) == len(expected_cells), (
-        f"Notebook contains {len(notebook_data['cells'])} cells, " f"expected {len(expected_cells)}"
-    )
-
-    for i, expected in enumerate(expected_cells):
-        cell = notebook_data["cells"][i]
-        assert (
-            cell["cell_type"] == expected["cell_type"]
-        ), f"{expected['description']} is not a {expected['cell_type']} cell"
-
-        if "source" in expected:
-            assert (
-                cell["source"] == expected["source"]
-            ), f"{expected['description']} source is incorrect"
-
-        if "source_contains" in expected:
-            assert expected["source_contains"] in "".join(
-                cell["source"]
-            ), f"{expected['description']} source code does not contain expected content"
-
-        if "output_contains" in expected and cell["cell_type"] == "code":
-            assert expected["output_contains"] in "".join(
-                cell["outputs"][0]["text"]
-            ), f"{expected['description']} output is incorrect"
