@@ -279,6 +279,7 @@ def configure_model(
             default_headers={
                 "HTTP-Referer": "https://local-operator.com",
                 "X-Title": "Local Operator",
+                "X-Description": "AI agents doing work for you on your own device",
             },
         )
 
