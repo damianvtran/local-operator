@@ -34,6 +34,7 @@ from typing import Any, Callable, Dict, List, Optional
 from local_operator.agents import AgentData, AgentEditFields, AgentRegistry
 from local_operator.config import Config, ConfigManager
 from local_operator.executor import LocalCodeExecutor
+from local_operator.notebook import save_code_history_to_notebook
 from local_operator.operator import ConversationRole
 from local_operator.tools import ToolRegistry
 
@@ -594,8 +595,14 @@ def save_conversation_history_to_notebook_tool(
             Exception: If there is an error during notebook creation or file saving.
         """
         try:
-            executor.save_code_history_to_notebook(file_path)
-
+            save_code_history_to_notebook(
+                code_history=executor.code_history,
+                model_configuration=executor.model_configuration,
+                max_conversation_history=executor.max_conversation_history,
+                detail_conversation_length=executor.detail_conversation_length,
+                max_learnings_history=executor.max_learnings_history,
+                file_path=file_path,
+            )
             print(f"Notebook saved to {file_path}")
 
         except Exception as e:
