@@ -1,4 +1,5 @@
 import asyncio
+import importlib.metadata
 import inspect
 import io
 import json
@@ -1978,15 +1979,69 @@ class LocalCodeExecutor:
             "nbformat_minor": 5,
         }
 
+        # Add title and description as the first cell
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Get version information
+        try:
+            version = importlib.metadata.version("local-operator")
+        except (ImportError, importlib.metadata.PackageNotFoundError):
+            version = "unknown"
+
+        # Get model information
+        model_info = self.model_configuration.name
+
+        # Get hosting information
+        hosting_info = self.model_configuration.hosting
+        title_cell_content = [
+            "# 🤖 Local Operator Conversation Notebook 📓\n\n",
+            "This notebook contains the exported conversation and code execution history from a "
+            "<a href='https://local-operator.com'>Local Operator</a> agent session.\n\n",
+            "## 📊 Session Information\n\n",
+            "<table style='width: 80%; border-collapse: collapse;'>\n"
+            f"  <tr><td style='padding: 8px; font-weight: bold;'>📅 Date and Time</td>"
+            f"<td>{current_time}</td></tr>\n"
+            f"  <tr><td style='padding: 8px; font-weight: bold;'>🔢 Local Operator Version</td>"
+            f"<td>{version}</td></tr>\n"
+            f"  <tr><td style='padding: 8px; font-weight: bold;'>🧠 Model</td>"
+            f"<td>{model_info}</td></tr>\n"
+            f"  <tr><td style='padding: 8px; font-weight: bold;'>☁️ Hosting</td>"
+            f"<td>{hosting_info}</td></tr>\n"
+            f"  <tr><td style='padding: 8px; font-weight: bold;'>💬 Max Conversation History</td>"
+            f"<td>{self.max_conversation_history}</td></tr>\n"
+            f"  <tr><td style='padding: 8px; font-weight: bold;'>📜 Detailed Conversation Length"
+            "</td>"
+            f"<td>{self.detail_conversation_length}</td></tr>\n"
+            f"  <tr><td style='padding: 8px; font-weight: bold;'>📚 Learning History Length"
+            "</td>"
+            f"<td>{self.max_learnings_history}</td></tr>\n"
+            "</table>\n\n",
+            "💡 **Tip:** To reproduce this conversation, you can run Local Operator with the "
+            "same configuration settings listed above.",
+        ]
+
+        notebook_content["cells"].append(
+            {"cell_type": "markdown", "metadata": {}, "source": title_cell_content}
+        )
+
         code_results = self.code_history
         for code_result in code_results:
             # Add agent response as a markdown cell
             if code_result.message:
+                # Add role-specific icons and formatting
+                if code_result.role == ConversationRole.ASSISTANT:
+                    prefix = "🤖 **Assistant**: "
+                elif code_result.role == ConversationRole.USER:
+                    prefix = "👤 **User**: "
+                else:
+                    prefix = ""
+
+                message_with_prefix = f"{prefix}{code_result.message}"
                 notebook_content["cells"].append(
                     {
                         "cell_type": "markdown",
                         "metadata": {},
-                        "source": code_result.message.splitlines(keepends=True),
+                        "source": message_with_prefix.splitlines(keepends=True),
                     }
                 )
 
