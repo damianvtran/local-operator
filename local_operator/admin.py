@@ -342,7 +342,7 @@ def get_agent_info_tool(
     return get_agent_info
 
 
-def save_conversation_tool(
+def save_conversation_raw_json_tool(
     executor: LocalCodeExecutor,
 ) -> Callable[[str], None]:
     """Create a tool function that saves conversation history to disk in JSON format.
@@ -363,8 +363,8 @@ def save_conversation_tool(
         RuntimeError: If there are unexpected issues during the save operation
     """
 
-    def save_conversation(filename: str) -> None:
-        """Save the current Local Operator conversation history to a JSON file.
+    def save_conversation_raw_json(filename: str) -> None:
+        """Save the current Local Operator conversation history to a raw JSON file.
 
         Exports the complete conversation history including all messages between user and agent,
         commands executed, and their results. The file can be used for analysis or to initialize
@@ -398,7 +398,7 @@ def save_conversation_tool(
         except Exception as e:
             raise RuntimeError(f"Error saving conversation: {str(e)}")
 
-    return save_conversation
+    return save_conversation_raw_json
 
 
 def get_config_tool(config_manager: ConfigManager) -> Callable[[], Config]:
@@ -568,8 +568,10 @@ def open_settings_config_tool(config_manager: ConfigManager) -> Callable[[], Non
     return open_settings_config
 
 
-def save_code_history_to_notebook_tool(executor: LocalCodeExecutor) -> Callable[[str], None]:
-    """Create a tool function that saves code to a notebook in ipynb format.
+def save_conversation_history_to_notebook_tool(
+    executor: LocalCodeExecutor,
+) -> Callable[[str], None]:
+    """Create a tool function that saves conversation history to a notebook in ipynb format.
 
     This function returns a callable that, when called, saves the executed code blocks
     along with their outputs into an IPython notebook file (.ipynb). The notebook
@@ -579,8 +581,8 @@ def save_code_history_to_notebook_tool(executor: LocalCodeExecutor) -> Callable[
         Callable[[str], None]: A function that saves the code blocks to a notebook file.
     """
 
-    def save_code_history_to_notebook(file_path: str = "notebook.ipynb") -> None:
-        """Save the code execution history to an IPython notebook file (.ipynb).
+    def save_conversation_history_to_notebook(file_path: str = "notebook.ipynb") -> None:
+        """Save the conversation history to an IPython notebook file (.ipynb).
 
         This function retrieves the code blocks and their execution results from the
         executor, formats them as notebook cells, and saves them to a .ipynb file
@@ -598,9 +600,9 @@ def save_code_history_to_notebook_tool(executor: LocalCodeExecutor) -> Callable[
             print(f"Notebook saved to {file_path}")
 
         except Exception as e:
-            raise Exception(f"Failed to save code to notebook: {str(e)}")
+            raise Exception(f"Failed to save conversation history to notebook: {str(e)}")
 
-    return save_code_history_to_notebook
+    return save_conversation_history_to_notebook
 
 
 def add_admin_tools(
@@ -618,10 +620,12 @@ def add_admin_tools(
     - edit_agent_tool
     - delete_agent_tool
     - get_agent_info_tool
-    - save_conversation_tool
+    - save_conversation_raw_json_tool
     - get_config_tool
     - update_config_tool
     - open_agents_config_tool
+    - open_settings_config_tool
+    - save_conversation_history_to_notebook_tool
     Args:
         tool_registry: The ToolRegistry instance to add tools to
     """
@@ -645,8 +649,8 @@ def add_admin_tools(
         get_agent_info_tool(agent_registry),
     )
     tool_registry.add_tool(
-        "save_conversation",
-        save_conversation_tool(executor),
+        "save_conversation_raw_json",
+        save_conversation_raw_json_tool(executor),
     )
     tool_registry.add_tool(
         "get_config",
@@ -669,6 +673,6 @@ def add_admin_tools(
         open_settings_config_tool(config_manager),
     )
     tool_registry.add_tool(
-        "save_code_history_to_notebook",
-        save_code_history_to_notebook_tool(executor),
+        "save_conversation_history_to_notebook",
+        save_conversation_history_to_notebook_tool(executor),
     )
