@@ -1417,8 +1417,6 @@ class LocalCodeExecutor:
 
                     execution_result = await self.execute_code(code_block)
 
-                    self.add_to_code_history(execution_result, response)
-
                     if "code execution cancelled by user" in execution_result.message:
                         return ProcessResponseOutput(
                             status=ProcessResponseStatus.CANCELLED,
