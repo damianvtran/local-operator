@@ -11,10 +11,10 @@ import pytest
 from openai import APIError
 
 from local_operator.executor import (
+    CodeExecutionError,
+    CodeExecutionResult,
     ConfirmSafetyResult,
     LocalCodeExecutor,
-    ProcessResponseStatus,
-    get_annotated_error_traceback,
     get_confirm_safety_result,
     get_context_vars_str,
     process_json_response,
@@ -25,6 +25,7 @@ from local_operator.types import (
     ActionType,
     ConversationRecord,
     ConversationRole,
+    ProcessResponseStatus,
     ResponseJsonSchema,
 )
 
@@ -448,9 +449,9 @@ async def test_execute_code_success(executor, mock_model_config):
     code = "print('hello')"
 
     with patch("sys.stdout", new_callable=io.StringIO):
-        result = await executor.execute_code(code)
-        assert "✓ Code Execution Complete" in result
-        assert "hello" in result
+        execution_result = await executor.execute_code(code)
+        assert "✓ Code Execution Complete" in execution_result.formatted_print
+        assert "hello" in execution_result.formatted_print
 
 
 @pytest.mark.asyncio
@@ -459,9 +460,9 @@ async def test_execute_code_no_output(executor, mock_model_config):
     code = "x = 1 + 1"  # Code that produces no output
 
     with patch("sys.stdout", new_callable=io.StringIO):
-        result = await executor.execute_code(code)
-        assert "✓ Code Execution Complete" in result
-        assert "[No output]" in result
+        execution_result = await executor.execute_code(code)
+        assert "✓ Code Execution Complete" in execution_result.formatted_print
+        assert "[No output]" in execution_result.formatted_print
 
 
 @pytest.mark.asyncio
@@ -473,10 +474,10 @@ async def test_execute_code_safety_no_prompt(executor, mock_model_config):
     code = "import os; os.remove('file.txt')"  # Potentially dangerous code
 
     with patch("sys.stdout", new_callable=io.StringIO):
-        result = await executor.execute_code(code)
+        execution_result = await executor.execute_code(code)
 
         # Should not cancel execution but add warning to conversation history
-        assert "requires further confirmation" in result
+        assert "requires further confirmation" in execution_result.message
         assert len(executor.conversation_history) > 0
         last_message = executor.conversation_history[-1]
         assert last_message.role == ConversationRole.ASSISTANT
@@ -495,10 +496,10 @@ async def test_execute_code_safety_with_prompt(executor, mock_model_config):
         patch("sys.stdout", new_callable=io.StringIO),
         patch("builtins.input", return_value="n"),
     ):  # User responds "n" to safety prompt
-        result = await executor.execute_code(code)
+        execution_result = await executor.execute_code(code)
 
         # Should cancel execution when user declines
-        assert "Code execution canceled by user" in result
+        assert "Code execution canceled by user" in execution_result.message
         assert len(executor.conversation_history) > 0
         last_message = executor.conversation_history[-1]
         assert last_message.role == ConversationRole.USER
@@ -515,10 +516,10 @@ async def test_execute_code_safety_with_prompt_approved(executor, mock_model_con
         patch("sys.stdout", new_callable=io.StringIO),
         patch("builtins.input", return_value="y"),  # User responds "y" to safety prompt
     ):
-        result = await executor.execute_code(code)
+        execution_result = await executor.execute_code(code)
 
         # Should proceed with execution when user approves
-        assert "Code Execution Complete" in result
+        assert "Code Execution Complete" in execution_result.formatted_print
 
 
 @pytest.mark.asyncio
@@ -530,10 +531,10 @@ async def test_execute_code_safety_with_override(executor, mock_model_config):
     code = "x = 1 + 1"
 
     with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
-        result = await executor.execute_code(code)
+        execution_result = await executor.execute_code(code)
 
         # Should proceed with execution and log override
-        assert "Code Execution Complete" in result
+        assert "Code Execution Complete" in execution_result.formatted_print
         output = mock_stdout.getvalue()
         assert "Code safety override applied" in output
 
@@ -1249,7 +1250,6 @@ def test_process_json_response(
     "action_type, code, file_path, content, replacements, expected_output",
     [
         (ActionType.CODE, "print('hello')", None, None, None, "Executing Code"),
-        (ActionType.CHECK, "x = 1", None, None, None, "Executing Check"),
         (ActionType.WRITE, None, "test.txt", "test content", None, "Executing Write"),
         (
             ActionType.EDIT,
@@ -1294,13 +1294,57 @@ async def test_perform_action(
 
     with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
         if action_type == ActionType.READ:
-            executor.read_file = AsyncMock(return_value="File content")
+            executor.read_file = AsyncMock(
+                return_value=CodeExecutionResult(
+                    stdout="File content",
+                    stderr="",
+                    logging="",
+                    formatted_print="File content",
+                    code="",
+                    message="",
+                    role=ConversationRole.SYSTEM,
+                    status=ProcessResponseStatus.SUCCESS,
+                )
+            )
         elif action_type == ActionType.WRITE:
-            executor.write_file = AsyncMock(return_value="File written")
+            executor.write_file = AsyncMock(
+                return_value=CodeExecutionResult(
+                    stdout="File written",
+                    stderr="",
+                    logging="",
+                    formatted_print="File written",
+                    code="",
+                    message="",
+                    role=ConversationRole.SYSTEM,
+                    status=ProcessResponseStatus.SUCCESS,
+                )
+            )
         elif action_type == ActionType.EDIT:
-            executor.edit_file = AsyncMock(return_value="File edited")
+            executor.edit_file = AsyncMock(
+                return_value=CodeExecutionResult(
+                    stdout="File edited",
+                    stderr="",
+                    logging="",
+                    formatted_print="File edited",
+                    code="",
+                    message="",
+                    role=ConversationRole.SYSTEM,
+                    status=ProcessResponseStatus.SUCCESS,
+                )
+            )
         else:
-            executor.execute_code = AsyncMock(return_value="Code executed")
+            executor.execute_code = AsyncMock(
+                return_value=CodeExecutionResult(
+                    stdout="Code executed",
+                    stderr="",
+                    logging="",
+                    formatted_print="Code executed",
+                    code="",
+                    message="",
+                    role=ConversationRole.SYSTEM,
+                    status=ProcessResponseStatus.SUCCESS,
+                )
+            )
 
         result = await executor.perform_action(response)
         assert result is not None
@@ -1372,7 +1416,7 @@ async def test_read_file_action(executor: LocalCodeExecutor, tmp_path: Path, fil
 
     result = await executor.read_file(str(file_path))
 
-    assert "Successfully read file" in result
+    assert "Successfully read file" in result.formatted_print
     assert str(file_path) in executor.conversation_history[-1].content
 
     with open(file_path, "r") as f:
@@ -1399,7 +1443,7 @@ async def test_write_file_action(executor: LocalCodeExecutor, tmp_path: Path):
         file_content = f.read()
     assert file_content == "New file content"
 
-    assert "Successfully wrote to file" in result
+    assert "Successfully wrote to file" in result.formatted_print
     assert str(file_path) in executor.conversation_history[-1].content
 
 
@@ -1486,7 +1530,7 @@ async def test_edit_file_action(
             file_content = f.read()
         assert file_content == expected_content
         assert result is not None
-        assert "Successfully edited file" in result
+        assert "Successfully edited file" in result.formatted_print
         assert str(file_path) in executor.conversation_history[-1].content
 
 
@@ -1792,12 +1836,14 @@ def test_get_environment_details_large_directory(executor, monkeypatch):
         "IndexError",
     ],
 )
-def test_get_annotated_error_traceback(code, error_type, error_msg, expected_content, monkeypatch):
-    """Test that get_annotated_error_traceback properly formats error tracebacks."""
+def test_code_execution_error_agent_info_str(
+    code, error_type, error_msg, expected_content, monkeypatch
+):
+    """Test that CodeExecutionError.agent_info_str properly formats error tracebacks."""
 
-    # Create a traceback by actually executing the code
+    # Create a CodeExecutionError by actually executing the code
     tb = None
-    error = None
+    code_execution_error = None
     try:
         # Compile and execute the code to get a real traceback
         compiled_code = compile(code, "<agent_generated_code>", "exec")
@@ -1805,24 +1851,24 @@ def test_get_annotated_error_traceback(code, error_type, error_msg, expected_con
     except Exception as e:
         if isinstance(e, error_type):
             tb = e.__traceback__
-            error = e
+            code_execution_error = CodeExecutionError(str(e), code)
+            code_execution_error.__traceback__ = tb
         else:
             # Create an error of the expected type with the real traceback
-            error = error_type(error_msg)
-            error.__traceback__ = e.__traceback__
+            temp_error = error_type(error_msg)
+            code_execution_error = CodeExecutionError(str(temp_error), code)
+            code_execution_error.__traceback__ = temp_error.__traceback__
 
     # If we didn't get an error (unlikely), create one manually
-    if tb is None:
-        error = error_type(error_msg)
+    if tb is None and code_execution_error is None:
+        temp_error = error_type(error_msg)
+        code_execution_error = CodeExecutionError(str(temp_error), code)
         # We'll rely on the function to handle missing traceback
 
-    assert error is not None
+    assert code_execution_error is not None
 
-    # Get the annotated error
-    annotated_error = get_annotated_error_traceback(code, error)
-
-    # Convert to string for easier assertion
-    error_str = str(annotated_error)
+    # Get the annotated error string
+    error_str = code_execution_error.agent_info_str()
 
     # Check that all expected content is in the error message
     for content in expected_content:
@@ -1838,6 +1884,3 @@ def test_get_annotated_error_traceback(code, error_type, error_msg, expected_con
     assert "<code_block>" in error_str
     assert "</code_block>" in error_str
     assert "</agent_generated_code>" in error_str
-
-    # Verify the error is of the same type as the input error
-    assert isinstance(annotated_error, error_type)

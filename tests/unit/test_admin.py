@@ -26,7 +26,7 @@ from local_operator.admin import (
     get_config_tool,
     list_agent_info_tool,
     save_agent_training_tool,
-    save_conversation_tool,
+    save_conversation_raw_json_tool,
     update_config_tool,
 )
 from local_operator.agents import AgentEditFields
@@ -293,7 +293,7 @@ def test_save_conversation_tool(tmp_path: Any, executor: LocalCodeExecutor) -> N
         ConversationRecord(role=ConversationRole.ASSISTANT, content="Hi there!"),
     ]
     executor.conversation_history = conversation_history
-    save_tool = save_conversation_tool(executor)
+    save_tool = save_conversation_raw_json_tool(executor)
     save_tool(str(file_path))
     with open(file_path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -345,12 +345,13 @@ def test_add_admin_tools(
         "edit_agent",
         "delete_agent",
         "get_agent_info",
-        "save_conversation",
+        "save_conversation_raw_json",
         "get_config",
         "update_config",
         "save_agent_training",
         "open_agents_config",
         "open_settings_config",
+        "save_conversation_history_to_notebook",
     }
     tools_set = set(tool_registry._tools.keys())
     # Check that all expected tools are present, but allow for additional builtin tools

@@ -29,11 +29,9 @@ class ActionType(str, Enum):
     Used to track the type of action being taken in a conversation.
     """
 
-    RESEARCH = "RESEARCH"
     CODE = "CODE"
     WRITE = "WRITE"
     EDIT = "EDIT"
-    CHECK = "CHECK"
     DONE = "DONE"
     ASK = "ASK"
     BYE = "BYE"
@@ -149,3 +147,26 @@ class ResponseJsonSchema(BaseModel):
     action: ActionType
     learnings: str
     plan: str
+
+
+class ProcessResponseStatus(Enum):
+    """Status codes for process_response results."""
+
+    SUCCESS = "success"
+    CANCELLED = "cancelled"
+    ERROR = "error"
+    INTERRUPTED = "interrupted"
+    CONFIRMATION_REQUIRED = "confirmation_required"
+
+
+class ProcessResponseOutput:
+    """Output structure for process_response results.
+
+    Attributes:
+        status (ProcessResponseStatus): Status of the response processing
+        message (str): Descriptive message about the processing result
+    """
+
+    def __init__(self, status: ProcessResponseStatus, message: str):
+        self.status = status
+        self.message = message
