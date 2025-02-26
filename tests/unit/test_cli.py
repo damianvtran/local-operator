@@ -142,7 +142,12 @@ def test_main_success():
     ):
 
         mock_config_manager = mock_config_manager_cls.return_value
-        mock_config_manager.get_config_value.side_effect = ["deepseek", "deepseek-chat", 10]
+        mock_config_manager.get_config_value.side_effect = lambda key, default=None: {
+            "hosting": "deepseek",
+            "model_name": "deepseek-chat",
+            "detail_length": 10,
+            "max_learnings_history": 50,
+        }.get(key, default)
 
         with patch("sys.argv", ["program", "--hosting", "deepseek", "--agent", "test-agent"]):
             result = main()
