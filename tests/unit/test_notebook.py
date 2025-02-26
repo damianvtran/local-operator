@@ -45,6 +45,16 @@ def test_save_code_history_to_notebook(tmp_path: Path) -> None:
             status=ProcessResponseStatus.SUCCESS,
         ),
         CodeExecutionResult(
+            stdout="",
+            stderr="Failed to print 'Lorem ipsum dolor sit amet!'",
+            logging="",
+            formatted_print="",
+            code="print('Lorem ipsum dolor sit amet!')",
+            message="I will now print 'Lorem ipsum dolor sit amet!'",
+            role=ConversationRole.ASSISTANT,
+            status=ProcessResponseStatus.ERROR,
+        ),
+        CodeExecutionResult(
             stdout="Hello, world!\n",
             stderr="",
             logging="",
@@ -104,25 +114,37 @@ def test_save_code_history_to_notebook(tmp_path: Path) -> None:
         },
         {
             "cell_type": "markdown",
-            "source_contains": "I will now print 'Hello, world!'",
+            "source_contains": "I will now print 'Lorem ipsum dolor sit amet!'",
             "description": "Third cell (response)",
+        },
+        {
+            "cell_type": "code",
+            "source_contains": "print('Lorem ipsum dolor sit amet!')",
+            "output_contains": "Failed to print 'Lorem ipsum dolor sit amet!'",
+            "description": "Fourth cell (error code)",
+            "should_skip_execution": True,
+        },
+        {
+            "cell_type": "markdown",
+            "source_contains": "I will now print 'Hello, world!'",
+            "description": "Fifth cell (response)",
         },
         {
             "cell_type": "code",
             "source_contains": "print('Hello, world!')",
             "output_contains": "Hello, world!",
-            "description": "Fourth cell (code)",
+            "description": "Sixth cell (code)",
         },
         {
             "cell_type": "markdown",
             "source_contains": "I will now print the current working directory",
-            "description": "Fifth cell (response)",
+            "description": "Seventh cell (response)",
         },
         {
             "cell_type": "code",
             "source_contains": "import os",
             "output_contains": "/path/to/cwd",
-            "description": "Sixth cell (code)",
+            "description": "Eighth cell (code)",
         },
     ]
 
@@ -150,3 +172,8 @@ def test_save_code_history_to_notebook(tmp_path: Path) -> None:
             assert expected["output_contains"] in "".join(
                 cell["outputs"][0]["text"]
             ), f"{expected['description']} output is incorrect"
+
+        if "should_skip_execution" in expected and cell["cell_type"] == "code":
+            assert (
+                cell["metadata"]["skip_execution"] == expected["should_skip_execution"]
+            ), f"{expected['description']} should_skip_execution is incorrect"

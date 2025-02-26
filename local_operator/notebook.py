@@ -14,7 +14,7 @@ from typing import List
 
 from local_operator.executor import CodeExecutionResult
 from local_operator.model.configure import ModelConfiguration
-from local_operator.types import ConversationRole
+from local_operator.types import ConversationRole, ProcessResponseStatus
 
 TitleCellTemplate = """
 # 🤖 Local Operator Conversation Notebook 📓
@@ -154,6 +154,7 @@ def save_code_history_to_notebook(
 
         cell_source = code_result.code
 
+        # Don't add a code cell if the history record is only a user/assistant message
         if not cell_source:
             continue
 
@@ -165,11 +166,15 @@ def save_code_history_to_notebook(
         if code_result.logging:
             cell_output += f"Logging:\n{code_result.logging}\n"
 
+        metadata = {}
+        if code_result.status != ProcessResponseStatus.SUCCESS:
+            metadata["skip_execution"] = True
+
         notebook_content["cells"].append(
             {
                 "cell_type": "code",
                 "execution_count": None,
-                "metadata": {},
+                "metadata": metadata,
                 "outputs": [
                     {
                         "name": "stdout",
