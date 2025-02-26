@@ -68,13 +68,30 @@ Once you have the API key, install the operator CLI with the following command:
 pip install local-operator
 ```
 
-Then, install the playwright browsers with the following command:
+### Web Browsing
+
+To enable web browsing, you can install the playwright browsers with the following command:
 
 ```bash
 playwright install
 ```
 
+This is not necessary to use the web browsing tool, as the agent will automatically install the browsers when they are needed, but it can be faster to install them ahead of start up if you know you will need them.
+
 If you would like to run with a local Ollama model, you will need to install Ollama first from [here](https://ollama.ai/download), and fetch a model using `ollama pull`.  Make sure that the ollama server is running with `ollama serve`.
+
+### Web Search
+
+To enable web search, you will need to get a SERP API key from [SerpApi](https://serpapi.com/users/sign_up).  This is used to search the web for information.  The agent can still browse the web without it, though information access will be less efficient.
+
+Get your API key and then configure the `SERP_API_KEY` credential:
+
+```bash
+local-operator credential --key SERP_API_KEY
+```
+
+Once the credential is set, the agent will be able to search the web for information
+using its web search tool on the next start up.
 
 ## 🖥️ Usage (CLI)
 
@@ -201,6 +218,8 @@ Credentials are stored in the `~/.local-operator/credentials.yml` file.  Credent
 - `DEEPSEEK_API_KEY`: The API key for the DeepSeek API.  This is used to access the DeepSeek model.
 
 ## 📝 Examples
+
+Check out the [example notebooks](./examples/notebooks/) for more examples of tasks completed with Local Operator.  These notebooks were created in Local Operator by asking the agent to save the conversation history to a notebook each time.  You can replicate them by asking the same user prompts with the same configuration settings.
 
 ### Hello World
 
