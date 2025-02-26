@@ -27,6 +27,8 @@ Typical usage example:
 """
 
 import json
+import platform
+import subprocess
 from typing import Any, Callable, Dict, List, Optional
 
 from local_operator.agents import AgentData, AgentEditFields, AgentRegistry
@@ -550,9 +552,6 @@ def open_settings_config_tool(config_manager: ConfigManager) -> Callable[[], Non
             config_file = config_manager.config_dir / "config.yml"
             if not config_file.exists():
                 raise RuntimeError(f"Settings configuration file not found at {config_file}")
-
-            import platform
-            import subprocess
 
             system = platform.system()
             if system == "Darwin":  # macOS
