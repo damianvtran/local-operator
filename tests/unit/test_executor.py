@@ -1899,28 +1899,33 @@ def test_save_code_history_to_notebook(executor: LocalCodeExecutor, tmp_path: Pa
     expected_cells = [
         {
             "cell_type": "markdown",
-            "source": ["Please print hello world"],
+            "source_contains": "Local Operator Conversation Notebook",
+            "description": "First cell (title)",
+        },
+        {
+            "cell_type": "markdown",
+            "source_contains": "Please print hello world",
             "description": "First cell (user message)",
         },
         {
             "cell_type": "markdown",
-            "source": ["Ok, the plan is that I will print hello world"],
+            "source_contains": "Ok, the plan is that I will print hello world",
             "description": "Second cell (assistant message)",
         },
         {
             "cell_type": "markdown",
-            "source": ["I will now print 'Hello, world!'"],
+            "source_contains": "I will now print 'Hello, world!'",
             "description": "Third cell (response)",
         },
         {
             "cell_type": "code",
-            "source": ["print('Hello, world!')"],
+            "source_contains": "print('Hello, world!')",
             "output_contains": "Hello, world!",
             "description": "Fourth cell (code)",
         },
         {
             "cell_type": "markdown",
-            "source": ["I will now print the current working directory"],
+            "source_contains": "I will now print the current working directory",
             "description": "Fifth cell (response)",
         },
         {
