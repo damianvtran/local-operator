@@ -32,7 +32,7 @@ from local_operator.admin import (
 )
 from local_operator.agents import AgentEditFields
 from local_operator.config import Config, ConfigManager
-from local_operator.executor import CodeExecutionResult, ExecutorCodeBlock
+from local_operator.executor import CodeExecutionResult
 from local_operator.tools import ToolRegistry
 from local_operator.types import ConversationRecord, ConversationRole
 
@@ -338,13 +338,19 @@ def test_save_code_history_to_notebook(executor: LocalCodeExecutor, tmp_path: Pa
     """
     file_path = tmp_path / "notebook.ipynb"
     executor.code_history = [
-        ExecutorCodeBlock(
-            source="print('Hello, world!')",
-            output=CodeExecutionResult(stdout="Hello, world!\n", stderr="", logging="", message=""),
+        CodeExecutionResult(
+            stdout="Hello, world!\n",
+            stderr="",
+            logging="",
+            message="",
+            code="print('Hello, world!')",
         ),
-        ExecutorCodeBlock(
-            source="import os\nprint(os.getcwd())",
-            output=CodeExecutionResult(stdout="/path/to/cwd\n", stderr="", logging="", message=""),
+        CodeExecutionResult(
+            stdout="/path/to/cwd\n",
+            stderr="",
+            logging="",
+            message="",
+            code="import os\nprint(os.getcwd())",
         ),
     ]
     save_tool = save_code_history_to_notebook_tool(executor)

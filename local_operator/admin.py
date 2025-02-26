@@ -617,14 +617,14 @@ def save_code_history_to_notebook_tool(executor: LocalCodeExecutor) -> Callable[
 
             code_results = executor.code_history
             for code_result in code_results:
-                cell_source = code_result.source
+                cell_source = code_result.code
                 cell_output = ""
-                if code_result.output.stdout:
-                    cell_output += f"Output:\n{code_result.output.stdout}\n"
-                if code_result.output.stderr:
-                    cell_output += f"Errors:\n{code_result.output.stderr}\n"
-                if code_result.output.logging:
-                    cell_output += f"Logging:\n{code_result.output.logging}\n"
+                if code_result.stdout:
+                    cell_output += f"Output:\n{code_result.stdout}\n"
+                if code_result.stderr:
+                    cell_output += f"Errors:\n{code_result.stderr}\n"
+                if code_result.logging:
+                    cell_output += f"Logging:\n{code_result.logging}\n"
 
                 notebook_content["cells"].append(
                     {

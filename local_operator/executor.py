@@ -323,24 +323,14 @@ class CodeExecutionResult(BaseModel):
         stderr (str): The standard error from the code execution.
         logging (str): Any logging output generated during the code execution.
         message (str): The message to display to the user about the code execution.
+        code (str): The code that was executed.
     """
 
     stdout: str
     stderr: str
     logging: str
     message: str
-
-
-class ExecutorCodeBlock(BaseModel):
-    """Represents a code block that has been executed, along with its execution results.
-
-    Attributes:
-        source (str): The Python code that was executed.
-        output (str): The result of the code execution.
-    """
-
-    source: str
-    output: CodeExecutionResult
+    code: str
 
 
 class LocalCodeExecutor:
@@ -357,7 +347,7 @@ class LocalCodeExecutor:
     tool_registry: ToolRegistry | None
     learnings: List[str]
     current_plan: str | None
-    code_history: List[ExecutorCodeBlock]
+    code_history: List[CodeExecutionResult]
 
     """A class to handle local Python code execution with safety checks and context management.
 
@@ -892,6 +882,7 @@ class LocalCodeExecutor:
                 stderr="",
                 logging="",
                 message="Code execution canceled by user",
+                code=code,
             )
         elif safety_result == ConfirmSafetyResult.CONVERSATION_CONFIRM:
             return CodeExecutionResult(
@@ -899,6 +890,7 @@ class LocalCodeExecutor:
                 stderr="",
                 logging="",
                 message="Code execution requires further confirmation from the user",
+                code=code,
             )
         elif safety_result == ConfirmSafetyResult.OVERRIDE:
             print(
@@ -937,11 +929,13 @@ class LocalCodeExecutor:
         formatted_message = format_error_output(
             final_error or Exception("Unknown error occurred"), max_retries
         )
+
         return CodeExecutionResult(
             stdout="",
             stderr="",
             logging="",
             message=formatted_message,
+            code=current_code,
         )
 
     async def _check_and_confirm_safety(self, code: str) -> ConfirmSafetyResult:
@@ -1053,6 +1047,7 @@ class LocalCodeExecutor:
                 stderr=error_output,
                 logging=log_output,
                 message=message,
+                code=code,
             )
         except Exception as e:
             # Add captured log output to error output if any
@@ -1395,12 +1390,7 @@ class LocalCodeExecutor:
 
                     execution_result = await self.execute_code(code_block)
 
-                    self.code_history.append(
-                        ExecutorCodeBlock(
-                            source=code_block,
-                            output=execution_result,
-                        )
-                    )
+                    self.code_history.append(execution_result)
 
                     if "code execution cancelled by user" in execution_result.message:
                         return ProcessResponseOutput(
