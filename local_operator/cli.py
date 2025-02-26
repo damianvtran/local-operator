@@ -114,6 +114,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "claude-3-5-sonnet-20240620, moonshot-v1-32k, qwen-plus, gemini-2.0-flash, "
         "mistral-large-latest, test-model, deepseek/deepseek-chat)",
     )
+    parser.add_argument(
+        "--run-in",
+        type=str,
+        help="The working directory to run the operator in.  Must be a valid directory.",
+        dest="run_in",
+    )
     subparsers = parser.add_subparsers(dest="subcommand")
 
     # Credential command
@@ -395,6 +401,15 @@ def main() -> int:
 
         # Override config with CLI args where provided
         config_manager.update_config_from_args(args)
+
+        # Set working directory if provided and valid
+        if args.run_in:
+            run_in_path = Path(args.run_in).resolve()
+            if not run_in_path.is_dir():
+                print(f"\n\033[1;31mError: Invalid working directory: {args.run_in}\033[0m")
+                return -1
+            os.chdir(run_in_path)
+            print(f"\n\033[1;32mSetting working directory to: {run_in_path}\033[0m")
 
         # Get agent if name provided
         agent = None
