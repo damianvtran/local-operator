@@ -344,6 +344,7 @@ def test_save_code_history_to_notebook(executor: LocalCodeExecutor, tmp_path: Pa
             logging="",
             message="",
             code="print('Hello, world!')",
+            response="I will now print 'Hello, world!'",
         ),
         CodeExecutionResult(
             stdout="/path/to/cwd\n",
@@ -351,6 +352,7 @@ def test_save_code_history_to_notebook(executor: LocalCodeExecutor, tmp_path: Pa
             logging="",
             message="",
             code="import os\nprint(os.getcwd())",
+            response="I will now print the current working directory",
         ),
     ]
     save_tool = save_code_history_to_notebook_tool(executor)
@@ -362,23 +364,39 @@ def test_save_code_history_to_notebook(executor: LocalCodeExecutor, tmp_path: Pa
         notebook_data = json.load(f)
 
     assert "cells" in notebook_data, "Notebook does not contain cells"
-    assert len(notebook_data["cells"]) == 2, "Notebook does not contain the correct number of cells"
+    assert len(notebook_data["cells"]) == 4, "Notebook does not contain the correct number of cells"
 
-    # Verify the content of the first cell
+    # Verify the content of the first cell (response)
     first_cell = notebook_data["cells"][0]
-    assert first_cell["cell_type"] == "code", "First cell is not a code cell"
-    assert first_cell["source"] == ["print('Hello, world!')"], "First cell source code is incorrect"
-    assert "Hello, world!" in "".join(
-        first_cell["outputs"][0]["text"]
-    ), "First cell output is incorrect"
+    assert first_cell["cell_type"] == "markdown", "First cell is not a markdown cell"
+    assert first_cell["source"] == [
+        "I will now print 'Hello, world!'",
+    ], "First cell source is incorrect"
 
-    # Verify the content of the second cell
+    # Verify the content of the second cell (code)
     second_cell = notebook_data["cells"][1]
     assert second_cell["cell_type"] == "code", "Second cell is not a code cell"
-    assert "import os" in "".join(second_cell["source"]), "Second cell source code is incorrect"
-    assert "/path/to/cwd" in "".join(
+    assert second_cell["source"] == [
+        "print('Hello, world!')",
+    ], "Second cell source code is incorrect"
+    assert "Hello, world!" in "".join(
         second_cell["outputs"][0]["text"]
     ), "Second cell output is incorrect"
+
+    # Verify the content of the third cell (response)
+    third_cell = notebook_data["cells"][2]
+    assert third_cell["cell_type"] == "markdown", "Third cell is not a markdown cell"
+    assert third_cell["source"] == [
+        "I will now print the current working directory",
+    ], "Third cell source is incorrect"
+
+    # Verify the content of the forth cell (code)
+    forth_cell = notebook_data["cells"][3]
+    assert forth_cell["cell_type"] == "code", "Forth cell is not a code cell"
+    assert "import os" in "".join(forth_cell["source"]), "Forth cell source code is incorrect"
+    assert "/path/to/cwd" in "".join(
+        forth_cell["outputs"][0]["text"]
+    ), "Forth cell output is incorrect"
 
 
 def test_add_admin_tools(

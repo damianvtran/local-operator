@@ -278,6 +278,7 @@ class CodeExecutionResult(BaseModel):
         logging (str): Any logging output generated during the code execution.
         message (str): The message to display to the user about the code execution.
         code (str): The code that was executed.
+        response (str): The response from the model.
     """
 
     stdout: str
@@ -285,6 +286,7 @@ class CodeExecutionResult(BaseModel):
     logging: str
     message: str
     code: str
+    response: str
 
 
 class CodeExecutionError(Exception):
@@ -905,6 +907,7 @@ class LocalCodeExecutor:
                 logging="",
                 message="Code execution canceled by user",
                 code=code,
+                response="",
             )
         elif safety_result == ConfirmSafetyResult.CONVERSATION_CONFIRM:
             return CodeExecutionResult(
@@ -913,6 +916,7 @@ class LocalCodeExecutor:
                 logging="",
                 message="Code execution requires further confirmation from the user",
                 code=code,
+                response="",
             )
         elif safety_result == ConfirmSafetyResult.OVERRIDE:
             print(
@@ -958,6 +962,7 @@ class LocalCodeExecutor:
             logging="",
             message=formatted_message,
             code=current_code,
+            response="",
         )
 
     async def _check_and_confirm_safety(self, code: str) -> ConfirmSafetyResult:
@@ -1070,6 +1075,7 @@ class LocalCodeExecutor:
                 logging=log_output,
                 message=message,
                 code=code,
+                response="",
             )
         except Exception as e:
             # Add captured log output to error output if any
@@ -1415,6 +1421,7 @@ class LocalCodeExecutor:
                     )
 
                     execution_result = await self.execute_code(code_block)
+                    execution_result.response = response.response
 
                     self.code_history.append(execution_result)
 
