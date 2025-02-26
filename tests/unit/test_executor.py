@@ -1,4 +1,5 @@
 import io
+import json
 import subprocess
 import tempfile
 import textwrap
@@ -12,6 +13,7 @@ from openai import APIError
 
 from local_operator.executor import (
     CodeExecutionError,
+    CodeExecutionResult,
     ConfirmSafetyResult,
     LocalCodeExecutor,
     ProcessResponseStatus,
@@ -449,8 +451,8 @@ async def test_execute_code_success(executor, mock_model_config):
 
     with patch("sys.stdout", new_callable=io.StringIO):
         execution_result = await executor.execute_code(code)
-        assert "✓ Code Execution Complete" in execution_result.message
-        assert "hello" in execution_result.message
+        assert "✓ Code Execution Complete" in execution_result.formatted_print
+        assert "hello" in execution_result.formatted_print
 
 
 @pytest.mark.asyncio
@@ -460,8 +462,8 @@ async def test_execute_code_no_output(executor, mock_model_config):
 
     with patch("sys.stdout", new_callable=io.StringIO):
         execution_result = await executor.execute_code(code)
-        assert "✓ Code Execution Complete" in execution_result.message
-        assert "[No output]" in execution_result.message
+        assert "✓ Code Execution Complete" in execution_result.formatted_print
+        assert "[No output]" in execution_result.formatted_print
 
 
 @pytest.mark.asyncio
@@ -518,7 +520,7 @@ async def test_execute_code_safety_with_prompt_approved(executor, mock_model_con
         execution_result = await executor.execute_code(code)
 
         # Should proceed with execution when user approves
-        assert "Code Execution Complete" in execution_result.message
+        assert "Code Execution Complete" in execution_result.formatted_print
 
 
 @pytest.mark.asyncio
@@ -533,7 +535,7 @@ async def test_execute_code_safety_with_override(executor, mock_model_config):
         execution_result = await executor.execute_code(code)
 
         # Should proceed with execution and log override
-        assert "Code Execution Complete" in execution_result.message
+        assert "Code Execution Complete" in execution_result.formatted_print
         output = mock_stdout.getvalue()
         assert "Code safety override applied" in output
 
@@ -1839,3 +1841,117 @@ def test_code_execution_error_agent_info_str(
     assert "<code_block>" in error_str
     assert "</code_block>" in error_str
     assert "</agent_generated_code>" in error_str
+
+
+def test_save_code_history_to_notebook(executor: LocalCodeExecutor, tmp_path: Path) -> None:
+    """
+    Test the save_code_history_to_notebook tool to verify that the code execution history
+    is saved to an IPython notebook file.
+    """
+    file_path = tmp_path / "notebook.ipynb"
+    executor.code_history = [
+        CodeExecutionResult(
+            stdout="",
+            stderr="",
+            logging="",
+            message="Please print hello world",
+            code="",
+            formatted_print="",
+            role=ConversationRole.USER,
+        ),
+        CodeExecutionResult(
+            stdout="",
+            stderr="",
+            logging="",
+            message="Ok, the plan is that I will print hello world",
+            code="",
+            formatted_print="",
+            role=ConversationRole.ASSISTANT,
+        ),
+        CodeExecutionResult(
+            stdout="Hello, world!\n",
+            stderr="",
+            logging="",
+            formatted_print="",
+            code="print('Hello, world!')",
+            message="I will now print 'Hello, world!'",
+            role=ConversationRole.ASSISTANT,
+        ),
+        CodeExecutionResult(
+            stdout="/path/to/cwd\n",
+            stderr="",
+            logging="",
+            formatted_print="",
+            code="import os\nprint(os.getcwd())",
+            message="I will now print the current working directory",
+            role=ConversationRole.ASSISTANT,
+        ),
+    ]
+    executor.save_code_history_to_notebook(str(file_path))
+
+    assert file_path.exists(), "Notebook file was not created"
+
+    with open(file_path, "r", encoding="utf-8") as f:
+        notebook_data = json.load(f)
+
+    assert "cells" in notebook_data, "Notebook does not contain cells"
+
+    expected_cells = [
+        {
+            "cell_type": "markdown",
+            "source": ["Please print hello world"],
+            "description": "First cell (user message)",
+        },
+        {
+            "cell_type": "markdown",
+            "source": ["Ok, the plan is that I will print hello world"],
+            "description": "Second cell (assistant message)",
+        },
+        {
+            "cell_type": "markdown",
+            "source": ["I will now print 'Hello, world!'"],
+            "description": "Third cell (response)",
+        },
+        {
+            "cell_type": "code",
+            "source": ["print('Hello, world!')"],
+            "output_contains": "Hello, world!",
+            "description": "Fourth cell (code)",
+        },
+        {
+            "cell_type": "markdown",
+            "source": ["I will now print the current working directory"],
+            "description": "Fifth cell (response)",
+        },
+        {
+            "cell_type": "code",
+            "source_contains": "import os",
+            "output_contains": "/path/to/cwd",
+            "description": "Sixth cell (code)",
+        },
+    ]
+
+    assert len(notebook_data["cells"]) == len(expected_cells), (
+        f"Notebook contains {len(notebook_data['cells'])} cells, " f"expected {len(expected_cells)}"
+    )
+
+    for i, expected in enumerate(expected_cells):
+        cell = notebook_data["cells"][i]
+        assert (
+            cell["cell_type"] == expected["cell_type"]
+        ), f"{expected['description']} is not a {expected['cell_type']} cell"
+
+        if "source" in expected:
+            assert (
+                cell["source"] == expected["source"]
+            ), f"{expected['description']} source is incorrect"
+
+        if "source_contains" in expected:
+            assert expected["source_contains"] in "".join(
+                cell["source"]
+            ), f"{expected['description']} source code does not contain expected content"
+
+        if "output_contains" in expected and cell["cell_type"] == "code":
+            assert expected["output_contains"] in "".join(
+                cell["outputs"][0]["text"]
+            ), f"{expected['description']} output is incorrect"

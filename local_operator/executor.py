@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import io
+import json
 import logging
 import os
 import subprocess
@@ -278,7 +279,7 @@ class CodeExecutionResult(BaseModel):
         logging (str): Any logging output generated during the code execution.
         message (str): The message to display to the user about the code execution.
         code (str): The code that was executed.
-        response (str): The response from the model.
+        formatted_print (str): The formatted print output from the code execution.
     """
 
     stdout: str
@@ -286,7 +287,8 @@ class CodeExecutionResult(BaseModel):
     logging: str
     message: str
     code: str
-    response: str
+    formatted_print: str
+    role: ConversationRole
 
 
 class CodeExecutionError(Exception):
@@ -907,7 +909,8 @@ class LocalCodeExecutor:
                 logging="",
                 message="Code execution canceled by user",
                 code=code,
-                response="",
+                formatted_print="",
+                role=ConversationRole.ASSISTANT,
             )
         elif safety_result == ConfirmSafetyResult.CONVERSATION_CONFIRM:
             return CodeExecutionResult(
@@ -916,7 +919,8 @@ class LocalCodeExecutor:
                 logging="",
                 message="Code execution requires further confirmation from the user",
                 code=code,
-                response="",
+                formatted_print="",
+                role=ConversationRole.ASSISTANT,
             )
         elif safety_result == ConfirmSafetyResult.OVERRIDE:
             print(
@@ -952,7 +956,7 @@ class LocalCodeExecutor:
                         log_retry_error(retry_error, attempt, max_retries)
                         break
 
-        formatted_message = format_error_output(
+        formatted_print = format_error_output(
             final_error or Exception("Unknown error occurred"), max_retries
         )
 
@@ -960,9 +964,10 @@ class LocalCodeExecutor:
             stdout="",
             stderr="",
             logging="",
-            message=formatted_message,
+            message="",
             code=current_code,
-            response="",
+            formatted_print=formatted_print,
+            role=ConversationRole.ASSISTANT,
         )
 
     async def _check_and_confirm_safety(self, code: str) -> ConfirmSafetyResult:
@@ -1068,14 +1073,15 @@ class LocalCodeExecutor:
             output, error_output = self._capture_and_record_output(
                 new_stdout, new_stderr, log_output
             )
-            message = format_success_output((output, error_output, log_output))
+            formatted_print = format_success_output((output, error_output, log_output))
             return CodeExecutionResult(
                 stdout=output,
                 stderr=error_output,
                 logging=log_output,
-                message=message,
+                message="",
                 code=code,
-                response="",
+                formatted_print=formatted_print,
+                role=ConversationRole.ASSISTANT,
             )
         except Exception as e:
             # Add captured log output to error output if any
@@ -1421,9 +1427,8 @@ class LocalCodeExecutor:
                     )
 
                     execution_result = await self.execute_code(code_block)
-                    execution_result.response = response.response
 
-                    self.code_history.append(execution_result)
+                    self.add_to_code_history(execution_result, response)
 
                     if "code execution cancelled by user" in execution_result.message:
                         return ProcessResponseOutput(
@@ -1433,7 +1438,7 @@ class LocalCodeExecutor:
 
                     print_execution_section(
                         ExecutionSection.RESULT,
-                        content=execution_result.message,
+                        content=execution_result.formatted_print,
                         action=response.action,
                     )
                 elif response.action == ActionType.CODE:
@@ -1917,3 +1922,103 @@ class LocalCodeExecutor:
         </current_plan>
         """
         return template
+
+    def add_to_code_history(
+        self, execution_result: CodeExecutionResult, response: ResponseJsonSchema | None
+    ) -> None:
+        """Add a code execution result to the code history.
+
+        Args:
+            execution_result (CodeExecutionResult): The execution result to add
+            response (ResponseJsonSchema | None): The response from the model
+        """
+        new_code_record = execution_result
+
+        if response:
+            new_code_record.message = response.response
+
+        self.code_history.append(new_code_record)
+
+    def save_code_history_to_notebook(self, file_path: str) -> None:
+        """Save the code execution history to an IPython notebook file (.ipynb).
+
+        This function retrieves the code blocks and their execution results from the
+        executor, formats them as notebook cells, and saves them to a .ipynb file
+        in JSON format.
+
+        Args:
+            file_path (str): The path to save the notebook to.
+
+        Raises:
+            ValueError: If the file_path is empty.
+            Exception: If there is an error during notebook creation or file saving.
+        """
+        if not file_path:
+            raise ValueError("File path is required")
+
+        notebook_content = {
+            "cells": [],
+            "metadata": {
+                "kernelspec": {
+                    "display_name": "Python 3",
+                    "language": "python",
+                    "name": "python3",
+                },
+                "language_info": {
+                    "codemirror_mode": {"name": "ipython", "version": 3},
+                    "file_extension": ".py",
+                    "mimetype": "text/x-python",
+                    "name": "python",
+                    "nbconvert_exporter": "python",
+                    "pygments_lexer": "ipython3",
+                    "version": "3.x",
+                },
+            },
+            "nbformat": 4,
+            "nbformat_minor": 5,
+        }
+
+        code_results = self.code_history
+        for code_result in code_results:
+            # Add agent response as a markdown cell
+            if code_result.message:
+                notebook_content["cells"].append(
+                    {
+                        "cell_type": "markdown",
+                        "metadata": {},
+                        "source": code_result.message.splitlines(keepends=True),
+                    }
+                )
+
+            cell_source = code_result.code
+
+            if not cell_source:
+                continue
+
+            cell_output = ""
+            if code_result.stdout:
+                cell_output += f"Output:\n{code_result.stdout}\n"
+            if code_result.stderr:
+                cell_output += f"Errors:\n{code_result.stderr}\n"
+            if code_result.logging:
+                cell_output += f"Logging:\n{code_result.logging}\n"
+
+            notebook_content["cells"].append(
+                {
+                    "cell_type": "code",
+                    "execution_count": None,
+                    "metadata": {},
+                    "outputs": [
+                        {
+                            "name": "stdout",
+                            "output_type": "stream",
+                            "text": cell_output.splitlines(keepends=True),
+                        }
+                    ],
+                    "source": cell_source.splitlines(keepends=True),
+                }
+            )
+
+        # Save the notebook to a file
+        with open(file_path, "w") as f:
+            json.dump(notebook_content, f, indent=1)
