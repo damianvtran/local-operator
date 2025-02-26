@@ -29,11 +29,9 @@ class ActionType(str, Enum):
     Used to track the type of action being taken in a conversation.
     """
 
-    RESEARCH = "RESEARCH"
     CODE = "CODE"
     WRITE = "WRITE"
     EDIT = "EDIT"
-    CHECK = "CHECK"
     DONE = "DONE"
     ASK = "ASK"
     BYE = "BYE"

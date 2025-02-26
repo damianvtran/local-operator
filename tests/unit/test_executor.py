@@ -1249,7 +1249,6 @@ def test_process_json_response(
     "action_type, code, file_path, content, replacements, expected_output",
     [
         (ActionType.CODE, "print('hello')", None, None, None, "Executing Code"),
-        (ActionType.CHECK, "x = 1", None, None, None, "Executing Check"),
         (ActionType.WRITE, None, "test.txt", "test content", None, "Executing Write"),
         (
             ActionType.EDIT,

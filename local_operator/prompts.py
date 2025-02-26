@@ -3,6 +3,7 @@ import inspect
 import os
 import platform
 import subprocess
+import sys
 from pathlib import Path
 
 import psutil
@@ -182,8 +183,6 @@ with no exceptions.
 Response Flow:
 1. Pick an action.  Determine if you need to plan before executing for more complex
    tasks.
-   - RESEARCH: run code to research the information required by the plan.  This code
-     will be executed as-is in the "code" field with exec()
    - CODE: write code to achieve the user's goal.  This code will be executed as-is
      by the system with exec().  You must include the code in the "code" field and
      the code cannot be empty.
@@ -195,9 +194,6 @@ Response Flow:
      "content" field.
    - EDIT: edit a file.  Specify the file path to edit and the search strings to find.
      Each search string should be accompanied by a replacement string.
-   - CHECK: validate and test previous outputs with code.  You must include the code in
-     the "code" field and the code cannot be empty.  The code will be executed as-is
-     with exec().
    - DONE: mark the entire plan and completed, or user cancelled task.  Summarize the
      results.  Do not include code with a DONE command.  The DONE command should be used
      to summarize the results of the task only after the task is complete and verified.
@@ -206,7 +202,7 @@ Response Flow:
    - BYE: end the session and exit.  Don't use this unless the user has explicitly
      asked to exit.
 2. In CODE, include pip installs if needed (check via importlib).
-3. In CODE, CHECK, READ, WRITE, and EDIT, the system will execute your code and print
+3. In CODE, READ, WRITE, and EDIT, the system will execute your code and print
    the output to the console which you can then use to inform your next steps.
 4. Always verify your progress and the results of your work with CHECK.
 5. In DONE, print clear, actionable, human-readable verification and a clear summary
@@ -215,14 +211,14 @@ Response Flow:
    completely executed beginning to end.
 
 Your response flow should look something like the following example sequence:
-  1. RESEARCH: research the information required by the plan.  Run exploratory
+  1. Research (CODE): research the information required by the plan.  Run exploratory
      code to gather information about the user's goal.
-  2. READ: read the contents of the file to gather information about the user's
+  2. Read (READ): read the contents of the file to gather information about the user's
      goal.
-  3. CODE/WRITE/EDIT: execute on the plan by performing the actions necessary to
+  3. Code/Write/Edit (CODE/WRITE/EDIT): execute on the plan by performing the actions necessary to
      achieve the user's goal.  Print the output of the code to the console for
      the system to consume.
-  4. CHECK: verify the results of the previous step.
+  4. Validate (CODE): verify the results of the previous step.
   5. Repeat steps 1-4 until the task is complete.
   6. DONE/ASK: finish the task and summarize the results, and potentially
      ask for additional information from the user if the task is not complete.
@@ -548,6 +544,7 @@ def get_system_details_str() -> str:
         "memory": memory_info,
         "gpus": gpu_info,
         "home_directory": os.path.expanduser("~"),
+        "python_version": sys.version,
     }
 
     system_details_str = "\n".join(f"{key}: {value}" for key, value in system_details.items())
