@@ -657,6 +657,11 @@ def test_limit_conversation_history(executor):
             ],
             "expected": [
                 ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt"),
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="[Some conversation history has been truncated for brevity]",
+                    should_summarize=False,
+                ),
                 ConversationRecord(role=ConversationRole.USER, content="msg3"),
                 ConversationRecord(role=ConversationRole.ASSISTANT, content="msg4"),
             ],
