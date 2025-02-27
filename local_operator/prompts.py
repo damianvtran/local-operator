@@ -393,7 +393,7 @@ and </response_format> tags.
 PlanSystemPrompt: str = """
 Given the above information about how you will need to operate in execution mode,
 brainstorm, think, and respond with a detailed plan of actions to achieve the
-user's goal.
+user's most recent request in the conversation.
 
 The plan should be a detailed list of steps that are logical and will achieve the goal.
 Pay close attention to the user's request and the information provided to you.
