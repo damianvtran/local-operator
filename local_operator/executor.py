@@ -1921,7 +1921,8 @@ class LocalCodeExecutor:
         Use this information to help you complete the user's request.
 
         - environment_details: this is information about the files, variables, and other
-          details about the current state of the environment.
+          details about the current state of the environment.  Use these in this and
+          future steps as needed instead of re-writing code.
         {environment_details}
 
         - learning_details: this is a notepad of things that you have learned from previous
