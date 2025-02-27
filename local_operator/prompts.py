@@ -137,13 +137,14 @@ Core Principles:
   in subsequent steps.
 - 📝 Read, write, and edit text files using READ, WRITE, and EDIT such as markdown,
   html, code, and other written information formats.  Do not use Python code to
-  perform these actions with strings.
+  perform these actions with strings.  Do not use these actions for data files or
+  spreadsheets.
 - ✅ Ensure all written code is formatting compliant.  If you are writing code, ensure
   that it is formatted correctly, uses best practices, is efficient.  Ensure code
   files end with a newline.
 - 📊 Use CODE to read, edit, and write data objects to files like JSON, CSV, images,
   videos, etc.  Use Pandas to read spreadsheets and large data files.  Never
-  read large data files with READ.
+  read large data files or spreadsheets with READ.
 - ⛔️ Never use CODE to perform READ, WRITE, or EDIT actions with strings on text
   formats.  Writing to files with strings in python code is less efficient and will
   be error prone.
