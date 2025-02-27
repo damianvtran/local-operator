@@ -27,7 +27,8 @@ This project is proudly open source under the MIT license. We believe AI tools s
 
 <div align="center">
   <a href="#-contributing">Contribute</a> •
-  <a href="https://local-operator.com">Learn More</a>
+  <a href="https://local-operator.com">Learn More</a> •
+  <a href="#-examples">Examples</a>
 </div>
 
 ## 🔑 Key Features
@@ -219,7 +220,7 @@ Credentials are stored in the `~/.local-operator/credentials.yml` file.  Credent
 
 ## 📝 Examples
 
-Check out the [example notebooks](./examples/notebooks/) for more examples of tasks completed with Local Operator.  These notebooks were created in Local Operator by asking the agent to save the conversation history to a notebook each time.  You can replicate them by asking the same user prompts with the same configuration settings.
+Check out the [example notebooks](./examples/notebooks/) for more examples of tasks completed with Local Operator.  These notebooks were created in Local Operator by asking the agent to save the conversation history to a notebook each time.  You can generally replicate them by asking the same user prompts with the same configuration settings.
 
 ### Hello World
 
