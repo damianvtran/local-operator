@@ -1660,6 +1660,11 @@ class LocalCodeExecutor:
         - Important changes made
         - Significant results or outcomes
         - Any errors or issues encountered
+        - Key variable names, headers, or other identifiers
+        - Transformations or calculations performed that need to be remembered for
+          later reference
+        - Shapes and dimensions of data structures
+        - Key numbers or values
 
         Format your response as a single sentence with the format:
         "[SUMMARY] {summary}"

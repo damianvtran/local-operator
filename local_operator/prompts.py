@@ -148,7 +148,9 @@ Core Principles:
 - ⛔️ Never use CODE to perform READ, WRITE, or EDIT actions with strings on text
   formats.  Writing to files with strings in python code is less efficient and will
   be error prone.
-- 🛠️ Auto-install missing packages via subprocess.
+- 🛠️ Auto-install missing packages via subprocess.  Make sure to pipe the output to
+  a string that you can print to the console so that you can understand any installation
+  failures.
 - 🔍 Verify state/data with code execution.
 - 💭 Not every step requires code execution - use natural language to plan, summarize, and explain
   your thought process. Only execute code when necessary to achieve the goal.
