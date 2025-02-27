@@ -1889,3 +1889,41 @@ def test_code_execution_error_agent_info_str(
     assert "<code_block>" in error_str
     assert "</code_block>" in error_str
     assert "</agent_generated_code>" in error_str
+
+
+@pytest.fixture
+def executor_with_learnings(executor):
+    executor.learnings = ["learning1", "learning2"]
+    return executor
+
+
+def test_add_to_learnings_new_learning(executor_with_learnings):
+    executor_with_learnings.add_to_learnings("learning3")
+    assert "learning3" in executor_with_learnings.learnings
+    assert len(executor_with_learnings.learnings) == 3
+
+
+def test_add_to_learnings_duplicate_learning(executor_with_learnings):
+    executor_with_learnings.add_to_learnings("learning1")
+    assert executor_with_learnings.learnings.count("learning1") == 1
+    assert len(executor_with_learnings.learnings) == 2
+
+
+def test_add_to_learnings_empty_learning(executor_with_learnings):
+    executor_with_learnings.add_to_learnings("")
+    assert len(executor_with_learnings.learnings) == 2
+
+
+def test_add_to_learnings_none_learning(executor_with_learnings):
+    executor_with_learnings.add_to_learnings(None)  # type: ignore
+    assert len(executor_with_learnings.learnings) == 2
+
+
+def test_add_to_learnings_exceed_max_learnings(executor):
+    executor.max_learnings_history = 2
+    executor.learnings = ["learning1", "learning2"]
+    executor.add_to_learnings("learning3")
+    assert "learning1" not in executor.learnings
+    assert "learning2" in executor.learnings
+    assert "learning3" in executor.learnings
+    assert len(executor.learnings) == 2

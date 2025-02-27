@@ -1859,15 +1859,15 @@ class LocalCodeExecutor:
         self.learnings = []
 
     def add_to_learnings(self, learning: str) -> None:
-        """Add a learning to the learnings list.
+        """Add a unique learning to the learnings list.
 
-        Maintains a maximum number of learnings by removing the oldest learning
-        when the list would exceed the maximum length.
+        Maintains a maximum number of unique learnings by removing the oldest learning
+        when the list would exceed the maximum length. Prevents duplicate entries.
 
         Args:
-            learning: The learning to add to the list
+            learning: The learning to add to the list, if it's not already present.
         """
-        if not learning:
+        if not learning or learning in self.learnings:
             return
 
         self.learnings.append(learning)
