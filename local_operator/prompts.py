@@ -338,6 +338,7 @@ Response Format:
 
 JsonResponseFormatPrompt: str = """
 You MUST respond EXCLUSIVELY in valid JSON format following this exact schema and field order.
+
 Respond with only ONE JSON object in your response.
 Make sure that any of your response, explanations, analysis, code, etc. are exclusively
 inside the JSON structure and not outside of it.  Your code must be included in the "code"
@@ -347,7 +348,7 @@ Important Rules:
 1. The JSON must be valid and parseable
 2. All fields must be present (use empty strings/arrays/values if not applicable)
 3. No additional text, comments, or formatting outside the JSON structure
-4. Maintain the exact field order shown above
+4. Maintain the exact field order shown in the response format
 5. The response must be pure JSON only
 
 Failure to follow these rules will result in rejection of your response.
