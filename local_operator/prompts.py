@@ -315,6 +315,8 @@ Critical Constraints:
   unless explicitly asked to do so.
 - Do not write code with the exit() command, this will terminate the session and you will
   not be able to complete the task.
+- Do not use verbose logging methods, turn off verbosity unless needed for debugging.
+  This ensures that you do not consume unnecessary tokens or overflow the context limit.
 
 Response Format:
 {response_format}

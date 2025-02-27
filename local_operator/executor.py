@@ -1524,7 +1524,7 @@ class LocalCodeExecutor:
             stdout=f"Successfully read file: {file_path}",
             stderr="",
             logging="",
-            formatted_print="Successfully read file: {file_path}",
+            formatted_print=f"Successfully read file: {file_path}",
             code="",
             message="",
             role=ConversationRole.SYSTEM,
@@ -1570,7 +1570,7 @@ class LocalCodeExecutor:
             stdout=f"Successfully wrote to file: {file_path}",
             stderr="",
             logging="",
-            formatted_print="Successfully wrote to file: {file_path}",
+            formatted_print=f"Successfully wrote to file: {file_path}",
             code=equivalent_code,
             message="",
             role=ConversationRole.SYSTEM,
@@ -1623,7 +1623,7 @@ class LocalCodeExecutor:
             stdout=f"Successfully edited file: {file_path}",
             stderr="",
             logging="",
-            formatted_print="Successfully edited file: {file_path}",
+            formatted_print=f"Successfully edited file: {file_path}",
             code="",
             message="",
             role=ConversationRole.SYSTEM,
@@ -1634,9 +1634,14 @@ class LocalCodeExecutor:
         """Limit the conversation history to the maximum number of messages."""
         if len(self.conversation_history) > self.max_conversation_history:
             # Keep the first message (system prompt) and the most recent messages
-            self.conversation_history = [self.conversation_history[0]] + self.conversation_history[
-                -self.max_conversation_history + 1 :
-            ]
+            self.conversation_history = [
+                self.conversation_history[0],
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="[Some conversation history has been truncated for brevity]",
+                    should_summarize=False,
+                ),
+            ] + self.conversation_history[-self.max_conversation_history + 1 :]
 
     async def _summarize_conversation_step(self, msg: ConversationRecord) -> str:
         """Summarize the conversation step by invoking the model to generate a concise summary.
