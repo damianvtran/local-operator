@@ -369,7 +369,7 @@ def condense_logging(log_output: str, max_lines: int = 1000) -> str:
         while i + count < len(lines) and lines[i + count] == line:
             count += 1
 
-        if count > 1:
+        if count > 1 and line.strip() != "":
             condensed_lines.append(f"{line} ({count} identical lines)")
             i += count
         else:
