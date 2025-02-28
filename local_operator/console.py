@@ -334,3 +334,74 @@ def print_task_interrupted() -> None:
     print("\n\033[1;33m╭─ Task Interrupted ───────────────────────────────────\033[0m")
     print("\033[1;33m│ User requested to stop current task\033[0m")
     print("\033[1;33m╰══════════════════════════════════════════════════╯\033[0m\n")
+
+
+def condense_logging(log_output: str) -> str:
+    """Condense the logging output to a more concise format.
+
+    This function takes a string of logging output and condenses identical lines,
+    replacing them with a single line indicating the number of repetitions.
+    It also identifies and condenses multi-line patterns that repeat throughout the output.
+
+    Args:
+        log_output (str): The logging output to condense.
+
+    Returns:
+        str: The condensed logging output.
+    """
+    if not log_output:
+        return log_output
+
+    lines = log_output.splitlines()
+
+    # First pass: identify consecutive identical lines
+    i = 0
+    condensed_lines = []
+    while i < len(lines):
+        line = lines[i]
+        count = 1
+
+        # Count consecutive identical lines
+        while i + count < len(lines) and lines[i + count] == line:
+            count += 1
+
+        if count > 1:
+            condensed_lines.append(f"{line} ({count} identical lines)")
+            i += count
+        else:
+            # Look for multi-line patterns
+            pattern_found = False
+
+            # Try patterns of different lengths (2 to 10 lines)
+            for pattern_length in range(2, min(11, len(lines) - i + 1)):
+                pattern = lines[i : i + pattern_length]
+
+                # Check if this pattern repeats
+                repeats = 0
+                j = i
+                while j <= len(lines) - pattern_length:
+                    if lines[j : j + pattern_length] == pattern:
+                        repeats += 1
+                        j += pattern_length
+                    else:
+                        break
+
+                if repeats > 1:
+                    # Found a repeating multi-line pattern
+                    for k in range(pattern_length - 1):
+                        condensed_lines.append(pattern[k])
+
+                    # Add the last line of the pattern with the count
+                    condensed_lines.append(
+                        f"{pattern[pattern_length - 1]} ({repeats} identical multi-line blocks)"
+                    )
+
+                    i += pattern_length * repeats
+                    pattern_found = True
+                    break
+
+            if not pattern_found:
+                condensed_lines.append(line)
+                i += 1
+
+    return "\n".join(condensed_lines)

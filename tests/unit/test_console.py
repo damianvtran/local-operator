@@ -7,6 +7,7 @@ import pytest
 
 from local_operator.agents import AgentData
 from local_operator.console import (
+    condense_logging,
     format_agent_output,
     format_error_output,
     format_success_output,
@@ -382,3 +383,115 @@ def test_print_agent_response_multiline(monkeypatch):
     assert "Line 3" in result
     assert "╭─" in result
     assert "╰" in result
+
+
+condense_test_case_console_output = """
+Increase the number of iterations (max_iter) or scale the data as shown in:
+    https://scikit-learn.org/stable/modules/preprocessing.html
+Please also refer to the documentation for alternative solver options:
+    https://scikit-learn.org/stable/modules/linear_model.html#logistic-regression
+  n_iter_i = _check_optimize_result(
+STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT.
+
+Increase the number of iterations (max_iter) or scale the data as shown in:
+    https://scikit-learn.org/stable/modules/preprocessing.html
+Please also refer to the documentation for alternative solver options:
+    https://scikit-learn.org/stable/modules/linear_model.html#logistic-regression
+  n_iter_i = _check_optimize_result(
+STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT.
+
+Increase the number of iterations (max_iter) or scale the data as shown in:
+    https://scikit-learn.org/stable/modules/preprocessing.html
+Please also refer to the documentation for alternative solver options:
+    https://scikit-learn.org/stable/modules/linear_model.html#logistic-regression
+  n_iter_i = _check_optimize_result(
+STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT.
+"""
+
+condense_test_case_console_expected = """
+Increase the number of iterations (max_iter) or scale the data as shown in:
+    https://scikit-learn.org/stable/modules/preprocessing.html
+Please also refer to the documentation for alternative solver options:
+    https://scikit-learn.org/stable/modules/linear_model.html#logistic-regression
+  n_iter_i = _check_optimize_result(
+STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT. (3 identical multi-line blocks)"""
+
+
+@pytest.mark.parametrize(
+    "log_output, expected, test_id",
+    [
+        (
+            "line1\nline1\nline2",
+            "line1 (2 identical lines)\nline2",
+            "test_consecutive_lines",
+        ),
+        (
+            "line1\nline2\nline2\nline2",
+            "line1\nline2 (3 identical lines)",
+            "test_multiple_consecutive_lines",
+        ),
+        (
+            "line1\nline2\nline3",
+            "line1\nline2\nline3",
+            "test_no_consecutive_lines",
+        ),
+        (
+            "",
+            "",
+            "test_empty_string",
+        ),
+        (
+            "line1",
+            "line1",
+            "test_single_line",
+        ),
+        (
+            "line1\nline1",
+            "line1 (2 identical lines)",
+            "test_two_identical_lines",
+        ),
+        (
+            "line1\nline1\nline1\nline1",
+            "line1 (4 identical lines)",
+            "test_multiple_identical_lines",
+        ),
+        (
+            "line1\nline1\nline2\nline2\nline3",
+            "line1 (2 identical lines)\nline2 (2 identical lines)\nline3",
+            "test_mixed_consecutive_lines",
+        ),
+        (
+            "pattern1\npattern2\npattern1\npattern2",
+            "pattern1\npattern2 (2 identical multi-line blocks)",
+            "test_repeating_pattern",
+        ),
+        (
+            "pattern1\npattern2\npattern3\npattern1\npattern2\npattern3\npattern1\npattern2\n"
+            "pattern3",
+            "pattern1\npattern2\npattern3 (3 identical multi-line blocks)",
+            "test_multiple_repeating_patterns",
+        ),
+        (
+            "line1\npattern1\npattern2\npattern1\npattern2\nline2",
+            "line1\npattern1\npattern2 (2 identical multi-line blocks)\nline2",
+            "test_mixed_lines_and_patterns",
+        ),
+        (
+            condense_test_case_console_output,
+            condense_test_case_console_expected,
+            "test_complex_console_output",
+        ),
+    ],
+    ids=lambda x: x[2] if isinstance(x, tuple) else x,
+)
+def test_condense_logging(log_output: str, expected: str, test_id: str) -> None:
+    """
+    Test the condense_logging function with various inputs and expected outputs.
+
+    Args:
+        log_output: The input log output string.
+        expected: The expected condensed log output string.
+        test_id: The ID of the test case.
+    """
+    result = condense_logging(log_output)
+    assert result == expected
