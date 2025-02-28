@@ -410,7 +410,7 @@ Only include steps that are necessary to achieve the goal to its fullest extent.
 Be specific, and include any files, queries, and other details that will be needed
 for each step.  Determine which tools you will need to use if any.
 
-The plan should be in the following format, in natural language and not JSON or
+The plan should contain all of the following details, in natural language and not JSON or
 code:
 
 1. Gather information about the user's goal.
