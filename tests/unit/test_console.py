@@ -416,6 +416,9 @@ Please also refer to the documentation for alternative solver options:
   n_iter_i = _check_optimize_result(
 STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT. (3 identical multi-line blocks)"""
 
+long_line_output = "line1\n" * 2000
+long_line_expected = "...(1000 previous lines removed)\n" + "line1\n" * 1000
+
 
 @pytest.mark.parametrize(
     "log_output, expected, test_id",
@@ -480,6 +483,11 @@ STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT. (3 identical multi-line blocks)"""
             condense_test_case_console_output,
             condense_test_case_console_expected,
             "test_complex_console_output",
+        ),
+        (
+            long_line_output,
+            long_line_expected,
+            "test_long_line_output",
         ),
     ],
     ids=lambda x: x[2] if isinstance(x, tuple) else x,
