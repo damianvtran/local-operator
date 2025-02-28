@@ -189,9 +189,11 @@ class Operator:
             ConversationRecord(
                 role=ConversationRole.USER,
                 content="Please come up with a detailed writeup for a plan of actions to "
-                "achieve the goal before proceeding with the execution phase.  Your plan "
-                "will be used to perform actions in the next steps.  Respond in natural "
-                "language format, not JSON or code.",
+                "achieve the goal for the user's recent request before proceeding with the"
+                " execution phase.  Your plan will be used to perform actions in the next steps."
+                " Respond in natural language format, not JSON or code.  Keep in mind that"
+                " the user might change directions with their request so determine if you "
+                "need to be planning for the same goal or a new one.",
             )
         )
 
