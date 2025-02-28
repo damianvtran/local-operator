@@ -147,6 +147,7 @@ def test_main_success():
             "model_name": "deepseek-chat",
             "detail_length": 10,
             "max_learnings_history": 50,
+            "max_conversation_history": 100,
         }.get(key, default)
 
         with patch("sys.argv", ["program", "--hosting", "deepseek", "--agent", "test-agent"]):
