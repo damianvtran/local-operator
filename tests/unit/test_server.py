@@ -75,7 +75,6 @@ class DummyOperator:
             replacements=[],
             action=ActionType.DONE,
             learnings="",
-            plan="",
             previous_step_issue="",
         )
 

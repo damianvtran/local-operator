@@ -20,6 +20,7 @@ from tiktoken import encoding_for_model
 from local_operator.agents import AgentData
 from local_operator.console import (
     ExecutionSection,
+    condense_logging,
     format_agent_output,
     format_error_output,
     format_success_output,
@@ -36,7 +37,7 @@ from local_operator.prompts import (
     SafetyCheckUserPrompt,
     create_system_prompt,
 )
-from local_operator.tools import ToolRegistry, index_current_directory
+from local_operator.tools import ToolRegistry, list_working_directory
 from local_operator.types import (
     ActionType,
     ConversationRecord,
@@ -45,6 +46,13 @@ from local_operator.types import (
     ProcessResponseStatus,
     ResponseJsonSchema,
 )
+
+MAX_FILE_READ_SIZE_BYTES = 1024 * 24
+"""The maximum file size to read in bytes.
+
+This is used to prevent reading large files into context, which can cause
+context overflow errors for LLM APIs.
+"""
 
 
 class ExecutorInitError(Exception):
@@ -976,8 +984,8 @@ class LocalCodeExecutor:
 
                 msg = (
                     "I've identified that this is a dangerous operation. "
-                    "Let's stop this task for now, I will provide further instructions shortly. "
-                    "Action DONE."
+                    "Let's stop the current task, I will provide further instructions shortly. "
+                    "Please await further instructions and use action DONE."
                 )
                 self.append_to_history(
                     ConversationRecord(
@@ -1054,14 +1062,16 @@ class LocalCodeExecutor:
             await self._run_code(code)
             log_output = log_capture.getvalue()
 
-            output, error_output = self._capture_and_record_output(
-                new_stdout, new_stderr, log_output
+            condensed_output, condensed_error_output, condensed_log_output = (
+                self._capture_and_record_output(new_stdout, new_stderr, log_output)
             )
-            formatted_print = format_success_output((output, error_output, log_output))
+            formatted_print = format_success_output(
+                (condensed_output, condensed_error_output, condensed_log_output)
+            )
             return CodeExecutionResult(
-                stdout=output,
-                stderr=error_output,
-                logging=log_output,
+                stdout=condensed_output,
+                stderr=condensed_error_output,
+                logging=condensed_log_output,
                 message="",
                 code=code,
                 formatted_print=formatted_print,
@@ -1071,8 +1081,8 @@ class LocalCodeExecutor:
         except Exception as e:
             # Add captured log output to error output if any
             log_output = log_capture.getvalue()
-            output, error_output = self._capture_and_record_output(
-                new_stdout, new_stderr, log_output
+            condensed_output, condensed_error_output, condensed_log_output = (
+                self._capture_and_record_output(new_stdout, new_stderr, log_output)
             )
             raise e
         finally:
@@ -1141,7 +1151,7 @@ class LocalCodeExecutor:
 
     def _capture_and_record_output(
         self, stdout: io.StringIO, stderr: io.StringIO, log_output: str, format_for_ui: bool = False
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, str]:
         """Capture stdout/stderr output and record it in conversation history.
 
         Args:
@@ -1153,7 +1163,7 @@ class LocalCodeExecutor:
             UI-friendly features.
 
         Returns:
-            tuple[str, str]: Tuple containing (stdout output, stderr output)
+            tuple[str, str, str]: Tuple containing (stdout output, stderr output, log output)
         """
         stdout.flush()
         stderr.flush()
@@ -1173,21 +1183,26 @@ class LocalCodeExecutor:
             else log_output or "[No logger output]"
         )
 
+        condensed_output = condense_logging(output)
+        condensed_error_output = condense_logging(error_output)
+        condensed_log_output = condense_logging(log_output)
+
         self.append_to_history(
             ConversationRecord(
-                role=ConversationRole.SYSTEM,
-                content=f"Here are the results of the last code execution:\n"
-                f"<stdout>\n{output}\n</stdout>\n"
-                f"<stderr>\n{error_output}\n</stderr>\n"
-                f"<logger>\n{log_output}\n</logger>\n"
+                role=ConversationRole.USER,
+                content=f"Here are the results of your last code execution:\n"
+                f"<stdout>\n{condensed_output}\n</stdout>\n"
+                f"<stderr>\n{condensed_error_output}\n</stderr>\n"
+                f"<logger>\n{condensed_log_output}\n</logger>\n"
                 "Please review the results and continue according to the plan. "
                 "If you need to run the code again, please do so with the necessary "
-                "changes or improvements.",
+                "changes or improvements.  Please proceed and respond with your next "
+                "json response and make sure to follow the response format.",
                 should_summarize=True,
             )
         )
 
-        return output, error_output
+        return condensed_output, condensed_error_output, condensed_log_output
 
     def _record_initial_error(self, error: Exception) -> None:
         """Record the initial execution error, including the traceback, in conversation history.
@@ -1483,19 +1498,30 @@ class LocalCodeExecutor:
 
         return output
 
-    async def read_file(self, file_path: str) -> CodeExecutionResult:
+    async def read_file(
+        self, file_path: str, max_file_size_bytes: int = MAX_FILE_READ_SIZE_BYTES
+    ) -> CodeExecutionResult:
         """Read the contents of a file and include line numbers and lengths.
 
         Args:
             file_path (str): The path to the file to read
+            max_file_size_bytes (int): The maximum file size to read in bytes
 
         Returns:
             str: A message indicating the file has been read
 
         Raises:
             FileNotFoundError: If the file does not exist
+            ValueError: If the file is too large to read
             OSError: If there is an error reading the file
         """
+        if os.path.getsize(file_path) > max_file_size_bytes:
+            raise ValueError(
+                f"File is too large to use read action on: {file_path}\n"
+                f"Please use code action to summarize and extract key features from "
+                f"the file instead."
+            )
+
         with open(file_path, "r", encoding="utf-8") as f:
             file_content = f.read()
 
@@ -1524,7 +1550,7 @@ class LocalCodeExecutor:
             stdout=f"Successfully read file: {file_path}",
             stderr="",
             logging="",
-            formatted_print="Successfully read file: {file_path}",
+            formatted_print=f"Successfully read file: {file_path}",
             code="",
             message="",
             role=ConversationRole.SYSTEM,
@@ -1570,7 +1596,7 @@ class LocalCodeExecutor:
             stdout=f"Successfully wrote to file: {file_path}",
             stderr="",
             logging="",
-            formatted_print="Successfully wrote to file: {file_path}",
+            formatted_print=f"Successfully wrote to file: {file_path}",
             code=equivalent_code,
             message="",
             role=ConversationRole.SYSTEM,
@@ -1623,7 +1649,7 @@ class LocalCodeExecutor:
             stdout=f"Successfully edited file: {file_path}",
             stderr="",
             logging="",
-            formatted_print="Successfully edited file: {file_path}",
+            formatted_print=f"Successfully edited file: {file_path}",
             code="",
             message="",
             role=ConversationRole.SYSTEM,
@@ -1634,9 +1660,14 @@ class LocalCodeExecutor:
         """Limit the conversation history to the maximum number of messages."""
         if len(self.conversation_history) > self.max_conversation_history:
             # Keep the first message (system prompt) and the most recent messages
-            self.conversation_history = [self.conversation_history[0]] + self.conversation_history[
-                -self.max_conversation_history + 1 :
-            ]
+            self.conversation_history = [
+                self.conversation_history[0],
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="[Some conversation history has been truncated for brevity]",
+                    should_summarize=False,
+                ),
+            ] + self.conversation_history[-self.max_conversation_history + 1 :]
 
     async def _summarize_conversation_step(self, msg: ConversationRecord) -> str:
         """Summarize the conversation step by invoking the model to generate a concise summary.
@@ -1655,6 +1686,11 @@ class LocalCodeExecutor:
         - Important changes made
         - Significant results or outcomes
         - Any errors or issues encountered
+        - Key variable names, headers, or other identifiers
+        - Transformations or calculations performed that need to be remembered for
+          later reference
+        - Shapes and dimensions of data structures
+        - Key numbers or values
 
         Format your response as a single sentence with the format:
         "[SUMMARY] {summary}"
@@ -1733,6 +1769,7 @@ class LocalCodeExecutor:
             "doc": "📝",
             "image": "🖼️",
             "config": "🔑",
+            "data": "📊",
             "other": "📎",
         }
 
@@ -1812,7 +1849,7 @@ class LocalCodeExecutor:
 
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         git_status = self._get_git_status()
-        directory_tree = self.format_directory_tree(index_current_directory())
+        directory_tree = self.format_directory_tree(list_working_directory())
         context_vars = get_context_vars_str(self.context)
 
         return f"""<environment_details>
@@ -1849,15 +1886,15 @@ class LocalCodeExecutor:
         self.learnings = []
 
     def add_to_learnings(self, learning: str) -> None:
-        """Add a learning to the learnings list.
+        """Add a unique learning to the learnings list.
 
-        Maintains a maximum number of learnings by removing the oldest learning
-        when the list would exceed the maximum length.
+        Maintains a maximum number of unique learnings by removing the oldest learning
+        when the list would exceed the maximum length. Prevents duplicate entries.
 
         Args:
-            learning: The learning to add to the list
+            learning: The learning to add to the list, if it's not already present.
         """
-        if not learning:
+        if not learning or learning in self.learnings:
             return
 
         self.learnings.append(learning)
@@ -1911,7 +1948,8 @@ class LocalCodeExecutor:
         Use this information to help you complete the user's request.
 
         - environment_details: this is information about the files, variables, and other
-          details about the current state of the environment.
+          details about the current state of the environment.  Use these in this and
+          future steps as needed instead of re-writing code.
         {environment_details}
 
         - learning_details: this is a notepad of things that you have learned from previous

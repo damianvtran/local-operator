@@ -7,6 +7,7 @@ import pytest
 
 from local_operator.agents import AgentData
 from local_operator.console import (
+    condense_logging,
     format_agent_output,
     format_error_output,
     format_success_output,
@@ -382,3 +383,136 @@ def test_print_agent_response_multiline(monkeypatch):
     assert "Line 3" in result
     assert "╭─" in result
     assert "╰" in result
+
+
+condense_test_case_console_output = """
+Increase the number of iterations (max_iter) or scale the data as shown in:
+    https://scikit-learn.org/stable/modules/preprocessing.html
+Please also refer to the documentation for alternative solver options:
+    https://scikit-learn.org/stable/modules/linear_model.html#logistic-regression
+  n_iter_i = _check_optimize_result(
+STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT.
+
+Increase the number of iterations (max_iter) or scale the data as shown in:
+    https://scikit-learn.org/stable/modules/preprocessing.html
+Please also refer to the documentation for alternative solver options:
+    https://scikit-learn.org/stable/modules/linear_model.html#logistic-regression
+  n_iter_i = _check_optimize_result(
+STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT.
+
+Increase the number of iterations (max_iter) or scale the data as shown in:
+    https://scikit-learn.org/stable/modules/preprocessing.html
+Please also refer to the documentation for alternative solver options:
+    https://scikit-learn.org/stable/modules/linear_model.html#logistic-regression
+  n_iter_i = _check_optimize_result(
+STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT.
+"""
+
+condense_test_case_console_expected = """
+Increase the number of iterations (max_iter) or scale the data as shown in:
+    https://scikit-learn.org/stable/modules/preprocessing.html
+Please also refer to the documentation for alternative solver options:
+    https://scikit-learn.org/stable/modules/linear_model.html#logistic-regression
+  n_iter_i = _check_optimize_result(
+STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT. (3 identical multi-line blocks)"""
+
+long_line_output = "\n".join([f"line{i}" for i in range(1, 2001)])
+long_line_expected = "...(1000 previous lines removed)\n" + "\n".join(
+    [f"line{i}" for i in range(1001, 2001)]
+)
+
+
+@pytest.mark.parametrize(
+    "log_output, expected",
+    [
+        (
+            "line1\nline1\nline2",
+            "line1 (2 identical lines)\nline2",
+        ),
+        (
+            "line1\nline2\nline2\nline2",
+            "line1\nline2 (3 identical lines)",
+        ),
+        (
+            "line1\nline2\nline3",
+            "line1\nline2\nline3",
+        ),
+        (
+            "",
+            "",
+        ),
+        (
+            "line1",
+            "line1",
+        ),
+        (
+            "line1\nline1",
+            "line1 (2 identical lines)",
+        ),
+        (
+            "line1\nline1\nline1\nline1",
+            "line1 (4 identical lines)",
+        ),
+        (
+            "line1\nline1\nline2\nline2\nline3",
+            "line1 (2 identical lines)\nline2 (2 identical lines)\nline3",
+        ),
+        (
+            "pattern1\npattern2\npattern1\npattern2",
+            "pattern1\npattern2 (2 identical multi-line blocks)",
+        ),
+        (
+            "pattern1\npattern2\npattern3\npattern1\npattern2\npattern3\npattern1\npattern2\n"
+            "pattern3",
+            "pattern1\npattern2\npattern3 (3 identical multi-line blocks)",
+        ),
+        (
+            "line1\npattern1\npattern2\npattern1\npattern2\nline2",
+            "line1\npattern1\npattern2 (2 identical multi-line blocks)\nline2",
+        ),
+        (
+            condense_test_case_console_output,
+            condense_test_case_console_expected,
+        ),
+        (
+            long_line_output,
+            long_line_expected,
+        ),
+        (
+            " \n \n ",
+            " \n \n ",
+        ),
+        (
+            "line1\n \n ",
+            "line1\n \n ",
+        ),
+    ],
+    ids=[
+        "test_consecutive_lines",
+        "test_multiple_consecutive_lines",
+        "test_no_consecutive_lines",
+        "test_empty_string",
+        "test_single_line",
+        "test_two_identical_lines",
+        "test_multiple_identical_lines",
+        "test_mixed_consecutive_lines",
+        "test_repeating_pattern",
+        "test_multiple_repeating_patterns",
+        "test_mixed_lines_and_patterns",
+        "test_complex_console_output",
+        "test_long_line_output",
+        "test_whitespace_only_string",
+        "test_whitespace_mixed_string",
+    ],
+)
+def test_condense_logging(log_output: str, expected: str) -> None:
+    """
+    Test the condense_logging function with various inputs and expected outputs.
+
+    Args:
+        log_output: The input log output string.
+        expected: The expected condensed log output string.
+        test_id: The ID of the test case.
+    """
+    result = condense_logging(log_output, max_lines=1000)
+    assert result == expected
