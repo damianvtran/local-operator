@@ -1182,14 +1182,15 @@ class LocalCodeExecutor:
 
         self.append_to_history(
             ConversationRecord(
-                role=ConversationRole.SYSTEM,
-                content=f"Here are the results of the last code execution:\n"
+                role=ConversationRole.USER,
+                content=f"Here are the results of your last code execution:\n"
                 f"<stdout>\n{condensed_output}\n</stdout>\n"
                 f"<stderr>\n{condensed_error_output}\n</stderr>\n"
                 f"<logger>\n{condensed_log_output}\n</logger>\n"
                 "Please review the results and continue according to the plan. "
                 "If you need to run the code again, please do so with the necessary "
-                "changes or improvements.",
+                "changes or improvements.  Please proceed and respond with your next "
+                "json response and make sure to follow the response format.",
                 should_summarize=True,
             )
         )
@@ -1750,6 +1751,7 @@ class LocalCodeExecutor:
             "doc": "📝",
             "image": "🖼️",
             "config": "🔑",
+            "data": "📊",
             "other": "📎",
         }
 

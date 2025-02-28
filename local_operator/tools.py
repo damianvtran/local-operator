@@ -105,7 +105,7 @@ def list_working_directory(max_depth: int = 3) -> Dict[str, List[Tuple[str, str,
 
     Returns:
         Dict mapping directory paths to lists of (filename, file_type, size_bytes) tuples.
-        File types are: 'code', 'doc', 'image', 'config', 'other'
+        File types are: 'code', 'doc', 'data', 'image', 'config', 'other'
     """
     directory_index = {}
 
@@ -290,6 +290,27 @@ def list_working_directory(max_depth: int = 3) -> Dict[str, List[Tuple[str, str,
             ]:
                 file_type = "code"
             elif ext in [
+                ".csv",
+                ".tsv",
+                ".xlsx",
+                ".xls",
+                ".parquet",
+                ".arrow",
+                ".feather",
+                ".hdf5",
+                ".h5",
+                ".dta",
+                ".sas7bdat",
+                ".sav",
+                ".arff",
+                ".ods",
+                ".fods",
+                ".dbf",
+                ".mdb",
+                ".accdb",
+            ]:
+                file_type = "data"
+            elif ext in [
                 ".md",
                 ".txt",
                 ".rst",
@@ -302,8 +323,6 @@ def list_working_directory(max_depth: int = 3) -> Dict[str, List[Tuple[str, str,
                 ".html",
                 ".htm",
                 ".css",
-                ".csv",
-                ".tsv",
                 ".log",
                 ".conf",
                 ".cfg",
