@@ -235,6 +235,43 @@ def annotate_code(code: str, error_line: int | None = None) -> str | None:
     return annotated_code
 
 
+def condense_logging(log_output: str) -> str:
+    """Condense the logging output to a more concise format.
+
+    This function takes a string of logging output and condenses identical lines,
+    replacing them with a single line indicating the number of repetitions.
+
+    Args:
+        log_output (str): The logging output to condense.
+
+    Returns:
+        str: The condensed logging output.
+    """
+    lines = log_output.splitlines()
+    condensed_lines: list[str] = []
+    count = 1
+
+    for i in range(len(lines)):
+        if i > 0 and lines[i] == lines[i - 1]:
+            count += 1
+        else:
+            if i > 0:
+                if count > 1:
+                    condensed_lines.append(f"{lines[i - 1]} ({count} identical lines)")
+                else:
+                    condensed_lines.append(lines[i - 1])
+            count = 1
+
+    # Add the last line
+    if lines:
+        if count > 1:
+            condensed_lines.append(f"{lines[-1]} ({count} identical lines)")
+        else:
+            condensed_lines.append(lines[-1])
+
+    return "\n".join(condensed_lines)
+
+
 class ExecutorTokenMetrics(BaseModel):
     """Tracks token usage and cost metrics for model executions.
 
@@ -1054,14 +1091,16 @@ class LocalCodeExecutor:
             await self._run_code(code)
             log_output = log_capture.getvalue()
 
-            output, error_output = self._capture_and_record_output(
-                new_stdout, new_stderr, log_output
+            condensed_output, condensed_error_output, condensed_log_output = (
+                self._capture_and_record_output(new_stdout, new_stderr, log_output)
             )
-            formatted_print = format_success_output((output, error_output, log_output))
+            formatted_print = format_success_output(
+                (condensed_output, condensed_error_output, condensed_log_output)
+            )
             return CodeExecutionResult(
-                stdout=output,
-                stderr=error_output,
-                logging=log_output,
+                stdout=condensed_output,
+                stderr=condensed_error_output,
+                logging=condensed_log_output,
                 message="",
                 code=code,
                 formatted_print=formatted_print,
@@ -1071,8 +1110,8 @@ class LocalCodeExecutor:
         except Exception as e:
             # Add captured log output to error output if any
             log_output = log_capture.getvalue()
-            output, error_output = self._capture_and_record_output(
-                new_stdout, new_stderr, log_output
+            condensed_output, condensed_error_output, condensed_log_output = (
+                self._capture_and_record_output(new_stdout, new_stderr, log_output)
             )
             raise e
         finally:
@@ -1141,7 +1180,7 @@ class LocalCodeExecutor:
 
     def _capture_and_record_output(
         self, stdout: io.StringIO, stderr: io.StringIO, log_output: str, format_for_ui: bool = False
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, str]:
         """Capture stdout/stderr output and record it in conversation history.
 
         Args:
@@ -1153,7 +1192,7 @@ class LocalCodeExecutor:
             UI-friendly features.
 
         Returns:
-            tuple[str, str]: Tuple containing (stdout output, stderr output)
+            tuple[str, str, str]: Tuple containing (stdout output, stderr output, log output)
         """
         stdout.flush()
         stderr.flush()
@@ -1173,13 +1212,17 @@ class LocalCodeExecutor:
             else log_output or "[No logger output]"
         )
 
+        condensed_output = condense_logging(output)
+        condensed_error_output = condense_logging(error_output)
+        condensed_log_output = condense_logging(log_output)
+
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.SYSTEM,
                 content=f"Here are the results of the last code execution:\n"
-                f"<stdout>\n{output}\n</stdout>\n"
-                f"<stderr>\n{error_output}\n</stderr>\n"
-                f"<logger>\n{log_output}\n</logger>\n"
+                f"<stdout>\n{condensed_output}\n</stdout>\n"
+                f"<stderr>\n{condensed_error_output}\n</stderr>\n"
+                f"<logger>\n{condensed_log_output}\n</logger>\n"
                 "Please review the results and continue according to the plan. "
                 "If you need to run the code again, please do so with the necessary "
                 "changes or improvements.",
@@ -1187,7 +1230,7 @@ class LocalCodeExecutor:
             )
         )
 
-        return output, error_output
+        return condensed_output, condensed_error_output, condensed_log_output
 
     def _record_initial_error(self, error: Exception) -> None:
         """Record the initial execution error, including the traceback, in conversation history.

@@ -15,6 +15,7 @@ from local_operator.executor import (
     CodeExecutionResult,
     ConfirmSafetyResult,
     LocalCodeExecutor,
+    condense_logging,
     get_confirm_safety_result,
     get_context_vars_str,
     process_json_response,
@@ -1927,3 +1928,45 @@ def test_add_to_learnings_exceed_max_learnings(executor):
     assert "learning2" in executor.learnings
     assert "learning3" in executor.learnings
     assert len(executor.learnings) == 2
+
+
+@pytest.mark.parametrize(
+    "log_output, expected",
+    [
+        (
+            "line1\nline1\nline2",
+            "line1 (2 identical lines)\nline2",
+        ),
+        (
+            "line1\nline2\nline2\nline2",
+            "line1\nline2 (3 identical lines)",
+        ),
+        (
+            "line1\nline2\nline3",
+            "line1\nline2\nline3",
+        ),
+        (
+            "",
+            "",
+        ),
+        (
+            "line1",
+            "line1",
+        ),
+        (
+            "line1\nline1",
+            "line1 (2 identical lines)",
+        ),
+        (
+            "line1\nline1\nline1\nline1",
+            "line1 (4 identical lines)",
+        ),
+        (
+            "line1\nline1\nline2\nline2\nline3",
+            "line1 (2 identical lines)\nline2 (2 identical lines)\nline3",
+        ),
+    ],
+)
+def test_condense_logging(log_output, expected):
+    result = condense_logging(log_output)
+    assert result == expected
