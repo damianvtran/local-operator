@@ -416,83 +416,96 @@ Please also refer to the documentation for alternative solver options:
   n_iter_i = _check_optimize_result(
 STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT. (3 identical multi-line blocks)"""
 
-long_line_output = "line1\n" * 2000
-long_line_expected = "...(1000 previous lines removed)\n" + "line1\n" * 1000
+long_line_output = "\n".join([f"line{i}" for i in range(1, 2001)])
+long_line_expected = "...(1000 previous lines removed)\n" + "\n".join(
+    [f"line{i}" for i in range(1001, 2001)]
+)
 
 
 @pytest.mark.parametrize(
-    "log_output, expected, test_id",
+    "log_output, expected",
     [
         (
             "line1\nline1\nline2",
             "line1 (2 identical lines)\nline2",
-            "test_consecutive_lines",
         ),
         (
             "line1\nline2\nline2\nline2",
             "line1\nline2 (3 identical lines)",
-            "test_multiple_consecutive_lines",
         ),
         (
             "line1\nline2\nline3",
             "line1\nline2\nline3",
-            "test_no_consecutive_lines",
         ),
         (
             "",
             "",
-            "test_empty_string",
         ),
         (
             "line1",
             "line1",
-            "test_single_line",
         ),
         (
             "line1\nline1",
             "line1 (2 identical lines)",
-            "test_two_identical_lines",
         ),
         (
             "line1\nline1\nline1\nline1",
             "line1 (4 identical lines)",
-            "test_multiple_identical_lines",
         ),
         (
             "line1\nline1\nline2\nline2\nline3",
             "line1 (2 identical lines)\nline2 (2 identical lines)\nline3",
-            "test_mixed_consecutive_lines",
         ),
         (
             "pattern1\npattern2\npattern1\npattern2",
             "pattern1\npattern2 (2 identical multi-line blocks)",
-            "test_repeating_pattern",
         ),
         (
             "pattern1\npattern2\npattern3\npattern1\npattern2\npattern3\npattern1\npattern2\n"
             "pattern3",
             "pattern1\npattern2\npattern3 (3 identical multi-line blocks)",
-            "test_multiple_repeating_patterns",
         ),
         (
             "line1\npattern1\npattern2\npattern1\npattern2\nline2",
             "line1\npattern1\npattern2 (2 identical multi-line blocks)\nline2",
-            "test_mixed_lines_and_patterns",
         ),
         (
             condense_test_case_console_output,
             condense_test_case_console_expected,
-            "test_complex_console_output",
         ),
         (
             long_line_output,
             long_line_expected,
-            "test_long_line_output",
+        ),
+        (
+            " \n \n ",
+            " \n \n ",
+        ),
+        (
+            "line1\n \n ",
+            "line1\n \n ",
         ),
     ],
-    ids=lambda x: x[2] if isinstance(x, tuple) else x,
+    ids=[
+        "test_consecutive_lines",
+        "test_multiple_consecutive_lines",
+        "test_no_consecutive_lines",
+        "test_empty_string",
+        "test_single_line",
+        "test_two_identical_lines",
+        "test_multiple_identical_lines",
+        "test_mixed_consecutive_lines",
+        "test_repeating_pattern",
+        "test_multiple_repeating_patterns",
+        "test_mixed_lines_and_patterns",
+        "test_complex_console_output",
+        "test_long_line_output",
+        "test_whitespace_only_string",
+        "test_whitespace_mixed_string",
+    ],
 )
-def test_condense_logging(log_output: str, expected: str, test_id: str) -> None:
+def test_condense_logging(log_output: str, expected: str) -> None:
     """
     Test the condense_logging function with various inputs and expected outputs.
 
