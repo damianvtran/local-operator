@@ -5,6 +5,7 @@ import platform
 import subprocess
 import sys
 from pathlib import Path
+from typing import List, Optional
 
 import psutil
 
@@ -53,7 +54,7 @@ def get_installed_packages_str() -> str:
     return package_str
 
 
-def get_tools_str(tool_registry: ToolRegistry | None = None) -> str:
+def get_tools_str(tool_registry: Optional[ToolRegistry] = None) -> str:
     """Get formatted string describing available tool functions.
 
     Args:
@@ -69,7 +70,7 @@ def get_tools_str(tool_registry: ToolRegistry | None = None) -> str:
     builtin_names = set(dir(__builtins__))
     builtin_names.update(["dict", "list", "set", "tuple", "Path"])
 
-    tools_list: list[str] = []
+    tools_list: List[str] = []
     for name in tool_registry:
         # Skip private functions and builtins
         if name.startswith("_") or name in builtin_names:
@@ -91,15 +92,21 @@ def get_tools_str(tool_registry: ToolRegistry | None = None) -> str:
                 )
                 args.append(f"{p.name}: {arg_type}")
 
-            return_type = (
-                sig.return_annotation.__name__
-                if hasattr(sig.return_annotation, "__name__")
-                else str(sig.return_annotation)
-            )
-
-            # Check if function is async
-            is_async = inspect.iscoroutinefunction(tool)
-            async_prefix = "async " if is_async else ""
+            return_annotation = sig.return_annotation
+            if inspect.iscoroutinefunction(tool):
+                return_type = (
+                    f"Coroutine[{return_annotation.__name__}]"
+                    if hasattr(return_annotation, "__name__")
+                    else f"Coroutine[{return_annotation}]"
+                )
+                async_prefix = "async "
+            else:
+                return_type = (
+                    return_annotation.__name__
+                    if hasattr(return_annotation, "__name__")
+                    else str(return_annotation)
+                )
+                async_prefix = ""
 
             tools_list.append(f"- {async_prefix}{name}({', '.join(args)}) -> {return_type}: {doc}")
     return "\n".join(tools_list)
