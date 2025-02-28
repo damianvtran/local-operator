@@ -59,6 +59,18 @@ def wrap_text_to_width(text: str, max_width: int, first_line_prefix: str = "") -
 def print_cli_banner(
     config_manager: ConfigManager, current_agent: AgentData | None, training_mode: bool
 ) -> None:
+    """
+    Print the banner for the chat CLI.
+
+    This function prints a banner for the Local Executor Agent CLI, including details about the
+    current agent, hosting, model, and configuration options. It also indicates if the CLI is in
+    debug or training mode.
+
+    Args:
+        config_manager (ConfigManager): The configuration manager to retrieve settings.
+        current_agent (AgentData | None): The current agent data, if available.
+        training_mode (bool): Whether the CLI is in training mode.
+    """
     debug_mode = os.getenv("LOCAL_OPERATOR_DEBUG", "false").lower() == "true"
 
     hosting = config_manager.get_config_value("hosting")
@@ -70,7 +82,6 @@ def print_cli_banner(
         if current_agent.model:
             model = current_agent.model
 
-    """Print the banner for the chat CLI."""
     debug_indicator = " [DEBUG MODE]" if debug_mode else ""
     print("\033[1;36m╭──────────────────────────────────────────────────╮\033[0m")
     print(f"\033[1;36m│ Local Executor Agent CLI{debug_indicator:<25}│\033[0m")
