@@ -413,16 +413,16 @@ for each step.  Determine which tools you will need to use if any.
 The plan should contain all of the following details, in natural language and not JSON or
 code:
 
-1. Gather information about the user's goal.
-2. Break down the goal into smaller, manageable steps.
-3. Identify the tools and resources needed for each step.
-4. Determine the order in which the steps should be executed.
-5. Create a detailed plan that outlines each step, the tools/resources required,
-and the expected outcome.
-6. Create a validation plan for how you will check that each step is successful
-   and that the overall goal is achieved at the end.  This should be a list of
-   checks that you will perform to verify that the goal is achieved once you
-   complete the initial execution plan.
+- Gather information about the user's goal.
+- Break down the goal into smaller, manageable steps.
+- Identify the tools and resources needed for each step.
+- Determine the order in which the steps should be executed.
+- Create a detailed plan that outlines each step, the tools/resources required,
+  and the expected outcome.
+- Create a validation plan for how you will check that each step is successful
+  and that the overall goal is achieved at the end.  This should be a list of
+  checks that you will perform to verify that the goal is achieved once you
+  complete the initial execution plan.
 
 Present the plan in a clear and detailed manner.  Be specific and include all the
 details and data you will need to verify that the goal is achieved.
