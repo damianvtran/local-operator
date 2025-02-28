@@ -8,9 +8,15 @@ from local_operator.tools import _get_git_ignored_files, list_working_directory
 
 @pytest.fixture
 def mock_file_system():
-    """Mock file system with various file types and sizes"""
+    """Mock file system with various file types and sizes."""
     mock_files = {
-        ".": [("test.py", 100), ("doc.md", 200), ("image.png", 300), ("other.bin", 400)],
+        ".": [
+            ("test.py", 100),
+            ("doc.md", 200),
+            ("image.png", 300),
+            ("other.bin", 400),
+            ("data.csv", 150),
+        ],
         "./subdir": [("code.js", 500), ("readme.txt", 600)],
     }
 
@@ -42,7 +48,11 @@ def mock_file_system():
         patch(
             "os.walk",
             return_value=[
-                (".", ["subdir", ".git"], ["test.py", "doc.md", "image.png", "other.bin"]),
+                (
+                    ".",
+                    ["subdir", ".git"],
+                    ["test.py", "doc.md", "image.png", "other.bin", "data.csv"],
+                ),
                 ("./subdir", [], ["code.js", "readme.txt"]),
             ],
         ),
@@ -78,6 +88,7 @@ def test_list_working_directory(mock_file_system):
 
     # Check root directory
     assert sorted(index["."]) == [
+        ("data.csv", "data", 150),
         ("doc.md", "doc", 200),
         ("image.png", "image", 300),
         ("other.bin", "other", 400),

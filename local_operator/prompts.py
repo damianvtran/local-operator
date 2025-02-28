@@ -215,7 +215,7 @@ Response Flow:
 2. In CODE, include pip installs if needed (check via importlib).
 3. In CODE, READ, WRITE, and EDIT, the system will execute your code and print
    the output to the console which you can then use to inform your next steps.
-4. Always verify your progress and the results of your work with CHECK.
+4. Always verify your progress and the results of your work with CODE.
 5. In DONE, print clear, actionable, human-readable verification and a clear summary
    of the completed plan and key results.  Be specific in your summary and include all
    the details and data you have gathered.  Do not respond with DONE if the plan is not
@@ -225,7 +225,8 @@ Your response flow should look something like the following example sequence:
   1. Research (CODE): research the information required by the plan.  Run exploratory
      code to gather information about the user's goal.
   2. Read (READ): read the contents of the file to gather information about the user's
-     goal.
+     goal.  Do not READ for large files or data files, instead use CODE to extract and
+     summarize a portion of the file instead.
   3. Code/Write/Edit (CODE/WRITE/EDIT): execute on the plan by performing the actions necessary to
      achieve the user's goal.  Print the output of the code to the console for
      the system to consume.
@@ -383,10 +384,10 @@ and </response_format> tags.
   new information is discovered that changes the plan.",
   "next_goal": "Your goal for the next step",
   "response": "Natural language response to the user's goal",
-  "code": "Required for CHECK and CODE: code to achieve the user's goal, must be
+  "code": "Required for CODE: code to achieve the user's goal, must be
   valid Python code.  Do not provide for WRITE or EDIT",
   "content": "Required for WRITE: content to write to a file, if applicable.
-  Do not provide for CHECK, READ, or EDIT",
+  Do not provide for READ, or EDIT",
   "file_path": "Required for READ, WRITE, and EDIT: the path to the file to access, if applicable",
   "replacements": [
     {
@@ -394,7 +395,7 @@ and </response_format> tags.
       "replace": "Required for EDIT: the string to replace it with"
     }
   ], // Only include if the action is EDIT
-  "action": "RESEARCH | CODE | WRITE | EDIT | CHECK | DONE | ASK | BYE"
+  "action": "RESEARCH | CODE | READ | WRITE | EDIT | DONE | ASK | BYE"
 }
 </response_format>
 """
