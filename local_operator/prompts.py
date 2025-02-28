@@ -379,9 +379,6 @@ and </response_format> tags.
   contains useful insights as opposed to simply being anccounting of actions.
   Empty for the first step.",
   "current_goal": "Your goal for the current step.",
-  "plan": "Long term plan of actions to achieve the user's goal beyond these goals.
-  This plan should be the same or similar for all steps of the same task, unless
-  new information is discovered that changes the plan.",
   "next_goal": "Your goal for the next step",
   "response": "Natural language response to the user's goal",
   "code": "Required for CODE: code to achieve the user's goal, must be
