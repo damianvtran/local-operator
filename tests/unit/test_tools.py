@@ -3,14 +3,20 @@ from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
 
-from local_operator.tools import _get_git_ignored_files, index_current_directory
+from local_operator.tools import _get_git_ignored_files, list_working_directory
 
 
 @pytest.fixture
 def mock_file_system():
-    """Mock file system with various file types and sizes"""
+    """Mock file system with various file types and sizes."""
     mock_files = {
-        ".": [("test.py", 100), ("doc.md", 200), ("image.png", 300), ("other.bin", 400)],
+        ".": [
+            ("test.py", 100),
+            ("doc.md", 200),
+            ("image.png", 300),
+            ("other.bin", 400),
+            ("data.csv", 150),
+        ],
         "./subdir": [("code.js", 500), ("readme.txt", 600)],
     }
 
@@ -42,7 +48,11 @@ def mock_file_system():
         patch(
             "os.walk",
             return_value=[
-                (".", ["subdir", ".git"], ["test.py", "doc.md", "image.png", "other.bin"]),
+                (
+                    ".",
+                    ["subdir", ".git"],
+                    ["test.py", "doc.md", "image.png", "other.bin", "data.csv"],
+                ),
                 ("./subdir", [], ["code.js", "readme.txt"]),
             ],
         ),
@@ -68,16 +78,17 @@ def test_get_git_ignored_files_no_repo():
     assert ignored == set()
 
 
-def test_index_current_directory(mock_file_system):
+def test_list_working_directory(mock_file_system):
     """Test indexing directory with various file types when no .gitignore is present"""
     # Simulate a non-git environment by having .gitignore not found.
     with patch("builtins.open", side_effect=FileNotFoundError()):
-        index = index_current_directory()
+        index = list_working_directory()
 
     assert len(index) == 2  # Root and subdir
 
     # Check root directory
     assert sorted(index["."]) == [
+        ("data.csv", "data", 150),
         ("doc.md", "doc", 200),
         ("image.png", "image", 300),
         ("other.bin", "other", 400),
@@ -88,7 +99,7 @@ def test_index_current_directory(mock_file_system):
     assert sorted(index["subdir"]) == [("code.js", "code", 500), ("readme.txt", "doc", 600)]
 
 
-def test_index_current_directory_with_git_ignored(mock_file_system):
+def test_list_working_directory_with_git_ignored(mock_file_system):
     """Test indexing directory respects .gitignore glob patterns"""
     # Simulate a .gitignore that ignores files matching 'ignored1.txt' in the root
     # and 'subdir/ignored2.txt' in the subdirectory by patching open and os.walk.
@@ -106,7 +117,7 @@ def test_index_current_directory_with_git_ignored(mock_file_system):
             ],
         ),
     ):
-        index = index_current_directory()
+        index = list_working_directory()
 
     # Verify ignored files are not included
     all_files = []
@@ -123,12 +134,12 @@ def test_index_empty_directory(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     # Simulate no .gitignore file present.
     with patch("builtins.open", side_effect=FileNotFoundError()):
-        index = index_current_directory()
+        index = list_working_directory()
     assert index == {}
 
 
-def test_index_current_directory_max_depth():
-    """Test that index_current_directory respects the max_depth parameter."""
+def test_list_working_directory_max_depth():
+    """Test that list_working_directory respects the max_depth parameter."""
     mock_walk_data = [
         (".", ["level1"], ["root.txt"]),
         ("./level1", ["level2"], ["level1.txt"]),
@@ -147,14 +158,14 @@ def test_index_current_directory_max_depth():
         patch("builtins.open", side_effect=FileNotFoundError()),
     ):
         # Test with max_depth=1 (only root directory)
-        index = index_current_directory(max_depth=1)
+        index = list_working_directory(max_depth=1)
         assert list(index.keys()) == ["."]
         assert len(index["."]) == 1
         assert index["."][0][0] == "root.txt"
         assert "level1" not in index
 
         # Test with max_depth=2 (root and level1)
-        index = index_current_directory(max_depth=2)
+        index = list_working_directory(max_depth=2)
         assert sorted(list(index.keys())) == [".", "level1"]
         assert len(index["."]) == 1
         assert len(index["level1"]) == 1
@@ -162,7 +173,7 @@ def test_index_current_directory_max_depth():
         assert "level1/level2" not in index
 
         # Test with max_depth=3 (root, level1, and level2)
-        index = index_current_directory(max_depth=3)
+        index = list_working_directory(max_depth=3)
         assert sorted(list(index.keys())) == [".", "level1", "level1/level2"]
         assert len(index["."]) == 1
         assert len(index["level1"]) == 1

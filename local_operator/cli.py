@@ -478,6 +478,9 @@ def main() -> int:
         executor = LocalCodeExecutor(
             model_configuration=model_configuration,
             detail_conversation_length=config_manager.get_config_value("detail_length", 10),
+            max_conversation_history=config_manager.get_config_value(
+                "max_conversation_history", 100
+            ),
             max_learnings_history=config_manager.get_config_value("max_learnings_history", 50),
             agent=agent,
         )

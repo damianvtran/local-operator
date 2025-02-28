@@ -131,7 +131,6 @@ class ResponseJsonSchema(BaseModel):
         code (str): Python code to be executed to achieve the current goal
         action (str): Action to take next - one of: CONTINUE, DONE, ASK, BYE
         learnings (str): Learnings from the current step
-        plan (str): Plan for the next step
     """
 
     previous_step_success: bool
@@ -146,7 +145,6 @@ class ResponseJsonSchema(BaseModel):
     replacements: List[Dict[str, str]]
     action: ActionType
     learnings: str
-    plan: str
 
 
 class ProcessResponseStatus(Enum):

@@ -3,7 +3,7 @@ import itertools
 import os
 import sys
 from enum import Enum
-from typing import Any
+from typing import Any, List
 
 from local_operator.agents import AgentData
 from local_operator.config import ConfigManager
@@ -11,7 +11,21 @@ from local_operator.types import ActionType
 
 
 class ExecutionSection(Enum):
-    """Enum for execution section types."""
+    """Enum for execution section types.
+
+    This enum defines the different sections that can be printed during the execution of a task.
+    Each section type corresponds to a specific part of the task's output or action.
+
+    Attributes:
+        HEADER: Indicates the header section, which includes the step number and action.
+        CODE: Indicates the code section, which displays the code to be executed.
+        RESULT: Indicates the result section, which shows the output of the executed code.
+        FOOTER: Indicates the footer section, which marks the end of the task.
+        TOKEN_USAGE: Indicates the token usage section, which provides details on token consumption.
+        WRITE: Indicates the write section, which shows file writing operations.
+        EDIT: Indicates the edit section, which details file editing operations.
+        READ: Indicates the read section, which shows file reading operations.
+    """
 
     HEADER = "header"
     CODE = "code"
@@ -59,6 +73,18 @@ def wrap_text_to_width(text: str, max_width: int, first_line_prefix: str = "") -
 def print_cli_banner(
     config_manager: ConfigManager, current_agent: AgentData | None, training_mode: bool
 ) -> None:
+    """
+    Print the banner for the chat CLI.
+
+    This function prints a banner for the Local Executor Agent CLI, including details about the
+    current agent, hosting, model, and configuration options. It also indicates if the CLI is in
+    debug or training mode.
+
+    Args:
+        config_manager (ConfigManager): The configuration manager to retrieve settings.
+        current_agent (AgentData | None): The current agent data, if available.
+        training_mode (bool): Whether the CLI is in training mode.
+    """
     debug_mode = os.getenv("LOCAL_OPERATOR_DEBUG", "false").lower() == "true"
 
     hosting = config_manager.get_config_value("hosting")
@@ -70,7 +96,6 @@ def print_cli_banner(
         if current_agent.model:
             model = current_agent.model
 
-    """Print the banner for the chat CLI."""
     debug_indicator = " [DEBUG MODE]" if debug_mode else ""
     print("\033[1;36m╭──────────────────────────────────────────────────╮\033[0m")
     print(f"\033[1;36m│ Local Executor Agent CLI{debug_indicator:<25}│\033[0m")
@@ -334,3 +359,85 @@ def print_task_interrupted() -> None:
     print("\n\033[1;33m╭─ Task Interrupted ───────────────────────────────────\033[0m")
     print("\033[1;33m│ User requested to stop current task\033[0m")
     print("\033[1;33m╰══════════════════════════════════════════════════╯\033[0m\n")
+
+
+def condense_logging(log_output: str, max_lines: int = 8000) -> str:
+    """Condense the logging output to a more concise format.
+
+    This function takes a string of logging output and condenses identical lines,
+    replacing them with a single line indicating the number of repetitions.
+    It also identifies and condenses multi-line patterns that repeat throughout the output.
+    If the number of lines exceeds max_lines, it truncates the beginning of the output
+    and adds a message indicating the number of removed lines.
+
+    Args:
+        log_output (str): The logging output to condense.
+        max_lines (int, optional): The maximum number of lines to show in the condensed output.
+            Defaults to 8000.
+
+    Returns:
+        str: The condensed logging output.
+    """
+    if not log_output:
+        return log_output
+
+    lines: List[str] = log_output.splitlines()
+
+    # First pass: identify consecutive identical lines
+    i: int = 0
+    condensed_lines: List[str] = []
+    while i < len(lines):
+        line: str = lines[i]
+        count: int = 1
+
+        # Count consecutive identical lines
+        while i + count < len(lines) and lines[i + count] == line:
+            count += 1
+
+        if count > 1 and line.strip() != "":
+            condensed_lines.append(f"{line} ({count} identical lines)")
+            i += count
+        else:
+            # Look for multi-line patterns
+            pattern_found: bool = False
+
+            # Try patterns of different lengths (2 to 10 lines)
+            for pattern_length in range(2, min(11, len(lines) - i + 1)):
+                pattern: List[str] = lines[i : i + pattern_length]
+
+                # Check if this pattern repeats
+                repeats: int = 0
+                j: int = i
+                while j <= len(lines) - pattern_length:
+                    if lines[j : j + pattern_length] == pattern:
+                        repeats += 1
+                        j += pattern_length
+                    else:
+                        break
+
+                if repeats > 1:
+                    # Found a repeating multi-line pattern
+                    for k in range(pattern_length - 1):
+                        condensed_lines.append(pattern[k])
+
+                    # Add the last line of the pattern with the count
+                    condensed_lines.append(
+                        f"{pattern[pattern_length - 1]} ({repeats} identical multi-line blocks)"
+                    )
+
+                    i += pattern_length * repeats
+                    pattern_found = True
+                    break
+
+            if not pattern_found:
+                condensed_lines.append(line)
+                i += 1
+
+    # Truncate if necessary
+    num_condensed_lines: int = len(condensed_lines)
+    if num_condensed_lines > max_lines:
+        lines_removed: int = num_condensed_lines - max_lines
+        condensed_lines = condensed_lines[-max_lines:]
+        condensed_lines.insert(0, f"...({lines_removed} previous lines removed)")
+
+    return "\n".join(condensed_lines)

@@ -5,6 +5,7 @@ import platform
 import subprocess
 import sys
 from pathlib import Path
+from typing import List, Optional
 
 import psutil
 
@@ -53,7 +54,7 @@ def get_installed_packages_str() -> str:
     return package_str
 
 
-def get_tools_str(tool_registry: ToolRegistry | None = None) -> str:
+def get_tools_str(tool_registry: Optional[ToolRegistry] = None) -> str:
     """Get formatted string describing available tool functions.
 
     Args:
@@ -69,7 +70,7 @@ def get_tools_str(tool_registry: ToolRegistry | None = None) -> str:
     builtin_names = set(dir(__builtins__))
     builtin_names.update(["dict", "list", "set", "tuple", "Path"])
 
-    tools_list: list[str] = []
+    tools_list: List[str] = []
     for name in tool_registry:
         # Skip private functions and builtins
         if name.startswith("_") or name in builtin_names:
@@ -91,15 +92,21 @@ def get_tools_str(tool_registry: ToolRegistry | None = None) -> str:
                 )
                 args.append(f"{p.name}: {arg_type}")
 
-            return_type = (
-                sig.return_annotation.__name__
-                if hasattr(sig.return_annotation, "__name__")
-                else str(sig.return_annotation)
-            )
-
-            # Check if function is async
-            is_async = inspect.iscoroutinefunction(tool)
-            async_prefix = "async " if is_async else ""
+            return_annotation = sig.return_annotation
+            if inspect.iscoroutinefunction(tool):
+                return_type = (
+                    f"Coroutine[{return_annotation.__name__}]"
+                    if hasattr(return_annotation, "__name__")
+                    else f"Coroutine[{return_annotation}]"
+                )
+                async_prefix = "async "
+            else:
+                return_type = (
+                    return_annotation.__name__
+                    if hasattr(return_annotation, "__name__")
+                    else str(return_annotation)
+                )
+                async_prefix = ""
 
             tools_list.append(f"- {async_prefix}{name}({', '.join(args)}) -> {return_type}: {doc}")
     return "\n".join(tools_list)
@@ -121,12 +128,13 @@ code will be available in the "output" field of the response.
 
 Core Principles:
 - 🔒 Pre-validate safety and system impact for code actions.
-- 🐍 Write Python code for code actions.  print() to the console to output the results
-  of the code.  Ensure that the output can be captured when the system runs exec()
-  on your code.
-- 🖥️ You are in a Python interpreter environment. You will be shown the variables in your context,
-  the files in your working directory, and other relevant context at each step.
-  Use variables from previous steps and don't repeat work unnecessarily.
+- 🐍 Write Python code for code actions in the style of Jupyter Notebook cells.  Use
+  print() to the console to output the results of the code.  Ensure that the output
+  can be captured when the system runs exec() on your code.
+- 🖥️ You are in a Python interpreter environment similar to a Jupyter Notebook. You will
+  be shown the variables in your context, the files in your working directory, and other
+  relevant context at each step.  Use variables from previous steps and don't repeat work
+  unnecessarily.
 - 🧱 Break up complex code into separate, well-defined steps, and use the outputs of
   each step in the environment context for the next steps.  Output one step at a
   time and wait for the system to execute it before outputting the next step.
@@ -137,17 +145,20 @@ Core Principles:
   in subsequent steps.
 - 📝 Read, write, and edit text files using READ, WRITE, and EDIT such as markdown,
   html, code, and other written information formats.  Do not use Python code to
-  perform these actions with strings.
+  perform these actions with strings.  Do not use these actions for data files or
+  spreadsheets.
 - ✅ Ensure all written code is formatting compliant.  If you are writing code, ensure
   that it is formatted correctly, uses best practices, is efficient.  Ensure code
   files end with a newline.
 - 📊 Use CODE to read, edit, and write data objects to files like JSON, CSV, images,
   videos, etc.  Use Pandas to read spreadsheets and large data files.  Never
-  read large data files with READ.
+  read large data files or spreadsheets with READ.
 - ⛔️ Never use CODE to perform READ, WRITE, or EDIT actions with strings on text
   formats.  Writing to files with strings in python code is less efficient and will
   be error prone.
-- 🛠️ Auto-install missing packages via subprocess.
+- 🛠️ Auto-install missing packages via subprocess.  Make sure to pipe the output to
+  a string that you can print to the console so that you can understand any installation
+  failures.
 - 🔍 Verify state/data with code execution.
 - 💭 Not every step requires code execution - use natural language to plan, summarize, and explain
   your thought process. Only execute code when necessary to achieve the goal.
@@ -204,7 +215,7 @@ Response Flow:
 2. In CODE, include pip installs if needed (check via importlib).
 3. In CODE, READ, WRITE, and EDIT, the system will execute your code and print
    the output to the console which you can then use to inform your next steps.
-4. Always verify your progress and the results of your work with CHECK.
+4. Always verify your progress and the results of your work with CODE.
 5. In DONE, print clear, actionable, human-readable verification and a clear summary
    of the completed plan and key results.  Be specific in your summary and include all
    the details and data you have gathered.  Do not respond with DONE if the plan is not
@@ -214,7 +225,8 @@ Your response flow should look something like the following example sequence:
   1. Research (CODE): research the information required by the plan.  Run exploratory
      code to gather information about the user's goal.
   2. Read (READ): read the contents of the file to gather information about the user's
-     goal.
+     goal.  Do not READ for large files or data files, instead use CODE to extract and
+     summarize a portion of the file instead.
   3. Code/Write/Edit (CODE/WRITE/EDIT): execute on the plan by performing the actions necessary to
      achieve the user's goal.  Print the output of the code to the console for
      the system to consume.
@@ -228,7 +240,7 @@ python interpreter:
 <example_code>
 Step 1 - Action CODE, string in "code" field:
 ```python
-import package
+import package # Import once and then use in next steps
 
 def long_running_function(input):
     # Some long running function
@@ -243,9 +255,9 @@ print(x)
 
 Step 2 - Action CODE, string in "code" field:
 ```python
-y = x * 2
-z = long_running_function(y)
-error_throwing_function()
+y = x * 2 # Reuse x from previous step
+z = long_running_function(y) # Use function defined in previous step
+error_throwing_function() # Use function defined in previous step
 print(z)
 ```
 
@@ -255,8 +267,8 @@ Step 3 - Action CODE, string in "code" field:
 def fixed_error_function():
     # Another version of error_throwing_function that fixes the error
 
-fixed_error_function() # Reuse z to not waste time, fix the error and continue
-print(z)
+fixed_error_function() # Run the fixed function so that we can continue
+print(z) # Reuse z to not waste time, fix the error and continue
 ```
 </example_code>
 
@@ -281,8 +293,8 @@ make your code more efficient.
 </tools_list>
 
 Use them by running tools.[TOOL_FUNCTION] in your code. `tools` is a tool registry that
-is in the execution context of your code. Use `await` for async functions (do not call
-`asyncio.run()`).
+is in the execution context of your code. If the tool is async, it will be annotated
+with the Coroutine return type.  Otherwise, do not await it.
 
 Additional User Notes:
 <additional_user_notes>
@@ -298,9 +310,16 @@ Critical Constraints:
   be able to review the output of the code where necessary.
 - Avoid making errors in code.  Review any error outputs from code and formatting and
   don't repeat them.
+- Be efficient with your code.  Only generate the code that you need for each step
+  and reuse variables from previous steps.
+- Don't re-read objects from the filesystem if they are already in memory in your
+  environment context.
 - Always check paths, network, and installs first.
 - Always read before writing or editing.
 - Never repeat questions.
+- Never repeat errors, always make meaningful efforts to debug errors with different
+  approaches each time.  Go back a few steps if you need to if the issue is related
+  to something that you did in previous steps.
 - Pay close attention to the user's instruction.  The user may switch goals or
   ask you a new question without notice.  In this case you will need to prioritize
   the user's new request over the previous goal.
@@ -315,6 +334,13 @@ Critical Constraints:
   unless explicitly asked to do so.
 - Do not write code with the exit() command, this will terminate the session and you will
   not be able to complete the task.
+- Do not use verbose logging methods, turn off verbosity unless needed for debugging.
+  This ensures that you do not consume unnecessary tokens or overflow the context limit.
+- Never get stuck in a loop performing the same action over and over again.  You must
+  continually move forward and make progress on each step.  Each step should be a
+  meaningfully better improvement over the last with new techniques and approaches.
+- Use await for async functions.  Never call `asyncio.run()`, as this is already handled
+  for you in the runtime and the code executor.
 
 Response Format:
 {response_format}
@@ -322,6 +348,7 @@ Response Format:
 
 JsonResponseFormatPrompt: str = """
 You MUST respond EXCLUSIVELY in valid JSON format following this exact schema and field order.
+
 Respond with only ONE JSON object in your response.
 Make sure that any of your response, explanations, analysis, code, etc. are exclusively
 inside the JSON structure and not outside of it.  Your code must be included in the "code"
@@ -331,7 +358,7 @@ Important Rules:
 1. The JSON must be valid and parseable
 2. All fields must be present (use empty strings/arrays/values if not applicable)
 3. No additional text, comments, or formatting outside the JSON structure
-4. Maintain the exact field order shown above
+4. Maintain the exact field order shown in the response format
 5. The response must be pure JSON only
 
 Failure to follow these rules will result in rejection of your response.
@@ -352,15 +379,12 @@ and </response_format> tags.
   contains useful insights as opposed to simply being anccounting of actions.
   Empty for the first step.",
   "current_goal": "Your goal for the current step.",
-  "plan": "Long term plan of actions to achieve the user's goal beyond these goals.
-  This plan should be the same or similar for all steps of the same task, unless
-  new information is discovered that changes the plan.",
   "next_goal": "Your goal for the next step",
   "response": "Natural language response to the user's goal",
-  "code": "Required for CHECK and CODE: code to achieve the user's goal, must be
+  "code": "Required for CODE: code to achieve the user's goal, must be
   valid Python code.  Do not provide for WRITE or EDIT",
   "content": "Required for WRITE: content to write to a file, if applicable.
-  Do not provide for CHECK, READ, or EDIT",
+  Do not provide for READ, or EDIT",
   "file_path": "Required for READ, WRITE, and EDIT: the path to the file to access, if applicable",
   "replacements": [
     {
@@ -368,7 +392,7 @@ and </response_format> tags.
       "replace": "Required for EDIT: the string to replace it with"
     }
   ], // Only include if the action is EDIT
-  "action": "RESEARCH | CODE | WRITE | EDIT | CHECK | DONE | ASK | BYE"
+  "action": "RESEARCH | CODE | READ | WRITE | EDIT | DONE | ASK | BYE"
 }
 </response_format>
 """
@@ -376,7 +400,7 @@ and </response_format> tags.
 PlanSystemPrompt: str = """
 Given the above information about how you will need to operate in execution mode,
 brainstorm, think, and respond with a detailed plan of actions to achieve the
-user's goal.
+user's most recent request in the conversation.
 
 The plan should be a detailed list of steps that are logical and will achieve the goal.
 Pay close attention to the user's request and the information provided to you.
@@ -384,19 +408,19 @@ Only include steps that are necessary to achieve the goal to its fullest extent.
 Be specific, and include any files, queries, and other details that will be needed
 for each step.  Determine which tools you will need to use if any.
 
-The plan should be in the following format, in natural language and not JSON or
+The plan should contain all of the following details, in natural language and not JSON or
 code:
 
-1. Gather information about the user's goal.
-2. Break down the goal into smaller, manageable steps.
-3. Identify the tools and resources needed for each step.
-4. Determine the order in which the steps should be executed.
-5. Create a detailed plan that outlines each step, the tools/resources required,
-and the expected outcome.
-6. Create a validation plan for how you will check that each step is successful
-   and that the overall goal is achieved at the end.  This should be a list of
-   checks that you will perform to verify that the goal is achieved once you
-   complete the initial execution plan.
+- Gather information about the user's goal.
+- Break down the goal into smaller, manageable steps.
+- Identify the tools and resources needed for each step.
+- Determine the order in which the steps should be executed.
+- Create a detailed plan that outlines each step, the tools/resources required,
+  and the expected outcome.
+- Create a validation plan for how you will check that each step is successful
+  and that the overall goal is achieved at the end.  This should be a list of
+  checks that you will perform to verify that the goal is achieved once you
+  complete the initial execution plan.
 
 Present the plan in a clear and detailed manner.  Be specific and include all the
 details and data you will need to verify that the goal is achieved.

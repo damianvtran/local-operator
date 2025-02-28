@@ -83,16 +83,17 @@ def test_get_tools_str():
         {
             "name": "Async tool registry",
             "registry": ToolRegistry(),
-            "expected": "- async async_func(url: str) -> str: Async test function",
+            "expected": "- async async_func(url: str) -> Coroutine[str]: Async test function",
         },
         {
             "name": "Default init registry",
             "registry": ToolRegistry(),
             "expected": (
-                "- async browse_single_url(url: str) -> str: Browse to a URL using Playwright to "
-                "render JavaScript and return the page content.\n"
-                "- index_current_directory(max_depth: int) -> Dict: Index the current directory "
-                "showing files and their metadata."
+                "- async browse_single_url(url: str) -> Coroutine[str]: Browse to a URL "
+                "using Playwright to render JavaScript and return the page content.\n"
+                "- list_working_directory(max_depth: int) -> Dict: "
+                "List the files in the current "
+                "directory showing files and their metadata."
             ),
         },
     ]

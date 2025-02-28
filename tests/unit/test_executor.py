@@ -610,7 +610,6 @@ async def test_process_response(executor, mock_model_config):
         code="print('hello world')",
         action=ActionType.CODE,
         learnings="",
-        plan="",
         content="",
         file_path="",
         replacements=[],
@@ -657,6 +656,11 @@ def test_limit_conversation_history(executor):
             ],
             "expected": [
                 ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt"),
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="[Some conversation history has been truncated for brevity]",
+                    should_summarize=False,
+                ),
                 ConversationRecord(role=ConversationRole.USER, content="msg3"),
                 ConversationRecord(role=ConversationRole.ASSISTANT, content="msg4"),
             ],
@@ -1280,7 +1284,6 @@ async def test_perform_action(
         code=code or "",
         action=action_type,
         learnings="",
-        plan="",
         content=content or "",
         file_path=file_path or "",
         replacements=replacements or [],
@@ -1368,7 +1371,6 @@ async def test_perform_action_handles_exception(executor: LocalCodeExecutor):
         code="invalid code",
         action=ActionType.CODE,
         learnings="",
-        plan="",
         content="",
         file_path="",
         replacements=[],
@@ -1719,7 +1721,7 @@ def test_get_environment_details(executor, monkeypatch, tmp_path):
             ("other.bin", "other", 750),
         ]
     }
-    monkeypatch.setattr("local_operator.executor.index_current_directory", lambda: mock_index)
+    monkeypatch.setattr("local_operator.executor.list_working_directory", lambda: mock_index)
 
     # Mock git status
     def mock_check_output(*args, **kwargs):
@@ -1758,7 +1760,7 @@ def test_get_environment_details(executor, monkeypatch, tmp_path):
 def test_get_environment_details_no_git(executor, monkeypatch, tmp_path):
     """Test get_environment_details when not in a git repository."""
     # Mock directory indexing with empty directory
-    monkeypatch.setattr("local_operator.executor.index_current_directory", lambda: {})
+    monkeypatch.setattr("local_operator.executor.list_working_directory", lambda: {})
 
     # Mock git branch check to fail
     def mock_check_output(*args, **kwargs):
@@ -1779,7 +1781,7 @@ def test_get_environment_details_large_directory(executor, monkeypatch):
     # Create mock directory with >300 files
     mock_files = [("file{}.txt".format(i), "doc", 100) for i in range(1000)]
     mock_index = {f"dir{i}": mock_files[i * 100 : (i + 1) * 100] for i in range(10)}
-    monkeypatch.setattr("local_operator.executor.index_current_directory", lambda: mock_index)
+    monkeypatch.setattr("local_operator.executor.list_working_directory", lambda: mock_index)
 
     # Mock git branch
     def mock_check_output(*args, **kwargs):
@@ -1884,3 +1886,41 @@ def test_code_execution_error_agent_info_str(
     assert "<code_block>" in error_str
     assert "</code_block>" in error_str
     assert "</agent_generated_code>" in error_str
+
+
+@pytest.fixture
+def executor_with_learnings(executor):
+    executor.learnings = ["learning1", "learning2"]
+    return executor
+
+
+def test_add_to_learnings_new_learning(executor_with_learnings):
+    executor_with_learnings.add_to_learnings("learning3")
+    assert "learning3" in executor_with_learnings.learnings
+    assert len(executor_with_learnings.learnings) == 3
+
+
+def test_add_to_learnings_duplicate_learning(executor_with_learnings):
+    executor_with_learnings.add_to_learnings("learning1")
+    assert executor_with_learnings.learnings.count("learning1") == 1
+    assert len(executor_with_learnings.learnings) == 2
+
+
+def test_add_to_learnings_empty_learning(executor_with_learnings):
+    executor_with_learnings.add_to_learnings("")
+    assert len(executor_with_learnings.learnings) == 2
+
+
+def test_add_to_learnings_none_learning(executor_with_learnings):
+    executor_with_learnings.add_to_learnings(None)  # type: ignore
+    assert len(executor_with_learnings.learnings) == 2
+
+
+def test_add_to_learnings_exceed_max_learnings(executor):
+    executor.max_learnings_history = 2
+    executor.learnings = ["learning1", "learning2"]
+    executor.add_to_learnings("learning3")
+    assert "learning1" not in executor.learnings
+    assert "learning2" in executor.learnings
+    assert "learning3" in executor.learnings
+    assert len(executor.learnings) == 2
