@@ -37,7 +37,7 @@ from local_operator.prompts import (
     SafetyCheckUserPrompt,
     create_system_prompt,
 )
-from local_operator.tools import ToolRegistry, index_current_directory
+from local_operator.tools import ToolRegistry, list_working_directory
 from local_operator.types import (
     ActionType,
     ConversationRecord,
@@ -1829,7 +1829,7 @@ class LocalCodeExecutor:
 
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         git_status = self._get_git_status()
-        directory_tree = self.format_directory_tree(index_current_directory())
+        directory_tree = self.format_directory_tree(list_working_directory())
         context_vars = get_context_vars_str(self.context)
 
         return f"""<environment_details>

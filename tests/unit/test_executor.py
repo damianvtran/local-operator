@@ -1724,7 +1724,7 @@ def test_get_environment_details(executor, monkeypatch, tmp_path):
             ("other.bin", "other", 750),
         ]
     }
-    monkeypatch.setattr("local_operator.executor.index_current_directory", lambda: mock_index)
+    monkeypatch.setattr("local_operator.executor.list_working_directory", lambda: mock_index)
 
     # Mock git status
     def mock_check_output(*args, **kwargs):
@@ -1763,7 +1763,7 @@ def test_get_environment_details(executor, monkeypatch, tmp_path):
 def test_get_environment_details_no_git(executor, monkeypatch, tmp_path):
     """Test get_environment_details when not in a git repository."""
     # Mock directory indexing with empty directory
-    monkeypatch.setattr("local_operator.executor.index_current_directory", lambda: {})
+    monkeypatch.setattr("local_operator.executor.list_working_directory", lambda: {})
 
     # Mock git branch check to fail
     def mock_check_output(*args, **kwargs):
@@ -1784,7 +1784,7 @@ def test_get_environment_details_large_directory(executor, monkeypatch):
     # Create mock directory with >300 files
     mock_files = [("file{}.txt".format(i), "doc", 100) for i in range(1000)]
     mock_index = {f"dir{i}": mock_files[i * 100 : (i + 1) * 100] for i in range(10)}
-    monkeypatch.setattr("local_operator.executor.index_current_directory", lambda: mock_index)
+    monkeypatch.setattr("local_operator.executor.list_working_directory", lambda: mock_index)
 
     # Mock git branch
     def mock_check_output(*args, **kwargs):

@@ -96,8 +96,8 @@ def _should_ignore_file(file_path: str) -> bool:
     return False
 
 
-def index_current_directory(max_depth: int = 3) -> Dict[str, List[Tuple[str, str, int]]]:
-    """Index the current directory showing files and their metadata.
+def list_working_directory(max_depth: int = 3) -> Dict[str, List[Tuple[str, str, int]]]:
+    """List the files in the current directory showing files and their metadata.
     If in a git repo, only shows unignored files. If not in a git repo, shows all files.
 
     Args:
@@ -445,11 +445,11 @@ class ToolRegistry:
 
         Default tools include:
         - browse_single_url: Browse a URL and get page content
-        - index_current_directory: Index files in current directory
+        - list_working_directory: Index files in current directory
         - search_web: Search the web using SERP API
         """
         self.add_tool("browse_single_url", browse_single_url)
-        self.add_tool("index_current_directory", index_current_directory)
+        self.add_tool("list_working_directory", list_working_directory)
         if self.serp_api_client:
             self.add_tool("search_web", search_web_tool(self.serp_api_client))
 
