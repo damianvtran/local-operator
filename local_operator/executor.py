@@ -47,6 +47,13 @@ from local_operator.types import (
     ResponseJsonSchema,
 )
 
+MAX_FILE_READ_SIZE_BYTES = 1024 * 24
+"""The maximum file size to read in bytes.
+
+This is used to prevent reading large files into context, which can cause
+context overflow errors for LLM APIs.
+"""
+
 
 class ExecutorInitError(Exception):
     """Raised when the executor fails to initialize properly."""
@@ -1491,19 +1498,30 @@ class LocalCodeExecutor:
 
         return output
 
-    async def read_file(self, file_path: str) -> CodeExecutionResult:
+    async def read_file(
+        self, file_path: str, max_file_size_bytes: int = MAX_FILE_READ_SIZE_BYTES
+    ) -> CodeExecutionResult:
         """Read the contents of a file and include line numbers and lengths.
 
         Args:
             file_path (str): The path to the file to read
+            max_file_size_bytes (int): The maximum file size to read in bytes
 
         Returns:
             str: A message indicating the file has been read
 
         Raises:
             FileNotFoundError: If the file does not exist
+            ValueError: If the file is too large to read
             OSError: If there is an error reading the file
         """
+        if os.path.getsize(file_path) > max_file_size_bytes:
+            raise ValueError(
+                f"File is too large to use read action on: {file_path}\n"
+                f"Please use code action to summarize and extract key features from "
+                f"the file instead."
+            )
+
         with open(file_path, "r", encoding="utf-8") as f:
             file_content = f.read()
 
