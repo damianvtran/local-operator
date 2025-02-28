@@ -402,7 +402,13 @@ Given the above information about how you will need to operate in execution mode
 brainstorm, think, and respond with a detailed plan of actions to achieve the
 user's most recent request in the conversation.
 
-The plan should be a detailed list of steps that are logical and will achieve the goal.
+First, determine if you need to plan at all.  Some tasks that require a single step
+or a simple console command can be performed without planning.  If you determine
+that planning is not needed, respond with "[SKIP_PLANNING]" and we will continue to
+execution.
+
+If planning is needed, respond with a detailed list of steps that are logical and will
+achieve the goal.
 Pay close attention to the user's request and the information provided to you.
 Only include steps that are necessary to achieve the goal to its fullest extent.
 Be specific, and include any files, queries, and other details that will be needed
@@ -427,6 +433,16 @@ details and data you will need to verify that the goal is achieved.
 
 Only respond with natural language, and do not include any JSON or code.  You will be
 asked to generate code and perform actions in subsequent steps.
+"""
+
+PlanUserPrompt: str = """
+Determine if planning is required.  If not required, then respond with "[SKIP_PLANNING]".
+
+If planning is required, then please come up with a detailed writeup for a plan of actions
+to achieve the goal for the user's recent request before proceeding with the execution phase.
+Your plan will be used to perform actions in the next steps. Respond in natural language
+format, not JSON or code. Keep in mind that the user might change directions with their
+request, so determine if you need to be planning for the same goal or a new one.
 """
 
 SafetyCheckSystemPrompt: str = """
