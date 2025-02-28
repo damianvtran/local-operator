@@ -514,5 +514,5 @@ def test_condense_logging(log_output: str, expected: str) -> None:
         expected: The expected condensed log output string.
         test_id: The ID of the test case.
     """
-    result = condense_logging(log_output)
+    result = condense_logging(log_output, max_lines=1000)
     assert result == expected

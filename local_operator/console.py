@@ -361,7 +361,7 @@ def print_task_interrupted() -> None:
     print("\033[1;33m╰══════════════════════════════════════════════════╯\033[0m\n")
 
 
-def condense_logging(log_output: str, max_lines: int = 1000) -> str:
+def condense_logging(log_output: str, max_lines: int = 8000) -> str:
     """Condense the logging output to a more concise format.
 
     This function takes a string of logging output and condenses identical lines,
@@ -373,7 +373,7 @@ def condense_logging(log_output: str, max_lines: int = 1000) -> str:
     Args:
         log_output (str): The logging output to condense.
         max_lines (int, optional): The maximum number of lines to show in the condensed output.
-            Defaults to 1000.
+            Defaults to 8000.
 
     Returns:
         str: The condensed logging output.
