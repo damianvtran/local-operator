@@ -3,7 +3,7 @@ import itertools
 import os
 import sys
 from enum import Enum
-from typing import Any
+from typing import Any, List
 
 from local_operator.agents import AgentData
 from local_operator.config import ConfigManager
@@ -336,15 +336,19 @@ def print_task_interrupted() -> None:
     print("\033[1;33m╰══════════════════════════════════════════════════╯\033[0m\n")
 
 
-def condense_logging(log_output: str) -> str:
+def condense_logging(log_output: str, max_lines: int = 1000) -> str:
     """Condense the logging output to a more concise format.
 
     This function takes a string of logging output and condenses identical lines,
     replacing them with a single line indicating the number of repetitions.
     It also identifies and condenses multi-line patterns that repeat throughout the output.
+    If the number of lines exceeds max_lines, it truncates the beginning of the output
+    and adds a message indicating the number of removed lines.
 
     Args:
         log_output (str): The logging output to condense.
+        max_lines (int, optional): The maximum number of lines to show in the condensed output.
+            Defaults to 1000.
 
     Returns:
         str: The condensed logging output.
@@ -352,14 +356,14 @@ def condense_logging(log_output: str) -> str:
     if not log_output:
         return log_output
 
-    lines = log_output.splitlines()
+    lines: List[str] = log_output.splitlines()
 
     # First pass: identify consecutive identical lines
-    i = 0
-    condensed_lines = []
+    i: int = 0
+    condensed_lines: List[str] = []
     while i < len(lines):
-        line = lines[i]
-        count = 1
+        line: str = lines[i]
+        count: int = 1
 
         # Count consecutive identical lines
         while i + count < len(lines) and lines[i + count] == line:
@@ -370,15 +374,15 @@ def condense_logging(log_output: str) -> str:
             i += count
         else:
             # Look for multi-line patterns
-            pattern_found = False
+            pattern_found: bool = False
 
             # Try patterns of different lengths (2 to 10 lines)
             for pattern_length in range(2, min(11, len(lines) - i + 1)):
-                pattern = lines[i : i + pattern_length]
+                pattern: List[str] = lines[i : i + pattern_length]
 
                 # Check if this pattern repeats
-                repeats = 0
-                j = i
+                repeats: int = 0
+                j: int = i
                 while j <= len(lines) - pattern_length:
                     if lines[j : j + pattern_length] == pattern:
                         repeats += 1
@@ -403,5 +407,12 @@ def condense_logging(log_output: str) -> str:
             if not pattern_found:
                 condensed_lines.append(line)
                 i += 1
+
+    # Truncate if necessary
+    num_condensed_lines: int = len(condensed_lines)
+    if num_condensed_lines > max_lines:
+        lines_removed: int = num_condensed_lines - max_lines
+        condensed_lines = condensed_lines[-max_lines:]
+        condensed_lines.insert(0, f"...({lines_removed} previous lines removed)")
 
     return "\n".join(condensed_lines)
