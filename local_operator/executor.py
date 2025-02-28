@@ -20,6 +20,7 @@ from tiktoken import encoding_for_model
 from local_operator.agents import AgentData
 from local_operator.console import (
     ExecutionSection,
+    condense_logging,
     format_agent_output,
     format_error_output,
     format_success_output,
@@ -233,43 +234,6 @@ def annotate_code(code: str, error_line: int | None = None) -> str | None:
         annotated_code += f"{error_indicator}{line_number:>4} | {line_length:>4} | {line}"
 
     return annotated_code
-
-
-def condense_logging(log_output: str) -> str:
-    """Condense the logging output to a more concise format.
-
-    This function takes a string of logging output and condenses identical lines,
-    replacing them with a single line indicating the number of repetitions.
-
-    Args:
-        log_output (str): The logging output to condense.
-
-    Returns:
-        str: The condensed logging output.
-    """
-    lines = log_output.splitlines()
-    condensed_lines: list[str] = []
-    count = 1
-
-    for i in range(len(lines)):
-        if i > 0 and lines[i] == lines[i - 1]:
-            count += 1
-        else:
-            if i > 0:
-                if count > 1:
-                    condensed_lines.append(f"{lines[i - 1]} ({count} identical lines)")
-                else:
-                    condensed_lines.append(lines[i - 1])
-            count = 1
-
-    # Add the last line
-    if lines:
-        if count > 1:
-            condensed_lines.append(f"{lines[-1]} ({count} identical lines)")
-        else:
-            condensed_lines.append(lines[-1])
-
-    return "\n".join(condensed_lines)
 
 
 class ExecutorTokenMetrics(BaseModel):
