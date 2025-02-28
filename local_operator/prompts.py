@@ -292,8 +292,8 @@ make your code more efficient.
 </tools_list>
 
 Use them by running tools.[TOOL_FUNCTION] in your code. `tools` is a tool registry that
-is in the execution context of your code. Use `await` for async functions (do not call
-`asyncio.run()`).
+is in the execution context of your code. If the tool is async, it will be annotated
+with the Coroutine return type.  Otherwise, do not await it.
 
 Additional User Notes:
 <additional_user_notes>
@@ -338,6 +338,8 @@ Critical Constraints:
 - Never get stuck in a loop performing the same action over and over again.  You must
   continually move forward and make progress on each step.  Each step should be a
   meaningfully better improvement over the last with new techniques and approaches.
+- Use await for async functions.  Never call `asyncio.run()`, as this is already handled
+  for you in the runtime and the code executor.
 
 Response Format:
 {response_format}
