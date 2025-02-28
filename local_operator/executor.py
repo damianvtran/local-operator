@@ -984,8 +984,8 @@ class LocalCodeExecutor:
 
                 msg = (
                     "I've identified that this is a dangerous operation. "
-                    "Let's stop this task for now, I will provide further instructions shortly. "
-                    "Action DONE."
+                    "Let's stop the current task, I will provide further instructions shortly. "
+                    "Please await further instructions and use action DONE."
                 )
                 self.append_to_history(
                     ConversationRecord(
