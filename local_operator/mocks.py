@@ -24,7 +24,7 @@ USER_MOCK_RESPONSES = {
         previous_goal="",
         current_goal="",
         next_goal="",
-        response='Sure, I will execute a simple Python script to print "Hello World".',
+        response='I will execute a simple Python script to print "Hello World".',
         code='print("Hello World")',
         action=ActionType.CODE,
         learnings="",
@@ -33,10 +33,10 @@ USER_MOCK_RESPONSES = {
         replacements=[],
         previous_step_issue="",
     ),
-}
-
-SYSTEM_MOCK_RESPONSES = {
-    "Hello World": ResponseJsonSchema(
+    "please come up with a detailed writeup for a plan of actions": (
+        "Sure, I will create a plan to print 'Hello World'."
+    ),
+    "hello world": ResponseJsonSchema(
         previous_step_success=True,
         previous_goal="Print Hello World",
         current_goal="Complete task",
@@ -50,9 +50,6 @@ SYSTEM_MOCK_RESPONSES = {
         replacements=[],
         previous_step_issue="",
     ),
-    "Please come up with a detailed plan of actions to achieve the goal "
-    "before proceeding with the execution phase.  Your plan will be used to "
-    "perform actions in the next steps.": "Sure, I will create a plan to print 'Hello World'.",
 }
 
 
@@ -94,51 +91,32 @@ class ChatMock:
 
         # Only consider the last message coming from the user
         user_message = ""
-        user_message_index = -1
-        for index, msg in reversed(list(enumerate(messages))):
+        for msg in reversed(list(messages)):
             if msg.get("role") == ConversationRole.USER.value:
                 user_message = msg.get("content", "")
-                user_message_index = index
                 break
 
         user_message_lower = user_message.lower()
 
-        code_execution_response = ""
-        code_execution_response_index = -1
-        for index, msg in reversed(list(enumerate(messages))):
-            if msg.get("role") == ConversationRole.SYSTEM.value and "<stdout>" in msg.get(
-                "content", ""
-            ):
-                code_execution_response = msg.get("content", "")
-                code_execution_response_index = index
-                break
+        # Find closest matching response by partial string match
+        closest_match = None
+        max_match_length = 0
+        for key in USER_MOCK_RESPONSES:
+            key_lower = key.lower()
+            if key_lower in user_message_lower and len(key_lower) > max_match_length:
+                closest_match = key
+                max_match_length = len(key_lower)
 
-        if user_message_index > code_execution_response_index:
-            # Find closest matching response by partial string match
-            closest_match = None
-            max_match_length = 0
-            for key in USER_MOCK_RESPONSES:
-                if key in user_message_lower and len(key) > max_match_length:
-                    closest_match = key
-                    max_match_length = len(key)
-
-            if closest_match:
-                response = USER_MOCK_RESPONSES[closest_match]
-                return BaseMessage(
-                    content=(
-                        response.model_dump_json()
-                        if isinstance(response, ResponseJsonSchema)
-                        else response
-                    ),
-                    type=ConversationRole.ASSISTANT.value,
-                )
-        else:
-            for response in SYSTEM_MOCK_RESPONSES:
-                if response in code_execution_response:
-                    return BaseMessage(
-                        content=SYSTEM_MOCK_RESPONSES[response].model_dump_json(),
-                        type=ConversationRole.ASSISTANT.value,
-                    )
+        if closest_match:
+            response = USER_MOCK_RESPONSES[closest_match]
+            return BaseMessage(
+                content=(
+                    response.model_dump_json()
+                    if isinstance(response, ResponseJsonSchema)
+                    else response
+                ),
+                type=ConversationRole.ASSISTANT.value,
+            )
 
         # Pass through the last message if no match found
         return BaseMessage(
