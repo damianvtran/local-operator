@@ -6,6 +6,8 @@ The notebooks are a visualization of the conversation history between the user a
 
 💡 Each notebook can be replicated by installing the `local-operator` package version in the configuration summary and asking the agent the same questions with the same/similar parameters.
 
+📝 Notebooks can be created from conversations simply by asking the agent at the end of some task to save the conversation as a notebook.
+
 ## 🔄 [github_commit.ipynb](github_commit.ipynb)
 
 This interactive notebook demonstrates a Local Operator agent session powered by the `qwen/qwen-2.5-72b-instruct` model. The Local Operator agent automatically reads the diffs from the current git commit and generates a suitable and concise commit message. The notebook shows how AI can help developers maintain clear version history and improve their git workflow with contextually relevant commit messages.
