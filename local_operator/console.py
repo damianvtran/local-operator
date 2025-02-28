@@ -11,7 +11,21 @@ from local_operator.types import ActionType
 
 
 class ExecutionSection(Enum):
-    """Enum for execution section types."""
+    """Enum for execution section types.
+
+    This enum defines the different sections that can be printed during the execution of a task.
+    Each section type corresponds to a specific part of the task's output or action.
+
+    Attributes:
+        HEADER: Indicates the header section, which includes the step number and action.
+        CODE: Indicates the code section, which displays the code to be executed.
+        RESULT: Indicates the result section, which shows the output of the executed code.
+        FOOTER: Indicates the footer section, which marks the end of the task.
+        TOKEN_USAGE: Indicates the token usage section, which provides details on token consumption.
+        WRITE: Indicates the write section, which shows file writing operations.
+        EDIT: Indicates the edit section, which details file editing operations.
+        READ: Indicates the read section, which shows file reading operations.
+    """
 
     HEADER = "header"
     CODE = "code"
