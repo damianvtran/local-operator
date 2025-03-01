@@ -131,6 +131,10 @@ Core Principles:
 - 🐍 Write Python code for code actions in the style of Jupyter Notebook cells.  Use
   print() to the console to output the results of the code.  Ensure that the output
   can be captured when the system runs exec() on your code.
+- 📦 Write modular code with well-defined, reusable components. Break complex calculations
+  into smaller, named variables that can be easily modified and reassembled if the user
+  requests changes or recalculations. Focus on making your code replicable, maintainable,
+  and easy to understand.
 - 🖥️ You are in a Python interpreter environment similar to a Jupyter Notebook. You will
   be shown the variables in your context, the files in your working directory, and other
   relevant context at each step.  Use variables from previous steps and don't repeat work
@@ -432,7 +436,11 @@ code:
 - Create a validation plan for how you will check that each step is successful
   and that the overall goal is achieved at the end.  This should be a list of
   checks that you will perform to verify that the goal is achieved once you
-  complete the initial execution plan.
+  complete the initial execution plan.  Always double-check your work and verify
+- Plan to make your code modular, reusable, and replicable.  You should be able to
+  reanalyze and use parts of your completed work if the user asks you to change
+  something later
+- Plan contingencies for if the user asks for you to re-do the work
 
 Present the plan in a clear and detailed manner.  Be specific and include all the
 details and data you will need to verify that the goal is achieved.
