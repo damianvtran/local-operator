@@ -37,3 +37,7 @@ This practical notebook shows a Local Operator agent tackling the classic Kaggle
 ## 🌐 [Web Research and Data Extraction Techniques](web_research_scraping.ipynb)
 
 This informative notebook showcases a Local Operator session (using `qwen/qwen-2.5-72b-instruct` via openrouter) that implements web scraping techniques to extract the Canadian sanctions list. Given a single prompt from the user, the agent proceeds with a structured planning approach to retrieval of data from government sources with SERP API tool usage, processing semi-structured information into a clean CSV format, and implementation of verification steps to ensure data completeness and accuracy. The use case demonstrated in the notebook is particularly valuable for data collection, transformation, and validation tasks involving public web resources.
+
+## 📈 [Business Pricing and Margin Calculation](business_pricing_margin.ipynb)
+
+This notebook demonstrates a Local Operator agent assisting with business pricing decisions by calculating optimal subscription prices based on cost of goods, desired profit margins, and projected cost increases. The agent systematically computes monthly costs, revenues, and subscription prices for different API tiers, incorporating annual cost increases and margin targets. The notebook showcases how AI can aid in financial planning and pricing strategy, providing clear, data-driven recommendations for small and medium-sized businesses.
