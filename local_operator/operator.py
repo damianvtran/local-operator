@@ -18,7 +18,11 @@ from local_operator.executor import (
     process_json_response,
 )
 from local_operator.model.configure import ModelConfiguration
-from local_operator.prompts import PlanSystemPrompt, create_system_prompt
+from local_operator.prompts import (
+    PlanSystemPrompt,
+    PlanUserPrompt,
+    create_system_prompt,
+)
 from local_operator.types import (
     ConversationRecord,
     ConversationRole,
@@ -172,7 +176,22 @@ class Operator:
         return response.action == "BYE"
 
     async def generate_plan(self) -> str:
-        """Generate a plan for the agent to follow."""
+        """Generate a plan for the agent to follow.
+
+        This method constructs a conversation with the agent to generate a plan. It
+        starts by creating a system prompt based on the available tools and the
+        predefined plan system prompt. The method then appends the current
+        conversation history and a user prompt to the messages list. The agent is
+        invoked to generate a response, which is checked for a skip planning
+        directive. If the directive is found, the method sets a default plan and
+        returns an empty string. Otherwise, it updates the conversation history
+        with the agent's response and a user instruction to proceed according to
+        the plan. The plan is also set in the executor and added to the code
+        history.
+
+        Returns:
+            str: The generated plan or an empty string if planning is skipped.
+        """
         system_prompt = create_system_prompt(self.executor.tool_registry, PlanSystemPrompt)
 
         messages = [
@@ -188,12 +207,7 @@ class Operator:
         messages.append(
             ConversationRecord(
                 role=ConversationRole.USER,
-                content="Please come up with a detailed writeup for a plan of actions to "
-                "achieve the goal for the user's recent request before proceeding with the"
-                " execution phase.  Your plan will be used to perform actions in the next steps."
-                " Respond in natural language format, not JSON or code.  Keep in mind that"
-                " the user might change directions with their request so determine if you "
-                "need to be planning for the same goal or a new one.",
+                content=PlanUserPrompt,
             )
         )
 
@@ -202,6 +216,10 @@ class Operator:
         response_content = (
             response.content if isinstance(response.content, str) else str(response.content)
         )
+
+        if "[SKIP_PLANNING]" in response_content:
+            self.executor.set_current_plan("No plan required, proceed with execution.")
+            return ""
 
         self.executor.conversation_history.extend(
             [
@@ -290,10 +308,11 @@ class Operator:
         try:
             plan = await self.generate_plan()
 
-            formatted_plan = format_agent_output(plan)
-            print("\n\033[1;36m╭─ Agent Plan ──────────────────────────────────────\033[0m")
-            print(f"\033[1;36m│\033[0m {formatted_plan}")
-            print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
+            if plan:
+                formatted_plan = format_agent_output(plan)
+                print("\n\033[1;36m╭─ Agent Plan ──────────────────────────────────────\033[0m")
+                print(f"\033[1;36m│\033[0m {formatted_plan}")
+                print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
         finally:
             spinner_task.cancel()
             try:
