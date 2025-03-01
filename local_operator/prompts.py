@@ -374,7 +374,7 @@ and </response_format> tags.
   "if applicable.  Be specific and include information that will prevent you from "
   "repeating errors.  Empty for the first step.",
   "previous_goal": "Your goal from the previous step.  Empty for the first step.",
-  "learnings": "Important information learned from the previous step.  Include
+  "learnings": "Aggregated information learned so far from previous steps.  Include
   detailed information that will help you in future steps.  Ensure that this
   contains useful insights as opposed to simply being anccounting of actions.
   Empty for the first step.",
