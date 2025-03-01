@@ -341,6 +341,9 @@ Critical Constraints:
   meaningfully better improvement over the last with new techniques and approaches.
 - Use await for async functions.  Never call `asyncio.run()`, as this is already handled
   for you in the runtime and the code executor.
+- You cannot "see" plots and figures, do not attempt to use them in your own analysis.
+  Create them for the user's benefit to help them understand your thinking, but your
+  analysis must be based on text and data alone.
 
 Response Format:
 {response_format}
@@ -374,13 +377,16 @@ and </response_format> tags.
   "if applicable.  Be specific and include information that will prevent you from "
   "repeating errors.  Empty for the first step.",
   "previous_goal": "Your goal from the previous step.  Empty for the first step.",
-  "learnings": "Aggregated information learned so far from previous steps.  Include
+  "learnings": "Important new information learned from the previous step.  Include
   detailed information that will help you in future steps.  Ensure that this
   contains useful insights as opposed to simply being anccounting of actions.
   Empty for the first step.",
   "current_goal": "Your goal for the current step.",
-  "next_goal": "Your goal for the next step",
-  "response": "Natural language response to the user's goal",
+  "next_goal": "Your goal for the next step.  This should move you forward in the plan,
+  address an error, or otherwise be an improvement over the last action.",
+  "response": "Natural language response to the user's goal.  Explain what you are
+  doing, and summarize the results of the previous step.  Include a detailed summary of
+  the final results and/or response to the user for DONE actions.",
   "code": "Required for CODE: code to achieve the user's goal, must be
   valid Python code.  Do not provide for WRITE or EDIT",
   "content": "Required for WRITE: content to write to a file, if applicable.
