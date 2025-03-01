@@ -374,7 +374,7 @@ and </response_format> tags.
   "if applicable.  Be specific and include information that will prevent you from "
   "repeating errors.  Empty for the first step.",
   "previous_goal": "Your goal from the previous step.  Empty for the first step.",
-  "learnings": "Aggregated information learned so far from previous steps.  Include
+  "learnings": "Important information learned from the previous step.  Include
   detailed information that will help you in future steps.  Ensure that this
   contains useful insights as opposed to simply being anccounting of actions.
   Empty for the first step.",
@@ -391,7 +391,7 @@ and </response_format> tags.
       "find": "Required for EDIT: the string to find",
       "replace": "Required for EDIT: the string to replace it with"
     }
-  ], // Only include if the action is EDIT
+  ], // Empty array unless the action is EDIT
   "action": "RESEARCH | CODE | READ | WRITE | EDIT | DONE | ASK | BYE"
 }
 </response_format>
