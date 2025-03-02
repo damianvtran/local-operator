@@ -29,7 +29,7 @@ from local_operator.console import (
     print_agent_response,
     print_execution_section,
     print_task_interrupted,
-    spinner,
+    spinner_context,
 )
 from local_operator.helpers import remove_think_tags
 from local_operator.model.configure import ModelConfiguration, calculate_cost
@@ -1368,102 +1368,95 @@ class LocalCodeExecutor:
         print_execution_section(
             ExecutionSection.HEADER, step=self.step_counter, action=response.action
         )
-        spinner_task = asyncio.create_task(spinner(f"Executing {str(response.action).lower()}"))
-
         execution_result = None
 
-        try:
-            if response.action == ActionType.WRITE:
-                file_path = response.file_path
-                content = response.content if response.content else response.code
-                if file_path:
-                    print_execution_section(
-                        ExecutionSection.WRITE,
-                        file_path=file_path,
-                        content=content,
-                        action=response.action,
-                    )
-
-                    execution_result = await self.write_file(file_path, content)
-                    print_execution_section(
-                        ExecutionSection.RESULT,
-                        content=execution_result.formatted_print,
-                        action=response.action,
-                    )
-                else:
-                    raise ValueError("File path is required for WRITE action")
-
-            elif response.action == ActionType.EDIT:
-                file_path = response.file_path
-                replacements = response.replacements
-                if file_path and replacements:
-                    print_execution_section(
-                        ExecutionSection.EDIT,
-                        file_path=file_path,
-                        replacements=replacements,
-                        action=response.action,
-                    )
-
-                    execution_result = await self.edit_file(file_path, replacements)
-
-                    print_execution_section(
-                        ExecutionSection.RESULT,
-                        content=execution_result.formatted_print,
-                        action=response.action,
-                    )
-                else:
-                    raise ValueError("File path and replacements are required for EDIT action")
-
-            elif response.action == ActionType.READ:
-                file_path = response.file_path
-                if file_path:
-                    print_execution_section(
-                        ExecutionSection.READ,
-                        file_path=file_path,
-                        action=response.action,
-                    )
-                    execution_result = await self.read_file(file_path)
-                else:
-                    raise ValueError("File path is required for READ action")
-
-            else:
-                code_block = response.code
-                if code_block:
-                    print_execution_section(
-                        ExecutionSection.CODE, content=code_block, action=response.action
-                    )
-
-                    execution_result = await self.execute_code(code_block)
-
-                    if "code execution cancelled by user" in execution_result.message:
-                        return ProcessResponseOutput(
-                            status=ProcessResponseStatus.CANCELLED,
-                            message="Code execution cancelled by user",
+        async with spinner_context(f"Executing {str(response.action).lower()}"):
+            try:
+                if response.action == ActionType.WRITE:
+                    file_path = response.file_path
+                    content = response.content if response.content else response.code
+                    if file_path:
+                        print_execution_section(
+                            ExecutionSection.WRITE,
+                            file_path=file_path,
+                            content=content,
+                            action=response.action,
                         )
 
-                    print_execution_section(
-                        ExecutionSection.RESULT,
-                        content=execution_result.formatted_print,
-                        action=response.action,
-                    )
-                elif response.action == ActionType.CODE:
-                    raise ValueError('"code" field is required for CODE actions')
+                        execution_result = await self.write_file(file_path, content)
+                        print_execution_section(
+                            ExecutionSection.RESULT,
+                            content=execution_result.formatted_print,
+                            action=response.action,
+                        )
+                    else:
+                        raise ValueError("File path is required for WRITE action")
 
-        except Exception as e:
-            log_action_error(e, str(response.action))
-            self.append_to_history(
-                ConversationRecord(
-                    role=ConversationRole.SYSTEM,
-                    content=f"Error: {str(e)}",
-                    should_summarize=True,
+                elif response.action == ActionType.EDIT:
+                    file_path = response.file_path
+                    replacements = response.replacements
+                    if file_path and replacements:
+                        print_execution_section(
+                            ExecutionSection.EDIT,
+                            file_path=file_path,
+                            replacements=replacements,
+                            action=response.action,
+                        )
+
+                        execution_result = await self.edit_file(file_path, replacements)
+
+                        print_execution_section(
+                            ExecutionSection.RESULT,
+                            content=execution_result.formatted_print,
+                            action=response.action,
+                        )
+                    else:
+                        raise ValueError("File path and replacements are required for EDIT action")
+
+                elif response.action == ActionType.READ:
+                    file_path = response.file_path
+                    if file_path:
+                        print_execution_section(
+                            ExecutionSection.READ,
+                            file_path=file_path,
+                            action=response.action,
+                        )
+                        execution_result = await self.read_file(file_path)
+                    else:
+                        raise ValueError("File path is required for READ action")
+
+                else:
+                    code_block = response.code
+                    if code_block:
+                        print_execution_section(
+                            ExecutionSection.CODE, content=code_block, action=response.action
+                        )
+
+                        execution_result = await self.execute_code(code_block)
+
+                        if "code execution cancelled by user" in execution_result.message:
+                            return ProcessResponseOutput(
+                                status=ProcessResponseStatus.CANCELLED,
+                                message="Code execution cancelled by user",
+                            )
+
+                        print_execution_section(
+                            ExecutionSection.RESULT,
+                            content=execution_result.formatted_print,
+                            action=response.action,
+                        )
+                    elif response.action == ActionType.CODE:
+                        raise ValueError('"code" field is required for CODE actions')
+
+            except Exception as e:
+                log_action_error(e, str(response.action))
+                self.append_to_history(
+                    ConversationRecord(
+                        role=ConversationRole.SYSTEM,
+                        content=f"Error: {str(e)}",
+                        should_summarize=True,
+                    )
                 )
-            )
-        finally:
-            spinner_task.cancel()
-            try:
-                await spinner_task
-            except asyncio.CancelledError:
-                pass
 
         if execution_result:
             self.add_to_code_history(execution_result, response)
@@ -1483,16 +1476,10 @@ class LocalCodeExecutor:
         self.step_counter += 1
 
         # Phase 4: Summarize old conversation steps
-        spinner_task = asyncio.create_task(spinner("Summarizing conversation"))
-        try:
+        async with spinner_context("Summarizing conversation"):
             await self._summarize_old_steps()
-        finally:
-            print("\n")  # New line for next spinner
-            spinner_task.cancel()
-            try:
-                await spinner_task
-            except asyncio.CancelledError:
-                pass
+
+        print("\n")  # New line for next spinner
 
         output = ProcessResponseOutput(
             status=ProcessResponseStatus.SUCCESS,
