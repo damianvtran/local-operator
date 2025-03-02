@@ -479,6 +479,12 @@ def main() -> int:
         if args.train:
             training_mode = True
 
+        auto_save_conversation = config_manager.get_config_value("auto_save_conversation", False)
+
+        # If autosave is enabled, create an autosave agent if it doesn't exist already
+        if auto_save_conversation:
+            agent_registry.create_autosave_agent()
+
         executor = LocalCodeExecutor(
             model_configuration=model_configuration,
             detail_conversation_length=config_manager.get_config_value("detail_length", 35),
@@ -498,6 +504,7 @@ def main() -> int:
             agent_registry=agent_registry,
             current_agent=agent,
             training_mode=training_mode,
+            auto_save_conversation=auto_save_conversation,
         )
 
         tool_registry = build_tool_registry(

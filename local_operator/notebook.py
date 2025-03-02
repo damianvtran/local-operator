@@ -10,6 +10,7 @@ review, sharing, or reproduction of interactions and processes.
 import importlib.metadata
 import json
 from datetime import datetime
+from pathlib import Path
 from typing import List
 
 from local_operator.executor import CodeExecutionResult
@@ -60,7 +61,7 @@ def save_code_history_to_notebook(
     max_conversation_history: int,
     detail_conversation_length: int,
     max_learnings_history: int,
-    file_path: str,
+    file_path: Path,
 ) -> None:
     """Save the code execution history to an IPython notebook file (.ipynb).
 
@@ -73,7 +74,8 @@ def save_code_history_to_notebook(
         max_conversation_history: The maximum number of conversation turns to include
         in the notebook.
         detail_conversation_length: The number of recent conversation turns to include in detail.
-        file_path (str): The path to save the notebook to.
+        max_learnings_history: The maximum number of learnings to include in the notebook.
+        file_path (Path): The path to save the notebook to.
 
     Raises:
         ValueError: If the file_path is empty.

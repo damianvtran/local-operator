@@ -25,6 +25,7 @@ class Config:
             hosting (str): AI model hosting provider
             model_name (str): Name of the AI model to use
             rag_enabled (bool): Whether RAG is enabled
+            auto_save_conversation (bool): Whether to automatically save the conversation
     """
 
     version: str
@@ -95,6 +96,7 @@ DEFAULT_CONFIG = Config(
             "max_learnings_history": 50,
             "hosting": "",
             "model_name": "",
+            "auto_save_conversation": True,
         },
     }
 )

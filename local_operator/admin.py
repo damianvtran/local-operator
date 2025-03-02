@@ -29,6 +29,7 @@ Typical usage example:
 import json
 import platform
 import subprocess
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from local_operator.agents import AgentData, AgentEditFields, AgentRegistry
@@ -609,7 +610,7 @@ def save_conversation_history_to_notebook_tool(
                 max_conversation_history=executor.max_conversation_history,
                 detail_conversation_length=executor.detail_conversation_length,
                 max_learnings_history=executor.max_learnings_history,
-                file_path=file_path,
+                file_path=Path(file_path),
             )
             print(f"Notebook saved to {file_path}")
 

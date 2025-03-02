@@ -86,7 +86,7 @@ def test_save_code_history_to_notebook(tmp_path: Path) -> None:
         max_conversation_history=100,
         detail_conversation_length=10,
         max_learnings_history=50,
-        file_path=str(file_path),
+        file_path=file_path,
     )
 
     assert file_path.exists(), "Notebook file was not created"
