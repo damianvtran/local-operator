@@ -7,7 +7,7 @@ from typing import Dict, List
 
 from pydantic import BaseModel, Field
 
-from local_operator.types import ConversationRecord
+from local_operator.types import CodeExecutionResult, ConversationRecord
 
 
 class AgentData(BaseModel):
@@ -70,6 +70,9 @@ class AgentConversation(BaseModel):
 
     version: str = Field(..., description="The version of the conversation")
     conversation: List[ConversationRecord] = Field(..., description="The conversation history")
+    execution_history: List[CodeExecutionResult] = Field(
+        default_factory=list, description="The execution history"
+    )
 
 
 class AgentRegistry:
@@ -284,7 +287,11 @@ class AgentRegistry:
         # Copy conversation history from source agent
         source_conversation = self.load_agent_conversation(agent_id)
         try:
-            self.save_agent_conversation(new_agent.id, source_conversation)
+            self.save_agent_conversation(
+                new_agent.id,
+                source_conversation.conversation,
+                source_conversation.execution_history,
+            )
             return new_agent
         except Exception as e:
             # Clean up if conversation copy fails
@@ -332,7 +339,7 @@ class AgentRegistry:
         """
         return list(self._agents.values())
 
-    def load_agent_conversation(self, agent_id: str) -> List[ConversationRecord]:
+    def load_agent_conversation(self, agent_id: str) -> AgentConversation:
         """
         Load the conversation history for a specified agent.
 
@@ -355,16 +362,27 @@ class AgentRegistry:
 
                     try:
                         conversation_data = AgentConversation.model_validate(raw_data)
-                        return conversation_data.conversation
+                        return conversation_data
                     except Exception as e:
                         raise Exception(f"Failed to load conversation: {str(e)}")
             except Exception:
                 # Return an empty conversation if the file is unreadable.
-                return []
-        return []
+                return AgentConversation(
+                    version="",
+                    conversation=[],
+                    execution_history=[],
+                )
+        return AgentConversation(
+            version="",
+            conversation=[],
+            execution_history=[],
+        )
 
     def save_agent_conversation(
-        self, agent_id: str, conversation: List[ConversationRecord]
+        self,
+        agent_id: str,
+        conversation: List[ConversationRecord],
+        execution_history: List[CodeExecutionResult],
     ) -> None:
         """
         Save the conversation history for a specified agent.
@@ -383,6 +401,7 @@ class AgentRegistry:
         conversation_data = AgentConversation(
             version=agent.version,
             conversation=conversation,
+            execution_history=execution_history,
         )
 
         try:

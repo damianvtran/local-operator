@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import SecretStr
 
-from local_operator.agents import AgentData
+from local_operator.agents import AgentConversation, AgentData
 from local_operator.cli import (
     agents_create_command,
     agents_delete_command,
@@ -19,11 +19,31 @@ from local_operator.model.configure import ModelConfiguration
 
 
 @pytest.fixture
-def mock_agent_registry():
+def mock_agent():
+    mock_agent = AgentData(
+        id="test-id",
+        name="TestAgent",
+        created_date=datetime.now(),
+        version="1.0.0",
+        security_prompt="",
+        hosting="test-hosting",
+        model="test-model",
+    )
+    return mock_agent
+
+
+@pytest.fixture
+def mock_agent_registry(mock_agent):
     registry = MagicMock()
     registry.create_agent = MagicMock()
     registry.delete_agent = MagicMock()
     registry.list_agents = MagicMock()
+    registry.get_agent_by_name.return_value = mock_agent
+    registry.load_agent_conversation.return_value = AgentConversation(
+        version="",
+        conversation=[],
+        execution_history=[],
+    )
     return registry
 
 
@@ -40,6 +60,20 @@ def mock_config_manager():
     manager.get_config_value = MagicMock()
     manager._write_config = MagicMock()
     return manager
+
+
+@pytest.fixture
+def mock_model():
+    model = MagicMock()
+    model.info = MagicMock()
+    return model
+
+
+@pytest.fixture
+def mock_operator():
+    operator = MagicMock()
+    operator.chat = MagicMock()
+    return operator
 
 
 def test_build_cli_parser():
@@ -105,23 +139,7 @@ def test_serve_command():
         assert result == 0
 
 
-def test_main_success():
-    mock_model = MagicMock()
-    mock_operator = MagicMock()
-    mock_operator.chat = MagicMock()
-    mock_agent_registry = MagicMock()
-    mock_agent = AgentData(
-        id="test-id",
-        name="test-agent",
-        created_date=datetime.now(),
-        version="1.0.0",
-        security_prompt="",
-        hosting="test-hosting",
-        model="test-model",
-    )
-    mock_agent_registry.get_agent_by_name.return_value = mock_agent
-    mock_agent_registry.load_agent_conversation.return_value = []
-
+def test_main_success(mock_operator, mock_agent_registry, mock_model):
     with (
         patch("local_operator.cli.ConfigManager") as mock_config_manager_cls,
         patch("local_operator.cli.CredentialManager"),

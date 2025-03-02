@@ -32,7 +32,12 @@ from local_operator.admin import (
 from local_operator.agents import AgentEditFields
 from local_operator.config import Config, ConfigManager
 from local_operator.tools import ToolRegistry
-from local_operator.types import ConversationRecord, ConversationRole
+from local_operator.types import (
+    CodeExecutionResult,
+    ConversationRecord,
+    ConversationRole,
+    ProcessResponseStatus,
+)
 
 
 @pytest.fixture
@@ -105,7 +110,12 @@ def test_create_agent_from_conversation_no_user_messages(
     agent_name = "TestAgent"
     new_agent = create_tool(agent_name)
     saved_history = agent_registry.load_agent_conversation(new_agent.id)
-    assert saved_history == [], f"Expected empty conversation history, got {saved_history}"
+    assert (
+        saved_history.conversation == []
+    ), f"Expected empty conversation history, got {saved_history}"
+    assert (
+        saved_history.execution_history == []
+    ), f"Expected empty execution history, got {saved_history}"
 
 
 def test_create_agent_from_conversation_with_user_messages(
@@ -124,15 +134,42 @@ def test_create_agent_from_conversation_with_user_messages(
         ConversationRecord(role=ConversationRole.USER, content="Third user message"),
         ConversationRecord(role=ConversationRole.SYSTEM, content="System message"),
     ]
+    executor.code_history = [
+        CodeExecutionResult(
+            stdout="",
+            stderr="",
+            logging="",
+            message="This is a test code execution result",
+            code="print('Hello, world!')",
+            formatted_print="Hello, world!",
+            role=ConversationRole.ASSISTANT,
+            status=ProcessResponseStatus.SUCCESS,
+        )
+    ]
     executor.conversation_history = conversation_history
     create_tool = create_agent_from_conversation_tool(executor, agent_registry)
     agent_name = "TestAgent2"
     new_agent = create_tool(agent_name)
     saved_history = agent_registry.load_agent_conversation(new_agent.id)
     expected_history = conversation_history[:4]
+    expected_execution_history = [
+        CodeExecutionResult(
+            stdout="",
+            stderr="",
+            logging="",
+            message="This is a test code execution result",
+            code="print('Hello, world!')",
+            formatted_print="Hello, world!",
+            role=ConversationRole.ASSISTANT,
+            status=ProcessResponseStatus.SUCCESS,
+        )
+    ]
     assert (
-        saved_history == expected_history
+        saved_history.conversation == expected_history
     ), f"Expected conversation history {expected_history}, got {saved_history}"
+    assert (
+        saved_history.execution_history == expected_execution_history
+    ), f"Expected execution history {expected_execution_history}, got {saved_history}"
 
 
 def test_save_agent_training_no_agent(
@@ -163,7 +200,30 @@ def test_save_agent_training_with_agent(
         ConversationRecord(role=ConversationRole.USER, content="User message 2"),
         ConversationRecord(role=ConversationRole.ASSISTANT, content="Assistant reply"),
     ]
+    execution_history = [
+        CodeExecutionResult(
+            stdout="",
+            stderr="",
+            logging="",
+            message="This is a test code execution result",
+            code="print('Hello, world!')",
+            formatted_print="Hello, world!",
+            role=ConversationRole.ASSISTANT,
+            status=ProcessResponseStatus.SUCCESS,
+        ),
+        CodeExecutionResult(
+            stdout="",
+            stderr="",
+            logging="",
+            message="This is a second test code execution result",
+            code="print('Lorem ipsum dolor sit amet!')",
+            formatted_print="Lorem ipsum dolor sit amet!",
+            role=ConversationRole.ASSISTANT,
+            status=ProcessResponseStatus.SUCCESS,
+        ),
+    ]
     executor.conversation_history = conversation_history
+    executor.code_history = execution_history
     agent = agent_registry.create_agent(
         AgentEditFields(name="TrainAgent", security_prompt="", hosting="", model="")
     )
@@ -171,10 +231,14 @@ def test_save_agent_training_with_agent(
     save_training_tool = save_agent_training_tool(executor, agent_registry)
     updated_agent = save_training_tool()
     expected_history = conversation_history[:2]
+    expected_execution_history = execution_history
     stored_history = agent_registry.load_agent_conversation(agent.id)
     assert (
-        stored_history == expected_history
+        stored_history.conversation == expected_history
     ), f"Expected conversation history {expected_history}, got {stored_history}"
+    assert (
+        stored_history.execution_history == expected_execution_history
+    ), f"Expected execution history {expected_execution_history}, got {stored_history}"
     assert updated_agent == agent, "The updated agent does not match the original agent."
 
 
