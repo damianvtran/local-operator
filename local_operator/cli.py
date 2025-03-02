@@ -479,10 +479,12 @@ def main() -> int:
         if args.train:
             training_mode = True
 
+        single_execution_mode = args.subcommand == "exec"
+
         auto_save_conversation = config_manager.get_config_value("auto_save_conversation", False)
 
         # If autosave is enabled, create an autosave agent if it doesn't exist already
-        if auto_save_conversation:
+        if auto_save_conversation and not single_execution_mode:
             agent_registry.create_autosave_agent()
 
         executor = LocalCodeExecutor(
@@ -504,7 +506,7 @@ def main() -> int:
             agent_registry=agent_registry,
             current_agent=agent,
             training_mode=training_mode,
-            auto_save_conversation=auto_save_conversation,
+            auto_save_conversation=auto_save_conversation and not single_execution_mode,
         )
 
         tool_registry = build_tool_registry(
@@ -517,7 +519,7 @@ def main() -> int:
         executor.load_execution_history(agent_conversation_data.execution_history)
 
         # Start the async chat interface or execute single command
-        if args.subcommand == "exec":
+        if single_execution_mode:
             message = asyncio.run(operator.execute_single_command(args.command))
             if message:
                 print(message.response)
