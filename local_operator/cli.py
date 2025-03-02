@@ -131,9 +131,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
         parents=[parent_parser],
     )
     credential_parser.add_argument(
-        "--key",
+        "key",
         type=str,
-        required=True,
         help="Credential key to update (e.g., DEEPSEEK_API_KEY, "
         "OPENAI_API_KEY, ANTHROPIC_API_KEY, KIMI_API_KEY, ALIBABA_CLOUD_API_KEY, "
         "GOOGLE_AI_STUDIO_API_KEY, MISTRAL_API_KEY, OPENROUTER_API_KEY)",
@@ -341,8 +340,6 @@ def config_list_command() -> int:
         "detail_length": "Number of recent messages to leave unsummarized in conversation history",
         "max_learnings_history": "Maximum number of learning entries to retain",
         "auto_save_conversation": "Whether to automatically save conversations",
-        "rag_enabled": "Whether Retrieval Augmented Generation is enabled with an MCP "
-        "(not yet implemented)",
     }
 
     print("\n\033[1;32m╭─ Configuration Options ───────────────────────\033[0m")

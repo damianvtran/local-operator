@@ -195,14 +195,48 @@ local-operator --hosting openai --model gpt-4o exec "Make a new file called test
 
 The operator uses a configuration file to manage API keys and other settings.  It can be created at `~/.local-operator/config.yml` with the `local-operator config create` command.  You can edit this file directly to change the configuration.
 
+To create a new configuration file, use the following command:  
+
+```bash
+local-operator config create
+```
+
+To edit a configuration value via the CLI, use the following command:
+
+```bash
+local-operator config edit <key> <value>
+```
+
+To edit a configuration value via the configuration file directly, use the following command:
+
+```bash
+local-operator config open
+```
+
+To list all available configuration options and their descriptions, use the following command:
+
+```bash
+local-operator config list
+```
+
+### Configuration Options
+
 - `conversation_length`: The number of messages to keep in the conversation history.  Defaults to 100.
-- `detail_length`: The number of messages to keep in the detail history.  All messages beyond this number excluding the primary system prompt will be summarized into a shorter form to reduce token costs.  Defaults to 10.
+- `detail_length`: The number of messages to keep in the detail history.  All messages beyond this number excluding the primary system prompt will be summarized into a shorter form to reduce token costs.  Defaults to 35.
 - `hosting`: The hosting platform to use.  Avoids needing to specify the `--hosting` argument every time.
 - `model_name`: The name of the model to use.  Avoids needing to specify the `--model` argument every time.
+- `max_learnings_history`: The maximum number of learnings to keep in the learnings history.  Defaults to 50.
+- `auto_save_conversation`: Whether to automatically save the conversation history to a file.  Defaults to `false`.
 
 ### Credentials
 
-Credentials are stored in the `~/.local-operator/credentials.yml` file.  Credentials can be updated at any time by running `local-operator credential --key <key>`.
+Credentials are stored in the `~/.local-operator/credentials.yml` file.  Credentials can be updated at any time by running `local-operator credential <key>`.
+
+Example:
+
+```bash
+local-operator credential SERP_API_KEY
+```
 
 - `SERP_API_KEY`: The API key for the SERP API from [SerpApi](https://serpapi.com/users/sign_up).  This is used to search the web for information.  This is required for the agent to be able to do real time searches of the web using search engines.  The agent can still browse the web without it, though information access will be less efficient.
 
