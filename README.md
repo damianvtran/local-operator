@@ -250,7 +250,7 @@ local-operator credential SERP_API_KEY
 
 - `GOOGLE_API_KEY`: The API key for the Google API.  This is used to access the Google model.
 
-- `DEEPSEEK_API_KEY`: The API key for the DeepSeek API.  This is used to access the DeepSeek model.
+- `MISTRAL_API_KEY`: The API key for the Mistral API.  This is used to access the Mistral model.
 
 ## 📝 Examples
 
