@@ -31,6 +31,7 @@ from local_operator.console import (
     print_task_interrupted,
     spinner,
 )
+from local_operator.helpers import remove_think_tags
 from local_operator.model.configure import ModelConfiguration, calculate_cost
 from local_operator.prompts import (
     SafetyCheckSystemPrompt,
@@ -104,6 +105,8 @@ def process_json_response(response_str: str) -> ResponseJsonSchema:
         ValueError: If no valid JSON object can be extracted from the response.
     """
     response_content = response_str
+
+    response_content = remove_think_tags(response_content)
 
     # Check for markdown code block format
     start_tag = "```json"

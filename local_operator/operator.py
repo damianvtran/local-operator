@@ -17,6 +17,7 @@ from local_operator.executor import (
     LocalCodeExecutor,
     process_json_response,
 )
+from local_operator.helpers import remove_think_tags
 from local_operator.model.configure import ModelConfiguration
 from local_operator.prompts import (
     PlanSystemPrompt,
@@ -220,6 +221,9 @@ class Operator:
         if "[SKIP_PLANNING]" in response_content:
             self.executor.set_current_plan("No plan required, proceed with execution.")
             return ""
+
+        # Remove think tags for reasoning models
+        response_content = remove_think_tags(response_content)
 
         self.executor.conversation_history.extend(
             [

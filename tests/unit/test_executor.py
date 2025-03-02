@@ -1231,6 +1231,17 @@ def test_get_context_vars_str(
             "print('hello world')",
             ActionType.CODE,
         ),
+        (
+            '<think>Some thinking process here</think> {"previous_step_success": true, '
+            '"previous_step_issue": "", "previous_goal": "", '
+            '"current_goal": "Process with thinking", "next_goal": "", '
+            '"response": "Here\'s the result after thinking", '
+            '"code": "print(\'thought result\')", "action": "CODE", '
+            '"learnings": "", "plan": "", "content": "", '
+            '"file_path": "", "replacements": []}',
+            "print('thought result')",
+            ActionType.CODE,
+        ),
     ],
 )
 def test_process_json_response(
