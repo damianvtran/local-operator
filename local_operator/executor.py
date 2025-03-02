@@ -1518,14 +1518,16 @@ class LocalCodeExecutor:
             ValueError: If the file is too large to read
             OSError: If there is an error reading the file
         """
-        if os.path.getsize(file_path) > max_file_size_bytes:
+        expanded_file_path = os.path.expanduser(file_path)
+
+        if os.path.getsize(expanded_file_path) > max_file_size_bytes:
             raise ValueError(
                 f"File is too large to use read action on: {file_path}\n"
                 f"Please use code action to summarize and extract key features from "
                 f"the file instead."
             )
 
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(expanded_file_path, "r", encoding="utf-8") as f:
             file_content = f.read()
 
         annotated_content = annotate_code(file_content)
@@ -1573,7 +1575,9 @@ class LocalCodeExecutor:
         Raises:
             OSError: If there is an error writing to the file
         """
-        with open(file_path, "w") as f:
+        expanded_file_path = os.path.expanduser(file_path)
+
+        with open(expanded_file_path, "w") as f:
             f.write(content)
 
         self.append_to_history(
@@ -1625,8 +1629,10 @@ class LocalCodeExecutor:
             ValueError: If the find string is not found in the file
             OSError: If there is an error reading or writing to the file
         """
+        expanded_file_path = os.path.expanduser(file_path)
+
         original_content = ""
-        with open(file_path, "r") as f:
+        with open(expanded_file_path, "r") as f:
             original_content = f.read()
 
         for replacement in replacements:
@@ -1638,7 +1644,7 @@ class LocalCodeExecutor:
 
             original_content = original_content.replace(find, replace, 1)
 
-        with open(file_path, "w") as f:
+        with open(expanded_file_path, "w") as f:
             f.write(original_content)
 
         self.append_to_history(
