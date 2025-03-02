@@ -1,4 +1,3 @@
-import asyncio
 import os
 import readline
 import signal
@@ -10,13 +9,18 @@ from pydantic import ValidationError
 
 from local_operator.agents import AgentData, AgentRegistry
 from local_operator.config import ConfigManager
-from local_operator.console import format_agent_output, print_cli_banner, spinner
+from local_operator.console import (
+    format_agent_output,
+    print_cli_banner,
+    spinner_context,
+)
 from local_operator.credentials import CredentialManager
 from local_operator.executor import (
     CodeExecutionResult,
     LocalCodeExecutor,
     process_json_response,
 )
+from local_operator.helpers import remove_think_tags
 from local_operator.model.configure import ModelConfiguration
 from local_operator.prompts import (
     PlanSystemPrompt,
@@ -221,6 +225,9 @@ class Operator:
             self.executor.set_current_plan("No plan required, proceed with execution.")
             return ""
 
+        # Remove think tags for reasoning models
+        response_content = remove_think_tags(response_content)
+
         self.executor.conversation_history.extend(
             [
                 ConversationRecord(
@@ -304,8 +311,7 @@ class Operator:
         self.executor_is_processing = True
         self.executor.update_ephemeral_messages()
 
-        spinner_task = asyncio.create_task(spinner("Generating plan"))
-        try:
+        async with spinner_context("Generating plan"):
             plan = await self.generate_plan()
 
             if plan:
@@ -313,12 +319,6 @@ class Operator:
                 print("\n\033[1;36m╭─ Agent Plan ──────────────────────────────────────\033[0m")
                 print(f"\033[1;36m│\033[0m {formatted_plan}")
                 print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
-        finally:
-            spinner_task.cancel()
-            try:
-                await spinner_task
-            except asyncio.CancelledError:
-                pass
 
         while (
             not self._agent_is_done(response_json)
@@ -331,15 +331,8 @@ class Operator:
             # Add environment details, etc.
             self.executor.update_ephemeral_messages()
 
-            spinner_task = asyncio.create_task(spinner("Generating response"))
-            try:
+            async with spinner_context("Generating response"):
                 response = await self.executor.invoke_model(self.executor.conversation_history)
-            finally:
-                spinner_task.cancel()
-                try:
-                    await spinner_task
-                except asyncio.CancelledError:
-                    pass
 
             response_content = (
                 response.content if isinstance(response.content, str) else str(response.content)
