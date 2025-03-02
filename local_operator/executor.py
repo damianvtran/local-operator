@@ -29,8 +29,9 @@ from local_operator.console import (
     print_agent_response,
     print_execution_section,
     print_task_interrupted,
-    spinner,
+    spinner_context,
 )
+from local_operator.helpers import remove_think_tags
 from local_operator.model.configure import ModelConfiguration, calculate_cost
 from local_operator.prompts import (
     SafetyCheckSystemPrompt,
@@ -104,6 +105,8 @@ def process_json_response(response_str: str) -> ResponseJsonSchema:
         ValueError: If no valid JSON object can be extracted from the response.
     """
     response_content = response_str
+
+    response_content = remove_think_tags(response_content)
 
     # Check for markdown code block format
     start_tag = "```json"
@@ -350,6 +353,31 @@ class CodeExecutionError(Exception):
 
 
 class LocalCodeExecutor:
+    """A class to handle local Python code execution with safety checks and context management.
+    Attributes:
+        context (Dict[str, Any]): A dictionary to maintain execution context between code blocks.
+        conversation_history (List[ConversationRecord]): A list of
+        message records tracking the conversation.
+        model_configuration (ModelConfiguration): Configuration for the language model used.
+        step_counter (int): A counter to track the current step in sequential execution.
+        max_conversation_history (int): The maximum number of messages to keep in the
+            conversation history. This does not include the system prompt.
+        detail_conversation_length (int): The number of messages to keep in full detail in the
+            conversation history. Every step before this, except the system prompt, will be
+            summarized.
+        interrupted (bool): Flag indicating if execution was interrupted.
+        can_prompt_user (bool): Informs the executor about whether the end user has access to the
+            terminal (True), or is consuming the service from some remote source where they
+            cannot respond via the terminal (False).
+        token_metrics (ExecutorTokenMetrics): Tracks token usage and
+        cost metrics for model executions.
+        agent (AgentData | None): The agent data for the current conversation.
+        tool_registry (ToolRegistry | None): The tool registry for the current conversation.
+        learnings (List[str]): A list of learnings from the current conversation.
+        current_plan (str | None): The current plan for the agent.
+        code_history (List[CodeExecutionResult]): A list of code execution results.
+    """
+
     context: Dict[str, Any]
     conversation_history: List[ConversationRecord]
     model_configuration: ModelConfiguration
@@ -365,29 +393,6 @@ class LocalCodeExecutor:
     current_plan: str | None
     code_history: List[CodeExecutionResult]
 
-    """A class to handle local Python code execution with safety checks and context management.
-
-    Attributes:
-        context (dict): A dictionary to maintain execution context between code blocks
-        conversation_history (list): A list of message dictionaries tracking the conversation
-        model: The language model used for code analysis and safety checks
-        step_counter (int): A counter to track the current step in sequential execution
-        max_conversation_history (int): The maximum number of messages to keep in
-            the conversation history.  This doesn't include the system prompt.
-        detail_conversation_length (int): The number of messages to keep in full detail in the
-            conversation history.  Every step before this except the system prompt will be
-            summarized.
-        interrupted (bool): Flag indicating if execution was interrupted
-        can_prompt_user (bool): Informs the executor about whether the end user has access to the
-            terminal (True), or is consuming the service from some remote source where they
-            cannot respond via the terminal (False).
-        token_metrics (ExecutorTokenMetrics): Tracks token usage and cost metrics for model
-        executions
-        agent (AgentData | None): The agent data for the current conversation
-        tool_registry (ToolRegistry | None): The tool registry for the current conversation
-        learnings (List[str]): A list of learnings from the current conversation
-    """
-
     def __init__(
         self,
         model_configuration: ModelConfiguration,
@@ -401,17 +406,20 @@ class LocalCodeExecutor:
         """Initialize the LocalCodeExecutor with a language model.
 
         Args:
-            model: The language model instance to use for code analysis
-            max_conversation_history: The maximum number of messages to keep in
-                the conversation history.  This doesn't include the system prompt.
-            detail_conversation_length: The number of messages to keep in full detail in the
-                conversation history.  Every step before this except the system prompt will be
-                summarized.  Set to -1 to keep all messages in full detail.
-            can_prompt_user: Informs the executor about whether the end user has access to the
+            model_configuration (ModelConfiguration): The model configuration to use
+            max_conversation_history (int): The maximum number of messages to keep in
+                the conversation history. This doesn't include the system prompt.
+            detail_conversation_length (int): The number of messages to keep in full detail in the
+                conversation history. Every step before this except the system prompt will be
+                summarized. Set to -1 to keep all messages in full detail.
+            can_prompt_user (bool): Informs the executor about whether
+            the end user has access to the
                 terminal (True), or is consuming the service from some remote source where they
                 cannot respond via the terminal (False).
-            conversation_history: A list of message dictionaries tracking the conversation.
-            agent: The agent data for the current conversation.
+            conversation_history (List[ConversationRecord]): A list of
+            message records tracking the conversation.
+            agent (AgentData | None): The agent data for the current conversation.
+            max_learnings_history (int): The maximum number of learnings to keep in history.
         """
         self.context = {}
         self.model_configuration = model_configuration
@@ -455,8 +463,20 @@ class LocalCodeExecutor:
         self._limit_conversation_history()
 
     async def _summarize_old_steps(self) -> None:
-        """Summarize old conversation steps beyond the detail conversation length.
-        Only summarizes steps that haven't been summarized yet."""
+        """
+        Summarize old conversation steps beyond the detail conversation length.
+
+        This method summarizes messages in the conversation history that are beyond the
+        `detail_conversation_length` limit and have not been summarized yet. It ensures that
+        only messages that need summarization are processed, and updates their content with
+        a concise summary.
+
+        Returns:
+            None
+
+        Raises:
+            ValueError: If the conversation record is not of the expected type.
+        """
         if len(self.conversation_history) <= 1:  # Just system prompt or empty
             return
 
@@ -468,10 +488,7 @@ class LocalCodeExecutor:
 
         for msg in history_to_summarize:
             # Skip messages that are already sufficiently concise/summarized
-            if not msg.should_summarize:
-                continue
-
-            if msg.summarized:
+            if not msg.should_summarize or msg.summarized:
                 continue
 
             summary = await self._summarize_conversation_step(msg)
@@ -1365,102 +1382,95 @@ class LocalCodeExecutor:
         print_execution_section(
             ExecutionSection.HEADER, step=self.step_counter, action=response.action
         )
-        spinner_task = asyncio.create_task(spinner(f"Executing {str(response.action).lower()}"))
-
         execution_result = None
 
-        try:
-            if response.action == ActionType.WRITE:
-                file_path = response.file_path
-                content = response.content if response.content else response.code
-                if file_path:
-                    print_execution_section(
-                        ExecutionSection.WRITE,
-                        file_path=file_path,
-                        content=content,
-                        action=response.action,
-                    )
-
-                    execution_result = await self.write_file(file_path, content)
-                    print_execution_section(
-                        ExecutionSection.RESULT,
-                        content=execution_result.formatted_print,
-                        action=response.action,
-                    )
-                else:
-                    raise ValueError("File path is required for WRITE action")
-
-            elif response.action == ActionType.EDIT:
-                file_path = response.file_path
-                replacements = response.replacements
-                if file_path and replacements:
-                    print_execution_section(
-                        ExecutionSection.EDIT,
-                        file_path=file_path,
-                        replacements=replacements,
-                        action=response.action,
-                    )
-
-                    execution_result = await self.edit_file(file_path, replacements)
-
-                    print_execution_section(
-                        ExecutionSection.RESULT,
-                        content=execution_result.formatted_print,
-                        action=response.action,
-                    )
-                else:
-                    raise ValueError("File path and replacements are required for EDIT action")
-
-            elif response.action == ActionType.READ:
-                file_path = response.file_path
-                if file_path:
-                    print_execution_section(
-                        ExecutionSection.READ,
-                        file_path=file_path,
-                        action=response.action,
-                    )
-                    execution_result = await self.read_file(file_path)
-                else:
-                    raise ValueError("File path is required for READ action")
-
-            else:
-                code_block = response.code
-                if code_block:
-                    print_execution_section(
-                        ExecutionSection.CODE, content=code_block, action=response.action
-                    )
-
-                    execution_result = await self.execute_code(code_block)
-
-                    if "code execution cancelled by user" in execution_result.message:
-                        return ProcessResponseOutput(
-                            status=ProcessResponseStatus.CANCELLED,
-                            message="Code execution cancelled by user",
+        async with spinner_context(f"Executing {str(response.action).lower()}"):
+            try:
+                if response.action == ActionType.WRITE:
+                    file_path = response.file_path
+                    content = response.content if response.content else response.code
+                    if file_path:
+                        print_execution_section(
+                            ExecutionSection.WRITE,
+                            file_path=file_path,
+                            content=content,
+                            action=response.action,
                         )
 
-                    print_execution_section(
-                        ExecutionSection.RESULT,
-                        content=execution_result.formatted_print,
-                        action=response.action,
-                    )
-                elif response.action == ActionType.CODE:
-                    raise ValueError('"code" field is required for CODE actions')
+                        execution_result = await self.write_file(file_path, content)
+                        print_execution_section(
+                            ExecutionSection.RESULT,
+                            content=execution_result.formatted_print,
+                            action=response.action,
+                        )
+                    else:
+                        raise ValueError("File path is required for WRITE action")
 
-        except Exception as e:
-            log_action_error(e, str(response.action))
-            self.append_to_history(
-                ConversationRecord(
-                    role=ConversationRole.SYSTEM,
-                    content=f"Error: {str(e)}",
-                    should_summarize=True,
+                elif response.action == ActionType.EDIT:
+                    file_path = response.file_path
+                    replacements = response.replacements
+                    if file_path and replacements:
+                        print_execution_section(
+                            ExecutionSection.EDIT,
+                            file_path=file_path,
+                            replacements=replacements,
+                            action=response.action,
+                        )
+
+                        execution_result = await self.edit_file(file_path, replacements)
+
+                        print_execution_section(
+                            ExecutionSection.RESULT,
+                            content=execution_result.formatted_print,
+                            action=response.action,
+                        )
+                    else:
+                        raise ValueError("File path and replacements are required for EDIT action")
+
+                elif response.action == ActionType.READ:
+                    file_path = response.file_path
+                    if file_path:
+                        print_execution_section(
+                            ExecutionSection.READ,
+                            file_path=file_path,
+                            action=response.action,
+                        )
+                        execution_result = await self.read_file(file_path)
+                    else:
+                        raise ValueError("File path is required for READ action")
+
+                else:
+                    code_block = response.code
+                    if code_block:
+                        print_execution_section(
+                            ExecutionSection.CODE, content=code_block, action=response.action
+                        )
+
+                        execution_result = await self.execute_code(code_block)
+
+                        if "code execution cancelled by user" in execution_result.message:
+                            return ProcessResponseOutput(
+                                status=ProcessResponseStatus.CANCELLED,
+                                message="Code execution cancelled by user",
+                            )
+
+                        print_execution_section(
+                            ExecutionSection.RESULT,
+                            content=execution_result.formatted_print,
+                            action=response.action,
+                        )
+                    elif response.action == ActionType.CODE:
+                        raise ValueError('"code" field is required for CODE actions')
+
+            except Exception as e:
+                log_action_error(e, str(response.action))
+                self.append_to_history(
+                    ConversationRecord(
+                        role=ConversationRole.SYSTEM,
+                        content=f"Error: {str(e)}",
+                        should_summarize=True,
+                    )
                 )
-            )
-        finally:
-            spinner_task.cancel()
-            try:
-                await spinner_task
-            except asyncio.CancelledError:
-                pass
 
         if execution_result:
             self.add_to_code_history(execution_result, response)
@@ -1480,16 +1490,10 @@ class LocalCodeExecutor:
         self.step_counter += 1
 
         # Phase 4: Summarize old conversation steps
-        spinner_task = asyncio.create_task(spinner("Summarizing conversation"))
-        try:
+        async with spinner_context("Summarizing conversation"):
             await self._summarize_old_steps()
-        finally:
-            print("\n")  # New line for next spinner
-            spinner_task.cancel()
-            try:
-                await spinner_task
-            except asyncio.CancelledError:
-                pass
+
+        print("\n")  # New line for next spinner
 
         output = ProcessResponseOutput(
             status=ProcessResponseStatus.SUCCESS,
@@ -1515,14 +1519,16 @@ class LocalCodeExecutor:
             ValueError: If the file is too large to read
             OSError: If there is an error reading the file
         """
-        if os.path.getsize(file_path) > max_file_size_bytes:
+        expanded_file_path = os.path.expanduser(file_path)
+
+        if os.path.getsize(expanded_file_path) > max_file_size_bytes:
             raise ValueError(
                 f"File is too large to use read action on: {file_path}\n"
                 f"Please use code action to summarize and extract key features from "
                 f"the file instead."
             )
 
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(expanded_file_path, "r", encoding="utf-8") as f:
             file_content = f.read()
 
         annotated_content = annotate_code(file_content)
@@ -1570,7 +1576,9 @@ class LocalCodeExecutor:
         Raises:
             OSError: If there is an error writing to the file
         """
-        with open(file_path, "w") as f:
+        expanded_file_path = os.path.expanduser(file_path)
+
+        with open(expanded_file_path, "w") as f:
             f.write(content)
 
         self.append_to_history(
@@ -1622,8 +1630,10 @@ class LocalCodeExecutor:
             ValueError: If the find string is not found in the file
             OSError: If there is an error reading or writing to the file
         """
+        expanded_file_path = os.path.expanduser(file_path)
+
         original_content = ""
-        with open(file_path, "r") as f:
+        with open(expanded_file_path, "r") as f:
             original_content = f.read()
 
         for replacement in replacements:
@@ -1635,7 +1645,7 @@ class LocalCodeExecutor:
 
             original_content = original_content.replace(find, replace, 1)
 
-        with open(file_path, "w") as f:
+        with open(expanded_file_path, "w") as f:
             f.write(original_content)
 
         self.append_to_history(
@@ -1670,13 +1680,19 @@ class LocalCodeExecutor:
             ] + self.conversation_history[-self.max_conversation_history + 1 :]
 
     async def _summarize_conversation_step(self, msg: ConversationRecord) -> str:
-        """Summarize the conversation step by invoking the model to generate a concise summary.
+        """
+        Summarize the conversation step by invoking the model to generate a concise summary.
 
         Args:
-            step_number (int): The step number to summarize
+            msg (ConversationRecord): The conversation record to summarize.
 
         Returns:
-            str: A concise summary of the critical information from this step
+            str: A concise summary of the critical information from the conversation step.
+                 The summary includes key actions, important changes, significant results,
+                 errors or issues, key identifiers, transformations, and data structures.
+
+        Raises:
+            ValueError: If the conversation record is not of the expected type.
         """
         summary_prompt = """
         You are a conversation summarizer. Your task is to summarize what happened in the given

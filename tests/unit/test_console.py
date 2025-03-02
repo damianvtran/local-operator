@@ -16,7 +16,7 @@ from local_operator.console import (
     print_cli_banner,
     print_execution_section,
     print_task_interrupted,
-    spinner,
+    spinner_context,
 )
 from local_operator.types import ActionType
 
@@ -206,16 +206,61 @@ async def test_spinner_cancellation(monkeypatch):
     monkeypatch.setattr(sys, "stdout", output)
 
     # Start the spinner and let it run briefly
-    task = asyncio.create_task(spinner("Testing spinner"))
-    await asyncio.sleep(0.25)
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    async with spinner_context("Testing spinner"):
+        await asyncio.sleep(0.25)
 
     # The spinner should clear the line on cancellation by writing "\r" at the end.
     assert output.getvalue().endswith("\r")
+
+
+@pytest.mark.asyncio
+async def test_spinner_context_basic_functionality(monkeypatch):
+    output = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+
+    async with spinner_context("Testing spinner"):
+        await asyncio.sleep(0.1)
+
+    # Check that the spinner message was displayed
+    assert "Testing spinner" in output.getvalue()
+    # Check that the spinner was cleared
+    assert output.getvalue().endswith("\r")
+
+
+@pytest.mark.asyncio
+async def test_spinner_context_with_exception(monkeypatch):
+    output = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+
+    try:
+        async with spinner_context("Testing spinner with exception"):
+            await asyncio.sleep(0.1)
+            raise ValueError("Test exception")
+    except ValueError:
+        pass
+
+    # Check that the spinner message was displayed
+    assert "Testing spinner with exception" in output.getvalue()
+    # Check that the spinner was cleared even when an exception occurred
+    assert output.getvalue().endswith("\r")
+
+
+@pytest.mark.asyncio
+async def test_spinner_context_nested(monkeypatch):
+    output = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+
+    async with spinner_context("Outer spinner"):
+        await asyncio.sleep(0.1)
+        async with spinner_context("Inner spinner"):
+            await asyncio.sleep(0.1)
+
+    # Check that both spinner messages were displayed
+    result = output.getvalue()
+    assert "Outer spinner" in result
+    assert "Inner spinner" in result
+    # The last thing written should be a carriage return
+    assert result.endswith("\r")
 
 
 def test_log_retry_error_with_attempts(monkeypatch):
