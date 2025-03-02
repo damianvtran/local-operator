@@ -2,8 +2,9 @@ import asyncio
 import itertools
 import os
 import sys
+from contextlib import asynccontextmanager
 from enum import Enum
-from typing import Any, List
+from typing import Any, AsyncGenerator, Awaitable, Callable, List, TypeVar
 
 from local_operator.agents import AgentData
 from local_operator.config import ConfigManager
@@ -171,6 +172,61 @@ async def spinner(text: str):
         except asyncio.CancelledError:
             sys.stdout.write("\r")
             break
+
+
+T = TypeVar("T")
+
+
+@asynccontextmanager
+async def spinner_context(message: str) -> AsyncGenerator[None, None]:
+    """Context manager for displaying a spinner during async operations.
+
+    Args:
+        message: The message to display alongside the spinner
+
+    Yields:
+        None
+
+    Example:
+        ```python
+        async with spinner_context("Processing data"):
+            result = await some_long_running_operation()
+        ```
+    """
+    spinner_task = asyncio.create_task(spinner(message))
+    try:
+        yield
+    finally:
+        spinner_task.cancel()
+        try:
+            await spinner_task
+        except asyncio.CancelledError:
+            pass
+
+
+async def with_spinner(message: str, coro_func: Callable[..., Awaitable[T]], *args, **kwargs) -> T:
+    """Execute a coroutine function with a spinner.
+
+    Args:
+        message: The message to display alongside the spinner
+        coro_func: The coroutine function to execute
+        *args: Positional arguments to pass to the coroutine function
+        **kwargs: Keyword arguments to pass to the coroutine function
+
+    Returns:
+        The result of the coroutine function
+
+    Example:
+        ```python
+        result = await with_spinner(
+            "Processing data",
+            process_data,
+            data_input
+        )
+        ```
+    """
+    async with spinner_context(message):
+        return await coro_func(*args, **kwargs)
 
 
 def log_action_error(error: Exception, action: str) -> None:
