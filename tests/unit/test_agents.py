@@ -412,3 +412,43 @@ def test_get_agent_by_name(temp_agents_dir: Path):
     # Test finding non-existent agent
     not_found = registry.get_agent_by_name("Non Existent")
     assert not_found is None
+
+
+def test_create_autosave_agent(temp_agents_dir: Path):
+    registry = AgentRegistry(temp_agents_dir)
+
+    # Create the autosave agent
+    autosave_agent = registry.create_autosave_agent()
+
+    # Assert that the agent was created with the correct ID and name
+    assert autosave_agent.id == "autosave"
+    assert autosave_agent.name == "autosave"
+
+    # Assert that the agent is now in the registry
+    retrieved_agent = registry.get_agent("autosave")
+    assert retrieved_agent == autosave_agent
+
+    # Call create_autosave_agent again, should return the existing agent
+    existing_autosave_agent = registry.create_autosave_agent()
+    assert existing_autosave_agent == autosave_agent
+
+
+def test_get_autosave_agent(temp_agents_dir: Path):
+    registry = AgentRegistry(temp_agents_dir)
+
+    # Create the autosave agent
+    autosave_agent = registry.create_autosave_agent()
+
+    # Retrieve the autosave agent
+    retrieved_agent = registry.get_autosave_agent()
+
+    # Assert that the retrieved agent is the same as the created agent
+    assert retrieved_agent == autosave_agent
+
+
+def test_get_autosave_agent_not_found(temp_agents_dir: Path):
+    registry = AgentRegistry(temp_agents_dir)
+
+    # If the autosave agent doesn't exist, create it
+    with pytest.raises(KeyError):
+        registry.get_autosave_agent()
