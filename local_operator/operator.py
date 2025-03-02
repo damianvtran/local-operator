@@ -117,8 +117,6 @@ class Operator:
         self.training_mode = training_mode
         self.auto_save_conversation = auto_save_conversation
 
-        print(f"Auto save conversation: {self.auto_save_conversation}")
-
         if self.type == OperatorType.CLI:
             self._load_input_history()
             self._setup_interrupt_handler()
