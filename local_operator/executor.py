@@ -1360,6 +1360,20 @@ class LocalCodeExecutor:
             ActionType.BYE,
             ActionType.ASK,
         ]:
+            self.add_to_code_history(
+                CodeExecutionResult(
+                    stdout="",
+                    stderr="",
+                    logging="",
+                    formatted_print=response.response,
+                    code="",
+                    message=response.response,
+                    role=ConversationRole.ASSISTANT,
+                    status=ProcessResponseStatus.SUCCESS,
+                ),
+                response,
+            )
+
             return ProcessResponseOutput(
                 status=ProcessResponseStatus.SUCCESS,
                 message="Action completed",
