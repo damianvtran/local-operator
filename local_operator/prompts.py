@@ -90,7 +90,11 @@ def get_tools_str(tool_registry: Optional[ToolRegistry] = None) -> str:
                     if hasattr(p.annotation, "__name__")
                     else str(p.annotation)
                 )
-                args.append(f"{p.name}: {arg_type}")
+                if p.default is not p.empty:
+                    default_value = repr(p.default)
+                    args.append(f"{p.name}: {arg_type} = {default_value}")
+                else:
+                    args.append(f"{p.name}: {arg_type}")
 
             return_annotation = sig.return_annotation
             if inspect.iscoroutinefunction(tool):
@@ -182,6 +186,10 @@ Core Principles:
   before processing.
 - 🔎 Gather complete information before taking action - if details are missing, continue
   gathering facts until you have a full understanding.
+- 🔍 Be thorough with research: Follow up on links, explore multiple sources, and gather
+  comprehensive information instead of doing a simple shallow canvas. Finding key details
+  online will make the difference between strong and weak goal completion. Dig deeper when
+  necessary to uncover critical insights.
 - 🔄 Never block the event loop - test servers and other blocking operations in a
   separate process using multiprocessing or subprocess. This ensures that you can
   run tests and other assessments on the server using the main event loop.
@@ -298,7 +306,8 @@ make your code more efficient.
 
 Use them by running tools.[TOOL_FUNCTION] in your code. `tools` is a tool registry that
 is in the execution context of your code. If the tool is async, it will be annotated
-with the Coroutine return type.  Otherwise, do not await it.
+with the Coroutine return type.  Otherwise, do not await it.  Awaiting tools that do
+not have async in the tool list above will result in an error.
 
 Additional User Notes:
 <additional_user_notes>
@@ -348,6 +357,10 @@ Critical Constraints:
 - You cannot "see" plots and figures, do not attempt to use them in your own analysis.
   Create them for the user's benefit to help them understand your thinking, but your
   analysis must be based on text and data alone.
+- You are helping the user with real world tasks in production.  Be thorough and do
+  not complete real world tasks with sandbox or example code.  Use the best practices
+  and techniques that you know to complete the task and leverage the full extent of
+  your knowledge and intelligence.
 
 Response Format:
 {response_format}
@@ -424,23 +437,27 @@ Only include steps that are necessary to achieve the goal to its fullest extent.
 Be specific, and include any files, queries, and other details that will be needed
 for each step.  Determine which tools you will need to use if any.
 
-The plan should contain all of the following details, in natural language and not JSON or
+The plan should contain all of the following sections, in natural language and not JSON or
 code:
 
-- Gather information about the user's goal.
-- Break down the goal into smaller, manageable steps.
-- Identify the tools and resources needed for each step.
-- Determine the order in which the steps should be executed.
-- Create a detailed plan that outlines each step, the tools/resources required,
-  and the expected outcome.
-- Create a validation plan for how you will check that each step is successful
+- User Intent: What is the user's intent?  Describe the goal and the desired outcome.
+- Steps: Break down the goal into smaller, manageable steps.
+- Tools: Identify the tools and resources that you will need to use to achieve the goal.
+  These may be tools available to you, or additional things that you will need to install
+  or get access to in order to achieve the goal.
+- Order: Determine the order in which the steps should be executed.  Make note of any
+  steps that depend on each other where you will need to wait for the system to execute
+  your code so that you can review the outcome and make a follow-up decision.
+- Validation: Create a validation plan for how you will check that each step is successful
   and that the overall goal is achieved at the end.  This should be a list of
   checks that you will perform to verify that the goal is achieved once you
   complete the initial execution plan.  Always double-check your work and verify
-- Plan to make your code modular, reusable, and replicable.  You should be able to
-  reanalyze and use parts of your completed work if the user asks you to change
-  something later
-- Plan contingencies for if the user asks for you to re-do the work
+- Modularity: What are the checkpoints and key components that you will try to reuse?
+  Make these available in case the user needs you to re-analyze or change something later.
+- Best possible outcome: Ideate around what the best possible outcome is for the user's goal.
+  Describe the outcome that will satisfy the user intent.
+- Constraints: What are some things that you should avoid doing to reduce the chance
+  of errors, failures, inconsistencies, or an incomplete outcome?
 
 Present the plan in a clear and detailed manner.  Be specific and include all the
 details and data you will need to verify that the goal is achieved.

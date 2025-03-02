@@ -8,6 +8,12 @@ The notebooks are a visualization of the conversation history between the user a
 
 📝 Notebooks can be created from conversations simply by asking the agent at the end of some task to save the conversation as a notebook.
 
+## 🕵️ [Open Source Deep Research: In-Depth Research on LLMs and Agentic AI](deep_research_agentic_ai.ipynb)
+
+This notebook demonstrates a Local Operator agent conducting in-depth research on Large Language Models (LLMs) and Agentic AI with web search tool use. The agent systematically gathers information using web search tools, refines content iteratively, and maintains a well-organized markdown report with thorough citations. The notebook showcases how Local Operator agents can assist in complex research tasks, ensuring comprehensive coverage of the subject matter and adherence to high standards of clarity and accuracy.
+
+📝 The output report is available [here](deep_research_agentic_ai_report.md).
+
 ## 🔄 [Automated Git Commit Message Generation](github_commit.ipynb)
 
 This interactive notebook demonstrates a Local Operator agent session powered by the `qwen/qwen-2.5-72b-instruct` model. The Local Operator agent automatically reads the diffs from the current git commit and generates a suitable and concise commit message. The notebook shows how AI can help developers maintain clear version history and improve their git workflow with contextually relevant commit messages.\

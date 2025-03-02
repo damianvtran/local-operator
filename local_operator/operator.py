@@ -3,6 +3,7 @@ import readline
 import signal
 from enum import Enum
 from pathlib import Path
+from typing import List
 
 from langchain_core.messages import BaseMessage
 from pydantic import ValidationError
@@ -22,6 +23,7 @@ from local_operator.executor import (
 )
 from local_operator.helpers import remove_think_tags
 from local_operator.model.configure import ModelConfiguration
+from local_operator.notebook import save_code_history_to_notebook
 from local_operator.prompts import (
     PlanSystemPrompt,
     PlanUserPrompt,
@@ -67,6 +69,7 @@ class Operator:
     agent_registry: AgentRegistry
     current_agent: AgentData | None
     training_mode: bool
+    auto_save_conversation: bool
 
     def __init__(
         self,
@@ -78,6 +81,7 @@ class Operator:
         agent_registry: AgentRegistry,
         current_agent: AgentData | None,
         training_mode: bool,
+        auto_save_conversation: bool = False,
     ):
         """Initialize the Operator with required components.
 
@@ -95,6 +99,8 @@ class Operator:
                 and improve its performance over time.
                 Omit this flag to have the agent not store the conversation history, thus
                 resetting it after each session.
+            auto_save_conversation (bool): Whether to automatically save the conversation
+                history to the agent's directory after each completed task.
 
         The Operator class serves as the main interface for interacting with language models,
         managing configuration, credentials, and code execution. It handles both CLI and
@@ -109,6 +115,7 @@ class Operator:
         self.agent_registry = agent_registry
         self.current_agent = current_agent
         self.training_mode = training_mode
+        self.auto_save_conversation = auto_save_conversation
 
         if self.type == OperatorType.CLI:
             self._load_input_history()
@@ -376,6 +383,19 @@ class Operator:
 
             result = await self.executor.process_response(response_json)
 
+            # Auto-save on each step if enabled
+            if self.auto_save_conversation:
+                try:
+                    self.handle_autosave(
+                        self.agent_registry.config_dir,
+                        self.executor.conversation_history,
+                        self.executor.code_history,
+                    )
+                except Exception as e:
+                    error_str = str(e)
+                    print("\n\033[1;31m✗ Error encountered while auto-saving conversation:\033[0m")
+                    print(f"\033[1;36m│ Error Details:\033[0m\n{error_str}")
+
             # Break out of the agent flow if the user cancels the code execution
             if (
                 result.status == ProcessResponseStatus.CANCELLED
@@ -386,7 +406,9 @@ class Operator:
         # Save the conversation history if an agent is being used and training mode is enabled
         if self.training_mode and self.current_agent:
             self.agent_registry.save_agent_conversation(
-                self.current_agent.id, self.executor.conversation_history
+                self.current_agent.id,
+                self.executor.conversation_history,
+                self.executor.code_history,
             )
 
         if os.environ.get("LOCAL_OPERATOR_DEBUG") == "true":
@@ -485,3 +507,43 @@ class Operator:
                 print("\n\033[1;36m╭─ Agent Question Requires Input ────────────────\033[0m")
                 print(f"\033[1;36m│\033[0m {response_content}")
                 print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
+
+    def handle_autosave(
+        self,
+        config_dir: Path,
+        conversation: List[ConversationRecord],
+        execution_history: List[CodeExecutionResult],
+    ) -> None:
+        """
+        Update the autosave agent's conversation and execution history.
+
+        This method persists the provided conversation and execution history
+        by utilizing the agent registry to update the autosave agent's data.
+        This ensures that the current state of the interaction is preserved.
+
+        Args:
+            conversation (List[ConversationRecord]): The list of conversation records
+                to be saved. Each record represents a turn in the conversation.
+            execution_history (List[CodeExecutionResult]): The list of code execution
+                results to be saved. Each result represents the outcome of a code
+                execution attempt.
+            config_dir (Path): The directory to save the autosave notebook to.
+        Raises:
+            KeyError: If the autosave agent does not exist in the agent registry.
+        """
+        self.agent_registry.update_autosave_conversation(conversation, execution_history)
+
+        notebook_path = config_dir / "autosave.ipynb"
+
+        save_code_history_to_notebook(
+            code_history=execution_history,
+            model_configuration=self.model_configuration,
+            max_conversation_history=self.config_manager.get_config_value(
+                "max_conversation_history", 100
+            ),
+            detail_conversation_length=self.config_manager.get_config_value(
+                "detail_conversation_length", 35
+            ),
+            max_learnings_history=self.config_manager.get_config_value("max_learnings_history", 50),
+            file_path=notebook_path,
+        )

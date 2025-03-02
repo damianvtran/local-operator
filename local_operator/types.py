@@ -147,7 +147,7 @@ class ResponseJsonSchema(BaseModel):
     learnings: str
 
 
-class ProcessResponseStatus(Enum):
+class ProcessResponseStatus(str, Enum):
     """Status codes for process_response results."""
 
     SUCCESS = "success"
@@ -168,3 +168,39 @@ class ProcessResponseOutput:
     def __init__(self, status: ProcessResponseStatus, message: str):
         self.status = status
         self.message = message
+
+
+class CodeExecutionResult(BaseModel):
+    """Represents the result of a code execution.
+
+    Attributes:
+        stdout (str): The standard output from the code execution.
+        stderr (str): The standard error from the code execution.
+        logging (str): Any logging output generated during the code execution.
+        message (str): The message to display to the user about the code execution.
+        code (str): The code that was executed.
+        formatted_print (str): The formatted print output from the code execution.
+        role (ConversationRole): The role of the message sender (user/assistant/system)
+        status (ProcessResponseStatus): The status of the code execution
+    """
+
+    stdout: str
+    stderr: str
+    logging: str
+    message: str
+    code: str
+    formatted_print: str
+    role: ConversationRole
+    status: ProcessResponseStatus
+
+
+class AgentExecutorState(BaseModel):
+    """Represents the state of an agent executor.
+
+    Attributes:
+        conversation (List[ConversationRecord]): The conversation history
+        execution_history (List[CodeExecutionResult]): The execution history
+    """
+
+    conversation: List[ConversationRecord]
+    execution_history: List[CodeExecutionResult]

@@ -18,6 +18,8 @@ import argparse
 import asyncio
 import math
 import os
+import platform
+import subprocess
 import traceback
 from importlib.metadata import version
 from pathlib import Path
@@ -27,7 +29,7 @@ import uvicorn
 from pydantic import SecretStr
 
 from local_operator.admin import add_admin_tools
-from local_operator.agents import AgentEditFields, AgentRegistry
+from local_operator.agents import AgentConversation, AgentEditFields, AgentRegistry
 from local_operator.clients.openrouter import OpenRouterClient
 from local_operator.clients.serpapi import SerpApiClient
 from local_operator.config import ConfigManager
@@ -129,9 +131,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
         parents=[parent_parser],
     )
     credential_parser.add_argument(
-        "--key",
+        "key",
         type=str,
-        required=True,
         help="Credential key to update (e.g., DEEPSEEK_API_KEY, "
         "OPENAI_API_KEY, ANTHROPIC_API_KEY, KIMI_API_KEY, ALIBABA_CLOUD_API_KEY, "
         "GOOGLE_AI_STUDIO_API_KEY, MISTRAL_API_KEY, OPENROUTER_API_KEY)",
@@ -142,6 +143,36 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "config", help="Manage configuration settings", parents=[parent_parser]
     )
     config_subparsers = config_parser.add_subparsers(dest="config_command")
+    # Open command
+    config_subparsers.add_parser(
+        "open", help="Open the configuration file in the default editor", parents=[parent_parser]
+    )
+    # Edit command
+    config_edit_parser = config_subparsers.add_parser(
+        "edit",
+        help="Edit a specific configuration value in the config file",
+        parents=[parent_parser],
+    )
+    config_edit_parser.add_argument(
+        "key",
+        type=str,
+        help="Configuration key to update (e.g., hosting, model_name, conversation_length, "
+        "detail_length, max_learnings_history, auto_save_conversation)",
+    )
+    config_edit_parser.add_argument(
+        "value",
+        type=str,
+        help="New value for the configuration key (type is automatically converted "
+        "based on the key)",
+    )
+
+    # List command
+    config_subparsers.add_parser(
+        "list",
+        help="List available configuration options and their descriptions",
+        parents=[parent_parser],
+    )
+
     config_subparsers.add_parser(
         "create", help="Create a new configuration file", parents=[parent_parser]
     )
@@ -229,6 +260,94 @@ def config_create_command() -> int:
     config_manager = ConfigManager(Path.home() / ".local-operator")
     config_manager._write_config(vars(config_manager.config))
     print("Created new configuration file at ~/.local-operator/config.yml")
+    return 0
+
+
+def config_open_command() -> int:
+    """Open the configuration file using the default system editor."""
+    config_path = Path.home() / ".local-operator" / "config.yml"
+    if not config_path.exists():
+        print(
+            "\n\033[1;31mError: Configuration file does not exist.  Create one with "
+            "`config create`.\033[0m"
+        )
+        return -1
+
+    try:
+        if platform.system() == "Windows":
+            subprocess.run(["start", str(config_path)], shell=True, check=True)
+        elif platform.system() == "Darwin":
+            subprocess.run(["open", str(config_path)], check=True)
+        else:
+            subprocess.run(["xdg-open", str(config_path)], check=True)
+        print(f"Opened configuration file at {config_path}")
+        return 0
+    except Exception as e:
+        print(f"\n\033[1;31mError opening configuration file: {e}\033[0m")
+        return -1
+
+
+def config_edit_command(args: argparse.Namespace) -> int:
+    """Edit a configuration value."""
+    config_manager = ConfigManager(Path.home() / ".local-operator")
+    try:
+        # Parse the value to the appropriate type
+        value = args.value
+        # Try to convert to int
+        try:
+            if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
+                value = int(value)
+            # Try to convert to float
+            elif value.replace(".", "", 1).isdigit() or (
+                value.startswith("-") and value[1:].replace(".", "", 1).isdigit()
+            ):
+                value = float(value)
+            # Try to convert to boolean
+            elif value.lower() in ("true", "false"):
+                value = value.lower() == "true"
+            # Handle null/None values
+            elif value.lower() in ("null", "none"):
+                value = None
+        except (ValueError, AttributeError):
+            # Keep as string if conversion fails
+            pass
+
+        config_manager.update_config(
+            {args.key: value},
+            write=True,
+        )
+
+        print(f"Successfully updated {args.key} to {value}")
+        return 0
+    except KeyError:
+        print(f"\n\033[1;31mError: Invalid configuration key: {args.key}\033[0m")
+        return -1
+    except Exception as e:
+        print(f"\n\033[1;31mError updating configuration: {e}\033[0m")
+        return -1
+
+
+def config_list_command() -> int:
+    """List available configuration options and their descriptions."""
+    config_manager = ConfigManager(Path.home() / ".local-operator")
+    config = config_manager.get_config()
+
+    # Configuration descriptions
+    descriptions = {
+        "hosting": "AI provider platform (e.g., openai, deepseek, anthropic, openrouter)",
+        "model_name": "The specific model to use for interactions",
+        "conversation_length": "Maximum number of messages to keep in conversation history",
+        "detail_length": "Number of recent messages to leave unsummarized in conversation history",
+        "max_learnings_history": "Maximum number of learning entries to retain",
+        "auto_save_conversation": "Whether to automatically save conversations",
+    }
+
+    print("\n\033[1;32m╭─ Configuration Options ───────────────────────\033[0m")
+    for key, value in config.values.items():
+        description = descriptions.get(key, "No description available")
+        print(f"\033[1;32m│ {key}: {value}\033[0m")
+        print(f"\033[1;32m│   Description: {description}\033[0m")
+    print("\033[1;32m╰──────────────────────────────────────────────\033[0m")
     return 0
 
 
@@ -379,6 +498,12 @@ def main() -> int:
         elif args.subcommand == "config":
             if args.config_command == "create":
                 return config_create_command()
+            elif args.config_command == "open":
+                return config_open_command()
+            elif args.config_command == "edit":
+                return config_edit_command(args)
+            elif args.config_command == "list":
+                return config_list_command()
             else:
                 parser.error(f"Invalid config command: {args.config_command}")
         elif args.subcommand == "agents":
@@ -440,7 +565,7 @@ def main() -> int:
 
         if agent:
             # Get conversation history if agent name provided
-            conversation_history = agent_registry.load_agent_conversation(agent.id)
+            agent_conversation_data = agent_registry.load_agent_conversation(agent.id)
 
             # Use agent's hosting and model if provided
             if agent.hosting:
@@ -448,7 +573,11 @@ def main() -> int:
             if agent.model:
                 model_name = agent.model
         else:
-            conversation_history = []
+            agent_conversation_data = AgentConversation(
+                version="",
+                conversation=[],
+                execution_history=[],
+            )
 
         model_info_client: Optional[OpenRouterClient] = None
 
@@ -475,6 +604,14 @@ def main() -> int:
         if args.train:
             training_mode = True
 
+        single_execution_mode = args.subcommand == "exec"
+
+        auto_save_conversation = config_manager.get_config_value("auto_save_conversation", False)
+
+        # If autosave is enabled, create an autosave agent if it doesn't exist already
+        if auto_save_conversation and not single_execution_mode:
+            agent_registry.create_autosave_agent()
+
         executor = LocalCodeExecutor(
             model_configuration=model_configuration,
             detail_conversation_length=config_manager.get_config_value("detail_length", 35),
@@ -494,6 +631,7 @@ def main() -> int:
             agent_registry=agent_registry,
             current_agent=agent,
             training_mode=training_mode,
+            auto_save_conversation=auto_save_conversation and not single_execution_mode,
         )
 
         tool_registry = build_tool_registry(
@@ -501,10 +639,12 @@ def main() -> int:
         )
 
         executor.set_tool_registry(tool_registry)
-        executor.load_conversation_history(conversation_history)
+
+        executor.load_conversation_history(agent_conversation_data.conversation)
+        executor.load_execution_history(agent_conversation_data.execution_history)
 
         # Start the async chat interface or execute single command
-        if args.subcommand == "exec":
+        if single_execution_mode:
             message = asyncio.run(operator.execute_single_command(args.command))
             if message:
                 print(message.response)

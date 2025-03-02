@@ -91,10 +91,16 @@ def test_get_tools_str():
             "expected": (
                 "- async browse_single_url(url: str) -> Coroutine[str]: Browse to a URL "
                 "using Playwright to render JavaScript and return the page content.\n"
-                "- list_working_directory(max_depth: int) -> Dict: "
+                "- list_working_directory(max_depth: int = 3) -> Dict: "
                 "List the files in the current "
                 "directory showing files and their metadata."
             ),
+        },
+        {
+            "name": "Function with default argument",
+            "registry": ToolRegistry(),
+            "expected": "- func_with_default_arg(arg: str = 'default') -> str: "
+            "Function with default argument",
         },
     ]
 
@@ -120,6 +126,13 @@ def test_get_tools_str():
     async_func.__name__ = "async_func"
     async_func.__doc__ = "Async test function"
 
+    def func_with_default_arg(arg: str = "default") -> str:
+        """Function with default argument"""
+        return arg
+
+    func_with_default_arg.__name__ = "func_with_default_arg"
+    func_with_default_arg.__doc__ = "Function with default argument"
+
     # Configure the one tool registry
     test_cases[2]["registry"].add_tool("test_func", test_func)
 
@@ -132,6 +145,9 @@ def test_get_tools_str():
 
     # Configure the default init registry
     test_cases[5]["registry"].init_tools()
+
+    # Configure the function with default argument
+    test_cases[6]["registry"].add_tool("func_with_default_arg", func_with_default_arg)
 
     # Run test cases
     for case in test_cases:
