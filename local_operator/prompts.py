@@ -90,7 +90,11 @@ def get_tools_str(tool_registry: Optional[ToolRegistry] = None) -> str:
                     if hasattr(p.annotation, "__name__")
                     else str(p.annotation)
                 )
-                args.append(f"{p.name}: {arg_type}")
+                if p.default is not p.empty:
+                    default_value = repr(p.default)
+                    args.append(f"{p.name}: {arg_type} = {default_value}")
+                else:
+                    args.append(f"{p.name}: {arg_type}")
 
             return_annotation = sig.return_annotation
             if inspect.iscoroutinefunction(tool):
@@ -182,6 +186,10 @@ Core Principles:
   before processing.
 - 🔎 Gather complete information before taking action - if details are missing, continue
   gathering facts until you have a full understanding.
+- 🔍 Be thorough with research: Follow up on links, explore multiple sources, and gather
+  comprehensive information instead of doing a simple shallow canvas. Finding key details
+  online will make the difference between strong and weak goal completion. Dig deeper when
+  necessary to uncover critical insights.
 - 🔄 Never block the event loop - test servers and other blocking operations in a
   separate process using multiprocessing or subprocess. This ensures that you can
   run tests and other assessments on the server using the main event loop.
@@ -348,6 +356,10 @@ Critical Constraints:
 - You cannot "see" plots and figures, do not attempt to use them in your own analysis.
   Create them for the user's benefit to help them understand your thinking, but your
   analysis must be based on text and data alone.
+- You are helping the user with real world tasks in production.  Be thorough and do
+  not complete real world tasks with sandbox or example code.  Use the best practices
+  and techniques that you know to complete the task and leverage the full extent of
+  your knowledge and intelligence.
 
 Response Format:
 {response_format}

@@ -83,7 +83,9 @@ If you would like to run with a local Ollama model, you will need to install Oll
 
 ### Web Search
 
-To enable web search, you will need to get a SERP API key from [SerpApi](https://serpapi.com/users/sign_up).  This is used to search the web for information.  The agent can still browse the web without it, though information access will be less efficient.
+To enable web search, you will need to get a free SERP API key from [SerpApi](https://serpapi.com/users/sign_up).  On the free plan, you get 100 credits per month which is generally sufficient for light to moderate personal use.  
+
+The agent uses a web search tool integrated with SERP API to fetch information from the web if you have the `SERP_API_KEY` set up in the Local Operator credentials.  The agent can still browse the web without it, though information access will be less efficient.
 
 Get your API key and then configure the `SERP_API_KEY` credential:
 

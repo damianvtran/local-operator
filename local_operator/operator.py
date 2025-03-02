@@ -385,11 +385,16 @@ class Operator:
 
             # Auto-save on each step if enabled
             if self.auto_save_conversation:
-                self.handle_autosave(
-                    self.agent_registry.config_dir,
-                    self.executor.conversation_history,
-                    self.executor.code_history,
-                )
+                try:
+                    self.handle_autosave(
+                        self.agent_registry.config_dir,
+                        self.executor.conversation_history,
+                        self.executor.code_history,
+                    )
+                except Exception as e:
+                    error_str = str(e)
+                    print("\n\033[1;31m✗ Error encountered while auto-saving conversation:\033[0m")
+                    print(f"\033[1;36m│ Error Details:\033[0m\n{error_str}")
 
             # Break out of the agent flow if the user cancels the code execution
             if (
@@ -531,10 +536,14 @@ class Operator:
         notebook_path = config_dir / "autosave.ipynb"
 
         save_code_history_to_notebook(
-            execution_history,
-            self.model_configuration,
-            self.config_manager.get_config_value("max_conversation_history", 100),
-            self.config_manager.get_config_value("detail_length", 35),
-            self.config_manager.get_config_value("max_learnings_history", 50),
-            notebook_path,
+            code_history=execution_history,
+            model_configuration=self.model_configuration,
+            max_conversation_history=self.config_manager.get_config_value(
+                "max_conversation_history", 100
+            ),
+            detail_conversation_length=self.config_manager.get_config_value(
+                "detail_conversation_length", 35
+            ),
+            max_learnings_history=self.config_manager.get_config_value("max_learnings_history", 50),
+            file_path=notebook_path,
         )

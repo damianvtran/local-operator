@@ -1447,15 +1447,47 @@ async def test_read_file_action(executor: LocalCodeExecutor, tmp_path: Path, fil
 
 
 @pytest.mark.asyncio
-async def test_write_file_action(executor: LocalCodeExecutor, tmp_path: Path):
+@pytest.mark.parametrize(
+    "file_content, expected_content",
+    [
+        ("New file content", "New file content"),
+        ("```\nMarkdown content\n```", "Markdown content"),
+        ("```python\nCode content\n```", "Code content"),
+        ("```\nLine 1\nLine 2\n```", "Line 1\nLine 2"),
+        ("No markdown here", "No markdown here"),
+        ("```", ""),
+        ("", ""),
+    ],
+    ids=[
+        "no_markdown",
+        "basic_markdown",
+        "python_markdown",
+        "multiline_markdown",
+        "no_markdown_present",
+        "just_markdown_delimiters",
+        "empty_string",
+    ],
+)
+async def test_write_file_action(
+    executor: LocalCodeExecutor, tmp_path: Path, file_content: str, expected_content: str
+) -> None:
+    """
+    Test the write_file action with different file contents, including markdown.
+
+    Args:
+        executor (LocalCodeExecutor): The executor instance.
+        tmp_path (Path): pytest fixture for a temporary directory.
+        file_content (str): The content to write to the test file, potentially with markdown.
+        expected_content (str): The expected content of the file after writing.
+    """
     file_path = tmp_path / "test_file.txt"
 
-    result = await executor.write_file(str(file_path), "New file content")
+    result = await executor.write_file(str(file_path), file_content)
 
     with open(file_path, "r") as f:
-        file_content = f.read()
-    assert file_content == "New file content"
+        actual_content = f.read()
 
+    assert actual_content == expected_content
     assert "Successfully wrote to file" in result.formatted_print
     assert str(file_path) in executor.conversation_history[-1].content
 

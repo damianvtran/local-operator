@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import io
+import json
 import logging
 import os
 import subprocess
@@ -54,6 +55,53 @@ MAX_FILE_READ_SIZE_BYTES = 1024 * 24
 
 This is used to prevent reading large files into context, which can cause
 context overflow errors for LLM APIs.
+"""
+
+FILE_WRITE_EQUIVALENT_TEMPLATE = """
+write_file_content = \"\"\"
+{content}
+\"\"\"
+
+with open("{file_path}", "w") as f:
+    f.write(write_file_content)
+
+    print(f"Successfully wrote to file: {file_path}")
+"""
+"""
+This template provides an equivalent code representation for a file write operation.
+
+It's used to generate a code snippet that mirrors the action of writing content to a file,
+so that it can be run in a notebook in the notebook export functionality.
+"""
+
+FILE_EDIT_EQUIVALENT_TEMPLATE = """
+# Read the original content of the file
+with open("{file_path}", "r") as f:
+    original_content = f.read()
+
+replacements = {replacements}
+
+# Perform the replacements
+for replacement in replacements:
+    find = replacement["find"]
+    replace = replacement["replace"]
+
+    if find not in original_content:
+        raise ValueError(f"Find string '{{find}}' not found in file {{file_path}}")
+
+    original_content = original_content.replace(find, replace, 1)
+
+# Write the modified content back to the file
+with open("{file_path}", "w") as f:
+    f.write(original_content)
+
+print(f"Successfully edited file: {file_path}")
+"""
+"""
+This template provides an equivalent code representation for a file edit operation.
+
+It's used to generate a code snippet that mirrors the action of editing a file,
+so that it can be run in a notebook in the notebook export functionality.
 """
 
 
@@ -1576,10 +1624,19 @@ class LocalCodeExecutor:
         Raises:
             OSError: If there is an error writing to the file
         """
+        # Remove code block markers if present
+        content_lines = content.split("\n")
+        if len(content_lines) > 0 and content_lines[0].startswith("```"):
+            content_lines = content_lines[1:]
+        if len(content_lines) > 0 and content_lines[-1].startswith("```"):
+            content_lines = content_lines[:-1]
+
+        cleaned_content = "\n".join(content_lines)
+
         expanded_file_path = os.path.expanduser(file_path)
 
         with open(expanded_file_path, "w") as f:
-            f.write(content)
+            f.write(cleaned_content)
 
         self.append_to_history(
             ConversationRecord(
@@ -1589,16 +1646,9 @@ class LocalCodeExecutor:
             )
         )
 
-        equivalent_code = f"""
-        write_file_content = \"\"\"
-        {content}
-        \"\"\"
-
-        with open(file_path, "w") as f:
-            f.write(write_file_content)
-
-            print(f"Successfully wrote to file: {file_path}")
-        """
+        equivalent_code = FILE_WRITE_EQUIVALENT_TEMPLATE.format(
+            file_path=file_path, content=cleaned_content
+        )
 
         return CodeExecutionResult(
             stdout=f"Successfully wrote to file: {file_path}",
@@ -1648,6 +1698,10 @@ class LocalCodeExecutor:
         with open(expanded_file_path, "w") as f:
             f.write(original_content)
 
+        equivalent_code = FILE_EDIT_EQUIVALENT_TEMPLATE.format(
+            file_path=file_path, replacements=json.dumps(replacements)
+        )
+
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.SYSTEM,
@@ -1655,12 +1709,13 @@ class LocalCodeExecutor:
                 should_summarize=True,
             )
         )
+
         return CodeExecutionResult(
             stdout=f"Successfully edited file: {file_path}",
             stderr="",
             logging="",
             formatted_print=f"Successfully edited file: {file_path}",
-            code="",
+            code=equivalent_code,
             message="",
             role=ConversationRole.SYSTEM,
             status=ProcessResponseStatus.SUCCESS,
