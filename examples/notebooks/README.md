@@ -12,6 +12,8 @@ The notebooks are a visualization of the conversation history between the user a
 
 This notebook demonstrates a Local Operator agent conducting in-depth research on Large Language Models (LLMs) and Agentic AI with web search tool use. The agent systematically gathers information using web search tools, refines content iteratively, and maintains a well-organized markdown report with thorough citations. The notebook showcases how Local Operator agents can assist in complex research tasks, ensuring comprehensive coverage of the subject matter and adherence to high standards of clarity and accuracy.
 
+💵 The report was generated for a total cost of $0.19 USD.
+
 📝 The output report is available [here](deep_research_agentic_ai_report.md).
 
 ## 🔄 [Automated Git Commit Message Generation](github_commit.ipynb)
