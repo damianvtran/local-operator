@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import SecretStr
 
-from local_operator.agents import AgentData
+from local_operator.agents import AgentConversation, AgentData
 from local_operator.cli import (
     agents_create_command,
     agents_delete_command,
@@ -19,11 +19,31 @@ from local_operator.model.configure import ModelConfiguration
 
 
 @pytest.fixture
-def mock_agent_registry():
+def mock_agent():
+    mock_agent = AgentData(
+        id="test-id",
+        name="TestAgent",
+        created_date=datetime.now(),
+        version="1.0.0",
+        security_prompt="",
+        hosting="test-hosting",
+        model="test-model",
+    )
+    return mock_agent
+
+
+@pytest.fixture
+def mock_agent_registry(mock_agent):
     registry = MagicMock()
     registry.create_agent = MagicMock()
     registry.delete_agent = MagicMock()
     registry.list_agents = MagicMock()
+    registry.get_agent_by_name.return_value = mock_agent
+    registry.load_agent_conversation.return_value = AgentConversation(
+        version="",
+        conversation=[],
+        execution_history=[],
+    )
     return registry
 
 
@@ -42,6 +62,20 @@ def mock_config_manager():
     return manager
 
 
+@pytest.fixture
+def mock_model():
+    model = MagicMock()
+    model.info = MagicMock()
+    return model
+
+
+@pytest.fixture
+def mock_operator():
+    operator = MagicMock()
+    operator.chat = MagicMock()
+    return operator
+
+
 def test_build_cli_parser():
     parser = build_cli_parser()
 
@@ -57,7 +91,7 @@ def test_build_cli_parser():
     assert args.hosting == "openai"
 
     # Test credential subcommand
-    args = parser.parse_args(["credential", "--key", "OPENAI_API_KEY"])
+    args = parser.parse_args(["credential", "OPENAI_API_KEY"])
     assert args.subcommand == "credential"
     assert args.key == "OPENAI_API_KEY"
 
@@ -65,6 +99,23 @@ def test_build_cli_parser():
     args = parser.parse_args(["config", "create"])
     assert args.subcommand == "config"
     assert args.config_command == "create"
+
+    # Test config open subcommand
+    args = parser.parse_args(["config", "open"])
+    assert args.subcommand == "config"
+    assert args.config_command == "open"
+
+    # Test config edit subcommand
+    args = parser.parse_args(["config", "edit", "hosting", "openai"])
+    assert args.subcommand == "config"
+    assert args.config_command == "edit"
+    assert args.key == "hosting"
+    assert args.value == "openai"
+
+    # Test config list subcommand
+    args = parser.parse_args(["config", "list"])
+    assert args.subcommand == "config"
+    assert args.config_command == "list"
 
     # Test serve subcommand
     args = parser.parse_args(["serve", "--host", "localhost", "--port", "8000"])
@@ -105,23 +156,7 @@ def test_serve_command():
         assert result == 0
 
 
-def test_main_success():
-    mock_model = MagicMock()
-    mock_operator = MagicMock()
-    mock_operator.chat = MagicMock()
-    mock_agent_registry = MagicMock()
-    mock_agent = AgentData(
-        id="test-id",
-        name="test-agent",
-        created_date=datetime.now(),
-        version="1.0.0",
-        security_prompt="",
-        hosting="test-hosting",
-        model="test-model",
-    )
-    mock_agent_registry.get_agent_by_name.return_value = mock_agent
-    mock_agent_registry.load_agent_conversation.return_value = []
-
+def test_main_success(mock_operator, mock_agent_registry, mock_model):
     with (
         patch("local_operator.cli.ConfigManager") as mock_config_manager_cls,
         patch("local_operator.cli.CredentialManager"),
@@ -148,6 +183,7 @@ def test_main_success():
             "detail_length": 10,
             "max_learnings_history": 50,
             "max_conversation_history": 100,
+            "auto_save_conversation": True,
         }.get(key, default)
 
         with patch("sys.argv", ["program", "--hosting", "deepseek", "--agent", "test-agent"]):

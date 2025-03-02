@@ -7,7 +7,7 @@ from typing import Dict, List
 
 from pydantic import BaseModel, Field
 
-from local_operator.types import ConversationRecord
+from local_operator.types import CodeExecutionResult, ConversationRecord
 
 
 class AgentData(BaseModel):
@@ -70,6 +70,9 @@ class AgentConversation(BaseModel):
 
     version: str = Field(..., description="The version of the conversation")
     conversation: List[ConversationRecord] = Field(..., description="The conversation history")
+    execution_history: List[CodeExecutionResult] = Field(
+        default_factory=list, description="The execution history"
+    )
 
 
 class AgentRegistry:
@@ -155,6 +158,15 @@ class AgentRegistry:
             model=agent_edit_metadata.model or "",
         )
 
+        return self.save_agent(agent_metadata)
+
+    def save_agent(self, agent_metadata: AgentData) -> AgentData:
+        """
+        Save an agent's metadata to the registry.
+
+        Args:
+            agent_metadata (AgentData): The metadata of the agent to save
+        """
         # Add to in-memory agents
         self._agents[agent_metadata.id] = agent_metadata
 
@@ -284,7 +296,11 @@ class AgentRegistry:
         # Copy conversation history from source agent
         source_conversation = self.load_agent_conversation(agent_id)
         try:
-            self.save_agent_conversation(new_agent.id, source_conversation)
+            self.save_agent_conversation(
+                new_agent.id,
+                source_conversation.conversation,
+                source_conversation.execution_history,
+            )
             return new_agent
         except Exception as e:
             # Clean up if conversation copy fails
@@ -332,7 +348,7 @@ class AgentRegistry:
         """
         return list(self._agents.values())
 
-    def load_agent_conversation(self, agent_id: str) -> List[ConversationRecord]:
+    def load_agent_conversation(self, agent_id: str) -> AgentConversation:
         """
         Load the conversation history for a specified agent.
 
@@ -355,16 +371,27 @@ class AgentRegistry:
 
                     try:
                         conversation_data = AgentConversation.model_validate(raw_data)
-                        return conversation_data.conversation
+                        return conversation_data
                     except Exception as e:
                         raise Exception(f"Failed to load conversation: {str(e)}")
             except Exception:
                 # Return an empty conversation if the file is unreadable.
-                return []
-        return []
+                return AgentConversation(
+                    version="",
+                    conversation=[],
+                    execution_history=[],
+                )
+        return AgentConversation(
+            version="",
+            conversation=[],
+            execution_history=[],
+        )
 
     def save_agent_conversation(
-        self, agent_id: str, conversation: List[ConversationRecord]
+        self,
+        agent_id: str,
+        conversation: List[ConversationRecord],
+        execution_history: List[CodeExecutionResult],
     ) -> None:
         """
         Save the conversation history for a specified agent.
@@ -383,6 +410,7 @@ class AgentRegistry:
         conversation_data = AgentConversation(
             version=agent.version,
             conversation=conversation,
+            execution_history=execution_history,
         )
 
         try:
@@ -391,3 +419,55 @@ class AgentRegistry:
         except Exception as e:
             # In a production scenario, consider logging this exception
             raise e
+
+    def create_autosave_agent(self) -> AgentData:
+        """
+        Create an autosave agent if it doesn't exist already.
+
+        Returns:
+            AgentData: The existing or newly created autosave agent
+
+        Raises:
+            Exception: If there is an error creating the agent
+        """
+        if "autosave" in self._agents:
+            return self._agents["autosave"]
+
+        agent_metadata = AgentData(
+            id="autosave",
+            name="autosave",
+            created_date=datetime.now(timezone.utc),
+            version=version("local-operator"),
+            security_prompt="",
+            hosting="",
+            model="",
+        )
+
+        return self.save_agent(agent_metadata)
+
+    def get_autosave_agent(self) -> AgentData:
+        """
+        Get the autosave agent.
+
+        Returns:
+            AgentData: The autosave agent
+
+        Raises:
+            KeyError: If the autosave agent does not exist
+        """
+        return self.get_agent("autosave")
+
+    def update_autosave_conversation(
+        self, conversation: List[ConversationRecord], execution_history: List[CodeExecutionResult]
+    ) -> None:
+        """
+        Update the autosave agent's conversation.
+
+        Args:
+            conversation (List[ConversationRecord]): The conversation history to save
+            execution_history (List[CodeExecutionResult]): The execution history to save
+
+        Raises:
+            KeyError: If the autosave agent does not exist
+        """
+        return self.save_agent_conversation("autosave", conversation, execution_history)

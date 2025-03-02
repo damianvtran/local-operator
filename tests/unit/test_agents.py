@@ -4,7 +4,12 @@ from pathlib import Path
 import pytest
 
 from local_operator.agents import AgentEditFields, AgentRegistry
-from local_operator.types import ConversationRecord, ConversationRole
+from local_operator.types import (
+    CodeExecutionResult,
+    ConversationRecord,
+    ConversationRole,
+    ProcessResponseStatus,
+)
 
 
 @pytest.fixture
@@ -262,9 +267,23 @@ def test_save_and_load_conversation(temp_agents_dir: Path):
         ConversationRecord(role=ConversationRole.USER, content="Hello"),
         ConversationRecord(role=ConversationRole.ASSISTANT, content="Hi there!"),
     ]
-    registry.save_agent_conversation(agent.id, conversation)
-    loaded_conversation = registry.load_agent_conversation(agent.id)
-    assert loaded_conversation == conversation
+    execution_history = [
+        CodeExecutionResult(
+            stdout="",
+            stderr="",
+            logging="",
+            message="This is a test code execution result",
+            code="print('Hello, world!')",
+            formatted_print="Hello, world!",
+            role=ConversationRole.ASSISTANT,
+            status=ProcessResponseStatus.SUCCESS,
+        )
+    ]
+
+    registry.save_agent_conversation(agent.id, conversation, execution_history)
+    loaded_conversation_data = registry.load_agent_conversation(agent.id)
+    assert loaded_conversation_data.conversation == conversation
+    assert loaded_conversation_data.execution_history == execution_history
 
 
 def test_load_nonexistent_conversation(temp_agents_dir: Path):
@@ -276,8 +295,9 @@ def test_load_nonexistent_conversation(temp_agents_dir: Path):
     # Remove the conversation file if it exists to simulate a missing file
     if conversation_file.exists():
         conversation_file.unlink()
-    conversation = registry.load_agent_conversation(agent.id)
-    assert conversation == []
+    conversation_data = registry.load_agent_conversation(agent.id)
+    assert conversation_data.conversation == []
+    assert conversation_data.execution_history == []
 
 
 def test_update_agent_not_found(temp_agents_dir: Path):
@@ -325,7 +345,20 @@ def test_clone_agent(temp_agents_dir: Path):
         ConversationRecord(role=ConversationRole.USER, content="Hello"),
         ConversationRecord(role=ConversationRole.ASSISTANT, content="Hi there!"),
     ]
-    registry.save_agent_conversation(source_agent.id, conversation)
+    execution_history = [
+        CodeExecutionResult(
+            stdout="",
+            stderr="",
+            logging="",
+            message="This is a test code execution result",
+            code="print('Hello, world!')",
+            formatted_print="Hello, world!",
+            role=ConversationRole.ASSISTANT,
+            status=ProcessResponseStatus.SUCCESS,
+        )
+    ]
+
+    registry.save_agent_conversation(source_agent.id, conversation, execution_history)
 
     # Clone the agent
     cloned_agent = registry.clone_agent(source_agent.id, "Cloned Agent")
@@ -334,8 +367,9 @@ def test_clone_agent(temp_agents_dir: Path):
     assert cloned_agent.security_prompt == "test security prompt"
 
     # Verify conversation was copied
-    cloned_conversation = registry.load_agent_conversation(cloned_agent.id)
-    assert cloned_conversation == conversation
+    cloned_conversation_data = registry.load_agent_conversation(cloned_agent.id)
+    assert cloned_conversation_data.conversation == conversation
+    assert cloned_conversation_data.execution_history == execution_history
 
 
 def test_clone_agent_not_found(temp_agents_dir: Path):
@@ -378,3 +412,43 @@ def test_get_agent_by_name(temp_agents_dir: Path):
     # Test finding non-existent agent
     not_found = registry.get_agent_by_name("Non Existent")
     assert not_found is None
+
+
+def test_create_autosave_agent(temp_agents_dir: Path):
+    registry = AgentRegistry(temp_agents_dir)
+
+    # Create the autosave agent
+    autosave_agent = registry.create_autosave_agent()
+
+    # Assert that the agent was created with the correct ID and name
+    assert autosave_agent.id == "autosave"
+    assert autosave_agent.name == "autosave"
+
+    # Assert that the agent is now in the registry
+    retrieved_agent = registry.get_agent("autosave")
+    assert retrieved_agent == autosave_agent
+
+    # Call create_autosave_agent again, should return the existing agent
+    existing_autosave_agent = registry.create_autosave_agent()
+    assert existing_autosave_agent == autosave_agent
+
+
+def test_get_autosave_agent(temp_agents_dir: Path):
+    registry = AgentRegistry(temp_agents_dir)
+
+    # Create the autosave agent
+    autosave_agent = registry.create_autosave_agent()
+
+    # Retrieve the autosave agent
+    retrieved_agent = registry.get_autosave_agent()
+
+    # Assert that the retrieved agent is the same as the created agent
+    assert retrieved_agent == autosave_agent
+
+
+def test_get_autosave_agent_not_found(temp_agents_dir: Path):
+    registry = AgentRegistry(temp_agents_dir)
+
+    # If the autosave agent doesn't exist, create it
+    with pytest.raises(KeyError):
+        registry.get_autosave_agent()
