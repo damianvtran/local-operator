@@ -58,8 +58,7 @@ context overflow errors for LLM APIs.
 """
 
 FILE_WRITE_EQUIVALENT_TEMPLATE = """
-write_file_content = \"\"\"
-{content}
+write_file_content = \"\"\"{content}
 \"\"\"
 
 with open("{file_path}", "w") as f:
