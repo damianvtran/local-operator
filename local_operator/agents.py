@@ -410,3 +410,49 @@ class AgentRegistry:
         except Exception as e:
             # In a production scenario, consider logging this exception
             raise e
+
+    def create_autosave_agent(self) -> AgentData:
+        """
+        Create an autosave agent if it doesn't exist already.
+
+        Returns:
+            AgentData: The existing or newly created autosave agent
+
+        Raises:
+            Exception: If there is an error creating the agent
+        """
+        try:
+            # Try to get the existing autosave agent
+            return self.get_agent("autosave")
+        except KeyError:
+            # Create a new autosave agent if it doesn't exist
+            return self.create_agent(
+                AgentEditFields(name="autosave", security_prompt="", hosting="", model="")
+            )
+
+    def get_autosave_agent(self) -> AgentData:
+        """
+        Get the autosave agent.
+
+        Returns:
+            AgentData: The autosave agent
+
+        Raises:
+            KeyError: If the autosave agent does not exist
+        """
+        return self.get_agent("autosave")
+
+    def update_autosave_conversation(
+        self, conversation: List[ConversationRecord], execution_history: List[CodeExecutionResult]
+    ) -> None:
+        """
+        Update the autosave agent's conversation.
+
+        Args:
+            conversation (List[ConversationRecord]): The conversation history to save
+            execution_history (List[CodeExecutionResult]): The execution history to save
+
+        Raises:
+            KeyError: If the autosave agent does not exist
+        """
+        return self.save_agent_conversation("autosave", conversation, execution_history)

@@ -166,6 +166,7 @@ def test_main_success(mock_operator, mock_agent_registry, mock_model):
             "detail_length": 10,
             "max_learnings_history": 50,
             "max_conversation_history": 100,
+            "auto_save_conversation": True,
         }.get(key, default)
 
         with patch("sys.argv", ["program", "--hosting", "deepseek", "--agent", "test-agent"]):
