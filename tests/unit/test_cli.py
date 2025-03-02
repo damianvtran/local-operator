@@ -91,7 +91,7 @@ def test_build_cli_parser():
     assert args.hosting == "openai"
 
     # Test credential subcommand
-    args = parser.parse_args(["credential", "--key", "OPENAI_API_KEY"])
+    args = parser.parse_args(["credential", "OPENAI_API_KEY"])
     assert args.subcommand == "credential"
     assert args.key == "OPENAI_API_KEY"
 
@@ -99,6 +99,23 @@ def test_build_cli_parser():
     args = parser.parse_args(["config", "create"])
     assert args.subcommand == "config"
     assert args.config_command == "create"
+
+    # Test config open subcommand
+    args = parser.parse_args(["config", "open"])
+    assert args.subcommand == "config"
+    assert args.config_command == "open"
+
+    # Test config edit subcommand
+    args = parser.parse_args(["config", "edit", "hosting", "openai"])
+    assert args.subcommand == "config"
+    assert args.config_command == "edit"
+    assert args.key == "hosting"
+    assert args.value == "openai"
+
+    # Test config list subcommand
+    args = parser.parse_args(["config", "list"])
+    assert args.subcommand == "config"
+    assert args.config_command == "list"
 
     # Test serve subcommand
     args = parser.parse_args(["serve", "--host", "localhost", "--port", "8000"])
