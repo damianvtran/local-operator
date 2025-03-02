@@ -383,6 +383,14 @@ class Operator:
 
             result = await self.executor.process_response(response_json)
 
+            # Auto-save on each step if enabled
+            if self.auto_save_conversation:
+                self.handle_autosave(
+                    self.agent_registry.config_dir,
+                    self.executor.conversation_history,
+                    self.executor.code_history,
+                )
+
             # Break out of the agent flow if the user cancels the code execution
             if (
                 result.status == ProcessResponseStatus.CANCELLED
@@ -394,13 +402,6 @@ class Operator:
         if self.training_mode and self.current_agent:
             self.agent_registry.save_agent_conversation(
                 self.current_agent.id,
-                self.executor.conversation_history,
-                self.executor.code_history,
-            )
-
-        if self.auto_save_conversation:
-            self.handle_autosave(
-                self.agent_registry.config_dir,
                 self.executor.conversation_history,
                 self.executor.code_history,
             )
