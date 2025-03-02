@@ -353,6 +353,31 @@ class CodeExecutionError(Exception):
 
 
 class LocalCodeExecutor:
+    """A class to handle local Python code execution with safety checks and context management.
+    Attributes:
+        context (Dict[str, Any]): A dictionary to maintain execution context between code blocks.
+        conversation_history (List[ConversationRecord]): A list of
+        message records tracking the conversation.
+        model_configuration (ModelConfiguration): Configuration for the language model used.
+        step_counter (int): A counter to track the current step in sequential execution.
+        max_conversation_history (int): The maximum number of messages to keep in the
+            conversation history. This does not include the system prompt.
+        detail_conversation_length (int): The number of messages to keep in full detail in the
+            conversation history. Every step before this, except the system prompt, will be
+            summarized.
+        interrupted (bool): Flag indicating if execution was interrupted.
+        can_prompt_user (bool): Informs the executor about whether the end user has access to the
+            terminal (True), or is consuming the service from some remote source where they
+            cannot respond via the terminal (False).
+        token_metrics (ExecutorTokenMetrics): Tracks token usage and
+        cost metrics for model executions.
+        agent (AgentData | None): The agent data for the current conversation.
+        tool_registry (ToolRegistry | None): The tool registry for the current conversation.
+        learnings (List[str]): A list of learnings from the current conversation.
+        current_plan (str | None): The current plan for the agent.
+        code_history (List[CodeExecutionResult]): A list of code execution results.
+    """
+
     context: Dict[str, Any]
     conversation_history: List[ConversationRecord]
     model_configuration: ModelConfiguration
@@ -368,29 +393,6 @@ class LocalCodeExecutor:
     current_plan: str | None
     code_history: List[CodeExecutionResult]
 
-    """A class to handle local Python code execution with safety checks and context management.
-
-    Attributes:
-        context (dict): A dictionary to maintain execution context between code blocks
-        conversation_history (list): A list of message dictionaries tracking the conversation
-        model: The language model used for code analysis and safety checks
-        step_counter (int): A counter to track the current step in sequential execution
-        max_conversation_history (int): The maximum number of messages to keep in
-            the conversation history.  This doesn't include the system prompt.
-        detail_conversation_length (int): The number of messages to keep in full detail in the
-            conversation history.  Every step before this except the system prompt will be
-            summarized.
-        interrupted (bool): Flag indicating if execution was interrupted
-        can_prompt_user (bool): Informs the executor about whether the end user has access to the
-            terminal (True), or is consuming the service from some remote source where they
-            cannot respond via the terminal (False).
-        token_metrics (ExecutorTokenMetrics): Tracks token usage and cost metrics for model
-        executions
-        agent (AgentData | None): The agent data for the current conversation
-        tool_registry (ToolRegistry | None): The tool registry for the current conversation
-        learnings (List[str]): A list of learnings from the current conversation
-    """
-
     def __init__(
         self,
         model_configuration: ModelConfiguration,
@@ -404,17 +406,20 @@ class LocalCodeExecutor:
         """Initialize the LocalCodeExecutor with a language model.
 
         Args:
-            model: The language model instance to use for code analysis
-            max_conversation_history: The maximum number of messages to keep in
-                the conversation history.  This doesn't include the system prompt.
-            detail_conversation_length: The number of messages to keep in full detail in the
-                conversation history.  Every step before this except the system prompt will be
-                summarized.  Set to -1 to keep all messages in full detail.
-            can_prompt_user: Informs the executor about whether the end user has access to the
+            model_configuration (ModelConfiguration): The model configuration to use
+            max_conversation_history (int): The maximum number of messages to keep in
+                the conversation history. This doesn't include the system prompt.
+            detail_conversation_length (int): The number of messages to keep in full detail in the
+                conversation history. Every step before this except the system prompt will be
+                summarized. Set to -1 to keep all messages in full detail.
+            can_prompt_user (bool): Informs the executor about whether
+            the end user has access to the
                 terminal (True), or is consuming the service from some remote source where they
                 cannot respond via the terminal (False).
-            conversation_history: A list of message dictionaries tracking the conversation.
-            agent: The agent data for the current conversation.
+            conversation_history (List[ConversationRecord]): A list of
+            message records tracking the conversation.
+            agent (AgentData | None): The agent data for the current conversation.
+            max_learnings_history (int): The maximum number of learnings to keep in history.
         """
         self.context = {}
         self.model_configuration = model_configuration
@@ -458,8 +463,20 @@ class LocalCodeExecutor:
         self._limit_conversation_history()
 
     async def _summarize_old_steps(self) -> None:
-        """Summarize old conversation steps beyond the detail conversation length.
-        Only summarizes steps that haven't been summarized yet."""
+        """
+        Summarize old conversation steps beyond the detail conversation length.
+
+        This method summarizes messages in the conversation history that are beyond the
+        `detail_conversation_length` limit and have not been summarized yet. It ensures that
+        only messages that need summarization are processed, and updates their content with
+        a concise summary.
+
+        Returns:
+            None
+
+        Raises:
+            ValueError: If the conversation record is not of the expected type.
+        """
         if len(self.conversation_history) <= 1:  # Just system prompt or empty
             return
 
@@ -471,10 +488,7 @@ class LocalCodeExecutor:
 
         for msg in history_to_summarize:
             # Skip messages that are already sufficiently concise/summarized
-            if not msg.should_summarize:
-                continue
-
-            if msg.summarized:
+            if not msg.should_summarize or msg.summarized:
                 continue
 
             summary = await self._summarize_conversation_step(msg)
@@ -1666,13 +1680,19 @@ class LocalCodeExecutor:
             ] + self.conversation_history[-self.max_conversation_history + 1 :]
 
     async def _summarize_conversation_step(self, msg: ConversationRecord) -> str:
-        """Summarize the conversation step by invoking the model to generate a concise summary.
+        """
+        Summarize the conversation step by invoking the model to generate a concise summary.
 
         Args:
-            step_number (int): The step number to summarize
+            msg (ConversationRecord): The conversation record to summarize.
 
         Returns:
-            str: A concise summary of the critical information from this step
+            str: A concise summary of the critical information from the conversation step.
+                 The summary includes key actions, important changes, significant results,
+                 errors or issues, key identifiers, transformations, and data structures.
+
+        Raises:
+            ValueError: If the conversation record is not of the expected type.
         """
         summary_prompt = """
         You are a conversation summarizer. Your task is to summarize what happened in the given
