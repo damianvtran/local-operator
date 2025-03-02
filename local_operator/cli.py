@@ -27,7 +27,7 @@ import uvicorn
 from pydantic import SecretStr
 
 from local_operator.admin import add_admin_tools
-from local_operator.agents import AgentEditFields, AgentRegistry
+from local_operator.agents import AgentConversation, AgentEditFields, AgentRegistry
 from local_operator.clients.openrouter import OpenRouterClient
 from local_operator.clients.serpapi import SerpApiClient
 from local_operator.config import ConfigManager
@@ -440,7 +440,7 @@ def main() -> int:
 
         if agent:
             # Get conversation history if agent name provided
-            conversation_history = agent_registry.load_agent_conversation(agent.id)
+            agent_conversation_data = agent_registry.load_agent_conversation(agent.id)
 
             # Use agent's hosting and model if provided
             if agent.hosting:
@@ -448,7 +448,11 @@ def main() -> int:
             if agent.model:
                 model_name = agent.model
         else:
-            conversation_history = []
+            agent_conversation_data = AgentConversation(
+                version="",
+                conversation=[],
+                execution_history=[],
+            )
 
         model_info_client: Optional[OpenRouterClient] = None
 
@@ -501,7 +505,9 @@ def main() -> int:
         )
 
         executor.set_tool_registry(tool_registry)
-        executor.load_conversation_history(conversation_history)
+
+        executor.load_conversation_history(agent_conversation_data.conversation)
+        executor.load_execution_history(agent_conversation_data.execution_history)
 
         # Start the async chat interface or execute single command
         if args.subcommand == "exec":

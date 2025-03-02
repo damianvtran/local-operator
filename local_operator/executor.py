@@ -41,6 +41,7 @@ from local_operator.prompts import (
 from local_operator.tools import ToolRegistry, list_working_directory
 from local_operator.types import (
     ActionType,
+    CodeExecutionResult,
     ConversationRecord,
     ConversationRole,
     ProcessResponseOutput,
@@ -258,30 +259,6 @@ class ExecutorTokenMetrics(BaseModel):
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
     total_cost: float = 0.0
-
-
-class CodeExecutionResult(BaseModel):
-    """Represents the result of a code execution.
-
-    Attributes:
-        stdout (str): The standard output from the code execution.
-        stderr (str): The standard error from the code execution.
-        logging (str): Any logging output generated during the code execution.
-        message (str): The message to display to the user about the code execution.
-        code (str): The code that was executed.
-        formatted_print (str): The formatted print output from the code execution.
-        role (ConversationRole): The role of the message sender (user/assistant/system)
-        status (ProcessResponseStatus): The status of the code execution
-    """
-
-    stdout: str
-    stderr: str
-    logging: str
-    message: str
-    code: str
-    formatted_print: str
-    role: ConversationRole
-    status: ProcessResponseStatus
 
 
 class CodeExecutionError(Exception):
@@ -602,6 +579,15 @@ class LocalCodeExecutor:
         ]
 
         self.conversation_history = history + filtered_history
+
+    def load_execution_history(self, new_execution_history: List[CodeExecutionResult]) -> None:
+        """Load a code execution history into the executor from a previous session.
+
+        This method initializes the code execution history by prepending the system prompt
+        and then appending the provided code execution history, excluding the initial system
+        prompt.
+        """
+        self.code_history = new_execution_history
 
     def extract_code_blocks(self, text: str) -> List[str]:
         """Extract Python code blocks from text using markdown-style syntax.
