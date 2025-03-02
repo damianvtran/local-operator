@@ -31,14 +31,15 @@ def mock_config_manager():
             self.config_file = None
             self.config = None
 
-        def get_config_value(self, key):
+        def get_config_value(self, key, default=None):
             config = {
                 "hosting": "test-host",
                 "model_name": "test-model",
                 "conversation_length": 10,
                 "detail_length": 5,
+                "auto_save_conversation": False,
             }
-            return config.get(key)
+            return config.get(key, default)
 
         def get_config(self):
             return self.config
@@ -61,7 +62,7 @@ def test_print_cli_banner_basic(monkeypatch, mock_config_manager):
     monkeypatch.setattr(sys, "stdout", output)
 
     # Override config values for this test
-    def mock_get_config_value(key):
+    def mock_get_config_value(key, default=None):
         return None
 
     mock_config_manager.get_config_value = mock_get_config_value

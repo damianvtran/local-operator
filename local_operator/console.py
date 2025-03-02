@@ -125,8 +125,11 @@ def print_cli_banner(
         model_text = f"Using model: {model}"
         padding = 49 - len(model_text)
         print(f"\033[1;36m│ {model_text}{' ' * padding}│\033[0m")
-    if hosting or model:
-        print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
+    autosave_enabled = config_manager.get_config_value("auto_save_conversation", False)
+    autosave_text = f"Autosave: {'Enabled' if autosave_enabled else 'Disabled'}"
+    padding = 49 - len(autosave_text)
+    print(f"\033[1;36m│ {autosave_text}{' ' * padding}│\033[0m")
+    print("\033[1;36m│──────────────────────────────────────────────────│\033[0m")
     print("\033[1;36m│ Type 'exit' or 'quit' to quit                    │\033[0m")
     print("\033[1;36m│ Press Ctrl+C to interrupt current task           │\033[0m")
     print("\033[1;36m╰──────────────────────────────────────────────────╯\033[0m\n")
