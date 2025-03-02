@@ -96,7 +96,7 @@ DEFAULT_CONFIG = Config(
             "max_learnings_history": 50,
             "hosting": "",
             "model_name": "",
-            "auto_save_conversation": True,
+            "auto_save_conversation": False,
         },
     }
 )

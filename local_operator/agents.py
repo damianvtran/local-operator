@@ -158,6 +158,15 @@ class AgentRegistry:
             model=agent_edit_metadata.model or "",
         )
 
+        return self.save_agent(agent_metadata)
+
+    def save_agent(self, agent_metadata: AgentData) -> AgentData:
+        """
+        Save an agent's metadata to the registry.
+
+        Args:
+            agent_metadata (AgentData): The metadata of the agent to save
+        """
         # Add to in-memory agents
         self._agents[agent_metadata.id] = agent_metadata
 
@@ -421,14 +430,20 @@ class AgentRegistry:
         Raises:
             Exception: If there is an error creating the agent
         """
-        try:
-            # Try to get the existing autosave agent
-            return self.get_agent("autosave")
-        except KeyError:
-            # Create a new autosave agent if it doesn't exist
-            return self.create_agent(
-                AgentEditFields(name="autosave", security_prompt="", hosting="", model="")
-            )
+        if "autosave" in self._agents:
+            return self._agents["autosave"]
+
+        agent_metadata = AgentData(
+            id="autosave",
+            name="autosave",
+            created_date=datetime.now(timezone.utc),
+            version=version("local-operator"),
+            security_prompt="",
+            hosting="",
+            model="",
+        )
+
+        return self.save_agent(agent_metadata)
 
     def get_autosave_agent(self) -> AgentData:
         """
