@@ -5,12 +5,14 @@ from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.agents import AgentEditFields, AgentRegistry
+from local_operator.config import ConfigManager
+from local_operator.credentials import CredentialManager
 from local_operator.executor import ExecutorInitError
 from local_operator.mocks import ChatMock
 from local_operator.model.configure import ModelConfiguration
 from local_operator.model.registry import ModelInfo
-from local_operator.server import app as srv
-from local_operator.server.app import AgentCreate, AgentUpdate, ChatRequest, app
+from local_operator.server.app import app
+from local_operator.server.models import AgentCreate, AgentUpdate, ChatRequest
 from local_operator.types import (
     ActionType,
     ConversationRecord,
@@ -117,6 +119,56 @@ def dummy_registry(temp_dir):
     app.state.agent_registry = None
 
 
+@pytest.fixture
+def mock_create_operator(monkeypatch):
+    """Mock the create_operator function to return a DummyOperator.
+
+    Args:
+        monkeypatch: pytest fixture for modifying objects during testing
+
+    Returns:
+        function: The mocked create_operator function
+    """
+
+    def _mock_create_operator(hosting, model, *args, **kwargs):
+        return DummyOperator(DummyExecutor())
+
+    monkeypatch.setattr("local_operator.server.utils.create_operator", _mock_create_operator)
+    return _mock_create_operator
+
+
+@pytest.fixture
+def mock_credential_manager(temp_dir):
+    """Create a mock credential manager for testing.
+
+    Args:
+        temp_dir: pytest fixture that provides a temporary directory
+
+    Returns:
+        CredentialManager: A credential manager instance using the temporary directory
+    """
+    credential_manager = CredentialManager(config_dir=temp_dir)
+    app.state.credential_manager = credential_manager
+    yield credential_manager
+    app.state.credential_manager = None
+
+
+@pytest.fixture
+def mock_config_manager(temp_dir):
+    """Create a mock config manager for testing.
+
+    Args:
+        temp_dir: pytest fixture that provides a temporary directory
+
+    Returns:
+        ConfigManager: A config manager instance using the temporary directory
+    """
+    config_manager = ConfigManager(config_dir=temp_dir)
+    app.state.config_manager = config_manager
+    yield config_manager
+    app.state.config_manager = None
+
+
 # Test for successful /health endpoint response.
 @pytest.mark.asyncio
 async def test_health_check():
@@ -131,11 +183,9 @@ async def test_health_check():
 
 # Test for successful /v1/chat endpoint response.
 @pytest.mark.asyncio
-async def test_chat_success(dummy_executor):
-    original_create_operator = srv.create_operator
-    # Override create_operator to return a DummyOperator with our dummy executor.
-    srv.create_operator = lambda hosting, model: DummyOperator(dummy_executor)
-
+async def test_chat_success(
+    dummy_executor, mock_create_operator, mock_credential_manager, mock_config_manager
+):
     test_prompt = "Hello, how are you?"
 
     # Use an empty context to trigger insertion of the system prompt by the server.
@@ -149,8 +199,6 @@ async def test_chat_success(dummy_executor):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         response = await ac.post("/v1/chat", json=payload)
-
-    srv.create_operator = original_create_operator
 
     assert response.status_code == 200
     data = response.json()
@@ -181,10 +229,6 @@ async def test_chat_success(dummy_executor):
 # Test for successful /v1/chat/agents/{agent_id} endpoint response
 @pytest.mark.asyncio
 async def test_chat_with_agent_success(dummy_executor, dummy_registry):
-    original_create_operator = srv.create_operator
-    # Override create_operator to return a DummyOperator with our dummy executor
-    srv.create_operator = lambda hosting, model: DummyOperator(dummy_executor)
-
     # Create a test agent
     agent = dummy_registry.create_agent(
         AgentEditFields(
@@ -208,8 +252,6 @@ async def test_chat_with_agent_success(dummy_executor, dummy_registry):
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         response = await ac.post(f"/v1/chat/agents/{agent_id}", json=payload.model_dump())
 
-    srv.create_operator = original_create_operator
-
     assert response.status_code == 200
     data = response.json()
 
@@ -228,9 +270,6 @@ async def test_chat_with_agent_success(dummy_executor, dummy_registry):
 # Test chat with non-existent agent
 @pytest.mark.asyncio
 async def test_chat_with_nonexistent_agent(dummy_executor, dummy_registry):
-    original_create_operator = srv.create_operator
-    srv.create_operator = lambda hosting, model: DummyOperator(dummy_executor)
-
     payload = ChatRequest(
         hosting="openai",
         model="gpt-4",
@@ -242,8 +281,6 @@ async def test_chat_with_nonexistent_agent(dummy_executor, dummy_registry):
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         response = await ac.post("/v1/chat/agents/nonexistent", json=payload.model_dump())
 
-    srv.create_operator = original_create_operator
-
     assert response.status_code == 404
     data = response.json()
     assert "Agent not found" in data.get("detail", "")
@@ -252,9 +289,6 @@ async def test_chat_with_nonexistent_agent(dummy_executor, dummy_registry):
 # Test chat with agent when registry not initialized
 @pytest.mark.asyncio
 async def test_chat_with_agent_registry_not_initialized(dummy_executor):
-    original_create_operator = srv.create_operator
-    srv.create_operator = lambda hosting, model: DummyOperator(dummy_executor)
-
     # Remove registry from app state
     original_registry = getattr(app.state, "agent_registry", None)
     if hasattr(app.state, "agent_registry"):
@@ -281,8 +315,6 @@ async def test_chat_with_agent_registry_not_initialized(dummy_executor):
         if original_registry is not None:
             app.state.agent_registry = original_registry
 
-        srv.create_operator = original_create_operator
-
 
 # Test when the operator's chat method raises an exception (simulating an error during
 # model invocation).
@@ -296,9 +328,6 @@ class FailingOperator:
 
 @pytest.mark.asyncio
 async def test_chat_model_failure():
-    original_create_operator = srv.create_operator
-    srv.create_operator = lambda hosting, model: FailingOperator()
-
     payload = ChatRequest(
         hosting="openai",
         model="gpt-4o",
@@ -312,8 +341,6 @@ async def test_chat_model_failure():
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         response = await ac.post("/v1/chat", json=payload.model_dump())
 
-    srv.create_operator = original_create_operator
-
     assert response.status_code == 500
     data = response.json()
     # The error detail should indicate an internal server error.
@@ -324,12 +351,8 @@ async def test_chat_model_failure():
 # Simulate this by overriding create_operator to raise an HTTPException.
 @pytest.mark.asyncio
 async def test_chat_executor_not_initialized():
-    original_create_operator = srv.create_operator
-
     async def get_none(hosting, model):
         raise HTTPException(status_code=500, detail="Executor not initialized")
-
-    srv.create_operator = get_none
 
     payload = ChatRequest(
         hosting="openai",
@@ -343,8 +366,6 @@ async def test_chat_executor_not_initialized():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         response = await ac.post("/v1/chat", json=payload.model_dump())
-
-    srv.create_operator = original_create_operator
 
     assert response.status_code == 500
     data = response.json()
