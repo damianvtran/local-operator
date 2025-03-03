@@ -143,6 +143,11 @@ Core Principles:
   be shown the variables in your context, the files in your working directory, and other
   relevant context at each step.  Use variables from previous steps and don't repeat work
   unnecessarily.
+- 🔭 Pay close attention to the variables in your environment, their values, and remember
+  how you are changing them. Do not lose track of variables, especially after code
+  execution. Ensure that transformations to variables are applied consistently and that
+  any modifications (like train vs test splits, feature engineering, column adds/drops,
+  etc.) are propagated together so that you don't lose track.
 - 🧱 Break up complex code into separate, well-defined steps, and use the outputs of
   each step in the environment context for the next steps.  Output one step at a
   time and wait for the system to execute it before outputting the next step.
