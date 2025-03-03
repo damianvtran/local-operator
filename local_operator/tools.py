@@ -416,7 +416,7 @@ def search_web_tool(
     """
 
     def search_web(
-        query: str, provider: str = "google", max_results: int = 20
+        query: str, search_engine: str = "google", max_results: int = 20
     ) -> SerpApiResponse | TavilyResponse:
         """Search the web using the SERP or Tavily API and return the results.
 
@@ -426,7 +426,7 @@ def search_web_tool(
 
         Args:
             query (str): The search query string.
-            provider (str, optional): Search provider to use (e.g., "google", "bing").
+            search_engine (str, optional): Search engine to use (e.g., "google", "bing").
                 Defaults to "google".
             max_results (int, optional): Maximum number of results to return. Defaults to 20.
 
@@ -438,7 +438,7 @@ def search_web_tool(
         """
         if serp_api_client:
             try:
-                return serp_api_client.search(query, provider, max_results)
+                return serp_api_client.search(query, search_engine, max_results)
             except Exception as e:
                 if not tavily_client:
                     raise e
