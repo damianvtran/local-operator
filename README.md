@@ -5,7 +5,7 @@
        src="./static/local-operator-icon-2-light-clear.png">
 </picture>
 
-<h1 align="center">Local Operator: On-device AI Agent Environment</h1>
+<h1 align="center">Local Operator: AI Agent Assistants On Your Device</h1>
 <div align="center">
   <h2>🤖 Your Personal Assistant that Gets Things Done with Python</h2>
   <p><i>Real-time code execution on your device through natural conversation</i></p>
