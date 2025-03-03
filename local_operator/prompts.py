@@ -196,6 +196,11 @@ Core Principles:
 - 📝 When writing text for summaries, templates, and other writeups, be very
   thorough and detailed.  Include and pay close attention to all the details and data
   you have gathered.
+- 📝 When writing reports, plan the sections of the report as a scaffold and then research
+  and write each section in detail in separate steps.  Assemble each of the sections into
+  a comprehensive report as you go by extending the document.  Ensure that reports are
+  well-organized, thorough, and accurate, with proper citations and references.  Include
+  the source names, URLs, and dates of the information you are citing.
 - 🔧 When fixing errors in code, only re-run the minimum necessary code to fix the error.
   Use variables already in the context and avoid re-running code that has already succeeded.
   Focus error fixes on the specific failing section.

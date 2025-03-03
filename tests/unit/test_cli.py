@@ -11,7 +11,8 @@ from local_operator.cli import (
     agents_list_command,
     build_cli_parser,
     config_create_command,
-    credential_command,
+    credential_delete_command,
+    credential_update_command,
     main,
     serve_command,
 )
@@ -91,8 +92,15 @@ def test_build_cli_parser():
     assert args.hosting == "openai"
 
     # Test credential subcommand
-    args = parser.parse_args(["credential", "OPENAI_API_KEY"])
+    args = parser.parse_args(["credential", "update", "OPENAI_API_KEY"])
     assert args.subcommand == "credential"
+    assert args.credential_command == "update"
+    assert args.key == "OPENAI_API_KEY"
+
+    # Test credential delete subcommand
+    args = parser.parse_args(["credential", "delete", "OPENAI_API_KEY"])
+    assert args.subcommand == "credential"
+    assert args.credential_command == "delete"
     assert args.key == "OPENAI_API_KEY"
 
     # Test config create subcommand
@@ -125,16 +133,27 @@ def test_build_cli_parser():
     assert not args.reload
 
 
-def test_credential_command(mock_credential_manager):
+def test_credential_update_command(mock_credential_manager):
     with patch("local_operator.cli.CredentialManager", return_value=mock_credential_manager):
         args = MagicMock()
         args.key = "TEST_API_KEY"
 
-        result = credential_command(args)
+        result = credential_update_command(args)
 
         mock_credential_manager.prompt_for_credential.assert_called_once_with(
             "TEST_API_KEY", reason="update requested"
         )
+        assert result == 0
+
+
+def test_credential_delete_command(mock_credential_manager):
+    with patch("local_operator.cli.CredentialManager", return_value=mock_credential_manager):
+        args = MagicMock()
+        args.key = "TEST_API_KEY"
+
+        result = credential_delete_command(args)
+
+        mock_credential_manager.set_credential.assert_called_once_with("TEST_API_KEY", "")
         assert result == 0
 
 
