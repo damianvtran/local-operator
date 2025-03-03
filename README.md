@@ -90,7 +90,7 @@ The agent uses a web search tool integrated with SERP API to fetch information f
 Get your API key and then configure the `SERP_API_KEY` credential:
 
 ```bash
-local-operator credential --key SERP_API_KEY
+local-operator credential update SERP_API_KEY
 ```
 
 Once the credential is set, the agent will be able to search the web for information
@@ -232,15 +232,24 @@ local-operator config list
 
 ### Credentials
 
-Credentials are stored in the `~/.local-operator/credentials.yml` file.  Credentials can be updated at any time by running `local-operator credential <key>`.
+Credentials are stored in the `~/.local-operator/credentials.yml` file.  Credentials can be updated at any time by running `local-operator credential update <credential_name>`.
 
 Example:
 
 ```bash
-local-operator credential SERP_API_KEY
+local-operator credential update SERP_API_KEY
+```
+
+To clear a credential, use the following command:
+
+```bash
+local-operator credential delete SERP_API_KEY
 ```
 
 - `SERP_API_KEY`: The API key for the SERP API from [SerpApi](https://serpapi.com/users/sign_up).  This is used to search the web for information.  This is required for the agent to be able to do real time searches of the web using search engines.  The agent can still browse the web without it, though information access will be less efficient.
+
+- `TAVILY_API_KEY`: The API key for the Tavily API from [Tavily](https://tavily.com/signup).  Alternative to SERP API with pay as you go pricing.  The per unit cost is lower
+for personal use if you go over the SERP API 100 requests per month limit.  The disadvantage is that the search results are not based off of Google like SERP API so the search depth is not as extensive.  Good for if you have run into the SERP API limit for the month.
 
 - `OPENROUTER_API_KEY`: The API key for the OpenRouter API.  This is used to access the OpenRouter service with a wide range of models.  It is the best option for being able to easily switch between models with less configuration.
 

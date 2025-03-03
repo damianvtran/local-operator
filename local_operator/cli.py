@@ -123,20 +123,29 @@ def build_cli_parser() -> argparse.ArgumentParser:
         dest="run_in",
     )
     subparsers = parser.add_subparsers(dest="subcommand")
-
     # Credential command
     credential_parser = subparsers.add_parser(
         "credential",
         help="Manage API keys and credentials for different hosting platforms",
         parents=[parent_parser],
     )
-    credential_parser.add_argument(
-        "key",
-        type=str,
-        help="Credential key to update (e.g., DEEPSEEK_API_KEY, "
-        "OPENAI_API_KEY, ANTHROPIC_API_KEY, KIMI_API_KEY, ALIBABA_CLOUD_API_KEY, "
-        "GOOGLE_AI_STUDIO_API_KEY, MISTRAL_API_KEY, OPENROUTER_API_KEY)",
+    credential_subparsers = credential_parser.add_subparsers(dest="credential_command")
+    credential_update_parser = credential_subparsers.add_parser(
+        "update", help="Update a credential", parents=[parent_parser]
     )
+
+    credential_delete_parser = credential_subparsers.add_parser(
+        "delete", help="Delete a credential", parents=[parent_parser]
+    )
+
+    credential_key_help = (
+        "Credential key to manage (e.g., DEEPSEEK_API_KEY, OPENAI_API_KEY, "
+        "ANTHROPIC_API_KEY, KIMI_API_KEY, ALIBABA_CLOUD_API_KEY, GOOGLE_AI_STUDIO_API_KEY, "
+        "MISTRAL_API_KEY, OPENROUTER_API_KEY)"
+    )
+
+    credential_update_parser.add_argument("key", type=str, help=credential_key_help)
+    credential_delete_parser.add_argument("key", type=str, help=credential_key_help)
 
     # Config command
     config_parser = subparsers.add_parser(
@@ -249,9 +258,15 @@ def build_cli_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def credential_command(args: argparse.Namespace) -> int:
+def credential_update_command(args: argparse.Namespace) -> int:
     credential_manager = CredentialManager(Path.home() / ".local-operator")
     credential_manager.prompt_for_credential(args.key, reason="update requested")
+    return 0
+
+
+def credential_delete_command(args: argparse.Namespace) -> int:
+    credential_manager = CredentialManager(Path.home() / ".local-operator")
+    credential_manager.set_credential(args.key, "")
     return 0
 
 
@@ -494,7 +509,12 @@ def main() -> int:
         agents_dir = config_dir / "agents"
 
         if args.subcommand == "credential":
-            return credential_command(args)
+            if args.credential_command == "update":
+                return credential_update_command(args)
+            elif args.credential_command == "delete":
+                return credential_delete_command(args)
+            else:
+                parser.error(f"Invalid credential command: {args.credential_command}")
         elif args.subcommand == "config":
             if args.config_command == "create":
                 return config_create_command()

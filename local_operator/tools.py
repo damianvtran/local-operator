@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Set, Tuple
 import playwright.async_api as pw
 
 from local_operator.clients.serpapi import SerpApiClient, SerpApiResponse
+from local_operator.clients.tavily import TavilyClient, TavilyResponse
 
 
 def _get_git_ignored_files(gitignore_path: str) -> Set[str]:
@@ -393,7 +394,7 @@ async def browse_single_url(url: str) -> str:
         raise RuntimeError(f"Failed to browse {url}: {str(e)}")
 
 
-def search_web_tool(serp_api_client: SerpApiClient) -> Callable[..., Any]:
+def search_web_tool(search_api_client: SerpApiClient | TavilyClient) -> Callable[..., Any]:
     """Search the web using SERP API.
 
     Makes a request to SERP API using the provided API key to search the web. Supports multiple
@@ -412,24 +413,51 @@ def search_web_tool(serp_api_client: SerpApiClient) -> Callable[..., Any]:
         RuntimeError: If the API request fails
     """
 
-    def search_web(query: str, provider: str = "google", max_results: int = 20) -> SerpApiResponse:
-        """Search the web using the SERP API and return the results.
+    tool_instance = None
 
-        This tool allows the agent to search the internet for information. The results
-        must be printed to the console.
+    if isinstance(search_api_client, SerpApiClient):
 
-        Args:
-            query (str): The search query string.
-            provider (str, optional): Search provider to use (e.g., "google", "bing").
-                Defaults to "google".
-            max_results (int, optional): Maximum number of results to return. Defaults to 20.
+        def search_web_serp_api(
+            query: str, provider: str = "google", max_results: int = 20
+        ) -> SerpApiResponse:
+            """Search the web using the SERP API and return the results.
 
-        Returns:
-            SerpApiResponse: A structured response containing search results.
-        """
-        return serp_api_client.search(query, provider, max_results)
+            This tool allows the agent to search the internet for information. The results
+            must be printed to the console.
 
-    return search_web
+            Args:
+                query (str): The search query string.
+                provider (str, optional): Search provider to use (e.g., "google", "bing").
+                    Defaults to "google".
+                max_results (int, optional): Maximum number of results to return. Defaults to 20.
+
+            Returns:
+                SerpApiResponse: A structured response containing search results.
+            """
+            return search_api_client.search(query, provider, max_results)
+
+        tool_instance = search_web_serp_api
+
+    elif isinstance(search_api_client, TavilyClient):
+
+        def search_web_tavily(query: str, max_results: int = 20) -> TavilyResponse:
+            """Search the web using the Tavily API and return the results.
+
+            This tool allows the agent to search the internet for information using the Tavily API.
+            The results must be printed to the console.
+
+            Args:
+                query (str): The search query string.
+                max_results (int, optional): Maximum number of results to return. Defaults to 20.
+
+            Returns:
+                TavilyResponse: A structured response containing search results from Tavily.
+            """
+            return search_api_client.search(query, max_results=max_results)
+
+        tool_instance = search_web_tavily
+
+    return tool_instance
 
 
 class ToolRegistry:
@@ -445,6 +473,7 @@ class ToolRegistry:
 
     _tools: Dict[str, Callable[..., Any]]
     serp_api_client: SerpApiClient | None = None
+    tavily_client: TavilyClient | None = None
 
     def __init__(self):
         """Initialize an empty tool registry."""
@@ -459,6 +488,14 @@ class ToolRegistry:
         """
         self.serp_api_client = serp_api_client
 
+    def set_tavily_client(self, tavily_client: TavilyClient):
+        """Set the Tavily API client for the registry.
+
+        Args:
+            tavily_client (TavilyClient): The Tavily API client to set
+        """
+        self.tavily_client = tavily_client
+
     def init_tools(self):
         """Initialize the registry with default tools.
 
@@ -469,8 +506,11 @@ class ToolRegistry:
         """
         self.add_tool("browse_single_url", browse_single_url)
         self.add_tool("list_working_directory", list_working_directory)
+
         if self.serp_api_client:
             self.add_tool("search_web", search_web_tool(self.serp_api_client))
+        if self.tavily_client:
+            self.add_tool("search_web", search_web_tool(self.tavily_client))
 
     def add_tool(self, name: str, tool: Callable[..., Any]):
         """Add a new tool to the registry.
