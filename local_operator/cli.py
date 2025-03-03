@@ -32,6 +32,7 @@ from local_operator.admin import add_admin_tools
 from local_operator.agents import AgentConversation, AgentEditFields, AgentRegistry
 from local_operator.clients.openrouter import OpenRouterClient
 from local_operator.clients.serpapi import SerpApiClient
+from local_operator.clients.tavily import TavilyClient
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
@@ -464,32 +465,33 @@ def build_tool_registry(
     config_manager: ConfigManager,
     credential_manager: CredentialManager,
 ) -> ToolRegistry:
-    """Build and initialize the tool registry with agent management tools.
+    """Build and initialize the tool registry.
 
-    This function creates a new ToolRegistry instance and registers the core agent management tools:
-    - create_agent_from_conversation: Creates a new agent from the current conversation
-    - edit_agent: Modifies an existing agent's properties
-    - delete_agent: Removes an agent from the registry
-    - get_agent_info: Retrieves information about agents
-    - search_web: Search the web using SERP API
+    This function creates a new ToolRegistry instance, initializes default tools,
+    and adds admin tools for agent management. It also sets up SERP API and Tavily
+    API clients if the corresponding API keys are available.
 
     Args:
-        executor: The LocalCodeExecutor instance containing conversation history
-        agent_registry: The AgentRegistry for managing agents
-        config_manager: The ConfigManager for managing configuration
-        credential_manager: The CredentialManager for managing credentials
+        executor (LocalCodeExecutor): The LocalCodeExecutor instance for conversation history.
+        agent_registry (AgentRegistry): The AgentRegistry for managing agents.
+        config_manager (ConfigManager): The ConfigManager for managing configuration.
+        credential_manager (CredentialManager): The CredentialManager for managing credentials.
+
     Returns:
-        ToolRegistry: The initialized tool registry with all agent management tools registered
+        ToolRegistry: The initialized tool registry with all tools registered.
     """
     tool_registry = ToolRegistry()
 
     serp_api_key = credential_manager.get_credential("SERP_API_KEY")
+    tavily_api_key = credential_manager.get_credential("TAVILY_API_KEY")
 
     if serp_api_key:
         serp_api_client = SerpApiClient(serp_api_key)
         tool_registry.set_serp_api_client(serp_api_client)
-    else:
-        serp_api_client = None
+
+    if tavily_api_key:
+        tavily_client = TavilyClient(tavily_api_key)
+        tool_registry.set_tavily_client(tavily_client)
 
     tool_registry.init_tools()
 

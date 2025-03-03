@@ -394,7 +394,9 @@ async def browse_single_url(url: str) -> str:
         raise RuntimeError(f"Failed to browse {url}: {str(e)}")
 
 
-def search_web_tool(search_api_client: SerpApiClient | TavilyClient) -> Callable[..., Any]:
+def search_web_tool(
+    serp_api_client: SerpApiClient | None, tavily_client: TavilyClient | None
+) -> Callable[..., Any]:
     """Search the web using SERP API.
 
     Makes a request to SERP API using the provided API key to search the web. Supports multiple
@@ -413,51 +415,40 @@ def search_web_tool(search_api_client: SerpApiClient | TavilyClient) -> Callable
         RuntimeError: If the API request fails
     """
 
-    tool_instance = None
+    def search_web(
+        query: str, provider: str = "google", max_results: int = 20
+    ) -> SerpApiResponse | TavilyResponse:
+        """Search the web using the SERP or Tavily API and return the results.
 
-    if isinstance(search_api_client, SerpApiClient):
+        This tool allows the agent to search the internet for information. The results
+        must be printed to the console.  If the SERP API fails, it will attempt to use
+        the Tavily API if available.
 
-        def search_web_serp_api(
-            query: str, provider: str = "google", max_results: int = 20
-        ) -> SerpApiResponse:
-            """Search the web using the SERP API and return the results.
+        Args:
+            query (str): The search query string.
+            provider (str, optional): Search provider to use (e.g., "google", "bing").
+                Defaults to "google".
+            max_results (int, optional): Maximum number of results to return. Defaults to 20.
 
-            This tool allows the agent to search the internet for information. The results
-            must be printed to the console.
+        Returns:
+            SerpApiResponse | TavilyResponse: A structured response containing search results.
 
-            Args:
-                query (str): The search query string.
-                provider (str, optional): Search provider to use (e.g., "google", "bing").
-                    Defaults to "google".
-                max_results (int, optional): Maximum number of results to return. Defaults to 20.
+        Raises:
+            RuntimeError: If no search provider is available.
+        """
+        if serp_api_client:
+            try:
+                return serp_api_client.search(query, provider, max_results)
+            except Exception as e:
+                if not tavily_client:
+                    raise e
 
-            Returns:
-                SerpApiResponse: A structured response containing search results.
-            """
-            return search_api_client.search(query, provider, max_results)
+        if tavily_client:
+            return tavily_client.search(query, max_results=max_results)
 
-        tool_instance = search_web_serp_api
+        raise RuntimeError("No search API provider available")
 
-    elif isinstance(search_api_client, TavilyClient):
-
-        def search_web_tavily(query: str, max_results: int = 20) -> TavilyResponse:
-            """Search the web using the Tavily API and return the results.
-
-            This tool allows the agent to search the internet for information using the Tavily API.
-            The results must be printed to the console.
-
-            Args:
-                query (str): The search query string.
-                max_results (int, optional): Maximum number of results to return. Defaults to 20.
-
-            Returns:
-                TavilyResponse: A structured response containing search results from Tavily.
-            """
-            return search_api_client.search(query, max_results=max_results)
-
-        tool_instance = search_web_tavily
-
-    return tool_instance
+    return search_web
 
 
 class ToolRegistry:
@@ -507,10 +498,8 @@ class ToolRegistry:
         self.add_tool("browse_single_url", browse_single_url)
         self.add_tool("list_working_directory", list_working_directory)
 
-        if self.serp_api_client:
-            self.add_tool("search_web", search_web_tool(self.serp_api_client))
-        if self.tavily_client:
-            self.add_tool("search_web", search_web_tool(self.tavily_client))
+        if self.serp_api_client or self.tavily_client:
+            self.add_tool("search_web", search_web_tool(self.serp_api_client, self.tavily_client))
 
     def add_tool(self, name: str, tool: Callable[..., Any]):
         """Add a new tool to the registry.
