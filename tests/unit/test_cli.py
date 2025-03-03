@@ -170,7 +170,7 @@ def test_serve_command():
         result = serve_command("localhost", 8000, False)
 
         mock_run.assert_called_once_with(
-            "local_operator.server:app", host="localhost", port=8000, reload=False
+            "local_operator.server.app:app", host="localhost", port=8000, reload=False
         )
         assert result == 0
 

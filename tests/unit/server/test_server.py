@@ -9,8 +9,8 @@ from local_operator.executor import ExecutorInitError
 from local_operator.mocks import ChatMock
 from local_operator.model.configure import ModelConfiguration
 from local_operator.model.registry import ModelInfo
-from local_operator.server import server as srv
-from local_operator.server.server import AgentCreate, AgentUpdate, ChatRequest, app
+from local_operator.server import app as srv
+from local_operator.server.app import AgentCreate, AgentUpdate, ChatRequest, app
 from local_operator.types import (
     ActionType,
     ConversationRecord,
