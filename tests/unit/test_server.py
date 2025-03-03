@@ -4,13 +4,13 @@ import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
-from local_operator import server as srv
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.executor import ExecutorInitError
 from local_operator.mocks import ChatMock
 from local_operator.model.configure import ModelConfiguration
 from local_operator.model.registry import ModelInfo
-from local_operator.server import AgentCreate, AgentUpdate, ChatRequest, app
+from local_operator.server import server as srv
+from local_operator.server.server import AgentCreate, AgentUpdate, ChatRequest, app
 from local_operator.types import (
     ActionType,
     ConversationRecord,
