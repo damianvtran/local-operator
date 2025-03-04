@@ -305,15 +305,16 @@ async def test_get_agent_conversation_empty(test_app_client, dummy_registry: Age
 
     assert response.status_code == 200
     data = response.json()
-    assert data["agent_id"] == agent_id
-    assert "first_message_datetime" in data
-    assert "last_message_datetime" in data
-    assert "messages" in data
-    assert len(data["messages"]) == 0
-    assert data["page"] == 1
-    assert data["per_page"] == 10
-    assert data["total"] == 0
-    assert data["count"] == 0
+    result = data.get("result")
+    assert result["agent_id"] == agent_id
+    assert "first_message_datetime" in result
+    assert "last_message_datetime" in result
+    assert "messages" in result
+    assert len(result["messages"]) == 0
+    assert result["page"] == 1
+    assert result["per_page"] == 10
+    assert result["total"] == 0
+    assert result["count"] == 0
 
 
 @pytest.mark.asyncio
@@ -354,14 +355,15 @@ async def test_get_agent_conversation_pagination_default(
 
     assert response.status_code == 200
     data = response.json()
-    assert data["agent_id"] == agent_id
-    assert len(data["messages"]) == 10
-    assert data["page"] == 1
-    assert data["per_page"] == 10
-    assert data["total"] == 15
-    assert data["count"] == 10
-    assert data["messages"][0]["content"] == "Message 6"
-    assert data["messages"][9]["content"] == "Message 15"
+    result = data.get("result")
+    assert result["agent_id"] == agent_id
+    assert len(result["messages"]) == 10
+    assert result["page"] == 1
+    assert result["per_page"] == 10
+    assert result["total"] == 15
+    assert result["count"] == 10
+    assert result["messages"][0]["content"] == "Message 6"
+    assert result["messages"][9]["content"] == "Message 15"
 
 
 @pytest.mark.asyncio
@@ -402,14 +404,15 @@ async def test_get_agent_conversation_pagination_second_page(
 
     assert response.status_code == 200
     data = response.json()
-    assert data["agent_id"] == agent_id
-    assert len(data["messages"]) == 5
-    assert data["page"] == 2
-    assert data["per_page"] == 10
-    assert data["total"] == 15
-    assert data["count"] == 5
-    assert data["messages"][0]["content"] == "Message 1"
-    assert data["messages"][4]["content"] == "Message 5"
+    result = data.get("result")
+    assert result["agent_id"] == agent_id
+    assert len(result["messages"]) == 5
+    assert result["page"] == 2
+    assert result["per_page"] == 10
+    assert result["total"] == 15
+    assert result["count"] == 5
+    assert result["messages"][0]["content"] == "Message 1"
+    assert result["messages"][4]["content"] == "Message 5"
 
 
 @pytest.mark.asyncio
@@ -450,12 +453,14 @@ async def test_get_agent_conversation_custom_per_page(
 
     assert response.status_code == 200
     data = response.json()
-    assert len(data["messages"]) == 5
-    assert data["page"] == 1
-    assert data["per_page"] == 5
-    assert data["count"] == 5
-    assert data["messages"][0]["content"] == "Message 11"
-    assert data["messages"][4]["content"] == "Message 15"
+    result = data.get("result")
+    assert result["agent_id"] == agent_id
+    assert len(result["messages"]) == 5
+    assert result["page"] == 1
+    assert result["per_page"] == 5
+    assert result["count"] == 5
+    assert result["messages"][0]["content"] == "Message 11"
+    assert result["messages"][4]["content"] == "Message 15"
 
 
 @pytest.mark.asyncio

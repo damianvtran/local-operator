@@ -34,10 +34,10 @@ async def test_chat_success(
 
     assert response.status_code == 200
     data = response.json()
-
+    result = data.get("result")
     # Verify that the response contains the dummy operator response.
-    assert data.get("response") == "dummy operator response"
-    conversation = data.get("context")
+    assert result.get("response") == "dummy operator response"
+    conversation = result.get("context")
     assert isinstance(conversation, list)
 
     # Count occurrences of the test prompt in the conversation
@@ -51,7 +51,7 @@ async def test_chat_success(
     assert ConversationRole.ASSISTANT.value in roles
 
     # Verify token stats are present.
-    stats = data.get("stats")
+    stats = result.get("stats")
     assert stats is not None
     assert stats.get("total_tokens") > 0
     assert stats.get("prompt_tokens") > 0
@@ -95,13 +95,13 @@ async def test_chat_sync_with_agent_success(
 
     assert response.status_code == 200
     data = response.json()
-
-    assert data.get("response") == "dummy operator response"
-    conversation = data.get("context")
+    result = data.get("result")
+    assert result.get("response") == "dummy operator response"
+    conversation = result.get("context")
     assert isinstance(conversation, list)
 
     # Verify token stats
-    stats = data.get("stats")
+    stats = result.get("stats")
     assert stats is not None
     assert stats.get("total_tokens") > 0
     assert stats.get("prompt_tokens") > 0

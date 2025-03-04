@@ -21,7 +21,12 @@ from local_operator.server.dependencies import (
     get_credential_manager,
     get_job_manager,
 )
-from local_operator.server.models.schemas import ChatRequest, ChatResponse, ChatStats
+from local_operator.server.models.schemas import (
+    ChatRequest,
+    ChatResponse,
+    ChatStats,
+    CRUDResponse,
+)
 from local_operator.server.utils.operator import create_operator
 from local_operator.types import ConversationRecord
 
@@ -31,7 +36,7 @@ logger = logging.getLogger("local_operator.server.routes.chat")
 
 @router.post(
     "/v1/chat",
-    response_model=ChatResponse,
+    response_model=CRUDResponse[ChatResponse],
     summary="Process chat request",
     description="Accepts a prompt and optional context/configuration, returns the model response "
     "and conversation history.",
@@ -121,16 +126,20 @@ async def chat_endpoint(
         completion_tokens = len(tokenizer.encode(response_content))
         total_tokens = prompt_tokens + completion_tokens
 
-        return ChatResponse(
-            response=response_content,
-            context=[
-                ConversationRecord(role=msg.role, content=msg.content)
-                for msg in operator.executor.conversation_history
-            ],
-            stats=ChatStats(
-                total_tokens=total_tokens,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
+        return CRUDResponse(
+            status=200,
+            message="Chat request processed successfully",
+            result=ChatResponse(
+                response=response_content,
+                context=[
+                    ConversationRecord(role=msg.role, content=msg.content)
+                    for msg in operator.executor.conversation_history
+                ],
+                stats=ChatStats(
+                    total_tokens=total_tokens,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                ),
             ),
         )
 
@@ -141,7 +150,7 @@ async def chat_endpoint(
 
 @router.post(
     "/v1/chat/agents/{agent_id}/sync",
-    response_model=ChatResponse,
+    response_model=CRUDResponse[ChatResponse],
     summary="Process chat request using a specific agent",
     description=(
         "Accepts a prompt and optional context/configuration, retrieves the specified "
@@ -233,16 +242,20 @@ async def chat_with_agent(
         completion_tokens = len(tokenizer.encode(response_content))
         total_tokens = prompt_tokens + completion_tokens
 
-        return ChatResponse(
-            response=response_content,
-            context=[
-                ConversationRecord(role=msg.role, content=msg.content)
-                for msg in operator.executor.conversation_history
-            ],
-            stats=ChatStats(
-                total_tokens=total_tokens,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
+        return CRUDResponse(
+            status=200,
+            message="Chat request processed successfully",
+            result=ChatResponse(
+                response=response_content,
+                context=[
+                    ConversationRecord(role=msg.role, content=msg.content)
+                    for msg in operator.executor.conversation_history
+                ],
+                stats=ChatStats(
+                    total_tokens=total_tokens,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                ),
             ),
         )
 
@@ -256,7 +269,7 @@ async def chat_with_agent(
 
 @router.post(
     "/v1/chat/async",
-    response_model=Dict[str, Any],
+    response_model=CRUDResponse[Dict[str, Any]],
     summary="Process chat request asynchronously",
     description="Accepts a prompt and optional context/configuration, starts an asynchronous job "
     "to process the request and returns a job ID.",
@@ -369,11 +382,11 @@ async def chat_async_endpoint(
         await job_manager.register_task(job.id, task)
 
         # Return job information
-        return {
-            "status": 202,
-            "message": "Chat request accepted",
-            "result": {"job_id": job.id, "status": job.status},
-        }
+        return CRUDResponse(
+            status=202,
+            message="Chat request accepted",
+            result={"job_id": job.id, "status": job.status},
+        )
 
     except HTTPException:
         # Re-raise HTTP exceptions to preserve their status code and detail

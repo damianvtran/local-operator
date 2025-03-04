@@ -4,7 +4,7 @@ Health check endpoint for the Local Operator API.
 
 from fastapi import APIRouter
 
-from local_operator.server.models.schemas import HealthCheckResponse
+from local_operator.server.models.schemas import CRUDResponse
 
 router = APIRouter(tags=["Health"])
 
@@ -13,7 +13,7 @@ router = APIRouter(tags=["Health"])
     "/health",
     summary="Health Check",
     description="Returns the health status of the API server.",
-    response_model=HealthCheckResponse,
+    response_model=CRUDResponse[str],
 )
 async def health_check():
     """
@@ -22,4 +22,4 @@ async def health_check():
     Returns:
         A JSON object with a "status" key indicating operational status.
     """
-    return HealthCheckResponse(status=200, message="ok")
+    return CRUDResponse(status=200, message="ok")
