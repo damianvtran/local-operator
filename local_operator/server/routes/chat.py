@@ -5,7 +5,6 @@ This module contains the FastAPI route handlers for chat-related endpoints.
 """
 
 import logging
-from typing import cast
 
 from fastapi import APIRouter, Depends, HTTPException, Path
 from tiktoken import encoding_for_model
@@ -180,11 +179,6 @@ async def chat_with_agent(
     context. The specified agent is applied to both the operator and executor.
     """
     try:
-        # Retrieve the agent registry from app state
-        if agent_registry is None:
-            raise HTTPException(status_code=500, detail="Agent registry not initialized")
-        agent_registry = cast(AgentRegistry, agent_registry)
-
         # Retrieve the specific agent from the registry
         try:
             agent_obj = agent_registry.get_agent(agent_id)
