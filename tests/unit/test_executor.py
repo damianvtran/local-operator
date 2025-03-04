@@ -638,11 +638,13 @@ def test_limit_conversation_history(executor):
                 ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt"),
                 ConversationRecord(role=ConversationRole.USER, content="msg1"),
                 ConversationRecord(role=ConversationRole.ASSISTANT, content="msg2"),
+                ConversationRecord(role=ConversationRole.USER, content="msg3"),
             ],
             "expected": [
                 ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt"),
                 ConversationRecord(role=ConversationRole.USER, content="msg1"),
                 ConversationRecord(role=ConversationRole.ASSISTANT, content="msg2"),
+                ConversationRecord(role=ConversationRole.USER, content="msg3"),
             ],
         },
         {
@@ -661,6 +663,7 @@ def test_limit_conversation_history(executor):
                     content="[Some conversation history has been truncated for brevity]",
                     should_summarize=False,
                 ),
+                ConversationRecord(role=ConversationRole.ASSISTANT, content="msg2"),
                 ConversationRecord(role=ConversationRole.USER, content="msg3"),
                 ConversationRecord(role=ConversationRole.ASSISTANT, content="msg4"),
             ],
@@ -1967,3 +1970,73 @@ def test_add_to_learnings_exceed_max_learnings(executor):
     assert "learning2" in executor.learnings
     assert "learning3" in executor.learnings
     assert len(executor.learnings) == 2
+
+
+@pytest.mark.parametrize(
+    "record_data, expected_length",
+    [
+        ({"role": ConversationRole.USER, "content": "Test message"}, 1),
+        ({"role": ConversationRole.ASSISTANT, "content": "Response message"}, 1),
+        ({"role": ConversationRole.SYSTEM, "content": "System message"}, 1),
+    ],
+)
+def test_append_to_history_adds_record(executor, record_data, expected_length):
+    # Clear existing history
+    executor.conversation_history = []
+
+    # Create record and append
+    record = ConversationRecord(**record_data)
+    executor.append_to_history(record)
+
+    # Verify record was added
+    assert len(executor.conversation_history) == expected_length
+    assert executor.conversation_history[0].role == record.role
+    assert executor.conversation_history[0].content == record.content
+    assert executor.conversation_history[0].timestamp is not None
+
+
+def test_append_to_history_sets_timestamp_if_none(executor):
+    executor.conversation_history = []
+    record = ConversationRecord(role=ConversationRole.USER, content="Test message")
+    assert record.timestamp is None
+
+    executor.append_to_history(record)
+
+    assert executor.conversation_history[0].timestamp is not None
+    assert isinstance(executor.conversation_history[0].timestamp, datetime)
+
+
+def test_append_to_history_preserves_timestamp(executor):
+    executor.conversation_history = []
+    timestamp = datetime(2023, 1, 1, 12, 0, 0)
+    record = ConversationRecord(
+        role=ConversationRole.USER, content="Test message", timestamp=timestamp
+    )
+
+    executor.append_to_history(record)
+
+    assert executor.conversation_history[0].timestamp == timestamp
+
+
+def test_append_to_history_limits_history_length(executor):
+    # Set small max history
+    executor.max_conversation_history = 3
+    executor.conversation_history = [
+        ConversationRecord(role=ConversationRole.SYSTEM, content="System prompt")
+    ]
+
+    # Add more records than the limit
+    for i in range(5):
+        record = ConversationRecord(role=ConversationRole.USER, content=f"Message {i+1}")
+        executor.append_to_history(record)
+
+    # Verify only the most recent messages are kept
+    assert len(executor.conversation_history) == 5
+    assert executor.conversation_history[0].content == "System prompt"
+    assert (
+        executor.conversation_history[1].content
+        == "[Some conversation history has been truncated for brevity]"
+    )
+    assert executor.conversation_history[2].content == "Message 3"
+    assert executor.conversation_history[3].content == "Message 4"
+    assert executor.conversation_history[4].content == "Message 5"
