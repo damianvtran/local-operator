@@ -401,6 +401,9 @@ async def delete_agent(
                                     "timestamp": "2023-01-01T11:00:00",
                                 },
                             ],
+                            "page": 1,
+                            "per_page": 10,
+                            "total": 2,
                         }
                     }
                 },
@@ -413,6 +416,8 @@ async def get_agent_conversation(
     agent_id: str = Path(
         ..., description="ID of the agent to get conversation for", examples=["agent123"]
     ),
+    page: int = Query(1, ge=1, description="Page number to retrieve"),
+    per_page: int = Query(10, ge=1, le=100, description="Number of messages per page"),
 ):
     """
     Retrieve the conversation history for a specific agent.
@@ -420,6 +425,8 @@ async def get_agent_conversation(
     Args:
         agent_registry: The agent registry dependency
         agent_id: The unique identifier of the agent
+        page: The page number to retrieve (starts at 1)
+        per_page: The number of messages per page (between 1 and 100)
 
     Returns:
         AgentGetConversationResult: The conversation history for the agent
@@ -429,6 +436,7 @@ async def get_agent_conversation(
     """
     try:
         conversation_history = agent_registry.get_agent_conversation_history(agent_id)
+        total_messages = len(conversation_history)
 
         # Set default datetime values in case the conversation is empty
         first_message_datetime = datetime.now()
@@ -454,15 +462,34 @@ async def get_agent_conversation(
                 # If timestamps aren't available, use current time
                 pass
 
+        # Apply pagination
+        start_idx = (page - 1) * per_page
+        end_idx = min(start_idx + per_page, total_messages)
+
+        # Check if page is out of bounds
+        if start_idx >= total_messages and total_messages > 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Page {page} is out of bounds. "
+                f"Total pages: {(total_messages + per_page - 1) // per_page}",
+            )
+
+        paginated_messages = conversation_history[start_idx:end_idx] if conversation_history else []
+
         return AgentGetConversationResult(
             agent_id=agent_id,
             first_message_datetime=first_message_datetime,
             last_message_datetime=last_message_datetime,
-            messages=conversation_history,
+            messages=paginated_messages,
+            page=page,
+            per_page=per_page,
+            total=total_messages,
         )
     except KeyError:
         logger.exception(f"Agent with ID {agent_id} not found")
         raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Error retrieving agent conversation")
         raise HTTPException(

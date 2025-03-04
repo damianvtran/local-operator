@@ -3,7 +3,7 @@
   "info": {
     "title": "Local Operator API",
     "description": "REST API interface for Local Operator agent",
-    "version": "0.3.7"
+    "version": "0.3.8"
   },
   "paths": {
     "/health": {
@@ -595,6 +595,33 @@
               "title": "Agent Id"
             },
             "description": "ID of the agent to get conversation for"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Page number to retrieve",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number to retrieve"
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Number of messages per page",
+              "default": 10,
+              "title": "Per Page"
+            },
+            "description": "Number of messages per page"
           }
         ],
         "responses": {
@@ -624,7 +651,10 @@
                       "summarized": false,
                       "timestamp": "2023-01-01T11:00:00"
                     }
-                  ]
+                  ],
+                  "page": 1,
+                  "per_page": 10,
+                  "total": 2
                 }
               }
             }
@@ -1093,13 +1123,31 @@
             "type": "array",
             "title": "Messages",
             "description": "List of messages in the conversation"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page",
+            "description": "Current page number"
+          },
+          "per_page": {
+            "type": "integer",
+            "title": "Per Page",
+            "description": "Number of messages per page"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "description": "Total number of messages in the conversation"
           }
         },
         "type": "object",
         "required": [
           "agent_id",
           "last_message_datetime",
-          "first_message_datetime"
+          "first_message_datetime",
+          "page",
+          "per_page",
+          "total"
         ],
         "title": "AgentGetConversationResult",
         "description": "Schema for getting an agent conversation."
