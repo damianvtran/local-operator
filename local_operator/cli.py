@@ -434,7 +434,14 @@ def agents_create_command(name: str, agent_registry: AgentRegistry) -> int:
             return -1
 
     agent = agent_registry.create_agent(
-        AgentEditFields(name=name, security_prompt=None, hosting=None, model=None)
+        AgentEditFields(
+            name=name,
+            security_prompt=None,
+            hosting=None,
+            model=None,
+            description=None,
+            last_message=None,
+        )
     )
     print("\n\033[1;32m╭─ Created New Agent ───────────────────────────\033[0m")
     print(f"\033[1;32m│ Name: {agent.name}\033[0m")
@@ -573,6 +580,8 @@ def main() -> int:
                         security_prompt=None,
                         hosting=None,
                         model=None,
+                        description=None,
+                        last_message=None,
                     )
                 )
                 print("\n\033[1;32m╭─ Created New Agent ───────────────────────────\033[0m")
