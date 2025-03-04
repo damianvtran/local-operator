@@ -6,6 +6,7 @@ including mock clients, executors, and dependencies needed for API testing.
 """
 
 from typing import List
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -15,6 +16,7 @@ from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.executor import ExecutorInitError
+from local_operator.jobs import JobManager
 from local_operator.mocks import ChatMock
 from local_operator.model.configure import ModelConfiguration
 from local_operator.model.registry import ModelInfo
@@ -144,12 +146,14 @@ def test_app_client(temp_dir):
     mock_credential_manager = CredentialManager(config_dir=temp_dir)
     mock_config_manager = ConfigManager(config_dir=temp_dir)
     mock_agent_registry = AgentRegistry(config_dir=temp_dir)
+    mock_job_manager = JobManager()
 
     mock_credential_manager.get_credential = lambda key: SecretStr("test-credential")
 
     app.state.credential_manager = mock_credential_manager
     app.state.config_manager = mock_config_manager
     app.state.agent_registry = mock_agent_registry
+    app.state.job_manager = mock_job_manager
 
     # Create and yield the test client
     transport = ASGITransport(app=app)
@@ -225,3 +229,18 @@ def mock_config_manager(temp_dir):
     app.state.config_manager = config_manager
     yield config_manager
     app.state.config_manager = None
+
+
+@pytest.fixture
+def mock_job_manager():
+    """Create a mock job manager for testing."""
+    manager = MagicMock(spec=JobManager)
+    manager.get_job = AsyncMock()
+    manager.list_jobs = AsyncMock()
+    manager.cancel_job = AsyncMock()
+    manager.cleanup_old_jobs = AsyncMock()
+    manager.get_job_summary = MagicMock()
+
+    app.state.job_manager = manager
+    yield manager
+    app.state.job_manager = None
