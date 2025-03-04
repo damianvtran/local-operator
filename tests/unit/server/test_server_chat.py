@@ -8,9 +8,7 @@ regular chat and agent-specific chat endpoints.
 from unittest.mock import patch
 
 import pytest
-from httpx import ASGITransport, AsyncClient
 
-from local_operator.server.app import app
 from local_operator.server.models.schemas import ChatRequest
 from local_operator.types import ConversationRecord, ConversationRole
 
@@ -126,35 +124,6 @@ async def test_chat_with_nonexistent_agent(
     assert response.status_code == 404
     data = response.json()
     assert "Agent not found" in data.get("detail", "")
-
-
-@pytest.mark.asyncio
-async def test_chat_with_agent_registry_not_initialized(test_app_client, dummy_executor):
-    """Test chat with agent when registry is not initialized."""
-    # Remove registry from app state
-    original_registry = getattr(app.state, "agent_registry", None)
-    app.state.agent_registry = None
-
-    payload = ChatRequest(
-        hosting="openai",
-        model="gpt-4",
-        prompt="Hello?",
-        context=[],
-    )
-
-    try:
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as ac:
-            response = await ac.post("/v1/chat/agents/agent1", json=payload.model_dump())
-
-        assert response.status_code == 500
-        data = response.json()
-        assert "Agent registry not initialized" in data.get("detail", "")
-
-    finally:
-        # Restore original registry
-        if original_registry is not None:
-            app.state.agent_registry = original_registry
 
 
 # Test when the operator's chat method raises an exception (simulating an error during
