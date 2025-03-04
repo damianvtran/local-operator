@@ -20,7 +20,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HealthCheckResponse"
+                  "$ref": "#/components/schemas/CRUDResponse_str_"
                 }
               }
             }
@@ -67,7 +67,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ChatResponse"
+                  "$ref": "#/components/schemas/CRUDResponse_ChatResponse_"
                 }
               }
             }
@@ -140,7 +140,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ChatResponse"
+                  "$ref": "#/components/schemas/CRUDResponse_ChatResponse_"
                 }
               }
             }
@@ -197,8 +197,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "title": "Response Chat Async Endpoint V1 Chat Async Post"
+                  "$ref": "#/components/schemas/CRUDResponse_Dict_str__Any__"
                 }
               }
             }
@@ -258,7 +257,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CRUDResponse"
+                  "$ref": "#/components/schemas/CRUDResponse_AgentListResult_"
                 },
                 "example": {
                   "status": 200,
@@ -333,7 +332,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CRUDResponse"
+                  "$ref": "#/components/schemas/CRUDResponse_Agent_"
                 }
               }
             }
@@ -404,7 +403,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CRUDResponse"
+                  "$ref": "#/components/schemas/CRUDResponse_Agent_"
                 },
                 "example": {
                   "status": 200,
@@ -488,7 +487,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CRUDResponse"
+                  "$ref": "#/components/schemas/CRUDResponse_Agent_"
                 },
                 "example": {
                   "status": 200,
@@ -630,31 +629,36 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AgentGetConversationResult"
+                  "$ref": "#/components/schemas/CRUDResponse_AgentGetConversationResult_"
                 },
                 "example": {
-                  "agent_id": "agent123",
-                  "last_message_datetime": "2023-01-01T12:00:00",
-                  "first_message_datetime": "2023-01-01T11:00:00",
-                  "messages": [
-                    {
-                      "role": "system",
-                      "content": "You are a helpful assistant",
-                      "should_summarize": false,
-                      "summarized": false,
-                      "timestamp": "2023-01-01T11:00:00"
-                    },
-                    {
-                      "role": "user",
-                      "content": "Hello, how are you?",
-                      "should_summarize": true,
-                      "summarized": false,
-                      "timestamp": "2023-01-01T11:00:00"
-                    }
-                  ],
-                  "page": 1,
-                  "per_page": 10,
-                  "total": 2
+                  "status": 200,
+                  "message": "Agent conversation retrieved successfully",
+                  "result": {
+                    "agent_id": "agent123",
+                    "last_message_datetime": "2023-01-01T12:00:00",
+                    "first_message_datetime": "2023-01-01T11:00:00",
+                    "messages": [
+                      {
+                        "role": "system",
+                        "content": "You are a helpful assistant",
+                        "should_summarize": false,
+                        "summarized": false,
+                        "timestamp": "2023-01-01T11:00:00"
+                      },
+                      {
+                        "role": "user",
+                        "content": "Hello, how are you?",
+                        "should_summarize": true,
+                        "summarized": false,
+                        "timestamp": "2023-01-01T11:00:00"
+                      }
+                    ],
+                    "page": 1,
+                    "per_page": 10,
+                    "total": 2,
+                    "count": 2
+                  }
                 }
               }
             }
@@ -665,6 +669,122 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/{agent_id}/history": {
+      "get": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Get agent execution history",
+        "description": "Retrieve the execution history for a specific agent.",
+        "operationId": "get_agent_execution_history_v1_agents__agent_id__history_get",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "ID of the agent to get execution history for",
+              "examples": [
+                "agent123"
+              ],
+              "title": "Agent Id"
+            },
+            "description": "ID of the agent to get execution history for"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Page number to retrieve",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number to retrieve"
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Number of executions per page",
+              "default": 10,
+              "title": "Per Page"
+            },
+            "description": "Number of executions per page"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent execution history retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_AgentExecutionHistoryResult_"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "Agent execution history retrieved successfully",
+                  "result": {
+                    "agent_id": "agent123",
+                    "history": [
+                      {
+                        "code": "print('Hello, world!')",
+                        "output": "Hello, world!",
+                        "success": true,
+                        "timestamp": "2024-01-01T12:00:00Z"
+                      }
+                    ],
+                    "first_execution_datetime": "2024-01-01T12:00:00Z",
+                    "last_execution_datetime": "2024-01-01T12:00:00Z",
+                    "page": 1,
+                    "per_page": 10,
+                    "total": 1,
+                    "count": 1
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Page 2 is out of bounds. Total pages: 1"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Agent with ID agent123 not found"
                 }
               }
             }
@@ -1034,6 +1154,77 @@
   },
   "components": {
     "schemas": {
+      "Agent": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id",
+            "description": "Unique identifier for the agent"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Agent's name"
+          },
+          "created_date": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created Date",
+            "description": "The date when the agent was created"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version",
+            "description": "The version of the agent"
+          },
+          "security_prompt": {
+            "type": "string",
+            "title": "Security Prompt",
+            "description": "The security prompt for the agent. Allows a user to explicitly specify the security context for the agent's code security checks.",
+            "default": ""
+          },
+          "hosting": {
+            "type": "string",
+            "title": "Hosting",
+            "description": "The hosting environment for the agent. Defaults to ''.",
+            "default": ""
+          },
+          "model": {
+            "type": "string",
+            "title": "Model",
+            "description": "The model to use for the agent. Defaults to ''.",
+            "default": ""
+          },
+          "description": {
+            "type": "string",
+            "title": "Description",
+            "description": "A description of the agent. Defaults to ''.",
+            "default": ""
+          },
+          "last_message": {
+            "type": "string",
+            "title": "Last Message",
+            "description": "The last message sent to the agent. Defaults to ''.",
+            "default": ""
+          },
+          "last_message_datetime": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Last Message Datetime",
+            "description": "The date and time of the last message sent to the agent."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "created_date",
+          "version",
+          "last_message_datetime"
+        ],
+        "title": "Agent",
+        "description": "Representation of an Agent."
+      },
       "AgentCreate": {
         "properties": {
           "name": {
@@ -1097,6 +1288,68 @@
         "title": "AgentCreate",
         "description": "Data required to create a new agent."
       },
+      "AgentExecutionHistoryResult": {
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "title": "Agent Id",
+            "description": "ID of the agent involved in the execution history"
+          },
+          "history": {
+            "items": {
+              "$ref": "#/components/schemas/CodeExecutionResult"
+            },
+            "type": "array",
+            "title": "History",
+            "description": "List of code execution results"
+          },
+          "last_execution_datetime": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Last Execution Datetime",
+            "description": "Date of the last execution in the history"
+          },
+          "first_execution_datetime": {
+            "type": "string",
+            "format": "date-time",
+            "title": "First Execution Datetime",
+            "description": "Date of the first execution in the history"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page",
+            "description": "Current page number"
+          },
+          "per_page": {
+            "type": "integer",
+            "title": "Per Page",
+            "description": "Number of messages per page"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "description": "Total number of messages in the execution history"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count",
+            "description": "Number of messages in the current page"
+          }
+        },
+        "type": "object",
+        "required": [
+          "agent_id",
+          "history",
+          "last_execution_datetime",
+          "first_execution_datetime",
+          "page",
+          "per_page",
+          "total",
+          "count"
+        ],
+        "title": "AgentExecutionHistoryResult",
+        "description": "Schema for getting an agent execution history."
+      },
       "AgentGetConversationResult": {
         "properties": {
           "agent_id": {
@@ -1138,6 +1391,11 @@
             "type": "integer",
             "title": "Total",
             "description": "Total number of messages in the conversation"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count",
+            "description": "Number of messages in the current page"
           }
         },
         "type": "object",
@@ -1147,10 +1405,47 @@
           "first_message_datetime",
           "page",
           "per_page",
-          "total"
+          "total",
+          "count"
         ],
         "title": "AgentGetConversationResult",
         "description": "Schema for getting an agent conversation."
+      },
+      "AgentListResult": {
+        "properties": {
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "description": "Total number of agents"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page",
+            "description": "Current page number"
+          },
+          "per_page": {
+            "type": "integer",
+            "title": "Per Page",
+            "description": "Number of agents per page"
+          },
+          "agents": {
+            "items": {
+              "$ref": "#/components/schemas/Agent"
+            },
+            "type": "array",
+            "title": "Agents",
+            "description": "List of agents"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total",
+          "page",
+          "per_page",
+          "agents"
+        ],
+        "title": "AgentListResult",
+        "description": "Paginated list result for agents."
       },
       "AgentUpdate": {
         "properties": {
@@ -1231,6 +1526,174 @@
           },
           "result": {
             "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse",
+        "description": "Standard response schema for CRUD operations.\n\nAttributes:\n    status: HTTP status code\n    message: Outcome message of the operation\n    result: The resulting data, which can be an object, paginated list, or empty."
+      },
+      "CRUDResponse_AgentExecutionHistoryResult_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentExecutionHistoryResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[AgentExecutionHistoryResult]"
+      },
+      "CRUDResponse_AgentGetConversationResult_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentGetConversationResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[AgentGetConversationResult]"
+      },
+      "CRUDResponse_AgentListResult_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentListResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[AgentListResult]"
+      },
+      "CRUDResponse_Agent_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Agent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[Agent]"
+      },
+      "CRUDResponse_ChatResponse_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChatResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[ChatResponse]"
+      },
+      "CRUDResponse_Dict_str__Any__": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
               {
                 "type": "object"
               },
@@ -1246,8 +1709,36 @@
           "status",
           "message"
         ],
-        "title": "CRUDResponse",
-        "description": "Standard response schema for CRUD operations.\nAttributes:\n    status: HTTP status code\n    message: Outcome message of the operation\n    result: The resulting data, which can be an object, paginated list, or empty."
+        "title": "CRUDResponse[Dict[str, Any]]"
+      },
+      "CRUDResponse_str_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[str]"
       },
       "ChatOptions": {
         "properties": {
@@ -1454,6 +1945,65 @@
         "title": "ChatStats",
         "description": "Statistics about token usage for the chat request.\n\nAttributes:\n    total_tokens: Total number of tokens used in prompt and completion\n    prompt_tokens: Number of tokens in the prompt\n    completion_tokens: Number of tokens in the completion"
       },
+      "CodeExecutionResult": {
+        "properties": {
+          "stdout": {
+            "type": "string",
+            "title": "Stdout"
+          },
+          "stderr": {
+            "type": "string",
+            "title": "Stderr"
+          },
+          "logging": {
+            "type": "string",
+            "title": "Logging"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "formatted_print": {
+            "type": "string",
+            "title": "Formatted Print"
+          },
+          "role": {
+            "$ref": "#/components/schemas/ConversationRole"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ProcessResponseStatus"
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp"
+          }
+        },
+        "type": "object",
+        "required": [
+          "stdout",
+          "stderr",
+          "logging",
+          "message",
+          "code",
+          "formatted_print",
+          "role",
+          "status"
+        ],
+        "title": "CodeExecutionResult",
+        "description": "Represents the result of a code execution.\n\nAttributes:\n    stdout (str): The standard output from the code execution.\n    stderr (str): The standard error from the code execution.\n    logging (str): Any logging output generated during the code execution.\n    message (str): The message to display to the user about the code execution.\n    code (str): The code that was executed.\n    formatted_print (str): The formatted print output from the code execution.\n    role (ConversationRole): The role of the message sender (user/assistant/system)\n    status (ProcessResponseStatus): The status of the code execution\n    timestamp (datetime): The timestamp of the code execution"
+      },
       "ConversationRecord": {
         "properties": {
           "content": {
@@ -1560,25 +2110,6 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
-      "HealthCheckResponse": {
-        "properties": {
-          "status": {
-            "type": "integer",
-            "title": "Status"
-          },
-          "message": {
-            "type": "string",
-            "title": "Message"
-          }
-        },
-        "type": "object",
-        "required": [
-          "status",
-          "message"
-        ],
-        "title": "HealthCheckResponse",
-        "description": "Response from health check endpoint.\n\nAttributes:\n    status: HTTP status code\n    message: Health check message"
-      },
       "JobStatus": {
         "type": "string",
         "enum": [
@@ -1590,6 +2121,18 @@
         ],
         "title": "JobStatus",
         "description": "Enum representing the possible states of a job."
+      },
+      "ProcessResponseStatus": {
+        "type": "string",
+        "enum": [
+          "success",
+          "cancelled",
+          "error",
+          "interrupted",
+          "confirmation_required"
+        ],
+        "title": "ProcessResponseStatus",
+        "description": "Status codes for process_response results."
       },
       "ValidationError": {
         "properties": {
