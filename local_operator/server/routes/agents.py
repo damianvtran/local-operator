@@ -5,6 +5,7 @@ This module contains the FastAPI route handlers for agent-related endpoints.
 """
 
 import logging
+from datetime import datetime
 from typing import Any, Dict, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
@@ -14,7 +15,12 @@ from pydantic import ValidationError
 
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.server.dependencies import get_agent_registry
-from local_operator.server.models.schemas import AgentCreate, AgentUpdate, CRUDResponse
+from local_operator.server.models.schemas import (
+    AgentCreate,
+    AgentGetConversationResult,
+    AgentUpdate,
+    CRUDResponse,
+)
 
 router = APIRouter(tags=["Agents"])
 logger = logging.getLogger("local_operator.server.routes.agents")
@@ -65,10 +71,6 @@ async def list_agents(
     """
     Retrieve a paginated list of agents.
     """
-    if agent_registry is None:
-        raise HTTPException(status_code=500, detail="Agent registry not initialized")
-    agent_registry = cast(AgentRegistry, agent_registry)
-
     try:
         agents_list = agent_registry.list_agents()
     except Exception as e:
@@ -149,10 +151,6 @@ async def create_agent(
     """
     Create a new agent.
     """
-    if agent_registry is None:
-        raise HTTPException(status_code=500, detail="Agent registry not initialized")
-    agent_registry = cast(AgentRegistry, agent_registry)
-
     try:
         agent_edit_metadata = AgentEditFields.model_validate(agent.model_dump(exclude_unset=True))
         new_agent = agent_registry.create_agent(agent_edit_metadata)
@@ -211,10 +209,6 @@ async def get_agent(
     """
     Retrieve an agent by ID.
     """
-    if agent_registry is None:
-        raise HTTPException(status_code=500, detail="Agent registry not initialized")
-    agent_registry = cast(AgentRegistry, agent_registry)
-
     try:
         agent_obj = agent_registry.get_agent(agent_id)
     except KeyError as e:
@@ -291,10 +285,6 @@ async def update_agent(
     """
     Update an existing agent.
     """
-    if agent_registry is None:
-        raise HTTPException(status_code=500, detail="Agent registry not initialized")
-    agent_registry = cast(AgentRegistry, agent_registry)
-
     try:
         agent_edit_data = AgentEditFields.model_validate(agent_data.model_dump(exclude_unset=True))
         updated_agent = agent_registry.update_agent(agent_id, agent_edit_data)
@@ -346,10 +336,6 @@ async def delete_agent(
     """
     Delete an existing agent.
     """
-    if agent_registry is None:
-        raise HTTPException(status_code=500, detail="Agent registry not initialized")
-    agent_registry = cast(AgentRegistry, agent_registry)
-
     try:
         agent_registry.delete_agent(agent_id)
     except KeyError as e:
@@ -364,3 +350,103 @@ async def delete_agent(
         message="Agent deleted successfully",
         result={},
     )
+
+
+@router.get(
+    "/v1/agents/{agent_id}/conversation",
+    response_model=AgentGetConversationResult,
+    summary="Get agent conversation history",
+    description="Retrieve the conversation history for a specific agent.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "description": "Agent conversation retrieved successfully",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "agent_id": "agent123",
+                            "last_message_datetime": "2023-01-01T12:00:00Z",
+                            "first_message_datetime": "2023-01-01T11:00:00Z",
+                            "messages": [
+                                {
+                                    "role": "system",
+                                    "content": "You are a helpful assistant",
+                                    "should_summarize": False,
+                                    "summarized": False,
+                                    "timestamp": "2023-01-01T11:00:00Z",
+                                },
+                                {
+                                    "role": "user",
+                                    "content": "Hello, how are you?",
+                                    "should_summarize": True,
+                                    "summarized": False,
+                                    "timestamp": "2023-01-01T11:00:00Z",
+                                },
+                            ],
+                        }
+                    }
+                },
+            }
+        }
+    },
+)
+async def get_agent_conversation(
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
+    agent_id: str = Path(
+        ..., description="ID of the agent to get conversation for", examples=["agent123"]
+    ),
+):
+    """
+    Retrieve the conversation history for a specific agent.
+
+    Args:
+        agent_registry: The agent registry dependency
+        agent_id: The unique identifier of the agent
+
+    Returns:
+        AgentGetConversationResult: The conversation history for the agent
+
+    Raises:
+        HTTPException: If the agent registry is not initialized or the agent is not found
+    """
+    try:
+        conversation_history = agent_registry.get_agent_conversation_history(agent_id)
+
+        # Set default datetime values in case the conversation is empty
+        first_message_datetime = datetime.now()
+        last_message_datetime = datetime.now()
+
+        if conversation_history:
+            # Find the first and last message timestamps
+            # This assumes ConversationRecord has a timestamp attribute
+            # If not, we'll use the current time as a fallback
+            try:
+                if hasattr(conversation_history[0], "timestamp"):
+                    first_message_datetime = min(
+                        msg.timestamp
+                        for msg in conversation_history
+                        if hasattr(msg, "timestamp") and msg.timestamp is not None
+                    )
+                    last_message_datetime = max(
+                        msg.timestamp
+                        for msg in conversation_history
+                        if hasattr(msg, "timestamp") and msg.timestamp is not None
+                    )
+            except (AttributeError, ValueError):
+                # If timestamps aren't available, use current time
+                pass
+
+        return AgentGetConversationResult(
+            agent_id=agent_id,
+            first_message_datetime=first_message_datetime,
+            last_message_datetime=last_message_datetime,
+            messages=conversation_history,
+        )
+    except KeyError:
+        logger.exception(f"Agent with ID {agent_id} not found")
+        raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+    except Exception as e:
+        logger.exception("Error retrieving agent conversation")
+        raise HTTPException(
+            status_code=500, detail=f"Error retrieving agent conversation: {str(e)}"
+        )

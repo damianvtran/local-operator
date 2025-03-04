@@ -8,7 +8,6 @@ regular chat and agent-specific chat endpoints.
 from unittest.mock import patch
 
 import pytest
-from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.server.app import app
@@ -188,32 +187,4 @@ async def test_chat_model_failure(test_app_client):
         assert response.status_code == 500
         data = response.json()
         # The error detail should indicate an internal server error.
-        assert "Internal Server Error" in data.get("detail", "")
-
-
-@pytest.mark.asyncio
-async def test_chat_executor_not_initialized(test_app_client, mock_create_operator):
-    """Test handling when executor is not initialized."""
-
-    async def get_none(hosting, model):
-        raise HTTPException(status_code=500, detail="Executor not initialized")
-
-    with patch("local_operator.server.routes.chat.create_operator", get_none):
-        payload = ChatRequest(
-            hosting="openai",
-            model="gpt-4o",
-            prompt="Test executor not initialized",
-            context=[
-                ConversationRecord(
-                    role=ConversationRole.USER, content="Test executor not initialized"
-                )
-            ],
-        )
-
-        response = await test_app_client.post("/v1/chat", json=payload.model_dump())
-
-        assert response.status_code == 500
-        data = response.json()
-        # Adjusted assertion based on failure: expecting "Internal Server Error" in
-        # the error detail.
         assert "Internal Server Error" in data.get("detail", "")

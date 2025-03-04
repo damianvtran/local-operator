@@ -56,6 +56,8 @@ class ConversationRecord(BaseModel):
         should_summarize (bool): Whether this message should be summarized
         ephemeral (bool): Whether this message is temporary/ephemeral
         summarized (bool): Whether this message has been summarized
+        is_system_prompt (bool): Whether this message is a system prompt
+        timestamp (datetime): When this message was created
 
     Methods:
         to_dict(): Convert the record to a dictionary format

@@ -364,6 +364,10 @@ class AgentRegistry:
                 Returns an empty list if no conversation history exists or if there's an error.
         """
         conversation_file = self.config_dir / f"{agent_id}_conversation.json"
+
+        if agent_id not in self._agents:
+            raise KeyError(f"Agent with id {agent_id} not found")
+
         if conversation_file.exists():
             try:
                 with conversation_file.open("r", encoding="utf-8") as f:
@@ -415,7 +419,14 @@ class AgentRegistry:
 
         try:
             with conversation_file.open("w", encoding="utf-8") as f:
-                json.dump(conversation_data.model_dump(), f, indent=2, ensure_ascii=False)
+                # Use a custom JSON encoder to handle datetime objects
+                json.dump(
+                    conversation_data.model_dump(),
+                    f,
+                    indent=2,
+                    ensure_ascii=False,
+                    default=lambda o: o.isoformat() if isinstance(o, datetime) else None,
+                )
         except Exception as e:
             # In a production scenario, consider logging this exception
             raise e
@@ -471,3 +482,16 @@ class AgentRegistry:
             KeyError: If the autosave agent does not exist
         """
         return self.save_agent_conversation("autosave", conversation, execution_history)
+
+    def get_agent_conversation_history(self, agent_id: str) -> List[ConversationRecord]:
+        """
+        Get the conversation history for a specified agent.
+
+        Args:
+            agent_id (str): The unique identifier of the agent.
+
+        Returns:
+            List[ConversationRecord]: The conversation history as a list of ConversationRecord
+                objects.
+        """
+        return self.load_agent_conversation(agent_id).conversation
