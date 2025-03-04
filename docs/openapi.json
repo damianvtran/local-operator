@@ -743,8 +743,13 @@
                     "history": [
                       {
                         "code": "print('Hello, world!')",
-                        "output": "Hello, world!",
-                        "success": true,
+                        "stdout": "Hello, world!",
+                        "stderr": "",
+                        "logging": "",
+                        "message": "Code executed successfully",
+                        "formatted_print": "Hello, world!",
+                        "role": "system",
+                        "status": "success",
                         "timestamp": "2024-01-01T12:00:00Z"
                       }
                     ],
@@ -755,16 +760,6 @@
                     "total": 1,
                     "count": 1
                   }
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -785,6 +780,26 @@
               "application/json": {
                 "example": {
                   "detail": "Agent with ID agent123 not found"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Error retrieving agent execution history"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
