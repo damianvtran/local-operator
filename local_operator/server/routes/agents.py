@@ -92,7 +92,7 @@ async def list_agents(
             "total": total,
             "page": page,
             "per_page": per_page,
-            "agents": cast(Dict[str, Any], {"agents": agents_serialized}),
+            "agents": agents_serialized,
         },
     )
 

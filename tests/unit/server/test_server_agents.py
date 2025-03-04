@@ -199,13 +199,13 @@ async def test_list_agents_pagination(test_app_client, dummy_registry: AgentRegi
     assert result["total"] == 15
     assert result["page"] == 1
     assert result["per_page"] == 10
-    assert len(result["agents"]["agents"]) == 10
+    assert len(result["agents"]) == 10
 
     # Test second page
     response = await test_app_client.get("/v1/agents?page=2&per_page=10")
     data = response.json()
     result = data.get("result")
-    assert len(result["agents"]["agents"]) == 5
+    assert len(result["agents"]) == 5
 
 
 @pytest.mark.asyncio
