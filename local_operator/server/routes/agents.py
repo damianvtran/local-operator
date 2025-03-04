@@ -519,49 +519,61 @@ async def get_agent_conversation(
     response_model=CRUDResponse[AgentExecutionHistoryResult],
     summary="Get agent execution history",
     description="Retrieve the execution history for a specific agent.",
-    openapi_extra={
-        "responses": {
-            "200": {
-                "description": "Agent execution history retrieved successfully",
-                "content": {
-                    "application/json": {
-                        "example": {
-                            "status": 200,
-                            "message": "Agent execution history retrieved successfully",
-                            "result": {
-                                "agent_id": "agent123",
-                                "history": [
-                                    {
-                                        "code": "print('Hello, world!')",
-                                        "output": "Hello, world!",
-                                        "success": True,
-                                        "timestamp": "2024-01-01T12:00:00Z",
-                                    }
-                                ],
-                                "first_execution_datetime": "2024-01-01T12:00:00Z",
-                                "last_execution_datetime": "2024-01-01T12:00:00Z",
-                                "page": 1,
-                                "per_page": 10,
-                                "total": 1,
-                                "count": 1,
-                            },
-                        }
+    responses={
+        200: {
+            "description": "Agent execution history retrieved successfully",
+            "model": CRUDResponse[AgentExecutionHistoryResult],
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": 200,
+                        "message": "Agent execution history retrieved successfully",
+                        "result": {
+                            "agent_id": "agent123",
+                            "history": [
+                                {
+                                    "code": "print('Hello, world!')",
+                                    "stdout": "Hello, world!",
+                                    "stderr": "",
+                                    "logging": "",
+                                    "message": "Code executed successfully",
+                                    "formatted_print": "Hello, world!",
+                                    "role": "system",
+                                    "status": "success",
+                                    "timestamp": "2024-01-01T12:00:00Z",
+                                }
+                            ],
+                            "first_execution_datetime": "2024-01-01T12:00:00Z",
+                            "last_execution_datetime": "2024-01-01T12:00:00Z",
+                            "page": 1,
+                            "per_page": 10,
+                            "total": 1,
+                            "count": 1,
+                        },
                     }
-                },
+                }
             },
-            "400": {
-                "description": "Bad request",
-                "content": {
-                    "application/json": {
-                        "example": {"detail": "Page 2 is out of bounds. Total pages: 1"}
-                    }
-                },
+        },
+        400: {
+            "description": "Bad request",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Page 2 is out of bounds. Total pages: 1"}
+                }
             },
-            "404": {
-                "description": "Agent not found",
-                "content": {
-                    "application/json": {"example": {"detail": "Agent with ID agent123 not found"}}
-                },
+        },
+        404: {
+            "description": "Agent not found",
+            "content": {
+                "application/json": {"example": {"detail": "Agent with ID agent123 not found"}}
+            },
+        },
+        500: {
+            "description": "Internal server error",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Error retrieving agent execution history"}
+                }
             },
         },
     },
