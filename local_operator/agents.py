@@ -527,3 +527,16 @@ class AgentRegistry:
                 objects.
         """
         return self.load_agent_conversation(agent_id).conversation
+
+    def get_agent_execution_history(self, agent_id: str) -> List[CodeExecutionResult]:
+        """
+        Get the execution history for a specified agent.
+
+        Args:
+            agent_id (str): The unique identifier of the agent.
+
+        Returns:
+            List[CodeExecutionResult]: The execution history as a list of CodeExecutionResult
+                objects.
+        """
+        return self.load_agent_conversation(agent_id).execution_history

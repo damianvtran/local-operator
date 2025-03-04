@@ -193,6 +193,7 @@ class CodeExecutionResult(BaseModel):
         formatted_print (str): The formatted print output from the code execution.
         role (ConversationRole): The role of the message sender (user/assistant/system)
         status (ProcessResponseStatus): The status of the code execution
+        timestamp (datetime): The timestamp of the code execution
     """
 
     stdout: str
@@ -203,6 +204,7 @@ class CodeExecutionResult(BaseModel):
     formatted_print: str
     role: ConversationRole
     status: ProcessResponseStatus
+    timestamp: Optional[datetime] = None
 
 
 class AgentExecutorState(BaseModel):

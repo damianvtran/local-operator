@@ -11,7 +11,7 @@ from typing import Generic, List, Optional, TypeVar
 from pydantic import BaseModel, Field
 
 # AgentEditFields will be used in the routes module
-from local_operator.types import ConversationRecord
+from local_operator.types import CodeExecutionResult, ConversationRecord
 
 
 class ChatOptions(BaseModel):
@@ -216,4 +216,21 @@ class AgentGetConversationResult(BaseModel):
     page: int = Field(..., description="Current page number")
     per_page: int = Field(..., description="Number of messages per page")
     total: int = Field(..., description="Total number of messages in the conversation")
+    count: int = Field(..., description="Number of messages in the current page")
+
+
+class AgentExecutionHistoryResult(BaseModel):
+    """Schema for getting an agent execution history."""
+
+    agent_id: str = Field(..., description="ID of the agent involved in the execution history")
+    history: List[CodeExecutionResult] = Field(..., description="List of code execution results")
+    last_execution_datetime: datetime = Field(
+        ..., description="Date of the last execution in the history"
+    )
+    first_execution_datetime: datetime = Field(
+        ..., description="Date of the first execution in the history"
+    )
+    page: int = Field(..., description="Current page number")
+    per_page: int = Field(..., description="Number of messages per page")
+    total: int = Field(..., description="Total number of messages in the execution history")
     count: int = Field(..., description="Number of messages in the current page")
