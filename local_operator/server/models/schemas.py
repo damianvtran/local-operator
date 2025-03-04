@@ -224,3 +224,4 @@ class AgentGetConversationResult(BaseModel):
     page: int = Field(..., description="Current page number")
     per_page: int = Field(..., description="Number of messages per page")
     total: int = Field(..., description="Total number of messages in the conversation")
+    count: int = Field(..., description="Number of messages in the current page")
