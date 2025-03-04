@@ -80,6 +80,7 @@ async def chat_endpoint(
             config_manager,
             agent_registry,
         )
+
         model_instance = operator.executor.model_configuration.instance
 
         if request.context and len(request.context) > 0:

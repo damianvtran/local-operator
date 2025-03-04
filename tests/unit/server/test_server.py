@@ -1,8 +1,10 @@
 from typing import List
+from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
+from pydantic import SecretStr
 
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.config import ConfigManager
@@ -112,6 +114,50 @@ def temp_dir(tmp_path):
 
 
 @pytest.fixture
+def test_app_client(temp_dir):
+    """Create a test client with a properly initialized app state.
+
+    This fixture uses the app's state to properly initialize the test environment,
+    ensuring tests run in an environment that closely matches the real application.
+
+    Args:
+        temp_dir: pytest fixture that provides a temporary directory
+
+    Yields:
+        AsyncClient: A configured test client for making requests to the app
+    """
+    # Override app state with test-specific values
+    # Store original values to restore later
+    original_state = {}
+    if hasattr(app.state, "credential_manager"):
+        original_state["credential_manager"] = app.state.credential_manager
+    if hasattr(app.state, "config_manager"):
+        original_state["config_manager"] = app.state.config_manager
+    if hasattr(app.state, "agent_registry"):
+        original_state["agent_registry"] = app.state.agent_registry
+
+    # Set up test-specific state
+    mock_credential_manager = CredentialManager(config_dir=temp_dir)
+    mock_config_manager = ConfigManager(config_dir=temp_dir)
+    mock_agent_registry = AgentRegistry(config_dir=temp_dir)
+
+    mock_credential_manager.get_credential = lambda key: SecretStr("test-credential")
+
+    app.state.credential_manager = mock_credential_manager
+    app.state.config_manager = mock_config_manager
+    app.state.agent_registry = mock_agent_registry
+
+    # Create and yield the test client
+    transport = ASGITransport(app=app)
+    client = AsyncClient(transport=transport, base_url="http://test")
+    yield client
+
+    # Restore original state
+    for key, value in original_state.items():
+        setattr(app.state, key, value)
+
+
+@pytest.fixture
 def dummy_registry(temp_dir):
     registry = AgentRegistry(config_dir=temp_dir)
     app.state.agent_registry = registry
@@ -130,10 +176,18 @@ def mock_create_operator(monkeypatch):
         function: The mocked create_operator function
     """
 
-    def _mock_create_operator(hosting, model, *args, **kwargs):
+    def _mock_create_operator(
+        request_hosting,
+        request_model,
+        credential_manager,
+        config_manager,
+        agent_registry,
+        current_agent=None,
+    ):
+        print("Returning dummy operator")
         return DummyOperator(DummyExecutor())
 
-    monkeypatch.setattr("local_operator.server.utils.create_operator", _mock_create_operator)
+    monkeypatch.setattr("local_operator.server.routes.chat.create_operator", _mock_create_operator)
     return _mock_create_operator
 
 
@@ -171,10 +225,9 @@ def mock_config_manager(temp_dir):
 
 # Test for successful /health endpoint response.
 @pytest.mark.asyncio
-async def test_health_check():
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.get("/health")
+async def test_health_check(test_app_client):
+    """Test the health check endpoint using the test_app_client fixture."""
+    response = await test_app_client.get("/health")
     assert response.status_code == 200
     data = response.json()
     assert data.get("status") == 200
@@ -184,8 +237,11 @@ async def test_health_check():
 # Test for successful /v1/chat endpoint response.
 @pytest.mark.asyncio
 async def test_chat_success(
-    dummy_executor, mock_create_operator, mock_credential_manager, mock_config_manager
+    test_app_client,
+    dummy_executor,
+    mock_create_operator,
 ):
+    """Test the chat endpoint using the test_app_client fixture."""
     test_prompt = "Hello, how are you?"
 
     # Use an empty context to trigger insertion of the system prompt by the server.
@@ -196,9 +252,7 @@ async def test_chat_success(
         "context": [],
     }
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.post("/v1/chat", json=payload)
+    response = await test_app_client.post("/v1/chat", json=payload)
 
     assert response.status_code == 200
     data = response.json()
@@ -228,7 +282,12 @@ async def test_chat_success(
 
 # Test for successful /v1/chat/agents/{agent_id} endpoint response
 @pytest.mark.asyncio
-async def test_chat_with_agent_success(dummy_executor, dummy_registry):
+async def test_chat_with_agent_success(
+    test_app_client,
+    dummy_executor,
+    dummy_registry,
+    mock_create_operator,
+):
     # Create a test agent
     agent = dummy_registry.create_agent(
         AgentEditFields(
@@ -248,9 +307,7 @@ async def test_chat_with_agent_success(dummy_executor, dummy_registry):
         context=[],
     )
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.post(f"/v1/chat/agents/{agent_id}", json=payload.model_dump())
+    response = await test_app_client.post(f"/v1/chat/agents/{agent_id}", json=payload.model_dump())
 
     assert response.status_code == 200
     data = response.json()
@@ -269,7 +326,12 @@ async def test_chat_with_agent_success(dummy_executor, dummy_registry):
 
 # Test chat with non-existent agent
 @pytest.mark.asyncio
-async def test_chat_with_nonexistent_agent(dummy_executor, dummy_registry):
+async def test_chat_with_nonexistent_agent(
+    test_app_client,
+    dummy_executor,
+    dummy_registry,
+    mock_create_operator,
+):
     payload = ChatRequest(
         hosting="openai",
         model="gpt-4",
@@ -277,9 +339,7 @@ async def test_chat_with_nonexistent_agent(dummy_executor, dummy_registry):
         context=[],
     )
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.post("/v1/chat/agents/nonexistent", json=payload.model_dump())
+    response = await test_app_client.post("/v1/chat/agents/nonexistent", json=payload.model_dump())
 
     assert response.status_code == 404
     data = response.json()
@@ -288,11 +348,10 @@ async def test_chat_with_nonexistent_agent(dummy_executor, dummy_registry):
 
 # Test chat with agent when registry not initialized
 @pytest.mark.asyncio
-async def test_chat_with_agent_registry_not_initialized(dummy_executor):
+async def test_chat_with_agent_registry_not_initialized(test_app_client, dummy_executor):
     # Remove registry from app state
     original_registry = getattr(app.state, "agent_registry", None)
-    if hasattr(app.state, "agent_registry"):
-        delattr(app.state, "agent_registry")
+    app.state.agent_registry = None
 
     payload = ChatRequest(
         hosting="openai",
@@ -327,57 +386,60 @@ class FailingOperator:
 
 
 @pytest.mark.asyncio
-async def test_chat_model_failure():
-    payload = ChatRequest(
-        hosting="openai",
-        model="gpt-4o",
-        prompt="This should cause an error",
-        context=[
-            ConversationRecord(role=ConversationRole.USER, content="This should cause an error")
-        ],
-    )
+async def test_chat_model_failure(test_app_client):
+    with patch("local_operator.server.routes.chat.create_operator", FailingOperator()):
+        payload = ChatRequest(
+            hosting="openai",
+            model="gpt-4o",
+            prompt="This should cause an error",
+            context=[
+                ConversationRecord(role=ConversationRole.USER, content="This should cause an error")
+            ],
+        )
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.post("/v1/chat", json=payload.model_dump())
+        response = await test_app_client.post("/v1/chat", json=payload.model_dump())
 
-    assert response.status_code == 500
-    data = response.json()
-    # The error detail should indicate an internal server error.
-    assert "Internal Server Error" in data.get("detail", "")
+        assert response.status_code == 500
+        data = response.json()
+        # The error detail should indicate an internal server error.
+        assert "Internal Server Error" in data.get("detail", "")
 
 
 # Test when operator is not initialized.
 # Simulate this by overriding create_operator to raise an HTTPException.
 @pytest.mark.asyncio
-async def test_chat_executor_not_initialized():
+async def test_chat_executor_not_initialized(test_app_client, mock_create_operator):
     async def get_none(hosting, model):
         raise HTTPException(status_code=500, detail="Executor not initialized")
 
-    payload = ChatRequest(
-        hosting="openai",
-        model="gpt-4o",
-        prompt="Test executor not initialized",
-        context=[
-            ConversationRecord(role=ConversationRole.USER, content="Test executor not initialized")
-        ],
-    )
+    with patch("local_operator.server.routes.chat.create_operator", get_none):
+        payload = ChatRequest(
+            hosting="openai",
+            model="gpt-4o",
+            prompt="Test executor not initialized",
+            context=[
+                ConversationRecord(
+                    role=ConversationRole.USER, content="Test executor not initialized"
+                )
+            ],
+        )
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.post("/v1/chat", json=payload.model_dump())
+        response = await test_app_client.post("/v1/chat", json=payload.model_dump())
 
-    assert response.status_code == 500
-    data = response.json()
-    # Adjusted assertion based on failure: expecting "Internal Server Error" in the error detail.
-    assert "Internal Server Error" in data.get("detail", "")
+        assert response.status_code == 500
+        data = response.json()
+        # Adjusted assertion based on failure: expecting "Internal Server Error" in
+        # the error detail.
+        assert "Internal Server Error" in data.get("detail", "")
 
 
 # Test for successful agent update.
 @pytest.mark.asyncio
-async def test_update_agent_success(dummy_registry: AgentRegistry):
+async def test_update_agent_success(test_app_client, dummy_registry: AgentRegistry):
+    """Test updating an agent using the test_app_client fixture."""
     # Create a dummy agent
-    agent = dummy_registry.create_agent(
+    agent_registry = app.state.agent_registry
+    agent = agent_registry.create_agent(
         AgentEditFields(
             name="Original Name",
             security_prompt="Original Security",
@@ -394,9 +456,9 @@ async def test_update_agent_success(dummy_registry: AgentRegistry):
         model="claude-2",
     )
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.patch(f"/v1/agents/{agent_id}", json=update_payload.model_dump())
+    response = await test_app_client.patch(
+        f"/v1/agents/{agent_id}", json=update_payload.model_dump()
+    )
 
     assert response.status_code == 200
     data = response.json()
@@ -412,7 +474,7 @@ async def test_update_agent_success(dummy_registry: AgentRegistry):
 
 # Test for updating only name field
 @pytest.mark.asyncio
-async def test_update_agent_single_field(dummy_registry: AgentRegistry):
+async def test_update_agent_single_field(test_app_client, dummy_registry: AgentRegistry):
     # Create a dummy agent
     agent = dummy_registry.create_agent(
         AgentEditFields(
@@ -428,9 +490,9 @@ async def test_update_agent_single_field(dummy_registry: AgentRegistry):
         name="Updated Name Only", security_prompt=None, hosting=None, model=None
     )
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.patch(f"/v1/agents/{agent_id}", json=update_payload.model_dump())
+    response = await test_app_client.patch(
+        f"/v1/agents/{agent_id}", json=update_payload.model_dump()
+    )
 
     assert response.status_code == 200
     data = response.json()
@@ -446,17 +508,15 @@ async def test_update_agent_single_field(dummy_registry: AgentRegistry):
 
 # Test for agent update when agent is not found.
 @pytest.mark.asyncio
-async def test_update_agent_not_found(dummy_registry: AgentRegistry):
+async def test_update_agent_not_found(test_app_client, dummy_registry: AgentRegistry):
     update_payload = AgentEditFields(
         name="Non-existent Update", security_prompt=None, hosting=None, model=None
     )
     non_existent_agent_id = "nonexistent"
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.patch(
-            f"/v1/agents/{non_existent_agent_id}", json=update_payload.model_dump()
-        )
+    response = await test_app_client.patch(
+        f"/v1/agents/{non_existent_agent_id}", json=update_payload.model_dump()
+    )
 
     assert response.status_code == 404
     data = response.json()
@@ -465,7 +525,7 @@ async def test_update_agent_not_found(dummy_registry: AgentRegistry):
 
 # Test for successful agent deletion.
 @pytest.mark.asyncio
-async def test_delete_agent_success(dummy_registry: AgentRegistry):
+async def test_delete_agent_success(test_app_client, dummy_registry: AgentRegistry):
     # Create a dummy agent
     agent = dummy_registry.create_agent(
         AgentEditFields(
@@ -477,9 +537,7 @@ async def test_delete_agent_success(dummy_registry: AgentRegistry):
     )
     agent_id = agent.id
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.delete(f"/v1/agents/{agent_id}")
+    response = await test_app_client.delete(f"/v1/agents/{agent_id}")
 
     assert response.status_code == 200
     data = response.json()
@@ -494,11 +552,9 @@ async def test_delete_agent_success(dummy_registry: AgentRegistry):
 
 # Test for agent deletion when agent is not found.
 @pytest.mark.asyncio
-async def test_delete_agent_not_found(dummy_registry: AgentRegistry):
+async def test_delete_agent_not_found(test_app_client, dummy_registry: AgentRegistry):
     non_existent_agent_id = "nonexistent"
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.delete(f"/v1/agents/{non_existent_agent_id}")
+    response = await test_app_client.delete(f"/v1/agents/{non_existent_agent_id}")
 
     assert response.status_code == 404
     data = response.json()
@@ -507,15 +563,15 @@ async def test_delete_agent_not_found(dummy_registry: AgentRegistry):
 
 # Test for agent update when agent registry is not initialized.
 @pytest.mark.asyncio
-async def test_update_agent_registry_not_initialized():
+async def test_update_agent_registry_not_initialized(test_app_client):
     # Safely get the original agent_registry without risking a KeyError.
     original_registry = getattr(app.state, "agent_registry", None)
     app.state.agent_registry = None
     update_payload = AgentEditFields(name="New Name", security_prompt="", hosting="", model="")
     agent_id = "agent1"
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.patch(f"/v1/agents/{agent_id}", json=update_payload.model_dump())
+    response = await test_app_client.patch(
+        f"/v1/agents/{agent_id}", json=update_payload.model_dump()
+    )
     # Restore the original state of agent_registry.
     if original_registry is not None:
         app.state.agent_registry = original_registry
@@ -616,7 +672,7 @@ async def test_list_agents_pagination(dummy_registry: AgentRegistry):
 
 # Test for getting a specific agent
 @pytest.mark.asyncio
-async def test_get_agent_success(dummy_registry: AgentRegistry):
+async def test_get_agent_success(test_app_client, dummy_registry: AgentRegistry):
     # Create a test agent
     agent = dummy_registry.create_agent(
         AgentEditFields(
@@ -625,9 +681,7 @@ async def test_get_agent_success(dummy_registry: AgentRegistry):
     )
     agent_id = agent.id
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.get(f"/v1/agents/{agent_id}")
+    response = await test_app_client.get(f"/v1/agents/{agent_id}")
 
     assert response.status_code == 200
     data = response.json()
@@ -641,13 +695,25 @@ async def test_get_agent_success(dummy_registry: AgentRegistry):
 
 # Test for getting a non-existent agent
 @pytest.mark.asyncio
-async def test_get_agent_not_found(dummy_registry: AgentRegistry):
+async def test_get_agent_not_found(test_app_client, dummy_registry: AgentRegistry):
     non_existent_id = "nonexistent"
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.get(f"/v1/agents/{non_existent_id}")
+    response = await test_app_client.get(f"/v1/agents/{non_existent_id}")
 
     assert response.status_code == 404
     data = response.json()
     assert "Agent not found" in data.get("detail", "")
+
+
+# Test that the app state is properly initialized using the test_app_client fixture
+@pytest.mark.asyncio
+async def test_app_state_initialization(test_app_client):
+    """Test that the app state is properly initialized with the test_app_client fixture."""
+    # Verify that the app state has been initialized with the expected managers
+    assert app.state.credential_manager is not None
+    assert app.state.config_manager is not None
+    assert app.state.agent_registry is not None
+
+    # Test a request that depends on the app state
+    response = await test_app_client.get("/v1/agents")
+    assert response.status_code == 200
