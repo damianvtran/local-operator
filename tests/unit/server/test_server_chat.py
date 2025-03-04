@@ -59,7 +59,7 @@ async def test_chat_success(
 
 
 @pytest.mark.asyncio
-async def test_chat_with_agent_success(
+async def test_chat_sync_with_agent_success(
     test_app_client,
     dummy_executor,
     dummy_registry,
@@ -87,7 +87,9 @@ async def test_chat_with_agent_success(
         context=[],
     )
 
-    response = await test_app_client.post(f"/v1/chat/agents/{agent_id}", json=payload.model_dump())
+    response = await test_app_client.post(
+        f"/v1/chat/agents/{agent_id}/sync", json=payload.model_dump()
+    )
 
     assert response.status_code == 200
     data = response.json()
@@ -105,7 +107,7 @@ async def test_chat_with_agent_success(
 
 
 @pytest.mark.asyncio
-async def test_chat_with_nonexistent_agent(
+async def test_chat_sync_with_nonexistent_agent(
     test_app_client,
     dummy_executor,
     dummy_registry,
@@ -119,7 +121,9 @@ async def test_chat_with_nonexistent_agent(
         context=[],
     )
 
-    response = await test_app_client.post("/v1/chat/agents/nonexistent", json=payload.model_dump())
+    response = await test_app_client.post(
+        "/v1/chat/agents/nonexistent/sync", json=payload.model_dump()
+    )
 
     assert response.status_code == 404
     data = response.json()

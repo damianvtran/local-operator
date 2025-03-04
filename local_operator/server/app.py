@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
+from local_operator.jobs import JobManager
 from local_operator.server.routes import agents, chat, health
 
 logger = logging.getLogger("local_operator.server")
@@ -36,11 +37,13 @@ async def lifespan(app: FastAPI):
     app.state.credential_manager = CredentialManager(config_dir=config_dir)
     app.state.config_manager = ConfigManager(config_dir=config_dir)
     app.state.agent_registry = AgentRegistry(config_dir=agents_dir)
+    app.state.job_manager = JobManager()
     yield
     # Clean up on shutdown
     app.state.credential_manager = None
     app.state.config_manager = None
     app.state.agent_registry = None
+    app.state.job_manager = None
 
 
 app = FastAPI(
