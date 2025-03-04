@@ -177,6 +177,10 @@ class AgentUpdate(BaseModel):
         None,
         description="The model to use for the agent. Defaults to 'openai/gpt-4o-mini'.",
     )
+    description: str | None = Field(
+        None,
+        description="A description of the agent.  Defaults to ''.",
+    )
 
 
 class AgentListResult(BaseModel):

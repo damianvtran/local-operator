@@ -122,6 +122,9 @@ def test_print_cli_banner_with_agent(monkeypatch, mock_config_manager):
         security_prompt="",
         hosting="",
         model="",
+        description="test description",
+        last_message="test last message",
+        last_message_datetime=datetime.now(),
     )
 
     print_cli_banner(mock_config_manager, current_agent=agent, training_mode=False)
@@ -151,6 +154,9 @@ def test_print_cli_banner_with_agent_and_config(monkeypatch, mock_config_manager
         security_prompt="",
         hosting="custom-host",
         model="custom-model",
+        description="test description",
+        last_message="test last message",
+        last_message_datetime=datetime.now(),
     )
 
     print_cli_banner(mock_config_manager, current_agent=agent, training_mode=False)
@@ -183,6 +189,9 @@ def test_print_cli_banner_with_agent_and_training(monkeypatch, mock_config_manag
         security_prompt="Security prompt",
         hosting="test-host",
         model="test-model",
+        description="test description",
+        last_message="test last message",
+        last_message_datetime=datetime.now(),
     )
 
     print_cli_banner(mock_config_manager, current_agent=agent, training_mode=True)

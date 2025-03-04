@@ -97,6 +97,8 @@ def create_agent_from_conversation_tool(
                 security_prompt="",
                 hosting="",
                 model="",
+                description="",
+                last_message="",
             )
         )
         agent_registry.save_agent_conversation(
@@ -248,6 +250,8 @@ def create_agent_tool(agent_registry: AgentRegistry) -> Callable[[str, Optional[
                 security_prompt=security_prompt or "",
                 hosting="",
                 model="",
+                description="",
+                last_message="",
             )
         )
 

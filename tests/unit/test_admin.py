@@ -225,7 +225,14 @@ def test_save_agent_training_with_agent(
     executor.conversation_history = conversation_history
     executor.code_history = execution_history
     agent = agent_registry.create_agent(
-        AgentEditFields(name="TrainAgent", security_prompt="", hosting="", model="")
+        AgentEditFields(
+            name="TrainAgent",
+            security_prompt="",
+            hosting="",
+            model="",
+            description="",
+            last_message="",
+        )
     )
     executor.agent = agent
     save_training_tool = save_agent_training_tool(executor, agent_registry)
@@ -248,10 +255,24 @@ def test_list_agent_info_without_id(agent_registry: AgentRegistry) -> None:
     All agents stored in the registry should be returned.
     """
     agent1 = agent_registry.create_agent(
-        AgentEditFields(name="Agent1", security_prompt="prompt1", hosting="", model="")
+        AgentEditFields(
+            name="Agent1",
+            security_prompt="prompt1",
+            hosting="",
+            model="",
+            description="",
+            last_message="",
+        )
     )
     agent2 = agent_registry.create_agent(
-        AgentEditFields(name="Agent2", security_prompt="prompt2", hosting="", model="")
+        AgentEditFields(
+            name="Agent2",
+            security_prompt="prompt2",
+            hosting="",
+            model="",
+            description="",
+            last_message="",
+        )
     )
     list_tool = list_agent_info_tool(agent_registry)
     agents_list = list_tool(None)
@@ -267,7 +288,14 @@ def test_list_agent_info_with_id(agent_registry: AgentRegistry) -> None:
     Only the desired agent should be returned.
     """
     agent = agent_registry.create_agent(
-        AgentEditFields(name="AgentX", security_prompt="promptX", hosting="", model="")
+        AgentEditFields(
+            name="AgentX",
+            security_prompt="promptX",
+            hosting="",
+            model="",
+            description="",
+            last_message="",
+        )
     )
     list_tool = list_agent_info_tool(agent_registry)
     agent_list = list_tool(agent.id)
@@ -293,11 +321,26 @@ def test_edit_agent_tool(agent_registry: AgentRegistry) -> None:
     Test the edit_agent_tool to verify that an agent's name and security prompt update correctly.
     """
     agent = agent_registry.create_agent(
-        AgentEditFields(name="OldName", security_prompt="old", hosting="", model="")
+        AgentEditFields(
+            name="OldName",
+            security_prompt="old",
+            hosting="",
+            model="",
+            description="",
+            last_message="",
+        )
     )
     edit_tool = edit_agent_tool(agent_registry)
     updated_agent = edit_tool(
-        agent.id, AgentEditFields(name="NewName", security_prompt="new", hosting="", model="")
+        agent.id,
+        AgentEditFields(
+            name="NewName",
+            security_prompt="new",
+            hosting="",
+            model="",
+            description="",
+            last_message="",
+        ),
     )
     assert updated_agent is not None, "edit_agent_tool returned None"
     assert updated_agent.name == "NewName", f"Expected 'NewName', got {updated_agent.name}"
@@ -311,7 +354,14 @@ def test_delete_agent_tool(agent_registry: AgentRegistry) -> None:
     Test the delete_agent_tool to confirm an agent is removed from the registry.
     """
     agent = agent_registry.create_agent(
-        AgentEditFields(name="ToDelete", security_prompt="", hosting="", model="")
+        AgentEditFields(
+            name="ToDelete",
+            security_prompt="",
+            hosting="",
+            model="",
+            description="",
+            last_message="",
+        )
     )
     delete_tool = delete_agent_tool(agent_registry)
     delete_tool(agent.id)
@@ -324,10 +374,24 @@ def test_get_agent_info_tool_without_id(agent_registry: AgentRegistry) -> None:
     Test get_agent_info_tool returns all agents when no id is provided.
     """
     agent_registry.create_agent(
-        AgentEditFields(name="Agent1", security_prompt="", hosting="", model="")
+        AgentEditFields(
+            name="Agent1",
+            security_prompt="",
+            hosting="",
+            model="",
+            description="",
+            last_message="",
+        )
     )
     agent_registry.create_agent(
-        AgentEditFields(name="Agent2", security_prompt="", hosting="", model="")
+        AgentEditFields(
+            name="Agent2",
+            security_prompt="",
+            hosting="",
+            model="",
+            description="",
+            last_message="",
+        )
     )
     get_tool = get_agent_info_tool(agent_registry)
     agents = get_tool(None)
@@ -339,7 +403,14 @@ def test_get_agent_info_tool_with_id(agent_registry: AgentRegistry) -> None:
     Test get_agent_info_tool returns information for the specified agent.
     """
     agent = agent_registry.create_agent(
-        AgentEditFields(name="AgentSingle", security_prompt="", hosting="", model="")
+        AgentEditFields(
+            name="AgentSingle",
+            security_prompt="",
+            hosting="",
+            model="",
+            description="",
+            last_message="",
+        )
     )
     get_tool = get_agent_info_tool(agent_registry)
     result = get_tool(agent.id)
