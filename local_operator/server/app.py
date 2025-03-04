@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from importlib.metadata import version
 from pathlib import Path
 
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
@@ -50,34 +50,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-
-# Dependency functions to inject managers into route handlers
-def get_credential_manager():
-    """Get the credential manager from the application state."""
-    return app.state.credential_manager
-
-
-def get_config_manager():
-    """Get the config manager from the application state."""
-    return app.state.config_manager
-
-
-def get_agent_registry():
-    """Get the agent registry from the application state."""
-    return app.state.agent_registry
-
-
 # Include routers from the routes modules
 app.include_router(health.router)
 app.include_router(
     chat.router,
-    dependencies=[
-        Depends(get_credential_manager),
-        Depends(get_config_manager),
-        Depends(get_agent_registry),
-    ],
 )
 app.include_router(
     agents.router,
-    dependencies=[Depends(get_agent_registry)],
 )

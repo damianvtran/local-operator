@@ -5,14 +5,15 @@ This module contains the FastAPI route handlers for agent-related endpoints.
 """
 
 import logging
-from typing import Any, Dict, Optional, cast
+from typing import Any, Dict, cast
 
-from fastapi import APIRouter, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from local_operator.agents import AgentEditFields, AgentRegistry
+from local_operator.server.dependencies import get_agent_registry
 from local_operator.server.models.schemas import AgentCreate, AgentUpdate, CRUDResponse
 
 router = APIRouter(tags=["Agents"])
@@ -57,7 +58,7 @@ logger = logging.getLogger("local_operator.server.routes.agents")
     },
 )
 async def list_agents(
-    agent_registry: Optional[AgentRegistry] = None,
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
     page: int = Query(1, ge=1, description="Page number"),
     per_page: int = Query(10, ge=1, description="Number of agents per page"),
 ):
@@ -141,7 +142,10 @@ async def list_agents(
         },
     },
 )
-async def create_agent(agent: AgentCreate, agent_registry: Optional[AgentRegistry] = None):
+async def create_agent(
+    agent: AgentCreate,
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
+):
     """
     Create a new agent.
     """
@@ -201,7 +205,7 @@ async def create_agent(agent: AgentCreate, agent_registry: Optional[AgentRegistr
     },
 )
 async def get_agent(
-    agent_registry: Optional[AgentRegistry] = None,
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
     agent_id: str = Path(..., description="ID of the agent to retrieve", examples=["agent123"]),
 ):
     """
@@ -281,7 +285,7 @@ async def get_agent(
 )
 async def update_agent(
     agent_data: AgentUpdate,
-    agent_registry: Optional[AgentRegistry] = None,
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
     agent_id: str = Path(..., description="ID of the agent to update", examples=["agent123"]),
 ):
     """
@@ -336,7 +340,7 @@ async def update_agent(
     },
 )
 async def delete_agent(
-    agent_registry: Optional[AgentRegistry] = None,
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
     agent_id: str = Path(..., description="ID of the agent to delete", examples=["agent123"]),
 ):
     """
