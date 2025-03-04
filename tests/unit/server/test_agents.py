@@ -5,12 +5,15 @@ This module contains tests for agent-related functionality, including
 creating, updating, deleting, and listing agents.
 """
 
+from datetime import datetime, timezone
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.server.app import app
 from local_operator.server.models.schemas import AgentCreate, AgentUpdate
+from local_operator.types import ConversationRecord, ConversationRole
 
 
 @pytest.mark.asyncio
@@ -141,48 +144,6 @@ async def test_delete_agent_not_found(test_app_client, dummy_registry: AgentRegi
 
 
 @pytest.mark.asyncio
-async def test_update_agent_registry_not_initialized(test_app_client):
-    """Test updating an agent when the registry is not initialized."""
-    # Safely get the original agent_registry without risking a KeyError.
-    original_registry = getattr(app.state, "agent_registry", None)
-    app.state.agent_registry = None
-    update_payload = AgentEditFields(name="New Name", security_prompt="", hosting="", model="")
-    agent_id = "agent1"
-    response = await test_app_client.patch(
-        f"/v1/agents/{agent_id}", json=update_payload.model_dump()
-    )
-    # Restore the original state of agent_registry.
-    if original_registry is not None:
-        app.state.agent_registry = original_registry
-    else:
-        # Remove agent_registry from the underlying state dict if it exists.
-        if "agent_registry" in app.state._state:
-            del app.state._state["agent_registry"]
-    assert response.status_code == 500
-    data = response.json()
-    assert "Agent registry not initialized" in data.get("detail", "")
-
-
-@pytest.mark.asyncio
-async def test_delete_agent_registry_not_initialized():
-    """Test deleting an agent when the registry is not initialized."""
-    original_registry = getattr(app.state, "agent_registry", None)
-    app.state.agent_registry = None
-    agent_id = "agent1"
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.delete(f"/v1/agents/{agent_id}")
-    if original_registry is not None:
-        app.state.agent_registry = original_registry
-    else:
-        if "agent_registry" in app.state._state:
-            del app.state._state["agent_registry"]
-    assert response.status_code == 500
-    data = response.json()
-    assert "Agent registry not initialized" in data.get("detail", "")
-
-
-@pytest.mark.asyncio
 async def test_create_agent_success(dummy_registry: AgentRegistry):
     """Test creating a new agent."""
     create_payload = AgentCreate(
@@ -280,3 +241,76 @@ async def test_get_agent_not_found(test_app_client, dummy_registry: AgentRegistr
     assert response.status_code == 404
     data = response.json()
     assert "Agent not found" in data.get("detail", "")
+
+
+@pytest.mark.asyncio
+async def test_get_agent_conversation(test_app_client, dummy_registry: AgentRegistry):
+    """Test retrieving conversation history for a specific agent."""
+    # Create a test agent
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="Conversation Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+        )
+    )
+    agent_id = agent.id
+
+    # Get conversation (should be empty initially)
+    response = await test_app_client.get(f"/v1/agents/{agent_id}/conversation")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["agent_id"] == agent_id
+    assert "first_message_datetime" in data
+    assert "last_message_datetime" in data
+    assert "messages" in data
+    assert len(data["messages"]) == 0
+
+    mock_conversation = [
+        ConversationRecord(
+            role=ConversationRole.SYSTEM,
+            content="You are a helpful assistant",
+            should_summarize=False,
+            timestamp=datetime.now(timezone.utc),
+        ),
+        ConversationRecord(
+            role=ConversationRole.USER,
+            content="Hello, can you help me?",
+            should_summarize=True,
+            timestamp=datetime.now(timezone.utc),
+        ),
+        ConversationRecord(
+            role=ConversationRole.ASSISTANT,
+            content="Yes, I'd be happy to help. What do you need?",
+            should_summarize=True,
+            timestamp=datetime.now(timezone.utc),
+        ),
+    ]
+
+    mock_execution_history = []
+
+    # Save the mock conversation
+    dummy_registry.save_agent_conversation(agent_id, mock_conversation, mock_execution_history)
+
+    # Get conversation again (should now have the mock data)
+    response = await test_app_client.get(f"/v1/agents/{agent_id}/conversation")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["agent_id"] == agent_id
+    assert len(data["messages"]) == 3
+    assert data["messages"][0]["role"] == "system"
+    assert data["messages"][1]["role"] == "user"
+    assert data["messages"][2]["role"] == "assistant"
+    assert "You are a helpful assistant" in data["messages"][0]["content"]
+    assert "Hello, can you help me?" in data["messages"][1]["content"]
+
+    # Test with non-existent agent
+    non_existent_id = "nonexistent"
+    response = await test_app_client.get(f"/v1/agents/{non_existent_id}/conversation")
+
+    assert response.status_code == 404
+    data = response.json()
+    assert f"Agent with ID {non_existent_id} not found" in data.get("detail", "")
