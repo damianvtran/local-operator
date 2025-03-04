@@ -7,12 +7,17 @@ This module contains the FastAPI route handlers for chat-related endpoints.
 import logging
 from typing import cast
 
-from fastapi import APIRouter, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path
 from tiktoken import encoding_for_model
 
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
+from local_operator.server.dependencies import (
+    get_agent_registry,
+    get_config_manager,
+    get_credential_manager,
+)
 from local_operator.server.models.schemas import ChatRequest, ChatResponse, ChatStats
 from local_operator.server.utils.operator import create_operator
 from local_operator.types import ConversationRecord
@@ -50,9 +55,9 @@ logger = logging.getLogger("local_operator.server.routes.chat")
 )
 async def chat_endpoint(
     request: ChatRequest,
-    credential_manager: CredentialManager,
-    config_manager: ConfigManager,
-    agent_registry: AgentRegistry,
+    credential_manager: CredentialManager = Depends(get_credential_manager),
+    config_manager: ConfigManager = Depends(get_config_manager),
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
 ):
     """
     Process a chat request and return the response with context.
@@ -162,9 +167,9 @@ async def chat_endpoint(
 )
 async def chat_with_agent(
     request: ChatRequest,
-    credential_manager: CredentialManager,
-    config_manager: ConfigManager,
-    agent_registry: AgentRegistry,
+    credential_manager: CredentialManager = Depends(get_credential_manager),
+    config_manager: ConfigManager = Depends(get_config_manager),
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
     agent_id: str = Path(
         ..., description="ID of the agent to use for the chat", examples=["agent123"]
     ),
