@@ -1,0 +1,227 @@
+"""
+Fixtures for server tests.
+
+This module provides pytest fixtures for testing the FastAPI server components,
+including mock clients, executors, and dependencies needed for API testing.
+"""
+
+from typing import List
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+from pydantic import SecretStr
+
+from local_operator.agents import AgentRegistry
+from local_operator.config import ConfigManager
+from local_operator.credentials import CredentialManager
+from local_operator.executor import ExecutorInitError
+from local_operator.mocks import ChatMock
+from local_operator.model.configure import ModelConfiguration
+from local_operator.model.registry import ModelInfo
+from local_operator.server.app import app
+from local_operator.types import (
+    ActionType,
+    ConversationRecord,
+    ConversationRole,
+    ResponseJsonSchema,
+)
+
+
+# Dummy implementations for the executor dependency
+class DummyResponse:
+    def __init__(self, content: str):
+        self.content = content
+
+
+class DummyExecutor:
+    def __init__(self):
+        self.model_configuration = ModelConfiguration(
+            hosting="test",
+            name="test-model",
+            instance=ChatMock(),
+            info=ModelInfo(),
+            api_key=None,
+        )
+        self.conversation_history = []
+
+    async def invoke_model(self, conversation_history):
+        # Simply return a dummy response content as if coming from the model.
+        return DummyResponse("dummy model response")
+
+    async def process_response(self, response_content: str):
+        # Dummy processing; does nothing extra.
+        return "processed successfully"
+
+    def initialize_conversation_history(self, conversation_history: List[ConversationRecord] = []):
+        if len(self.conversation_history) != 0:
+            raise ExecutorInitError("Conversation history already initialized")
+
+        if len(conversation_history) == 0:
+            self.conversation_history = [
+                ConversationRecord(role=ConversationRole.SYSTEM, content="System prompt")
+            ]
+        else:
+            self.conversation_history = conversation_history
+
+
+# Dummy Operator using a dummy executor
+class DummyOperator:
+    def __init__(self, executor):
+        self.executor = executor
+        self.current_agent = None
+
+    async def handle_user_input(self, prompt: str):
+        dummy_response = ResponseJsonSchema(
+            previous_step_success=True,
+            previous_goal="",
+            current_goal="Respond to user",
+            next_goal="",
+            response="dummy operator response",
+            code="",
+            content="",
+            file_path="",
+            replacements=[],
+            action=ActionType.DONE,
+            learnings="",
+            previous_step_issue="",
+        )
+
+        self.executor.conversation_history.append(
+            ConversationRecord(role=ConversationRole.USER, content=prompt)
+        )
+        self.executor.conversation_history.append(
+            ConversationRecord(
+                role=ConversationRole.ASSISTANT, content=dummy_response.model_dump_json()
+            )
+        )
+
+        return dummy_response
+
+
+# Fixture for overriding the executor dependency for successful chat requests.
+@pytest.fixture
+def dummy_executor():
+    return DummyExecutor()
+
+
+@pytest.fixture
+def temp_dir(tmp_path):
+    """Create a temporary directory for testing.
+
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory unique to each test
+
+    Returns:
+        pathlib.Path: Path to the temporary directory
+    """
+    return tmp_path
+
+
+@pytest.fixture
+def test_app_client(temp_dir):
+    """Create a test client with a properly initialized app state.
+
+    This fixture uses the app's state to properly initialize the test environment,
+    ensuring tests run in an environment that closely matches the real application.
+
+    Args:
+        temp_dir: pytest fixture that provides a temporary directory
+
+    Yields:
+        AsyncClient: A configured test client for making requests to the app
+    """
+    # Override app state with test-specific values
+    # Store original values to restore later
+    original_state = {}
+    if hasattr(app.state, "credential_manager"):
+        original_state["credential_manager"] = app.state.credential_manager
+    if hasattr(app.state, "config_manager"):
+        original_state["config_manager"] = app.state.config_manager
+    if hasattr(app.state, "agent_registry"):
+        original_state["agent_registry"] = app.state.agent_registry
+
+    # Set up test-specific state
+    mock_credential_manager = CredentialManager(config_dir=temp_dir)
+    mock_config_manager = ConfigManager(config_dir=temp_dir)
+    mock_agent_registry = AgentRegistry(config_dir=temp_dir)
+
+    mock_credential_manager.get_credential = lambda key: SecretStr("test-credential")
+
+    app.state.credential_manager = mock_credential_manager
+    app.state.config_manager = mock_config_manager
+    app.state.agent_registry = mock_agent_registry
+
+    # Create and yield the test client
+    transport = ASGITransport(app=app)
+    client = AsyncClient(transport=transport, base_url="http://test")
+    yield client
+
+    # Restore original state
+    for key, value in original_state.items():
+        setattr(app.state, key, value)
+
+
+@pytest.fixture
+def dummy_registry(temp_dir):
+    registry = AgentRegistry(config_dir=temp_dir)
+    app.state.agent_registry = registry
+    yield registry
+    app.state.agent_registry = None
+
+
+@pytest.fixture
+def mock_create_operator(monkeypatch):
+    """Mock the create_operator function to return a DummyOperator.
+
+    Args:
+        monkeypatch: pytest fixture for modifying objects during testing
+
+    Returns:
+        function: The mocked create_operator function
+    """
+
+    def _mock_create_operator(
+        request_hosting,
+        request_model,
+        credential_manager,
+        config_manager,
+        agent_registry,
+        current_agent=None,
+    ):
+        print("Returning dummy operator")
+        return DummyOperator(DummyExecutor())
+
+    monkeypatch.setattr("local_operator.server.routes.chat.create_operator", _mock_create_operator)
+    return _mock_create_operator
+
+
+@pytest.fixture
+def mock_credential_manager(temp_dir):
+    """Create a mock credential manager for testing.
+
+    Args:
+        temp_dir: pytest fixture that provides a temporary directory
+
+    Returns:
+        CredentialManager: A credential manager instance using the temporary directory
+    """
+    credential_manager = CredentialManager(config_dir=temp_dir)
+    app.state.credential_manager = credential_manager
+    yield credential_manager
+    app.state.credential_manager = None
+
+
+@pytest.fixture
+def mock_config_manager(temp_dir):
+    """Create a mock config manager for testing.
+
+    Args:
+        temp_dir: pytest fixture that provides a temporary directory
+
+    Returns:
+        ConfigManager: A config manager instance using the temporary directory
+    """
+    config_manager = ConfigManager(config_dir=temp_dir)
+    app.state.config_manager = config_manager
+    yield config_manager
+    app.state.config_manager = None
