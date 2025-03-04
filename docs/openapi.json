@@ -1,0 +1,1557 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Local Operator API",
+    "description": "REST API interface for Local Operator agent",
+    "version": "0.3.7"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Health Check",
+        "description": "Returns the health status of the API server.",
+        "operationId": "health_check_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthCheckResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/chat": {
+      "post": {
+        "tags": [
+          "Chat"
+        ],
+        "summary": "Process chat request",
+        "description": "Accepts a prompt and optional context/configuration, returns the model response and conversation history.",
+        "operationId": "chat_endpoint_v1_chat_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              },
+              "examples": {
+                "example": {
+                  "summary": "Example Request",
+                  "value": {
+                    "prompt": "Print 'Hello, world!'",
+                    "hosting": "openai",
+                    "model": "gpt-4o",
+                    "context": [],
+                    "options": {
+                      "temperature": 0.7,
+                      "top_p": 0.9
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/chat/agents/{agent_id}/sync": {
+      "post": {
+        "tags": [
+          "Chat"
+        ],
+        "summary": "Process chat request using a specific agent",
+        "description": "Accepts a prompt and optional context/configuration, retrieves the specified agent from the registry, applies it to the operator and executor, and returns the model response and conversation history.",
+        "operationId": "chat_with_agent_v1_chat_agents__agent_id__sync_post",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "ID of the agent to use for the chat",
+              "examples": [
+                "agent123"
+              ],
+              "title": "Agent Id"
+            },
+            "description": "ID of the agent to use for the chat"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              },
+              "examples": {
+                "example": {
+                  "summary": "Example Request with Agent",
+                  "value": {
+                    "prompt": "How do I implement a binary search in Python?",
+                    "hosting": "openai",
+                    "model": "gpt-4o",
+                    "context": [],
+                    "options": {
+                      "temperature": 0.7,
+                      "top_p": 0.9
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/chat/async": {
+      "post": {
+        "tags": [
+          "Chat"
+        ],
+        "summary": "Process chat request asynchronously",
+        "description": "Accepts a prompt and optional context/configuration, starts an asynchronous job to process the request and returns a job ID.",
+        "operationId": "chat_async_endpoint_v1_chat_async_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              },
+              "examples": {
+                "example": {
+                  "summary": "Example Async Request",
+                  "value": {
+                    "prompt": "Print 'Hello, world!'",
+                    "hosting": "openai",
+                    "model": "gpt-4o",
+                    "context": [],
+                    "options": {
+                      "temperature": 0.7,
+                      "top_p": 0.9
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response Chat Async Endpoint V1 Chat Async Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents": {
+      "get": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "List agents",
+        "description": "Retrieve a paginated list of agents with their details.",
+        "operationId": "list_agents_v1_agents_get",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Page number",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number"
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Number of agents per page",
+              "default": 10,
+              "title": "Per Page"
+            },
+            "description": "Number of agents per page"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agents list retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "Agents retrieved successfully",
+                  "result": {
+                    "total": 20,
+                    "page": 1,
+                    "per_page": 10,
+                    "agents": [
+                      {
+                        "id": "agent123",
+                        "name": "Example Agent",
+                        "created_date": "2024-01-01T00:00:00Z",
+                        "version": "0.2.16",
+                        "security_prompt": "Example security prompt",
+                        "hosting": "openrouter",
+                        "model": "openai/gpt-4o-mini"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Create a new agent",
+        "description": "Create a new agent with the provided details.",
+        "operationId": "create_agent_v1_agents_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentCreate"
+              },
+              "examples": {
+                "example": {
+                  "summary": "Create Agent Example",
+                  "value": {
+                    "name": "New Agent",
+                    "security_prompt": "Example security prompt",
+                    "hosting": "openrouter",
+                    "model": "openai/gpt-4o-mini"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Agent created successfully",
+            "content": {
+              "application/json": {
+                "example": {
+                  "status": 201,
+                  "message": "Agent created successfully",
+                  "result": {
+                    "id": "agent123",
+                    "name": "New Agent",
+                    "created_date": "2024-01-01T00:00:00Z",
+                    "version": "0.2.16",
+                    "security_prompt": "Example security prompt",
+                    "hosting": "openrouter",
+                    "model": "openai/gpt-4o-mini"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/{agent_id}": {
+      "get": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Retrieve an agent",
+        "description": "Retrieve details for an agent by its ID.",
+        "operationId": "get_agent_v1_agents__agent_id__get",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "ID of the agent to retrieve",
+              "examples": [
+                "agent123"
+              ],
+              "title": "Agent Id"
+            },
+            "description": "ID of the agent to retrieve"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "Agent retrieved successfully",
+                  "result": {
+                    "id": "agent123",
+                    "name": "Example Agent",
+                    "created_date": "2024-01-01T00:00:00Z",
+                    "version": "0.2.16",
+                    "security_prompt": "Example security prompt",
+                    "hosting": "openrouter",
+                    "model": "openai/gpt-4o-mini"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Update an agent",
+        "description": "Update an existing agent with new details. Only provided fields will be updated.",
+        "operationId": "update_agent_v1_agents__agent_id__patch",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "ID of the agent to update",
+              "examples": [
+                "agent123"
+              ],
+              "title": "Agent Id"
+            },
+            "description": "ID of the agent to update"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentUpdate"
+              },
+              "examples": {
+                "example": {
+                  "summary": "Update Agent Example",
+                  "value": {
+                    "name": "Updated Agent Name",
+                    "security_prompt": "Updated security prompt",
+                    "hosting": "openrouter",
+                    "model": "openai/gpt-4o-mini"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Agent updated successfully",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "status": 200,
+                  "message": "Agent updated successfully",
+                  "result": {
+                    "id": "agent123",
+                    "name": "Updated Agent Name",
+                    "created_date": "2024-01-01T00:00:00Z",
+                    "version": "0.2.16",
+                    "security_prompt": "Updated security prompt",
+                    "hosting": "openrouter",
+                    "model": "openai/gpt-4o-mini"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Delete an agent",
+        "description": "Delete an existing agent by its ID.",
+        "operationId": "delete_agent_v1_agents__agent_id__delete",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "ID of the agent to delete",
+              "examples": [
+                "agent123"
+              ],
+              "title": "Agent Id"
+            },
+            "description": "ID of the agent to delete"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent deleted successfully",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "status": 200,
+                  "message": "Agent deleted successfully",
+                  "result": {}
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/{agent_id}/conversation": {
+      "get": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Get agent conversation history",
+        "description": "Retrieve the conversation history for a specific agent.",
+        "operationId": "get_agent_conversation_v1_agents__agent_id__conversation_get",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "ID of the agent to get conversation for",
+              "examples": [
+                "agent123"
+              ],
+              "title": "Agent Id"
+            },
+            "description": "ID of the agent to get conversation for"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent conversation retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentGetConversationResult"
+                },
+                "example": {
+                  "agent_id": "agent123",
+                  "last_message_datetime": "2023-01-01T12:00:00Z",
+                  "first_message_datetime": "2023-01-01T11:00:00Z",
+                  "messages": [
+                    {
+                      "role": "system",
+                      "content": "You are a helpful assistant",
+                      "should_summarize": false,
+                      "summarized": false,
+                      "timestamp": "2023-01-01T11:00:00Z"
+                    },
+                    {
+                      "role": "user",
+                      "content": "Hello, how are you?",
+                      "should_summarize": true,
+                      "summarized": false,
+                      "timestamp": "2023-01-01T11:00:00Z"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/jobs/{job_id}": {
+      "get": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "Get job status",
+        "description": "Retrieves the status and result of an asynchronous job.",
+        "operationId": "get_job_status_v1_jobs__job_id__get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "The ID of the chat job to retrieve",
+              "title": "Job Id"
+            },
+            "description": "The ID of the chat job to retrieve"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job status and result retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "status": 200,
+                  "message": "Job status retrieved",
+                  "result": {
+                    "id": "job-123456",
+                    "agent_id": "test-agent",
+                    "status": "completed",
+                    "prompt": "Test prompt",
+                    "model": "gpt-4",
+                    "hosting": "openai",
+                    "created_at": "2023-01-01T12:00:00Z",
+                    "started_at": "2023-01-01T12:00:05Z",
+                    "completed_at": "2023-01-01T12:00:15Z",
+                    "result": {
+                      "response": "Test response",
+                      "context": [
+                        {
+                          "role": "user",
+                          "content": "Test prompt"
+                        }
+                      ],
+                      "stats": {
+                        "total_tokens": 100
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job not found",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Job with ID \"job-123456\" not found"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Internal Server Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "Cancel job",
+        "description": "Cancels a running or pending job.",
+        "operationId": "cancel_job_v1_jobs__job_id__delete",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "The ID of the job to cancel",
+              "title": "Job Id"
+            },
+            "description": "The ID of the job to cancel"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job cancelled successfully",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "status": 200,
+                  "message": "Job job-123456 cancelled successfully"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Job cannot be cancelled",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Job job-123456 cannot be cancelled (already completed or failed)"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job not found",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Job with ID \"job-123456\" not found"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Internal Server Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/jobs": {
+      "get": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "List jobs",
+        "description": "Lists all jobs, optionally filtered by agent ID and/or status.",
+        "operationId": "list_jobs_v1_jobs_get",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter jobs by agent ID",
+              "title": "Agent Id"
+            },
+            "description": "Filter jobs by agent ID"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/JobStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter jobs by status",
+              "title": "Status"
+            },
+            "description": "Filter jobs by status"
+          },
+          {
+            "name": "agent_id",
+            "in": "query",
+            "description": "Filter jobs by agent ID",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Filter jobs by status",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "processing",
+                "completed",
+                "failed",
+                "cancelled"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of jobs matching the filter criteria",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "status": 200,
+                  "message": "Jobs retrieved successfully",
+                  "result": {
+                    "jobs": [
+                      {
+                        "id": "job-123456",
+                        "agent_id": "test-agent",
+                        "status": "completed",
+                        "prompt": "Test prompt",
+                        "model": "gpt-4",
+                        "hosting": "openai",
+                        "created_at": "2023-01-01T12:00:00Z",
+                        "started_at": "2023-01-01T12:00:05Z",
+                        "completed_at": "2023-01-01T12:00:15Z"
+                      }
+                    ],
+                    "count": 1
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Internal Server Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/jobs/cleanup": {
+      "post": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "Cleanup old jobs",
+        "description": "Removes jobs older than the specified age.",
+        "operationId": "cleanup_jobs_v1_jobs_cleanup_post",
+        "parameters": [
+          {
+            "name": "max_age_hours",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "description": "Maximum age of jobs to keep in hours",
+              "default": 24,
+              "title": "Max Age Hours"
+            },
+            "description": "Maximum age of jobs to keep in hours"
+          },
+          {
+            "name": "max_age_hours",
+            "in": "query",
+            "description": "Maximum age of jobs to keep in hours",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 24
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Jobs cleaned up successfully",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "status": 200,
+                  "message": "Cleanup completed successfully",
+                  "result": {
+                    "removed_count": 5
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Internal Server Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AgentCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Agent's name"
+          },
+          "security_prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Security Prompt",
+            "description": "The security prompt for the agent. Allows a user to explicitly specify the security context for the agent's code security checks."
+          },
+          "hosting": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hosting",
+            "description": "The hosting environment for the agent. Defaults to 'openrouter'."
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model",
+            "description": "The model to use for the agent. Defaults to 'openai/gpt-4o-mini'."
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "AgentCreate",
+        "description": "Data required to create a new agent."
+      },
+      "AgentGetConversationResult": {
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "title": "Agent Id",
+            "description": "ID of the agent involved in the conversation"
+          },
+          "last_message_datetime": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Last Message Datetime",
+            "description": "Date of the last message in the conversation"
+          },
+          "first_message_datetime": {
+            "type": "string",
+            "format": "date-time",
+            "title": "First Message Datetime",
+            "description": "Date of the first message in the conversation"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/ConversationRecord"
+            },
+            "type": "array",
+            "title": "Messages",
+            "description": "List of messages in the conversation"
+          }
+        },
+        "type": "object",
+        "required": [
+          "agent_id",
+          "last_message_datetime",
+          "first_message_datetime"
+        ],
+        "title": "AgentGetConversationResult",
+        "description": "Schema for getting an agent conversation."
+      },
+      "AgentUpdate": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name",
+            "description": "Agent's name"
+          },
+          "security_prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Security Prompt",
+            "description": "The security prompt for the agent. Allows a user to explicitly specify the security context for the agent's code security checks."
+          },
+          "hosting": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hosting",
+            "description": "The hosting environment for the agent. Defaults to 'openrouter'."
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model",
+            "description": "The model to use for the agent. Defaults to 'openai/gpt-4o-mini'."
+          }
+        },
+        "type": "object",
+        "title": "AgentUpdate",
+        "description": "Data for updating an existing agent."
+      },
+      "CRUDResponse": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse",
+        "description": "Standard response schema for CRUD operations.\nAttributes:\n    status: HTTP status code\n    message: Outcome message of the operation\n    result: The resulting data, which can be an object, paginated list, or empty."
+      },
+      "ChatOptions": {
+        "properties": {
+          "temperature": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temperature"
+          },
+          "top_p": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top P"
+          },
+          "top_k": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top K"
+          },
+          "max_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Tokens"
+          },
+          "stop": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop"
+          },
+          "frequency_penalty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frequency Penalty"
+          },
+          "presence_penalty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Presence Penalty"
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seed"
+          }
+        },
+        "type": "object",
+        "title": "ChatOptions",
+        "description": "Options for controlling the chat generation.\n\nAttributes:\n    temperature: Controls randomness in responses. Higher values like 0.8 make output more\n        random, while lower values like 0.2 make it more focused and deterministic.\n        Default: 0.8\n    top_p: Controls cumulative probability of tokens to sample from. Higher values (0.95) keep\n        more options, lower values (0.1) are more selective. Default: 0.9\n    top_k: Limits tokens to sample from at each step. Lower values (10) are more selective,\n        higher values (100) allow more variety. Default: 40\n    max_tokens: Maximum tokens to generate. Model may generate fewer if response completes\n        before reaching limit. Default: 4096\n    stop: List of strings that will stop generation when encountered. Default: None\n    frequency_penalty: Reduces repetition by lowering likelihood of repeated tokens.\n        Range from -2.0 to 2.0. Default: 0.0\n    presence_penalty: Increases diversity by lowering likelihood of prompt tokens.\n        Range from -2.0 to 2.0. Default: 0.0\n    seed: Random number seed for deterministic generation. Default: None"
+      },
+      "ChatRequest": {
+        "properties": {
+          "hosting": {
+            "type": "string",
+            "title": "Hosting"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model"
+          },
+          "prompt": {
+            "type": "string",
+            "title": "Prompt"
+          },
+          "stream": {
+            "type": "boolean",
+            "title": "Stream",
+            "default": false
+          },
+          "context": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ConversationRecord"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context"
+          },
+          "options": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChatOptions"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "hosting",
+          "model",
+          "prompt"
+        ],
+        "title": "ChatRequest",
+        "description": "Request body for chat generation endpoint.\n\nAttributes:\n    hosting: Name of the hosting service to use for generation\n    model: Name of the model to use for generation\n    prompt: The prompt to generate a response for\n    stream: Whether to stream the response token by token. Default: False\n    context: Optional list of previous messages for context\n    options: Optional generation parameters to override defaults"
+      },
+      "ChatResponse": {
+        "properties": {
+          "response": {
+            "type": "string",
+            "title": "Response"
+          },
+          "context": {
+            "items": {
+              "$ref": "#/components/schemas/ConversationRecord"
+            },
+            "type": "array",
+            "title": "Context"
+          },
+          "stats": {
+            "$ref": "#/components/schemas/ChatStats"
+          }
+        },
+        "type": "object",
+        "required": [
+          "response",
+          "context",
+          "stats"
+        ],
+        "title": "ChatResponse",
+        "description": "Response from chat generation endpoint.\n\nAttributes:\n    response: The generated text response\n    context: List of all messages including the new response\n    stats: Token usage statistics"
+      },
+      "ChatStats": {
+        "properties": {
+          "total_tokens": {
+            "type": "integer",
+            "title": "Total Tokens"
+          },
+          "prompt_tokens": {
+            "type": "integer",
+            "title": "Prompt Tokens"
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "title": "Completion Tokens"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total_tokens",
+          "prompt_tokens",
+          "completion_tokens"
+        ],
+        "title": "ChatStats",
+        "description": "Statistics about token usage for the chat request.\n\nAttributes:\n    total_tokens: Total number of tokens used in prompt and completion\n    prompt_tokens: Number of tokens in the prompt\n    completion_tokens: Number of tokens in the completion"
+      },
+      "ConversationRecord": {
+        "properties": {
+          "content": {
+            "type": "string",
+            "title": "Content"
+          },
+          "role": {
+            "$ref": "#/components/schemas/ConversationRole"
+          },
+          "should_summarize": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Should Summarize",
+            "default": true
+          },
+          "ephemeral": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ephemeral",
+            "default": false
+          },
+          "summarized": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summarized",
+            "default": false
+          },
+          "is_system_prompt": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is System Prompt",
+            "default": false
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp"
+          }
+        },
+        "type": "object",
+        "required": [
+          "content",
+          "role"
+        ],
+        "title": "ConversationRecord",
+        "description": "A record of a conversation with an AI model.\n\nAttributes:\n    role (ConversationRole): The role of the sender of the message\n    content (str): The content of the message\n    should_summarize (bool): Whether this message should be summarized\n    ephemeral (bool): Whether this message is temporary/ephemeral\n    summarized (bool): Whether this message has been summarized\n    is_system_prompt (bool): Whether this message is a system prompt\n    timestamp (datetime): When this message was created\n\nMethods:\n    to_dict(): Convert the record to a dictionary format\n    from_dict(data): Create a ConversationRecord from a dictionary"
+      },
+      "ConversationRole": {
+        "type": "string",
+        "enum": [
+          "system",
+          "user",
+          "assistant",
+          "human",
+          "ai",
+          "function",
+          "tool",
+          "chat"
+        ],
+        "title": "ConversationRole",
+        "description": "Enum representing the different roles in a conversation with an AI model.\n\nUsed to track who sent each message in the conversation history.\nMaps to the standard roles used by LangChain message types."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HealthCheckResponse": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "HealthCheckResponse",
+        "description": "Response from health check endpoint.\n\nAttributes:\n    status: HTTP status code\n    message: Health check message"
+      },
+      "JobStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "processing",
+          "completed",
+          "failed",
+          "cancelled"
+        ],
+        "title": "JobStatus",
+        "description": "Enum representing the possible states of a job."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Health",
+      "description": "Health check endpoints"
+    },
+    {
+      "name": "Chat",
+      "description": "Chat generation endpoints"
+    },
+    {
+      "name": "Agents",
+      "description": "Agent management endpoints"
+    },
+    {
+      "name": "Jobs",
+      "description": "Job management endpoints"
+    }
+  ]
+}
