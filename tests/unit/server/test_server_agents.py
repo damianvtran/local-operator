@@ -21,21 +21,24 @@ async def test_update_agent_success(test_app_client, dummy_registry: AgentRegist
     """Test updating an agent using the test_app_client fixture."""
     # Create a dummy agent
     agent_registry = app.state.agent_registry
-    agent = agent_registry.create_agent(
+    original_agent = agent_registry.create_agent(
         AgentEditFields(
             name="Original Name",
             security_prompt="Original Security",
             hosting="openai",
             model="gpt-4",
+            description="Original description",
+            last_message="Original last message",
         )
     )
-    agent_id = agent.id
+    agent_id = original_agent.id
 
     update_payload = AgentUpdate(
         name="Updated Name",
         security_prompt="Updated Security",
         hosting="anthropic",
         model="claude-2",
+        description="New description",
     )
 
     response = await test_app_client.patch(
@@ -52,6 +55,12 @@ async def test_update_agent_success(test_app_client, dummy_registry: AgentRegist
     assert result["security_prompt"] == "Updated Security"
     assert result["hosting"] == "anthropic"
     assert result["model"] == "claude-2"
+    assert result["description"] == "New description"
+    assert result["last_message"] == "Original last message"
+    # Pydantic serializes datetime to ISO 8601 format with 'T' separator and 'Z' for UTC
+    assert result[
+        "last_message_datetime"
+    ] == original_agent.last_message_datetime.isoformat().replace("+00:00", "Z")
 
 
 @pytest.mark.asyncio
@@ -64,12 +73,19 @@ async def test_update_agent_single_field(test_app_client, dummy_registry: AgentR
             security_prompt="Original Security",
             hosting="openai",
             model="gpt-4",
+            description=None,
+            last_message=None,
         )
     )
     agent_id = agent.id
 
     update_payload = AgentEditFields(
-        name="Updated Name Only", security_prompt=None, hosting=None, model=None
+        name="Updated Name Only",
+        security_prompt=None,
+        hosting=None,
+        model=None,
+        description=None,
+        last_message=None,
     )
 
     response = await test_app_client.patch(
@@ -92,7 +108,12 @@ async def test_update_agent_single_field(test_app_client, dummy_registry: AgentR
 async def test_update_agent_not_found(test_app_client, dummy_registry: AgentRegistry):
     """Test updating a non-existent agent."""
     update_payload = AgentEditFields(
-        name="Non-existent Update", security_prompt=None, hosting=None, model=None
+        name="Non-existent Update",
+        security_prompt=None,
+        hosting=None,
+        model=None,
+        description=None,
+        last_message=None,
     )
     non_existent_agent_id = "nonexistent"
 
@@ -115,6 +136,8 @@ async def test_delete_agent_success(test_app_client, dummy_registry: AgentRegist
             security_prompt="Test Security",
             hosting="openai",
             model="gpt-4",
+            description=None,
+            last_message=None,
         )
     )
     agent_id = agent.id
@@ -187,7 +210,12 @@ async def test_list_agents_pagination(test_app_client, dummy_registry: AgentRegi
     for i in range(15):
         dummy_registry.create_agent(
             AgentEditFields(
-                name=f"Agent {i}", security_prompt=f"Security {i}", hosting="openai", model="gpt-4"
+                name=f"Agent {i}",
+                security_prompt=f"Security {i}",
+                hosting="openai",
+                model="gpt-4",
+                description=None,
+                last_message=None,
             )
         )
 
@@ -214,7 +242,12 @@ async def test_get_agent_success(test_app_client, dummy_registry: AgentRegistry)
     # Create a test agent
     agent = dummy_registry.create_agent(
         AgentEditFields(
-            name="Test Agent", security_prompt="Test Security", hosting="openai", model="gpt-4"
+            name="Test Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description=None,
+            last_message=None,
         )
     )
     agent_id = agent.id
@@ -253,6 +286,8 @@ async def test_get_agent_conversation(test_app_client, dummy_registry: AgentRegi
             security_prompt="Test Security",
             hosting="openai",
             model="gpt-4",
+            description=None,
+            last_message=None,
         )
     )
     agent_id = agent.id

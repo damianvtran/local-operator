@@ -32,6 +32,19 @@ class AgentData(BaseModel):
         "",
         description="The model to use for the agent.  Defaults to ''.",
     )
+    description: str = Field(
+        "",
+        description="A description of the agent.  Defaults to ''.",
+    )
+    last_message: str = Field(
+        "",
+        description="The last message sent to the agent.  Defaults to ''.",
+    )
+    last_message_datetime: datetime = Field(
+        datetime.now(timezone.utc),
+        description="The date and time of the last message sent to the agent.  "
+        "Defaults to the current UTC time.",
+    )
 
 
 class AgentEditFields(BaseModel):
@@ -52,6 +65,14 @@ class AgentEditFields(BaseModel):
     model: str | None = Field(
         None,
         description="The model to use for the agent.  Defaults to 'openai/gpt-4o-mini'.",
+    )
+    description: str | None = Field(
+        None,
+        description="A description of the agent.  Defaults to ''.",
+    )
+    last_message: str | None = Field(
+        None,
+        description="The last message sent to the agent.  Defaults to ''.",
     )
 
 
@@ -156,6 +177,9 @@ class AgentRegistry:
             security_prompt=agent_edit_metadata.security_prompt or "",
             hosting=agent_edit_metadata.hosting or "",
             model=agent_edit_metadata.model or "",
+            description=agent_edit_metadata.description or "",
+            last_message=agent_edit_metadata.last_message or "",
+            last_message_datetime=datetime.now(timezone.utc),
         )
 
         return self.save_agent(agent_metadata)
@@ -215,6 +239,9 @@ class AgentRegistry:
         for field, value in updated_metadata.model_dump(exclude_unset=True).items():
             if value is not None:
                 setattr(current_metadata, field, value)
+
+        if updated_metadata.last_message is not None:
+            current_metadata.last_message_datetime = datetime.now(timezone.utc)
 
         # Save updated agents metadata to file
         agents_list = [agent.model_dump() for agent in self._agents.values()]
@@ -290,6 +317,8 @@ class AgentRegistry:
                 security_prompt=original_agent.security_prompt,
                 hosting=original_agent.hosting,
                 model=original_agent.model,
+                description=original_agent.description,
+                last_message=original_agent.last_message,
             )
         )
 
@@ -452,6 +481,9 @@ class AgentRegistry:
             security_prompt="",
             hosting="",
             model="",
+            description="Automatic capture of your last conversation with a Local Operator agent.",
+            last_message="",
+            last_message_datetime=datetime.now(timezone.utc),
         )
 
         return self.save_agent(agent_metadata)
