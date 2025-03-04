@@ -404,6 +404,7 @@ async def delete_agent(
                             "page": 1,
                             "per_page": 10,
                             "total": 2,
+                            "count": 2,
                         }
                     }
                 },
@@ -474,7 +475,11 @@ async def get_agent_conversation(
                 f"Total pages: {(total_messages + per_page - 1) // per_page}",
             )
 
-        paginated_messages = conversation_history[start_idx:end_idx] if conversation_history else []
+        # Pages move backward in history, so we start from the end of the array and
+        # move backward while maintaining the same order of messages
+        paginated_messages = (
+            conversation_history[-end_idx : -start_idx or None] if conversation_history else []
+        )
 
         return AgentGetConversationResult(
             agent_id=agent_id,
@@ -484,6 +489,7 @@ async def get_agent_conversation(
             page=page,
             per_page=per_page,
             total=total_messages,
+            count=len(paginated_messages),
         )
     except KeyError:
         logger.exception(f"Agent with ID {agent_id} not found")

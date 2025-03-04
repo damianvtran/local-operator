@@ -285,8 +285,8 @@ async def test_get_agent_not_found(test_app_client, dummy_registry: AgentRegistr
 
 
 @pytest.mark.asyncio
-async def test_get_agent_conversation(test_app_client, dummy_registry: AgentRegistry):
-    """Test retrieving conversation history for a specific agent."""
+async def test_get_agent_conversation_empty(test_app_client, dummy_registry: AgentRegistry):
+    """Test retrieving empty conversation history for an agent."""
     # Create a test agent
     agent = dummy_registry.create_agent(
         AgentEditFields(
@@ -310,47 +310,198 @@ async def test_get_agent_conversation(test_app_client, dummy_registry: AgentRegi
     assert "last_message_datetime" in data
     assert "messages" in data
     assert len(data["messages"]) == 0
+    assert data["page"] == 1
+    assert data["per_page"] == 10
+    assert data["total"] == 0
+    assert data["count"] == 0
 
-    mock_conversation = [
-        ConversationRecord(
-            role=ConversationRole.SYSTEM,
-            content="You are a helpful assistant",
-            should_summarize=False,
-            timestamp=datetime.now(timezone.utc),
-        ),
-        ConversationRecord(
-            role=ConversationRole.USER,
-            content="Hello, can you help me?",
-            should_summarize=True,
-            timestamp=datetime.now(timezone.utc),
-        ),
-        ConversationRecord(
-            role=ConversationRole.ASSISTANT,
-            content="Yes, I'd be happy to help. What do you need?",
-            should_summarize=True,
-            timestamp=datetime.now(timezone.utc),
-        ),
-    ]
 
-    mock_execution_history = []
+@pytest.mark.asyncio
+async def test_get_agent_conversation_pagination_default(
+    test_app_client, dummy_registry: AgentRegistry
+):
+    """Test default pagination for agent conversation history."""
+    # Create a test agent
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="Conversation Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description=None,
+            last_message=None,
+        )
+    )
+    agent_id = agent.id
+
+    # Create 15 mock conversation records for pagination testing
+    mock_conversation = []
+    for i in range(15):
+        mock_conversation.append(
+            ConversationRecord(
+                role=ConversationRole.USER if i % 2 == 0 else ConversationRole.ASSISTANT,
+                content=f"Message {i+1}",
+                should_summarize=True,
+                timestamp=datetime.now(timezone.utc),
+            )
+        )
 
     # Save the mock conversation
-    dummy_registry.save_agent_conversation(agent_id, mock_conversation, mock_execution_history)
+    dummy_registry.save_agent_conversation(agent_id, mock_conversation, [])
 
-    # Get conversation again (should now have the mock data)
+    # Test default pagination (page 1, per_page 10)
     response = await test_app_client.get(f"/v1/agents/{agent_id}/conversation")
 
     assert response.status_code == 200
     data = response.json()
     assert data["agent_id"] == agent_id
-    assert len(data["messages"]) == 3
-    assert data["messages"][0]["role"] == "system"
-    assert data["messages"][1]["role"] == "user"
-    assert data["messages"][2]["role"] == "assistant"
-    assert "You are a helpful assistant" in data["messages"][0]["content"]
-    assert "Hello, can you help me?" in data["messages"][1]["content"]
+    assert len(data["messages"]) == 10
+    assert data["page"] == 1
+    assert data["per_page"] == 10
+    assert data["total"] == 15
+    assert data["count"] == 10
+    assert data["messages"][0]["content"] == "Message 6"
+    assert data["messages"][9]["content"] == "Message 15"
 
-    # Test with non-existent agent
+
+@pytest.mark.asyncio
+async def test_get_agent_conversation_pagination_second_page(
+    test_app_client, dummy_registry: AgentRegistry
+):
+    """Test second page pagination for agent conversation history."""
+    # Create a test agent
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="Conversation Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description=None,
+            last_message=None,
+        )
+    )
+    agent_id = agent.id
+
+    # Create 15 mock conversation records
+    mock_conversation = []
+    for i in range(15):
+        mock_conversation.append(
+            ConversationRecord(
+                role=ConversationRole.USER if i % 2 == 0 else ConversationRole.ASSISTANT,
+                content=f"Message {i+1}",
+                should_summarize=True,
+                timestamp=datetime.now(timezone.utc),
+            )
+        )
+
+    # Save the mock conversation
+    dummy_registry.save_agent_conversation(agent_id, mock_conversation, [])
+
+    # Test second page
+    response = await test_app_client.get(f"/v1/agents/{agent_id}/conversation?page=2&per_page=10")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["agent_id"] == agent_id
+    assert len(data["messages"]) == 5
+    assert data["page"] == 2
+    assert data["per_page"] == 10
+    assert data["total"] == 15
+    assert data["count"] == 5
+    assert data["messages"][0]["content"] == "Message 1"
+    assert data["messages"][4]["content"] == "Message 5"
+
+
+@pytest.mark.asyncio
+async def test_get_agent_conversation_custom_per_page(
+    test_app_client, dummy_registry: AgentRegistry
+):
+    """Test custom per_page parameter for agent conversation history."""
+    # Create a test agent
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="Conversation Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description=None,
+            last_message=None,
+        )
+    )
+    agent_id = agent.id
+
+    # Create 15 mock conversation records
+    mock_conversation = []
+    for i in range(15):
+        mock_conversation.append(
+            ConversationRecord(
+                role=ConversationRole.USER if i % 2 == 0 else ConversationRole.ASSISTANT,
+                content=f"Message {i+1}",
+                should_summarize=True,
+                timestamp=datetime.now(timezone.utc),
+            )
+        )
+
+    # Save the mock conversation
+    dummy_registry.save_agent_conversation(agent_id, mock_conversation, [])
+
+    # Test custom per_page
+    response = await test_app_client.get(f"/v1/agents/{agent_id}/conversation?per_page=5")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["messages"]) == 5
+    assert data["page"] == 1
+    assert data["per_page"] == 5
+    assert data["count"] == 5
+    assert data["messages"][0]["content"] == "Message 11"
+    assert data["messages"][4]["content"] == "Message 15"
+
+
+@pytest.mark.asyncio
+async def test_get_agent_conversation_page_out_of_bounds(
+    test_app_client, dummy_registry: AgentRegistry
+):
+    """Test out of bounds page parameter for agent conversation history."""
+    # Create a test agent
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="Conversation Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description=None,
+            last_message=None,
+        )
+    )
+    agent_id = agent.id
+
+    # Create 15 mock conversation records
+    mock_conversation = []
+    for i in range(15):
+        mock_conversation.append(
+            ConversationRecord(
+                role=ConversationRole.USER if i % 2 == 0 else ConversationRole.ASSISTANT,
+                content=f"Message {i+1}",
+                should_summarize=True,
+                timestamp=datetime.now(timezone.utc),
+            )
+        )
+
+    # Save the mock conversation
+    dummy_registry.save_agent_conversation(agent_id, mock_conversation, [])
+
+    # Test page out of bounds
+    response = await test_app_client.get(f"/v1/agents/{agent_id}/conversation?page=4&per_page=5")
+
+    assert response.status_code == 400
+    data = response.json()
+    assert "Page 4 is out of bounds" in data.get("detail", "")
+
+
+@pytest.mark.asyncio
+async def test_get_agent_conversation_not_found(test_app_client, dummy_registry: AgentRegistry):
+    """Test retrieving conversation for a non-existent agent."""
     non_existent_id = "nonexistent"
     response = await test_app_client.get(f"/v1/agents/{non_existent_id}/conversation")
 
