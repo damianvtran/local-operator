@@ -6,24 +6,12 @@ in the Local Operator API.
 """
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Generic, List, Optional, TypeVar
 
 from pydantic import BaseModel, Field
 
 # AgentEditFields will be used in the routes module
 from local_operator.types import ConversationRecord
-
-
-class HealthCheckResponse(BaseModel):
-    """Response from health check endpoint.
-
-    Attributes:
-        status: HTTP status code
-        message: Health check message
-    """
-
-    status: int
-    message: str
 
 
 class ChatOptions(BaseModel):
@@ -105,9 +93,13 @@ class ChatResponse(BaseModel):
     stats: ChatStats
 
 
-class CRUDResponse(BaseModel):
+T = TypeVar("T")
+
+
+class CRUDResponse(BaseModel, Generic[T]):
     """
     Standard response schema for CRUD operations.
+
     Attributes:
         status: HTTP status code
         message: Outcome message of the operation
@@ -116,7 +108,7 @@ class CRUDResponse(BaseModel):
 
     status: int
     message: str
-    result: Optional[Dict[str, Any]] = None
+    result: Optional[T] = None
 
 
 class Agent(BaseModel):

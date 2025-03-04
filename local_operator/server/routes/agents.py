@@ -30,7 +30,7 @@ logger = logging.getLogger("local_operator.server.routes.agents")
 
 @router.get(
     "/v1/agents",
-    response_model=CRUDResponse,
+    response_model=CRUDResponse[AgentListResult],
     summary="List agents",
     description="Retrieve a paginated list of agents with their details.",
     openapi_extra={
@@ -106,7 +106,7 @@ async def list_agents(
 
 @router.post(
     "/v1/agents",
-    response_model=CRUDResponse,
+    response_model=CRUDResponse[Agent],
     summary="Create a new agent",
     description="Create a new agent with the provided details.",
     openapi_extra={
@@ -185,7 +185,7 @@ async def create_agent(
 
 @router.get(
     "/v1/agents/{agent_id}",
-    response_model=CRUDResponse,
+    response_model=CRUDResponse[Agent],
     summary="Retrieve an agent",
     description="Retrieve details for an agent by its ID.",
     openapi_extra={
@@ -246,7 +246,7 @@ async def get_agent(
 
 @router.patch(
     "/v1/agents/{agent_id}",
-    response_model=CRUDResponse,
+    response_model=CRUDResponse[Agent],
     summary="Update an agent",
     description="Update an existing agent with new details. Only provided fields will be updated.",
     openapi_extra={
@@ -372,7 +372,7 @@ async def delete_agent(
 
 @router.get(
     "/v1/agents/{agent_id}/conversation",
-    response_model=AgentGetConversationResult,
+    response_model=CRUDResponse[AgentGetConversationResult],
     summary="Get agent conversation history",
     description="Retrieve the conversation history for a specific agent.",
     openapi_extra={
@@ -382,29 +382,33 @@ async def delete_agent(
                 "content": {
                     "application/json": {
                         "example": {
-                            "agent_id": "agent123",
-                            "last_message_datetime": "2023-01-01T12:00:00",
-                            "first_message_datetime": "2023-01-01T11:00:00",
-                            "messages": [
-                                {
-                                    "role": "system",
-                                    "content": "You are a helpful assistant",
-                                    "should_summarize": False,
-                                    "summarized": False,
-                                    "timestamp": "2023-01-01T11:00:00",
-                                },
-                                {
-                                    "role": "user",
-                                    "content": "Hello, how are you?",
-                                    "should_summarize": True,
-                                    "summarized": False,
-                                    "timestamp": "2023-01-01T11:00:00",
-                                },
-                            ],
-                            "page": 1,
-                            "per_page": 10,
-                            "total": 2,
-                            "count": 2,
+                            "status": 200,
+                            "message": "Agent conversation retrieved successfully",
+                            "result": {
+                                "agent_id": "agent123",
+                                "last_message_datetime": "2023-01-01T12:00:00",
+                                "first_message_datetime": "2023-01-01T11:00:00",
+                                "messages": [
+                                    {
+                                        "role": "system",
+                                        "content": "You are a helpful assistant",
+                                        "should_summarize": False,
+                                        "summarized": False,
+                                        "timestamp": "2023-01-01T11:00:00",
+                                    },
+                                    {
+                                        "role": "user",
+                                        "content": "Hello, how are you?",
+                                        "should_summarize": True,
+                                        "summarized": False,
+                                        "timestamp": "2023-01-01T11:00:00",
+                                    },
+                                ],
+                                "page": 1,
+                                "per_page": 10,
+                                "total": 2,
+                                "count": 2,
+                            },
                         }
                     }
                 },
@@ -481,7 +485,7 @@ async def get_agent_conversation(
             conversation_history[-end_idx : -start_idx or None] if conversation_history else []
         )
 
-        return AgentGetConversationResult(
+        result = AgentGetConversationResult(
             agent_id=agent_id,
             first_message_datetime=first_message_datetime,
             last_message_datetime=last_message_datetime,
@@ -490,6 +494,12 @@ async def get_agent_conversation(
             per_page=per_page,
             total=total_messages,
             count=len(paginated_messages),
+        )
+
+        return CRUDResponse(
+            status=200,
+            message="Agent conversation retrieved successfully",
+            result=result.model_dump(),
         )
     except KeyError:
         logger.exception(f"Agent with ID {agent_id} not found")
