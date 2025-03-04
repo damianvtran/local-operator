@@ -235,8 +235,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument(
         "--port",
         type=int,
-        default=8080,
-        help="Port for the server (default: 8080)",
+        default=1111,
+        help="Port for the server (default: 1111)",
     )
     serve_parser.add_argument(
         "--reload",

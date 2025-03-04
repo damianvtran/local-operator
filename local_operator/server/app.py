@@ -11,6 +11,7 @@ from importlib.metadata import version
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
@@ -60,6 +61,15 @@ app = FastAPI(
         {"name": "Agents", "description": "Agent management endpoints"},
         {"name": "Jobs", "description": "Job management endpoints"},
     ],
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
 )
 
 # Include routers from the routes modules
