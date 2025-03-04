@@ -16,7 +16,7 @@ from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.jobs import JobManager
-from local_operator.server.routes import agents, chat, health
+from local_operator.server.routes import agents, chat, health, jobs
 
 logger = logging.getLogger("local_operator.server")
 
@@ -54,10 +54,21 @@ app = FastAPI(
 )
 
 # Include routers from the routes modules
+
+# /health
 app.include_router(health.router)
+
+# /v1/chat
 app.include_router(
     chat.router,
 )
+
+# /v1/agents
 app.include_router(
     agents.router,
+)
+
+# /v1/jobs
+app.include_router(
+    jobs.router,
 )

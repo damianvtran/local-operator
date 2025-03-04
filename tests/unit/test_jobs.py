@@ -51,8 +51,8 @@ async def test_get_job(job_manager, sample_job):
     retrieved_job = await job_manager.get_job(sample_job.id)
     assert retrieved_job == sample_job
 
-    nonexistent_job = await job_manager.get_job("nonexistent-id")
-    assert nonexistent_job is None
+    with pytest.raises(KeyError, match='Job with ID "nonexistent-id" not found'):
+        await job_manager.get_job("nonexistent-id")
 
 
 @pytest.mark.asyncio
@@ -74,8 +74,8 @@ async def test_update_job_status(job_manager, sample_job, sample_job_result):
     assert updated_job.result == sample_job_result
 
     # Test updating nonexistent job
-    result = await job_manager.update_job_status("nonexistent-id", JobStatus.COMPLETED)
-    assert result is None
+    with pytest.raises(KeyError, match='Job with ID "nonexistent-id" not found'):
+        await job_manager.update_job_status("nonexistent-id", JobStatus.COMPLETED)
 
     # Test updating with dict result
     job2 = Job(prompt="Test", model="gpt-4", hosting="openai")
@@ -95,8 +95,8 @@ async def test_register_task(job_manager, sample_job):
     assert updated_job.task == mock_task
 
     # Test registering task for nonexistent job
-    result = await job_manager.register_task("nonexistent-id", mock_task)
-    assert result is None
+    with pytest.raises(KeyError, match='Job with ID "nonexistent-id" not found'):
+        await job_manager.register_task("nonexistent-id", mock_task)
 
 
 @pytest.mark.asyncio
@@ -115,8 +115,8 @@ async def test_cancel_job(job_manager, sample_job):
     assert job_manager.jobs[sample_job.id].status == JobStatus.CANCELLED
 
     # Test cancelling nonexistent job
-    result = await job_manager.cancel_job("nonexistent-id")
-    assert result is False
+    with pytest.raises(KeyError, match='Job with ID "nonexistent-id" not found'):
+        await job_manager.cancel_job("nonexistent-id")
 
     # Test cancelling already completed job
     completed_job = Job(prompt="Test", model="gpt-4", hosting="openai", status=JobStatus.COMPLETED)
@@ -238,9 +238,9 @@ def test_get_job_summary(job_manager, sample_job, sample_job_result):
 
     summary = job_manager.get_job_summary(sample_job)
 
-    assert summary["job_id"] == sample_job.id
+    assert summary["id"] == sample_job.id
     assert summary["agent_id"] == sample_job.agent_id
-    assert summary["status"] == sample_job.status
+    assert summary["status"] == sample_job.status.value
     assert summary["prompt"] == sample_job.prompt
     assert summary["model"] == sample_job.model
     assert summary["hosting"] == sample_job.hosting
@@ -251,7 +251,7 @@ def test_get_job_summary(job_manager, sample_job, sample_job_result):
     assert isinstance(summary["completed_at"], str)
 
     # Check result serialization
-    assert summary["result"] == sample_job_result.dict()
+    assert summary["result"] == sample_job_result.model_dump()
 
     # Test with missing optional fields
     minimal_job = Job(prompt="Test", model="gpt-4", hosting="openai")

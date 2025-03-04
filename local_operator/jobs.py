@@ -9,13 +9,15 @@ import asyncio
 import logging
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, TypeVar, Union, cast
 
 from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger("local_operator.jobs")
+
+T = TypeVar("T")
 
 
 class JobStatus(str, Enum):
@@ -52,11 +54,12 @@ class Job(BaseModel):
     model: str
     hosting: str
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = {
+        "arbitrary_types_allowed": True,
+    }
 
     @field_validator("task", mode="before")
-    def validate_task(cls, v):
+    def validate_task(cls, v: Any) -> Optional[asyncio.Task[Any]]:
         """Validate that the task is an asyncio.Task or None."""
         if v is not None and not isinstance(v, asyncio.Task):
             raise ValueError("task must be an asyncio.Task")
@@ -71,7 +74,7 @@ class JobManager:
     throughout their lifecycle.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize the JobManager with an empty jobs dictionary."""
         self.jobs: Dict[str, Job] = {}
         self._lock = asyncio.Lock()
@@ -98,7 +101,7 @@ class JobManager:
 
         return job
 
-    async def get_job(self, job_id: str) -> Optional[Job]:
+    async def get_job(self, job_id: str) -> Job:
         """
         Retrieve a job by its ID.
 
@@ -106,16 +109,21 @@ class JobManager:
             job_id: The ID of the job to retrieve
 
         Returns:
-            The Job object if found, None otherwise
+            The Job object
+
+        Raises:
+            KeyError: If the job with the specified ID is not found
         """
-        return self.jobs.get(job_id)
+        if job_id not in self.jobs:
+            raise KeyError(f'Job with ID "{job_id}" not found')
+        return self.jobs[job_id]
 
     async def update_job_status(
         self,
         job_id: str,
         status: JobStatus,
         result: Optional[Union[Dict[str, Any], JobResult]] = None,
-    ) -> Optional[Job]:
+    ) -> Job:
         """
         Update the status and optionally the result of a job.
 
@@ -125,11 +133,15 @@ class JobManager:
             result: Optional result data for the job
 
         Returns:
-            The updated Job object if found, None otherwise
+            The updated Job object
+
+        Raises:
+            KeyError: If the job with the specified ID is not found
         """
-        job = await self.get_job(job_id)
-        if not job:
-            return None
+        try:
+            job = await self.get_job(job_id)
+        except KeyError:
+            raise
 
         async with self._lock:
             job.status = status
@@ -148,7 +160,7 @@ class JobManager:
 
         return job
 
-    async def register_task(self, job_id: str, task: asyncio.Task[Any]) -> Optional[Job]:
+    async def register_task(self, job_id: str, task: asyncio.Task[T]) -> Job:
         """
         Register an asyncio task with a job.
 
@@ -157,14 +169,18 @@ class JobManager:
             task: The asyncio task to register
 
         Returns:
-            The updated Job object if found, None otherwise
+            The updated Job object
+
+        Raises:
+            KeyError: If the job with the specified ID is not found
         """
-        job = await self.get_job(job_id)
-        if not job:
-            return None
+        try:
+            job = await self.get_job(job_id)
+        except KeyError:
+            raise
 
         async with self._lock:
-            job.task = task
+            job.task = cast(asyncio.Task[Any], task)
 
         return job
 
@@ -177,9 +193,16 @@ class JobManager:
 
         Returns:
             True if the job was successfully cancelled, False otherwise
+
+        Raises:
+            KeyError: If the job with the specified ID is not found
         """
-        job = await self.get_job(job_id)
-        if not job or job.status not in (JobStatus.PENDING, JobStatus.PROCESSING):
+        try:
+            job = await self.get_job(job_id)
+        except KeyError:
+            raise
+
+        if job.status not in (JobStatus.PENDING, JobStatus.PROCESSING):
             return False
 
         if job.task and not job.task.done():
@@ -203,7 +226,7 @@ class JobManager:
         Returns:
             List of matching Job objects
         """
-        result = []
+        result: List[Job] = []
 
         for job in self.jobs.values():
             if agent_id is not None and job.agent_id != agent_id:
@@ -228,7 +251,7 @@ class JobManager:
         """
         current_time = time.time()
         max_age_seconds = max_age_hours * 3600
-        jobs_to_remove = []
+        jobs_to_remove: List[str] = []
 
         for job_id, job in self.jobs.items():
             # For completed jobs, check against completion time
@@ -259,17 +282,21 @@ class JobManager:
             Dictionary with job summary information
         """
         return {
-            "job_id": job.id,
+            "id": job.id,
             "agent_id": job.agent_id,
-            "status": job.status,
-            "created_at": datetime.fromtimestamp(job.created_at).isoformat(),
+            "status": job.status.value,
+            "created_at": datetime.fromtimestamp(job.created_at, tz=timezone.utc).isoformat(),
             "started_at": (
-                datetime.fromtimestamp(job.started_at).isoformat() if job.started_at else None
+                datetime.fromtimestamp(job.started_at, tz=timezone.utc).isoformat()
+                if job.started_at
+                else None
             ),
             "completed_at": (
-                datetime.fromtimestamp(job.completed_at).isoformat() if job.completed_at else None
+                datetime.fromtimestamp(job.completed_at, tz=timezone.utc).isoformat()
+                if job.completed_at
+                else None
             ),
-            "result": job.result.dict() if job.result else None,
+            "result": job.result.model_dump() if job.result else None,
             "prompt": job.prompt,
             "model": job.model,
             "hosting": job.hosting,
