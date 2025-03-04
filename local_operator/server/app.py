@@ -51,6 +51,15 @@ app = FastAPI(
     description="REST API interface for Local Operator agent",
     version=version("local-operator"),
     lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
+    openapi_tags=[
+        {"name": "Health", "description": "Health check endpoints"},
+        {"name": "Chat", "description": "Chat generation endpoints"},
+        {"name": "Agents", "description": "Agent management endpoints"},
+        {"name": "Jobs", "description": "Job management endpoints"},
+    ],
 )
 
 # Include routers from the routes modules
