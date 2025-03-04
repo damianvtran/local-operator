@@ -2079,4 +2079,7 @@ class LocalCodeExecutor:
         if response:
             new_code_record.message = response.response
 
+        if not new_code_record.timestamp:
+            new_code_record.timestamp = datetime.now()
+
         self.code_history.append(new_code_record)

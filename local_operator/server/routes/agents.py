@@ -5,7 +5,7 @@ This module contains the FastAPI route handlers for agent-related endpoints.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
@@ -18,6 +18,7 @@ from local_operator.server.dependencies import get_agent_registry
 from local_operator.server.models.schemas import (
     Agent,
     AgentCreate,
+    AgentExecutionHistoryResult,
     AgentGetConversationResult,
     AgentListResult,
     AgentUpdate,
@@ -452,17 +453,17 @@ async def get_agent_conversation(
             # This assumes ConversationRecord has a timestamp attribute
             # If not, we'll use the current time as a fallback
             try:
-                if hasattr(conversation_history[0], "timestamp"):
-                    first_message_datetime = min(
-                        msg.timestamp
-                        for msg in conversation_history
-                        if hasattr(msg, "timestamp") and msg.timestamp is not None
-                    )
-                    last_message_datetime = max(
-                        msg.timestamp
-                        for msg in conversation_history
-                        if hasattr(msg, "timestamp") and msg.timestamp is not None
-                    )
+                first_message_datetime = min(
+                    msg.timestamp
+                    for msg in conversation_history
+                    if hasattr(msg, "timestamp") and msg.timestamp is not None
+                )
+
+                last_message_datetime = max(
+                    msg.timestamp
+                    for msg in conversation_history
+                    if hasattr(msg, "timestamp") and msg.timestamp is not None
+                )
             except (AttributeError, ValueError):
                 # If timestamps aren't available, use current time
                 pass
@@ -510,4 +511,139 @@ async def get_agent_conversation(
         logger.exception("Error retrieving agent conversation")
         raise HTTPException(
             status_code=500, detail=f"Error retrieving agent conversation: {str(e)}"
+        )
+
+
+@router.get(
+    "/v1/agents/{agent_id}/history",
+    response_model=CRUDResponse[AgentExecutionHistoryResult],
+    summary="Get agent execution history",
+    description="Retrieve the execution history for a specific agent.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "description": "Agent execution history retrieved successfully",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "status": 200,
+                            "message": "Agent execution history retrieved successfully",
+                            "result": {
+                                "agent_id": "agent123",
+                                "history": [
+                                    {
+                                        "code": "print('Hello, world!')",
+                                        "output": "Hello, world!",
+                                        "success": True,
+                                        "timestamp": "2024-01-01T12:00:00Z",
+                                    }
+                                ],
+                                "first_execution_datetime": "2024-01-01T12:00:00Z",
+                                "last_execution_datetime": "2024-01-01T12:00:00Z",
+                                "page": 1,
+                                "per_page": 10,
+                                "total": 1,
+                                "count": 1,
+                            },
+                        }
+                    }
+                },
+            },
+            "400": {
+                "description": "Bad request",
+                "content": {
+                    "application/json": {
+                        "example": {"detail": "Page 2 is out of bounds. Total pages: 1"}
+                    }
+                },
+            },
+            "404": {
+                "description": "Agent not found",
+                "content": {
+                    "application/json": {"example": {"detail": "Agent with ID agent123 not found"}}
+                },
+            },
+        },
+    },
+)
+async def get_agent_execution_history(
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
+    agent_id: str = Path(
+        ..., description="ID of the agent to get execution history for", examples=["agent123"]
+    ),
+    page: int = Query(1, ge=1, description="Page number to retrieve"),
+    per_page: int = Query(10, ge=1, le=100, description="Number of executions per page"),
+):
+    """
+    Get the execution history for a specific agent.
+    """
+    try:
+        execution_history = agent_registry.get_agent_execution_history(agent_id)
+        total_executions = len(execution_history)
+
+        # Default timestamps if no executions
+        first_execution_datetime = datetime.now(timezone.utc)
+        last_execution_datetime = datetime.now(timezone.utc)
+
+        # Get actual timestamps if executions exist
+        if execution_history:
+            try:
+                first_execution_datetime = min(
+                    execution.timestamp
+                    for execution in execution_history
+                    if hasattr(execution, "timestamp") and execution.timestamp is not None
+                )
+
+                last_execution_datetime = max(
+                    execution.timestamp
+                    for execution in execution_history
+                    if hasattr(execution, "timestamp") and execution.timestamp is not None
+                )
+            except (AttributeError, ValueError):
+                # If timestamps aren't available, use current time
+                pass
+
+        # Apply pagination
+        start_idx = (page - 1) * per_page
+        end_idx = min(start_idx + per_page, total_executions)
+
+        # Check if page is out of bounds
+        if start_idx >= total_executions and total_executions > 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Page {page} is out of bounds. "
+                f"Total pages: {(total_executions + per_page - 1) // per_page}",
+            )
+
+        # Pages move backward in history, so we start from the end of the array and
+        # move backward while maintaining the same order of executions
+        paginated_history = (
+            execution_history[-end_idx : -start_idx or None] if execution_history else []
+        )
+
+        result = AgentExecutionHistoryResult(
+            agent_id=agent_id,
+            first_execution_datetime=first_execution_datetime,
+            last_execution_datetime=last_execution_datetime,
+            history=paginated_history,
+            page=page,
+            per_page=per_page,
+            total=total_executions,
+            count=len(paginated_history),
+        )
+
+        return CRUDResponse(
+            status=200,
+            message="Agent execution history retrieved successfully",
+            result=result.model_dump(),
+        )
+    except KeyError:
+        logger.exception(f"Agent with ID {agent_id} not found")
+        raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error retrieving agent execution history")
+        raise HTTPException(
+            status_code=500, detail=f"Error retrieving agent execution history: {str(e)}"
         )

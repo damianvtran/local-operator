@@ -13,7 +13,12 @@ from httpx import ASGITransport, AsyncClient
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.server.app import app
 from local_operator.server.models.schemas import AgentCreate, AgentUpdate
-from local_operator.types import ConversationRecord, ConversationRole
+from local_operator.types import (
+    CodeExecutionResult,
+    ConversationRecord,
+    ConversationRole,
+    ProcessResponseStatus,
+)
 
 
 @pytest.mark.asyncio
@@ -513,3 +518,206 @@ async def test_get_agent_conversation_not_found(test_app_client, dummy_registry:
     assert response.status_code == 404
     data = response.json()
     assert f"Agent with ID {non_existent_id} not found" in data.get("detail", "")
+
+
+@pytest.mark.asyncio
+async def test_get_agent_execution_history(test_app_client, dummy_registry: AgentRegistry):
+    """Test retrieving execution history for an agent."""
+    # Create a test agent
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="Execution History Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description=None,
+            last_message=None,
+        )
+    )
+    agent_id = agent.id
+
+    # Create 5 mock execution records
+    mock_executions = []
+    for i in range(5):
+        mock_executions.append(
+            CodeExecutionResult(
+                code=f"print('Execution {i+1}')",
+                stdout=f"Execution {i+1}",
+                stderr="",
+                logging="",
+                message="",
+                formatted_print="",
+                role=ConversationRole.SYSTEM,
+                status=ProcessResponseStatus.SUCCESS,
+                timestamp=datetime.now(timezone.utc),
+            )
+        )
+
+    # Save the mock executions
+    dummy_registry.save_agent_conversation(agent_id, [], mock_executions)
+
+    # Test retrieving execution history
+    response = await test_app_client.get(f"/v1/agents/{agent_id}/history")
+
+    assert response.status_code == 200
+    data = response.json()
+    result = data.get("result", {})
+
+    assert result.get("agent_id") == agent_id
+    assert result.get("total") == 5
+    assert result.get("page") == 1
+    assert result.get("per_page") == 10
+    assert result.get("count") == 5
+    assert len(result.get("history", [])) == 5
+
+
+@pytest.mark.asyncio
+async def test_get_agent_execution_history_pagination(
+    test_app_client, dummy_registry: AgentRegistry
+):
+    """Test pagination for agent execution history."""
+    # Create a test agent
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="Execution History Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description=None,
+            last_message=None,
+        )
+    )
+    agent_id = agent.id
+
+    # Create 15 mock execution records
+    mock_executions = []
+    for i in range(15):
+        mock_executions.append(
+            CodeExecutionResult(
+                code=f"print('Execution {i+1}')",
+                stdout=f"Execution {i+1}",
+                stderr="",
+                logging="",
+                message="",
+                formatted_print="",
+                role=ConversationRole.SYSTEM,
+                status=ProcessResponseStatus.SUCCESS,
+                timestamp=datetime.now(timezone.utc),
+            )
+        )
+
+    # Save the mock executions
+    dummy_registry.save_agent_conversation(agent_id, [], mock_executions)  # type: ignore
+
+    # Test pagination - page 1 with 5 per page
+    response = await test_app_client.get(f"/v1/agents/{agent_id}/history?page=1&per_page=5")
+
+    assert response.status_code == 200
+    data = response.json()
+    result = data.get("result", {})
+
+    assert result.get("agent_id") == agent_id
+    assert result.get("total") == 15
+    assert result.get("page") == 1
+    assert result.get("per_page") == 5
+    assert result.get("count") == 5
+    assert len(result.get("history", [])) == 5
+
+    # Test pagination - page 3 with 5 per page
+    response = await test_app_client.get(f"/v1/agents/{agent_id}/history?page=3&per_page=5")
+
+    assert response.status_code == 200
+    data = response.json()
+    result = data.get("result", {})
+
+    assert result.get("page") == 3
+    assert result.get("count") == 5
+    assert len(result.get("history", [])) == 5
+
+
+@pytest.mark.asyncio
+async def test_get_agent_execution_history_page_out_of_bounds(
+    test_app_client, dummy_registry: AgentRegistry
+):
+    """Test out of bounds page parameter for agent execution history."""
+    # Create a test agent
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="Execution History Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description=None,
+            last_message=None,
+        )
+    )
+    agent_id = agent.id
+
+    # Create 15 mock execution records
+    mock_executions = []
+    for i in range(15):
+        mock_executions.append(
+            CodeExecutionResult(
+                code=f"print('Execution {i+1}')",
+                stdout=f"Execution {i+1}",
+                stderr="",
+                logging="",
+                message="",
+                formatted_print="",
+                role=ConversationRole.SYSTEM,
+                status=ProcessResponseStatus.SUCCESS,
+                timestamp=datetime.now(timezone.utc),
+            )
+        )
+
+    # Save the mock executions
+    dummy_registry.save_agent_conversation(agent_id, [], mock_executions)  # type: ignore
+
+    # Test page out of bounds
+    response = await test_app_client.get(f"/v1/agents/{agent_id}/history?page=4&per_page=5")
+
+    assert response.status_code == 400
+    data = response.json()
+    assert "Page 4 is out of bounds" in data.get("detail", "")
+
+
+@pytest.mark.asyncio
+async def test_get_agent_execution_history_not_found(
+    test_app_client, dummy_registry: AgentRegistry
+):
+    """Test retrieving execution history for a non-existent agent."""
+    non_existent_id = "nonexistent"
+    response = await test_app_client.get(f"/v1/agents/{non_existent_id}/history")
+
+    assert response.status_code == 404
+    data = response.json()
+    assert f"Agent with ID {non_existent_id} not found" in data.get("detail", "")
+
+
+@pytest.mark.asyncio
+async def test_get_agent_execution_history_empty(test_app_client, dummy_registry: AgentRegistry):
+    """Test retrieving execution history for an agent with no executions."""
+    # Create a test agent
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="Empty Execution History Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description=None,
+            last_message=None,
+        )
+    )
+    agent_id = agent.id
+
+    # Test retrieving empty execution history
+    response = await test_app_client.get(f"/v1/agents/{agent_id}/history")
+
+    assert response.status_code == 200
+    data = response.json()
+    result = data.get("result", {})
+
+    assert result.get("agent_id") == agent_id
+    assert result.get("total") == 0
+    assert result.get("count") == 0
+    assert len(result.get("history", [])) == 0
