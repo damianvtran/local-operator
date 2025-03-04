@@ -139,6 +139,18 @@ class Agent(BaseModel):
         "",
         description="The model to use for the agent. Defaults to ''.",
     )
+    description: str = Field(
+        "",
+        description="A description of the agent. Defaults to ''.",
+    )
+    last_message: str = Field(
+        "",
+        description="The last message sent to the agent. Defaults to ''.",
+    )
+    last_message_datetime: datetime = Field(
+        ...,
+        description="The date and time of the last message sent to the agent.",
+    )
 
 
 class AgentCreate(BaseModel):
@@ -157,6 +169,10 @@ class AgentCreate(BaseModel):
     model: str | None = Field(
         None,
         description="The model to use for the agent. Defaults to 'openai/gpt-4o-mini'.",
+    )
+    description: str | None = Field(
+        None,
+        description="A description of the agent. Defaults to ''.",
     )
 
 

@@ -271,11 +271,14 @@
                       {
                         "id": "agent123",
                         "name": "Example Agent",
-                        "created_date": "2024-01-01T00:00:00Z",
+                        "created_date": "2024-01-01T00:00:00",
                         "version": "0.2.16",
                         "security_prompt": "Example security prompt",
                         "hosting": "openrouter",
-                        "model": "openai/gpt-4o-mini"
+                        "model": "openai/gpt-4o-mini",
+                        "description": "An example agent",
+                        "last_message": "Hello, how can I help?",
+                        "last_message_datetime": "2024-01-01T12:00:00"
                       }
                     ]
                   }
@@ -316,7 +319,8 @@
                     "name": "New Agent",
                     "security_prompt": "Example security prompt",
                     "hosting": "openrouter",
-                    "model": "openai/gpt-4o-mini"
+                    "model": "openai/gpt-4o-mini",
+                    "description": "A helpful assistant"
                   }
                 }
               }
@@ -354,11 +358,14 @@
                   "result": {
                     "id": "agent123",
                     "name": "New Agent",
-                    "created_date": "2024-01-01T00:00:00Z",
+                    "created_date": "2024-01-01T00:00:00",
                     "version": "0.2.16",
                     "security_prompt": "Example security prompt",
                     "hosting": "openrouter",
-                    "model": "openai/gpt-4o-mini"
+                    "model": "openai/gpt-4o-mini",
+                    "description": "A helpful assistant",
+                    "last_message": "",
+                    "last_message_datetime": "2024-01-01T00:00:00"
                   }
                 }
               }
@@ -405,11 +412,14 @@
                   "result": {
                     "id": "agent123",
                     "name": "Example Agent",
-                    "created_date": "2024-01-01T00:00:00Z",
+                    "created_date": "2024-01-01T00:00:00",
                     "version": "0.2.16",
                     "security_prompt": "Example security prompt",
                     "hosting": "openrouter",
-                    "model": "openai/gpt-4o-mini"
+                    "model": "openai/gpt-4o-mini",
+                    "description": "An example agent",
+                    "last_message": "Hello, how can I help?",
+                    "last_message_datetime": "2024-01-01T12:00:00"
                   }
                 }
               }
@@ -464,7 +474,8 @@
                     "name": "Updated Agent Name",
                     "security_prompt": "Updated security prompt",
                     "hosting": "openrouter",
-                    "model": "openai/gpt-4o-mini"
+                    "model": "openai/gpt-4o-mini",
+                    "description": "Updated description"
                   }
                 }
               }
@@ -476,18 +487,23 @@
             "description": "Agent updated successfully",
             "content": {
               "application/json": {
-                "schema": {},
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse"
+                },
                 "example": {
                   "status": 200,
                   "message": "Agent updated successfully",
                   "result": {
                     "id": "agent123",
                     "name": "Updated Agent Name",
-                    "created_date": "2024-01-01T00:00:00Z",
+                    "created_date": "2024-01-01T00:00:00",
                     "version": "0.2.16",
                     "security_prompt": "Updated security prompt",
                     "hosting": "openrouter",
-                    "model": "openai/gpt-4o-mini"
+                    "model": "openai/gpt-4o-mini",
+                    "description": "Updated description",
+                    "last_message": "Hello, how can I help?",
+                    "last_message_datetime": "2024-01-01T12:00:00"
                   }
                 }
               }
@@ -533,7 +549,9 @@
             "description": "Agent deleted successfully",
             "content": {
               "application/json": {
-                "schema": {},
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse"
+                },
                 "example": {
                   "status": 200,
                   "message": "Agent deleted successfully",
@@ -589,22 +607,22 @@
                 },
                 "example": {
                   "agent_id": "agent123",
-                  "last_message_datetime": "2023-01-01T12:00:00Z",
-                  "first_message_datetime": "2023-01-01T11:00:00Z",
+                  "last_message_datetime": "2023-01-01T12:00:00",
+                  "first_message_datetime": "2023-01-01T11:00:00",
                   "messages": [
                     {
                       "role": "system",
                       "content": "You are a helpful assistant",
                       "should_summarize": false,
                       "summarized": false,
-                      "timestamp": "2023-01-01T11:00:00Z"
+                      "timestamp": "2023-01-01T11:00:00"
                     },
                     {
                       "role": "user",
                       "content": "Hello, how are you?",
                       "should_summarize": true,
                       "summarized": false,
-                      "timestamp": "2023-01-01T11:00:00Z"
+                      "timestamp": "2023-01-01T11:00:00"
                     }
                   ]
                 }
@@ -1028,6 +1046,18 @@
             ],
             "title": "Model",
             "description": "The model to use for the agent. Defaults to 'openai/gpt-4o-mini'."
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description",
+            "description": "A description of the agent. Defaults to ''."
           }
         },
         "type": "object",
@@ -1123,6 +1153,18 @@
             ],
             "title": "Model",
             "description": "The model to use for the agent. Defaults to 'openai/gpt-4o-mini'."
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description",
+            "description": "A description of the agent.  Defaults to ''."
           }
         },
         "type": "object",
