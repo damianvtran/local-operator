@@ -3,6 +3,19 @@ import pytest
 from local_operator.server.app import app
 
 
+# Test that the CORS middleware is properly configured
+@pytest.mark.asyncio
+async def test_cors_headers(test_app_client):
+    """Test that CORS headers are properly set in the response."""
+    # Make a request with an Origin header to simulate a cross-origin request
+    response = await test_app_client.get("/v1/agents", headers={"Origin": "http://localhost:3000"})
+
+    # Verify that the CORS headers are present in the response
+    assert response.status_code == 200
+    assert response.headers.get("access-control-allow-origin") == "*"
+    assert response.headers.get("access-control-allow-credentials") == "true"
+
+
 # Test that the app state is properly initialized using the test_app_client fixture
 @pytest.mark.asyncio
 async def test_app_state_initialization(test_app_client):
