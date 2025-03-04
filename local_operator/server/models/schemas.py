@@ -186,3 +186,18 @@ class AgentListResult(BaseModel):
     page: int = Field(..., description="Current page number")
     per_page: int = Field(..., description="Number of agents per page")
     agents: List[Agent] = Field(..., description="List of agents")
+
+
+class AgentGetConversationResult(BaseModel):
+    """Schema for getting an agent conversation."""
+
+    agent_id: str = Field(..., description="ID of the agent involved in the conversation")
+    last_message_datetime: datetime = Field(
+        ..., description="Date of the last message in the conversation"
+    )
+    first_message_datetime: datetime = Field(
+        ..., description="Date of the first message in the conversation"
+    )
+    messages: List[ConversationRecord] = Field(
+        default_factory=list, description="List of messages in the conversation"
+    )

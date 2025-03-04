@@ -483,6 +483,9 @@ class LocalCodeExecutor:
 
         The method updates self.conversation_history in-place.
         """
+        if not new_record.timestamp:
+            new_record.timestamp = datetime.now()
+
         self.conversation_history.append(new_record)
         self._limit_conversation_history()
 
@@ -1722,7 +1725,7 @@ class LocalCodeExecutor:
 
     def _limit_conversation_history(self) -> None:
         """Limit the conversation history to the maximum number of messages."""
-        if len(self.conversation_history) > self.max_conversation_history:
+        if len(self.conversation_history) - 1 > self.max_conversation_history:
             # Keep the first message (system prompt) and the most recent messages
             self.conversation_history = [
                 self.conversation_history[0],
@@ -1731,7 +1734,7 @@ class LocalCodeExecutor:
                     content="[Some conversation history has been truncated for brevity]",
                     should_summarize=False,
                 ),
-            ] + self.conversation_history[-self.max_conversation_history + 1 :]
+            ] + self.conversation_history[-self.max_conversation_history :]
 
     async def _summarize_conversation_step(self, msg: ConversationRecord) -> str:
         """

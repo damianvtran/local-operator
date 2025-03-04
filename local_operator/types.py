@@ -1,5 +1,6 @@
 """Types module containing enums and type definitions used throughout the local-operator package."""
 
+from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -67,6 +68,7 @@ class ConversationRecord(BaseModel):
     ephemeral: Optional[bool] = False
     summarized: Optional[bool] = False
     is_system_prompt: Optional[bool] = False
+    timestamp: Optional[datetime] = None
 
     def dict(self, *args, **kwargs) -> Dict[str, Any]:
         """Convert the conversation record to a dictionary format compatible with LangChain.
@@ -81,6 +83,7 @@ class ConversationRecord(BaseModel):
             "ephemeral": str(self.ephemeral),
             "summarized": str(self.summarized),
             "is_system_prompt": str(self.is_system_prompt),
+            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
         }
 
     def to_dict(self) -> Dict[str, Any]:
@@ -96,6 +99,7 @@ class ConversationRecord(BaseModel):
             "ephemeral": str(self.ephemeral),
             "summarized": str(self.summarized),
             "is_system_prompt": str(self.is_system_prompt),
+            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
         }
 
     @classmethod
@@ -115,6 +119,11 @@ class ConversationRecord(BaseModel):
             ephemeral=data.get("ephemeral", "false").lower() == "true",
             summarized=data.get("summarized", "false").lower() == "true",
             is_system_prompt=data.get("is_system_prompt", "false").lower() == "true",
+            timestamp=(
+                datetime.fromisoformat(data.get("timestamp", None))
+                if data.get("timestamp")
+                else None
+            ),
         )
 
 
