@@ -16,8 +16,10 @@ from pydantic import ValidationError
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.server.dependencies import get_agent_registry
 from local_operator.server.models.schemas import (
+    Agent,
     AgentCreate,
     AgentGetConversationResult,
+    AgentListResult,
     AgentUpdate,
     CRUDResponse,
 )
@@ -48,11 +50,14 @@ logger = logging.getLogger("local_operator.server.routes.agents")
                                     {
                                         "id": "agent123",
                                         "name": "Example Agent",
-                                        "created_date": "2024-01-01T00:00:00Z",
+                                        "created_date": "2024-01-01T00:00:00",
                                         "version": "0.2.16",
                                         "security_prompt": "Example security prompt",
                                         "hosting": "openrouter",
                                         "model": "openai/gpt-4o-mini",
+                                        "description": "An example agent",
+                                        "last_message": "Hello, how can I help?",
+                                        "last_message_datetime": "2024-01-01T12:00:00",
                                     }
                                 ],
                             },
@@ -85,15 +90,17 @@ async def list_agents(
         agent.model_dump() if hasattr(agent, "model_dump") else agent for agent in paginated
     ]
 
+    result = AgentListResult(
+        total=total,
+        page=page,
+        per_page=per_page,
+        agents=[Agent.model_validate(agent) for agent in agents_serialized],
+    )
+
     return CRUDResponse(
         status=200,
         message="Agents retrieved successfully",
-        result={
-            "total": total,
-            "page": page,
-            "per_page": per_page,
-            "agents": agents_serialized,
-        },
+        result=result.model_dump(),
     )
 
 
@@ -114,6 +121,7 @@ async def list_agents(
                                 "security_prompt": "Example security prompt",
                                 "hosting": "openrouter",
                                 "model": "openai/gpt-4o-mini",
+                                "description": "A helpful assistant",
                             },
                         }
                     }
@@ -131,11 +139,14 @@ async def list_agents(
                             "result": {
                                 "id": "agent123",
                                 "name": "New Agent",
-                                "created_date": "2024-01-01T00:00:00Z",
+                                "created_date": "2024-01-01T00:00:00",
                                 "version": "0.2.16",
                                 "security_prompt": "Example security prompt",
                                 "hosting": "openrouter",
                                 "model": "openai/gpt-4o-mini",
+                                "description": "A helpful assistant",
+                                "last_message": "",
+                                "last_message_datetime": "2024-01-01T00:00:00",
                             },
                         }
                     }
@@ -189,11 +200,14 @@ async def create_agent(
                             "result": {
                                 "id": "agent123",
                                 "name": "Example Agent",
-                                "created_date": "2024-01-01T00:00:00Z",
+                                "created_date": "2024-01-01T00:00:00",
                                 "version": "0.2.16",
                                 "security_prompt": "Example security prompt",
                                 "hosting": "openrouter",
                                 "model": "openai/gpt-4o-mini",
+                                "description": "An example agent",
+                                "last_message": "Hello, how can I help?",
+                                "last_message_datetime": "2024-01-01T12:00:00",
                             },
                         }
                     }
@@ -232,7 +246,7 @@ async def get_agent(
 
 @router.patch(
     "/v1/agents/{agent_id}",
-    response_model=None,
+    response_model=CRUDResponse,
     summary="Update an agent",
     description="Update an existing agent with new details. Only provided fields will be updated.",
     openapi_extra={
@@ -247,6 +261,7 @@ async def get_agent(
                                 "security_prompt": "Updated security prompt",
                                 "hosting": "openrouter",
                                 "model": "openai/gpt-4o-mini",
+                                "description": "Updated description",
                             },
                         }
                     }
@@ -264,11 +279,14 @@ async def get_agent(
                             "result": {
                                 "id": "agent123",
                                 "name": "Updated Agent Name",
-                                "created_date": "2024-01-01T00:00:00Z",
+                                "created_date": "2024-01-01T00:00:00",
                                 "version": "0.2.16",
                                 "security_prompt": "Updated security prompt",
                                 "hosting": "openrouter",
                                 "model": "openai/gpt-4o-mini",
+                                "description": "Updated description",
+                                "last_message": "Hello, how can I help?",
+                                "last_message_datetime": "2024-01-01T12:00:00",
                             },
                         }
                     }
@@ -309,7 +327,7 @@ async def update_agent(
 
 @router.delete(
     "/v1/agents/{agent_id}",
-    response_model=None,
+    response_model=CRUDResponse,
     summary="Delete an agent",
     description="Delete an existing agent by its ID.",
     openapi_extra={
@@ -365,22 +383,22 @@ async def delete_agent(
                     "application/json": {
                         "example": {
                             "agent_id": "agent123",
-                            "last_message_datetime": "2023-01-01T12:00:00Z",
-                            "first_message_datetime": "2023-01-01T11:00:00Z",
+                            "last_message_datetime": "2023-01-01T12:00:00",
+                            "first_message_datetime": "2023-01-01T11:00:00",
                             "messages": [
                                 {
                                     "role": "system",
                                     "content": "You are a helpful assistant",
                                     "should_summarize": False,
                                     "summarized": False,
-                                    "timestamp": "2023-01-01T11:00:00Z",
+                                    "timestamp": "2023-01-01T11:00:00",
                                 },
                                 {
                                     "role": "user",
                                     "content": "Hello, how are you?",
                                     "should_summarize": True,
                                     "summarized": False,
-                                    "timestamp": "2023-01-01T11:00:00Z",
+                                    "timestamp": "2023-01-01T11:00:00",
                                 },
                             ],
                         }
