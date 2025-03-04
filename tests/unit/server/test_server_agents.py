@@ -170,7 +170,11 @@ async def test_delete_agent_not_found(test_app_client, dummy_registry: AgentRegi
 async def test_create_agent_success(dummy_registry: AgentRegistry):
     """Test creating a new agent."""
     create_payload = AgentCreate(
-        name="New Test Agent", security_prompt="Test Security", hosting="openai", model="gpt-4"
+        name="New Test Agent",
+        security_prompt="Test Security",
+        hosting="openai",
+        model="gpt-4",
+        description="",
     )
 
     transport = ASGITransport(app=app)
@@ -193,7 +197,11 @@ async def test_create_agent_success(dummy_registry: AgentRegistry):
 async def test_create_agent_invalid_data(dummy_registry: AgentRegistry):
     """Test creating an agent with invalid data."""
     invalid_payload = AgentCreate(
-        name="", security_prompt="", hosting="", model=""
+        name="",
+        security_prompt="",
+        hosting="",
+        model="",
+        description="",
     )  # Invalid empty name
 
     transport = ASGITransport(app=app)

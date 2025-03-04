@@ -75,6 +75,8 @@ async def test_chat_sync_with_agent_success(
             security_prompt="Test Security",
             hosting="openai",
             model="gpt-4",
+            description="",
+            last_message="",
         )
     )
     agent_id = agent.id
