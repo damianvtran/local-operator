@@ -240,6 +240,9 @@ def mock_job_manager():
     manager.cancel_job = AsyncMock()
     manager.cleanup_old_jobs = AsyncMock()
     manager.get_job_summary = MagicMock()
+    manager.create_job = AsyncMock()
+    manager.register_task = AsyncMock()
+    manager.update_job_status = AsyncMock()
 
     app.state.job_manager = manager
     yield manager

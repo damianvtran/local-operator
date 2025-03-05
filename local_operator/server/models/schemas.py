@@ -11,6 +11,7 @@ from typing import Generic, List, Optional, TypeVar
 from pydantic import BaseModel, Field
 
 # AgentEditFields will be used in the routes module
+from local_operator.jobs import JobResult, JobStatus
 from local_operator.types import CodeExecutionResult, ConversationRecord
 
 
@@ -234,3 +235,33 @@ class AgentExecutionHistoryResult(BaseModel):
     per_page: int = Field(..., description="Number of messages per page")
     total: int = Field(..., description="Total number of messages in the execution history")
     count: int = Field(..., description="Number of messages in the current page")
+
+
+class JobResultSchema(BaseModel):
+    """Schema for job result data.
+
+    Attributes:
+        id: Unique identifier for the job
+        agent_id: Optional ID of the agent associated with the job
+        status: Current status of the job
+        prompt: The prompt that was submitted for processing
+        model: The model used for processing
+        hosting: The hosting service used
+        created_at: Timestamp when the job was created
+        started_at: Optional timestamp when the job processing started
+        completed_at: Optional timestamp when the job completed
+        result: Optional result data containing response, context, and stats
+    """
+
+    id: str = Field(..., description="Unique identifier for the job")
+    agent_id: Optional[str] = Field(None, description="ID of the agent associated with the job")
+    status: JobStatus = Field(..., description="Current status of the job")
+    prompt: str = Field(..., description="The prompt that was submitted for processing")
+    model: str = Field(..., description="The model used for processing")
+    hosting: str = Field(..., description="The hosting service used")
+    created_at: float = Field(..., description="Timestamp when the job was created")
+    started_at: Optional[float] = Field(None, description="Timestamp when job processing started")
+    completed_at: Optional[float] = Field(None, description="Timestamp when job completed")
+    result: Optional[JobResult] = Field(
+        None, description="Result data containing response, context, and stats"
+    )
