@@ -10,6 +10,7 @@ from local_operator.agents import AgentConversation, AgentRegistry
 from local_operator.clients.serpapi import SerpApiClient
 from local_operator.clients.tavily import TavilyClient
 from local_operator.config import ConfigManager
+from local_operator.console import VerbosityLevel
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
 from local_operator.model.configure import configure_model
@@ -122,6 +123,7 @@ def create_operator(
         max_learnings_history=config_manager.get_config_value("max_learnings_history", 50),
         can_prompt_user=False,
         agent=current_agent,
+        verbosity_level=VerbosityLevel.QUIET,
     )
 
     operator = Operator(
@@ -134,6 +136,7 @@ def create_operator(
         current_agent=current_agent,
         training_mode=persist_conversation,
         auto_save_conversation=False,
+        verbosity_level=VerbosityLevel.QUIET,
     )
 
     tool_registry = build_tool_registry(

@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from local_operator.agents import AgentData, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.console import (
+    VerbosityLevel,
     format_agent_output,
     print_cli_banner,
     spinner_context,
@@ -83,6 +84,7 @@ class Operator:
         current_agent: AgentData | None,
         training_mode: bool,
         auto_save_conversation: bool = False,
+        verbosity_level: VerbosityLevel = VerbosityLevel.VERBOSE,
     ):
         """Initialize the Operator with required components.
 
@@ -102,6 +104,7 @@ class Operator:
                 resetting it after each session.
             auto_save_conversation (bool): Whether to automatically save the conversation
                 history to the agent's directory after each completed task.
+            verbosity_level (VerbosityLevel): The verbosity level to use for the operator.
 
         The Operator class serves as the main interface for interacting with language models,
         managing configuration, credentials, and code execution. It handles both CLI and
@@ -117,6 +120,7 @@ class Operator:
         self.current_agent = current_agent
         self.training_mode = training_mode
         self.auto_save_conversation = auto_save_conversation
+        self.verbosity_level = verbosity_level
 
         if self.type == OperatorType.CLI:
             self._load_input_history()
@@ -131,10 +135,12 @@ class Operator:
                 # executor is not processing a response
                 signal.default_int_handler(signum, frame)
             self.executor.interrupted = True
-            print(
-                "\033[33m⚠️  Received interrupt signal, execution will"
-                " stop after current step\033[0m"
-            )
+
+            if self.verbosity_level >= VerbosityLevel.INFO:
+                print(
+                    "\033[33m⚠️  Received interrupt signal, execution will"
+                    " stop after current step\033[0m"
+                )
 
         signal.signal(signal.SIGINT, handle_interrupt)
 
@@ -322,7 +328,10 @@ class Operator:
         self.executor_is_processing = True
         self.executor.update_ephemeral_messages()
 
-        async with spinner_context("Generating plan"):
+        async with spinner_context(
+            "Generating plan",
+            verbosity_level=self.verbosity_level,
+        ):
             plan = await self.generate_plan()
 
             if plan:
@@ -342,7 +351,10 @@ class Operator:
             # Add environment details, etc.
             self.executor.update_ephemeral_messages()
 
-            async with spinner_context("Generating response"):
+            async with spinner_context(
+                "Generating response",
+                verbosity_level=self.verbosity_level,
+            ):
                 response = await self.executor.invoke_model(self.executor.conversation_history)
 
             response_content = (
@@ -397,8 +409,12 @@ class Operator:
                     )
                 except Exception as e:
                     error_str = str(e)
-                    print("\n\033[1;31m✗ Error encountered while auto-saving conversation:\033[0m")
-                    print(f"\033[1;36m│ Error Details:\033[0m\n{error_str}")
+
+                    if self.verbosity_level >= VerbosityLevel.INFO:
+                        print(
+                            "\n\033[1;31m✗ Error encountered while auto-saving conversation:\033[0m"
+                        )
+                        print(f"\033[1;36m│ Error Details:\033[0m\n{error_str}")
 
             # Save the conversation history if an agent is being used and training mode is enabled.
             # Save on each step to ensure the conversation history is up to date for
@@ -508,7 +524,11 @@ class Operator:
                 break
 
             # Print the last assistant message if the agent is asking for user input
-            if response_json and self._agent_requires_user_input(response_json):
+            if (
+                response_json
+                and self._agent_requires_user_input(response_json)
+                and self.verbosity_level >= VerbosityLevel.QUIET
+            ):
                 response_content = response_json.response
                 print("\n\033[1;36m╭─ Agent Question Requires Input ────────────────\033[0m")
                 print(f"\033[1;36m│\033[0m {response_content}")

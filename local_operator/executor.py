@@ -21,6 +21,7 @@ from tiktoken import encoding_for_model
 from local_operator.agents import AgentData
 from local_operator.console import (
     ExecutionSection,
+    VerbosityLevel,
     condense_logging,
     format_agent_output,
     format_error_output,
@@ -426,6 +427,7 @@ class LocalCodeExecutor:
         conversation_history: List[ConversationRecord] = [],
         agent: AgentData | None = None,
         max_learnings_history: int = 50,
+        verbosity_level: VerbosityLevel = VerbosityLevel.VERBOSE,
     ):
         """Initialize the LocalCodeExecutor with a language model.
 
@@ -444,6 +446,8 @@ class LocalCodeExecutor:
             message records tracking the conversation.
             agent (AgentData | None): The agent data for the current conversation.
             max_learnings_history (int): The maximum number of learnings to keep in history.
+            verbosity_level (ExecutorVerbosityLevel): The level of detail to output
+            from the executor.
         """
         self.context = {}
         self.model_configuration = model_configuration
@@ -458,6 +462,7 @@ class LocalCodeExecutor:
         self.current_plan = None
         self.max_learnings_history = max_learnings_history
         self.code_history = []
+        self.verbosity_level = verbosity_level
 
         self.reset_step_counter()
 
@@ -972,10 +977,11 @@ class LocalCodeExecutor:
                 status=ProcessResponseStatus.CONFIRMATION_REQUIRED,
             )
         elif safety_result == ConfirmSafetyResult.OVERRIDE:
-            print(
-                "\n\033[1;33m⚠️  Warning: Code safety override applied based on user's security"
-                " prompt\033[0m\n"
-            )
+            if self.verbosity_level >= VerbosityLevel.INFO:
+                print(
+                    "\n\033[1;33m⚠️  Warning: Code safety override applied based on user's security"
+                    " prompt\033[0m\n"
+                )
 
         current_code = code
         final_error: Exception | None = None
@@ -1358,7 +1364,8 @@ class LocalCodeExecutor:
         """
         # Phase 1: Check for interruption
         if self.interrupted:
-            print_task_interrupted()
+            print_task_interrupted(self.verbosity_level)
+
             self.append_to_history(
                 ConversationRecord(
                     role=ConversationRole.USER,
@@ -1379,7 +1386,9 @@ class LocalCodeExecutor:
 
         # Phase 2: Display agent response
         formatted_response = format_agent_output(plain_text_response)
-        print_agent_response(self.step_counter, formatted_response)
+
+        print_agent_response(self.step_counter, formatted_response, self.verbosity_level)
+
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.ASSISTANT,
@@ -1435,11 +1444,18 @@ class LocalCodeExecutor:
             )
 
         print_execution_section(
-            ExecutionSection.HEADER, step=self.step_counter, action=response.action
+            ExecutionSection.HEADER,
+            step=self.step_counter,
+            action=response.action,
+            verbosity_level=self.verbosity_level,
         )
+
         execution_result = None
 
-        async with spinner_context(f"Executing {str(response.action).lower()}"):
+        async with spinner_context(
+            f"Executing {str(response.action).lower()}",
+            verbosity_level=self.verbosity_level,
+        ):
             try:
                 if response.action == ActionType.WRITE:
                     file_path = response.file_path
@@ -1450,6 +1466,7 @@ class LocalCodeExecutor:
                             file_path=file_path,
                             content=content,
                             action=response.action,
+                            verbosity_level=self.verbosity_level,
                         )
 
                         execution_result = await self.write_file(file_path, content)
@@ -1457,6 +1474,7 @@ class LocalCodeExecutor:
                             ExecutionSection.RESULT,
                             content=execution_result.formatted_print,
                             action=response.action,
+                            verbosity_level=self.verbosity_level,
                         )
                     else:
                         raise ValueError("File path is required for WRITE action")
@@ -1470,6 +1488,7 @@ class LocalCodeExecutor:
                             file_path=file_path,
                             replacements=replacements,
                             action=response.action,
+                            verbosity_level=self.verbosity_level,
                         )
 
                         execution_result = await self.edit_file(file_path, replacements)
@@ -1478,6 +1497,7 @@ class LocalCodeExecutor:
                             ExecutionSection.RESULT,
                             content=execution_result.formatted_print,
                             action=response.action,
+                            verbosity_level=self.verbosity_level,
                         )
                     else:
                         raise ValueError("File path and replacements are required for EDIT action")
@@ -1489,6 +1509,7 @@ class LocalCodeExecutor:
                             ExecutionSection.READ,
                             file_path=file_path,
                             action=response.action,
+                            verbosity_level=self.verbosity_level,
                         )
                         execution_result = await self.read_file(file_path)
                     else:
@@ -1498,7 +1519,10 @@ class LocalCodeExecutor:
                     code_block = response.code
                     if code_block:
                         print_execution_section(
-                            ExecutionSection.CODE, content=code_block, action=response.action
+                            ExecutionSection.CODE,
+                            content=code_block,
+                            action=response.action,
+                            verbosity_level=self.verbosity_level,
                         )
 
                         execution_result = await self.execute_code(code_block)
@@ -1513,12 +1537,14 @@ class LocalCodeExecutor:
                             ExecutionSection.RESULT,
                             content=execution_result.formatted_print,
                             action=response.action,
+                            verbosity_level=self.verbosity_level,
                         )
                     elif response.action == ActionType.CODE:
                         raise ValueError('"code" field is required for CODE actions')
 
             except Exception as e:
-                log_action_error(e, str(response.action))
+                log_action_error(e, str(response.action), self.verbosity_level)
+
                 self.append_to_history(
                     ConversationRecord(
                         role=ConversationRole.SYSTEM,
@@ -1531,6 +1557,7 @@ class LocalCodeExecutor:
             self.add_to_code_history(execution_result, response)
 
         token_metrics = self.get_token_metrics()
+
         print_execution_section(
             ExecutionSection.TOKEN_USAGE,
             data={
@@ -1539,16 +1566,26 @@ class LocalCodeExecutor:
                 "cost": token_metrics.total_cost,
             },
             action=response.action,
+            verbosity_level=self.verbosity_level,
         )
 
-        print_execution_section(ExecutionSection.FOOTER, action=response.action)
+        print_execution_section(
+            ExecutionSection.FOOTER,
+            action=response.action,
+            verbosity_level=self.verbosity_level,
+        )
+
         self.step_counter += 1
 
         # Phase 4: Summarize old conversation steps
-        async with spinner_context("Summarizing conversation"):
+        async with spinner_context(
+            "Summarizing conversation",
+            verbosity_level=self.verbosity_level,
+        ):
             await self._summarize_old_steps()
 
-        print("\n")  # New line for next spinner
+        if self.verbosity_level >= VerbosityLevel.VERBOSE:
+            print("\n")  # New line for next spinner
 
         output = ProcessResponseOutput(
             status=ProcessResponseStatus.SUCCESS,
