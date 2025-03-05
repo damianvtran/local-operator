@@ -564,7 +564,7 @@ class LocalCodeExecutor:
         return self.token_metrics.total_prompt_tokens + self.token_metrics.total_completion_tokens
 
     def initialize_conversation_history(
-        self, new_conversation_history: List[ConversationRecord] = []
+        self, new_conversation_history: List[ConversationRecord] = [], overwrite: bool = False
     ) -> None:
         """Initialize the conversation history with a system prompt.
 
@@ -577,7 +577,12 @@ class LocalCodeExecutor:
             new_conversation_history (List[ConversationRecord], optional):
                 A list of existing conversation records to initialize the history with.
                 Defaults to an empty list.
+            overwrite (bool, optional): Whether to overwrite the existing conversation history.
+                Defaults to False.
         """
+        if overwrite:
+            self.conversation_history = []
+
         if len(self.conversation_history) != 0:
             raise ValueError("Conversation history already initialized")
 

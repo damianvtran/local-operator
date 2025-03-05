@@ -99,9 +99,7 @@ async def chat_endpoint(
             conversation_history = [
                 ConversationRecord(role=msg.role, content=msg.content) for msg in request.context
             ]
-            operator.executor.initialize_conversation_history(conversation_history)
-        else:
-            operator.executor.initialize_conversation_history()
+            operator.executor.initialize_conversation_history(conversation_history, overwrite=True)
 
         # Configure model options if provided
         if request.options:
@@ -333,9 +331,7 @@ async def chat_async_endpoint(
             conversation_history = [
                 ConversationRecord(role=msg.role, content=msg.content) for msg in request.context
             ]
-            operator.executor.initialize_conversation_history(conversation_history)
-        else:
-            operator.executor.initialize_conversation_history()
+            operator.executor.initialize_conversation_history(conversation_history, overwrite=True)
 
         # Configure model options if provided
         if request.options:
