@@ -58,16 +58,28 @@ class DummyExecutor:
         # Dummy processing; does nothing extra.
         return "processed successfully"
 
-    def initialize_conversation_history(self, conversation_history: List[ConversationRecord] = []):
+    def initialize_conversation_history(
+        self, new_conversation_history: List[ConversationRecord] = [], overwrite: bool = False
+    ):
+        if overwrite:
+            self.conversation_history = []
+
         if len(self.conversation_history) != 0:
             raise ExecutorInitError("Conversation history already initialized")
 
-        if len(conversation_history) == 0:
-            self.conversation_history = [
-                ConversationRecord(role=ConversationRole.SYSTEM, content="System prompt")
-            ]
+        history = [
+            ConversationRecord(
+                role=ConversationRole.SYSTEM, content="System prompt", is_system_prompt=True
+            )
+        ]
+
+        if len(new_conversation_history) == 0:
+            self.conversation_history = history
         else:
-            self.conversation_history = conversation_history
+            filtered_history = [
+                record for record in new_conversation_history if not record.is_system_prompt
+            ]
+            self.conversation_history = history + filtered_history
 
     def add_to_code_history(self, code_execution_result: CodeExecutionResult, response):
         self.code_history.append(code_execution_result)
