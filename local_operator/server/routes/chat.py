@@ -15,7 +15,7 @@ from tiktoken import encoding_for_model
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
-from local_operator.jobs import JobManager, JobStatus
+from local_operator.jobs import JobManager, JobResult, JobStatus
 from local_operator.server.dependencies import (
     get_agent_registry,
     get_config_manager,
@@ -23,6 +23,7 @@ from local_operator.server.dependencies import (
     get_job_manager,
 )
 from local_operator.server.models.schemas import (
+    AgentChatRequest,
     ChatRequest,
     ChatResponse,
     ChatStats,
@@ -51,10 +52,10 @@ logger = logging.getLogger("local_operator.server.routes.chat")
                             "summary": "Example Request",
                             "value": {
                                 "prompt": "Print 'Hello, world!'",
-                                "hosting": "openai",
-                                "model": "gpt-4o",
+                                "hosting": "openrouter",
+                                "model": "google/gemini-2.0-flash-001",
                                 "context": [],
-                                "options": {"temperature": 0.7, "top_p": 0.9},
+                                "options": {"temperature": 0.2, "top_p": 0.9},
                             },
                         }
                     }
@@ -168,10 +169,10 @@ async def chat_endpoint(
                             "summary": "Example Request with Agent",
                             "value": {
                                 "prompt": "How do I implement a binary search in Python?",
-                                "hosting": "openai",
-                                "model": "gpt-4o",
-                                "context": [],
-                                "options": {"temperature": 0.7, "top_p": 0.9},
+                                "hosting": "openrouter",
+                                "model": "google/gemini-2.0-flash-001",
+                                "options": {"temperature": 0.2, "top_p": 0.9},
+                                "persist_conversation": False,
                             },
                         }
                     }
@@ -181,7 +182,7 @@ async def chat_endpoint(
     },
 )
 async def chat_with_agent(
-    request: ChatRequest,
+    request: AgentChatRequest,
     credential_manager: CredentialManager = Depends(get_credential_manager),
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
@@ -209,17 +210,9 @@ async def chat_with_agent(
             config_manager,
             agent_registry,
             current_agent=agent_obj,
+            persist_conversation=request.persist_conversation,
         )
         model_instance = operator.executor.model_configuration.instance
-
-        if request.context and len(request.context) > 0:
-            # Override the default system prompt with the provided context
-            conversation_history = [
-                ConversationRecord(role=msg.role, content=msg.content) for msg in request.context
-            ]
-            operator.executor.initialize_conversation_history(conversation_history)
-        else:
-            operator.executor.initialize_conversation_history()
 
         # Configure model options if provided
         if request.options:
@@ -284,10 +277,10 @@ async def chat_with_agent(
                             "summary": "Example Async Request",
                             "value": {
                                 "prompt": "Print 'Hello, world!'",
-                                "hosting": "openai",
-                                "model": "gpt-4o",
+                                "hosting": "openrouter",
+                                "model": "google/gemini-2.0-flash-001",
                                 "context": [],
-                                "options": {"temperature": 0.7, "top_p": 0.9},
+                                "options": {"temperature": 0.2, "top_p": 0.9},
                             },
                         }
                     }
@@ -366,13 +359,13 @@ async def chat_async_endpoint(
                 response_json = await operator.handle_user_input(request.prompt)
 
                 # Create result with response and context
-                result = {
-                    "response": response_json.response if response_json is not None else "",
-                    "context": [
+                result = JobResult(
+                    response=response_json.response if response_json is not None else "",
+                    context=[
                         {"role": msg.role, "content": msg.content}
                         for msg in operator.executor.conversation_history
                     ],
-                }
+                )
 
                 await job_manager.update_job_status(job.id, JobStatus.COMPLETED, result)
             except Exception as e:
@@ -428,10 +421,10 @@ async def chat_async_endpoint(
                             "summary": "Example Async Agent Request",
                             "value": {
                                 "prompt": "How do I implement a binary search in Python?",
-                                "hosting": "openai",
-                                "model": "gpt-4o",
-                                "context": [],
-                                "options": {"temperature": 0.7, "top_p": 0.9},
+                                "hosting": "openrouter",
+                                "model": "google/gemini-2.0-flash-001",
+                                "options": {"temperature": 0.2, "top_p": 0.9},
+                                "persist_conversation": False,
                             },
                         }
                     }
@@ -441,7 +434,7 @@ async def chat_async_endpoint(
     },
 )
 async def chat_with_agent_async(
-    request: ChatRequest,
+    request: AgentChatRequest,
     credential_manager: CredentialManager = Depends(get_credential_manager),
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
@@ -488,20 +481,11 @@ async def chat_with_agent_async(
             config_manager=config_manager,
             agent_registry=agent_registry,
             current_agent=agent_obj,
+            persist_conversation=request.persist_conversation,
         )
 
         # Get the model instance for configuration
         model_instance = operator.executor.model_configuration.instance
-
-        # Initialize conversation history
-        if request.context and len(request.context) > 0:
-            # Override the default system prompt with the provided context
-            conversation_history = [
-                ConversationRecord(role=msg.role, content=msg.content) for msg in request.context
-            ]
-            operator.executor.initialize_conversation_history(conversation_history)
-        else:
-            operator.executor.initialize_conversation_history()
 
         # Configure model options if provided
         if request.options:
@@ -525,13 +509,13 @@ async def chat_with_agent_async(
                 response_json = await operator.handle_user_input(request.prompt)
 
                 # Create result with response and context
-                result = {
-                    "response": response_json.response if response_json is not None else "",
-                    "context": [
+                result = JobResult(
+                    response=response_json.response if response_json is not None else "",
+                    context=[
                         {"role": msg.role, "content": msg.content}
                         for msg in operator.executor.conversation_history
                     ],
-                }
+                )
 
                 await job_manager.update_job_status(job.id, JobStatus.COMPLETED, result)
             except Exception as e:
