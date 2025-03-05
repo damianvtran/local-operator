@@ -1353,6 +1353,93 @@
           }
         }
       }
+    },
+    "/v1/credentials": {
+      "get": {
+        "tags": [
+          "Credentials"
+        ],
+        "summary": "List credentials",
+        "description": "Retrieve a list of credential keys (without their values).",
+        "operationId": "list_credentials_v1_credentials_get",
+        "responses": {
+          "200": {
+            "description": "Credentials list retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_CredentialListResult_"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "Credentials retrieved successfully",
+                  "result": {
+                    "keys": [
+                      "OPENAI_API_KEY",
+                      "SERPAPI_API_KEY",
+                      "TAVILY_API_KEY"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Credentials"
+        ],
+        "summary": "Update a credential",
+        "description": "Update an existing credential or create a new one with the provided key and value.",
+        "operationId": "update_credential_v1_credentials_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CredentialUpdate"
+              },
+              "examples": {
+                "example": {
+                  "summary": "Update Credential Example",
+                  "value": {
+                    "key": "OPENAI_API_KEY",
+                    "value": "sk-abcdefghijklmnopqrstuvwxyz"
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Credential updated successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "Credential updated successfully",
+                  "result": {}
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1968,6 +2055,34 @@
         ],
         "title": "CRUDResponse[ConfigResponse]"
       },
+      "CRUDResponse_CredentialListResult_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CredentialListResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[CredentialListResult]"
+      },
       "CRUDResponse_JobResultSchema_": {
         "properties": {
           "status": {
@@ -2495,6 +2610,45 @@
         "title": "ConversationRole",
         "description": "Enum representing the different roles in a conversation with an AI model.\n\nUsed to track who sent each message in the conversation history.\nMaps to the standard roles used by LangChain message types."
       },
+      "CredentialListResult": {
+        "properties": {
+          "keys": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Keys",
+            "description": "List of credential keys"
+          }
+        },
+        "type": "object",
+        "required": [
+          "keys"
+        ],
+        "title": "CredentialListResult",
+        "description": "Result containing a list of credential keys.\n\nAttributes:\n    keys: List of credential keys"
+      },
+      "CredentialUpdate": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key",
+            "description": "The credential key to update"
+          },
+          "value": {
+            "type": "string",
+            "title": "Value",
+            "description": "The new value for the credential"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "value"
+        ],
+        "title": "CredentialUpdate",
+        "description": "Data for updating a credential.\n\nAttributes:\n    key: The credential key to update\n    value: The new value for the credential"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -2738,6 +2892,10 @@
     {
       "name": "Configuration",
       "description": "Configuration management endpoints"
+    },
+    {
+      "name": "Credentials",
+      "description": "Credential management endpoints"
     }
   ]
 }
