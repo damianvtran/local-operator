@@ -6,7 +6,7 @@ in the Local Operator API.
 """
 
 from datetime import datetime
-from typing import Generic, List, Optional, TypeVar
+from typing import Any, Dict, Generic, List, Optional, TypeVar
 
 from pydantic import BaseModel, Field
 
@@ -291,3 +291,45 @@ class AgentChatRequest(BaseModel):
     options: Optional[ChatOptions] = None
     persist_conversation: bool = False
     user_message_id: Optional[str] = None
+
+
+class ConfigUpdate(BaseModel):
+    """Data for updating configuration settings.
+
+    Attributes:
+        conversation_length: Number of conversation messages to retain
+        detail_length: Maximum length of detailed conversation history
+        max_learnings_history: Maximum number of learning entries to retain
+        hosting: AI model hosting provider
+        model_name: Name of the AI model to use
+        auto_save_conversation: Whether to automatically save the conversation
+    """
+
+    conversation_length: Optional[int] = Field(
+        None, description="Number of conversation messages to retain", ge=1
+    )
+    detail_length: Optional[int] = Field(
+        None, description="Maximum length of detailed conversation history", ge=1
+    )
+    max_learnings_history: Optional[int] = Field(
+        None, description="Maximum number of learning entries to retain", ge=1
+    )
+    hosting: Optional[str] = Field(None, description="AI model hosting provider")
+    model_name: Optional[str] = Field(None, description="Name of the AI model to use")
+    auto_save_conversation: Optional[bool] = Field(
+        None, description="Whether to automatically save the conversation"
+    )
+
+
+class ConfigResponse(BaseModel):
+    """Response containing configuration settings.
+
+    Attributes:
+        version: Configuration schema version for compatibility
+        metadata: Metadata about the configuration
+        values: Configuration settings
+    """
+
+    version: str = Field(..., description="Configuration schema version for compatibility")
+    metadata: Dict[str, Any] = Field(..., description="Metadata about the configuration")
+    values: Dict[str, Any] = Field(..., description="Configuration settings")
