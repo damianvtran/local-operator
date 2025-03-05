@@ -279,6 +279,9 @@ class AgentChatRequest(BaseModel):
         persist_conversation: Whether to persist the conversation history by
         continuously updating the agent's conversation history with each new message.
         Default: False
+        user_message_id: Optional ID of the user message to assign to the first user message
+            in the conversation.  This is used by the UI to prevent duplicate user
+            messages after the initial render.
     """
 
     hosting: str
@@ -287,3 +290,4 @@ class AgentChatRequest(BaseModel):
     stream: bool = False
     options: Optional[ChatOptions] = None
     persist_conversation: bool = False
+    user_message_id: Optional[str] = None

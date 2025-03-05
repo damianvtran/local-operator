@@ -425,6 +425,7 @@ async def chat_async_endpoint(
                                 "model": "google/gemini-2.0-flash-001",
                                 "options": {"temperature": 0.2, "top_p": 0.9},
                                 "persist_conversation": False,
+                                "user_message_id": "",
                             },
                         }
                     }
@@ -506,7 +507,9 @@ async def chat_with_agent_async(
         async def process_chat_job():
             try:
                 await job_manager.update_job_status(job.id, JobStatus.PROCESSING)
-                response_json = await operator.handle_user_input(request.prompt)
+                response_json = await operator.handle_user_input(
+                    request.prompt, request.user_message_id
+                )
 
                 # Create result with response and context
                 result = JobResult(

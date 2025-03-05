@@ -1,6 +1,7 @@
 import os
 import readline
 import signal
+import uuid
 from enum import Enum
 from pathlib import Path
 from typing import List
@@ -271,7 +272,9 @@ class Operator:
 
         return response_content
 
-    async def handle_user_input(self, user_input: str) -> ResponseJsonSchema | None:
+    async def handle_user_input(
+        self, user_input: str, user_message_id: str | None = None
+    ) -> ResponseJsonSchema | None:
         """Process user input and generate agent responses.
 
         This method handles the core interaction loop between the user and agent:
@@ -298,6 +301,7 @@ class Operator:
         )
         self.executor.add_to_code_history(
             CodeExecutionResult(
+                id=user_message_id if user_message_id else str(uuid.uuid4()),
                 stdout="",
                 stderr="",
                 logging="",

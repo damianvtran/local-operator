@@ -5,6 +5,7 @@ This module provides pytest fixtures for testing the FastAPI server components,
 including mock clients, executors, and dependencies needed for API testing.
 """
 
+import uuid
 from typing import List
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -23,8 +24,10 @@ from local_operator.model.registry import ModelInfo
 from local_operator.server.app import app
 from local_operator.types import (
     ActionType,
+    CodeExecutionResult,
     ConversationRecord,
     ConversationRole,
+    ProcessResponseStatus,
     ResponseJsonSchema,
 )
 
@@ -45,6 +48,7 @@ class DummyExecutor:
             api_key=None,
         )
         self.conversation_history = []
+        self.code_history = []
 
     async def invoke_model(self, conversation_history):
         # Simply return a dummy response content as if coming from the model.
@@ -65,6 +69,9 @@ class DummyExecutor:
         else:
             self.conversation_history = conversation_history
 
+    def add_to_code_history(self, code_execution_result: CodeExecutionResult, response):
+        self.code_history.append(code_execution_result)
+
 
 # Dummy Operator using a dummy executor
 class DummyOperator:
@@ -72,7 +79,7 @@ class DummyOperator:
         self.executor = executor
         self.current_agent = None
 
-    async def handle_user_input(self, prompt: str):
+    async def handle_user_input(self, prompt: str, user_message_id: str | None = None):
         dummy_response = ResponseJsonSchema(
             previous_step_success=True,
             previous_goal="",
@@ -95,6 +102,20 @@ class DummyOperator:
             ConversationRecord(
                 role=ConversationRole.ASSISTANT, content=dummy_response.model_dump_json()
             )
+        )
+        self.executor.add_to_code_history(
+            CodeExecutionResult(
+                id=user_message_id if user_message_id else str(uuid.uuid4()),
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message=prompt,
+                role=ConversationRole.USER,
+                status=ProcessResponseStatus.SUCCESS,
+            ),
+            None,
         )
 
         return dummy_response
