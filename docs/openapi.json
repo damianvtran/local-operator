@@ -85,14 +85,14 @@
         }
       }
     },
-    "/v1/chat/agents/{agent_id}/sync": {
+    "/v1/chat/agents/{agent_id}": {
       "post": {
         "tags": [
           "Chat"
         ],
         "summary": "Process chat request using a specific agent",
         "description": "Accepts a prompt and optional context/configuration, retrieves the specified agent from the registry, applies it to the operator and executor, and returns the model response and conversation history.",
-        "operationId": "chat_with_agent_v1_chat_agents__agent_id__sync_post",
+        "operationId": "chat_with_agent_v1_chat_agents__agent_id__post",
         "parameters": [
           {
             "name": "agent_id",
