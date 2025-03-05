@@ -257,7 +257,8 @@
                       "temperature": 0.2,
                       "top_p": 0.9
                     },
-                    "persist_conversation": false
+                    "persist_conversation": false,
+                    "user_message_id": ""
                   }
                 }
               }
@@ -1238,6 +1239,120 @@
           }
         }
       }
+    },
+    "/v1/config": {
+      "get": {
+        "tags": [
+          "Configuration"
+        ],
+        "summary": "Get configuration",
+        "description": "Retrieve the current configuration settings.",
+        "operationId": "get_config_v1_config_get",
+        "responses": {
+          "200": {
+            "description": "Configuration retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ConfigResponse_"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "Configuration retrieved successfully",
+                  "result": {
+                    "version": "0.2.16",
+                    "metadata": {
+                      "created_at": "2024-01-01T00:00:00",
+                      "last_modified": "2024-01-01T12:00:00",
+                      "description": "Local Operator configuration file"
+                    },
+                    "values": {
+                      "conversation_length": 100,
+                      "detail_length": 35,
+                      "max_learnings_history": 50,
+                      "hosting": "openrouter",
+                      "model_name": "openai/gpt-4o-mini",
+                      "auto_save_conversation": false
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Configuration"
+        ],
+        "summary": "Update configuration",
+        "description": "Update the configuration settings with new values.",
+        "operationId": "update_config_v1_config_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigUpdate"
+              },
+              "examples": {
+                "example": {
+                  "summary": "Update Configuration Example",
+                  "value": {
+                    "conversation_length": 150,
+                    "detail_length": 50,
+                    "hosting": "openrouter",
+                    "model_name": "openai/gpt-4o-mini",
+                    "auto_save_conversation": true
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Configuration updated successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ConfigResponse_"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "Configuration updated successfully",
+                  "result": {
+                    "version": "0.2.16",
+                    "metadata": {
+                      "created_at": "2024-01-01T00:00:00",
+                      "last_modified": "2024-01-01T12:00:00",
+                      "description": "Local Operator configuration file"
+                    },
+                    "values": {
+                      "conversation_length": 150,
+                      "detail_length": 50,
+                      "max_learnings_history": 50,
+                      "hosting": "openrouter",
+                      "model_name": "openai/gpt-4o-mini",
+                      "auto_save_conversation": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1346,6 +1461,17 @@
             "type": "boolean",
             "title": "Persist Conversation",
             "default": false
+          },
+          "user_message_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Message Id"
           }
         },
         "type": "object",
@@ -1355,7 +1481,7 @@
           "prompt"
         ],
         "title": "AgentChatRequest",
-        "description": "Request body for chat generation endpoint.\n\nAttributes:\n    hosting: Name of the hosting service to use for generation\n    model: Name of the model to use for generation\n    prompt: The prompt to generate a response for\n    stream: Whether to stream the response token by token. Default: False\n    options: Optional generation parameters to override defaults\n    persist_conversation: Whether to persist the conversation history by\n    continuously updating the agent's conversation history with each new message.\n    Default: False"
+        "description": "Request body for chat generation endpoint.\n\nAttributes:\n    hosting: Name of the hosting service to use for generation\n    model: Name of the model to use for generation\n    prompt: The prompt to generate a response for\n    stream: Whether to stream the response token by token. Default: False\n    options: Optional generation parameters to override defaults\n    persist_conversation: Whether to persist the conversation history by\n    continuously updating the agent's conversation history with each new message.\n    Default: False\n    user_message_id: Optional ID of the user message to assign to the first user message\n        in the conversation.  This is used by the UI to prevent duplicate user\n        messages after the initial render."
       },
       "AgentCreate": {
         "properties": {
@@ -1627,7 +1753,7 @@
               }
             ],
             "title": "Model",
-            "description": "The model to use for the agent. Defaults to 'openai/gpt-4o-mini'."
+            "description": "The model to use for the agent. Defaults to 'google/gemini-2.0-flash-001'."
           },
           "description": {
             "anyOf": [
@@ -1813,6 +1939,34 @@
           "message"
         ],
         "title": "CRUDResponse[ChatResponse]"
+      },
+      "CRUDResponse_ConfigResponse_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConfigResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[ConfigResponse]"
       },
       "CRUDResponse_JobResultSchema_": {
         "properties": {
@@ -2078,6 +2232,10 @@
       },
       "CodeExecutionResult": {
         "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
           "stdout": {
             "type": "string",
             "title": "Stdout"
@@ -2133,7 +2291,116 @@
           "status"
         ],
         "title": "CodeExecutionResult",
-        "description": "Represents the result of a code execution.\n\nAttributes:\n    stdout (str): The standard output from the code execution.\n    stderr (str): The standard error from the code execution.\n    logging (str): Any logging output generated during the code execution.\n    message (str): The message to display to the user about the code execution.\n    code (str): The code that was executed.\n    formatted_print (str): The formatted print output from the code execution.\n    role (ConversationRole): The role of the message sender (user/assistant/system)\n    status (ProcessResponseStatus): The status of the code execution\n    timestamp (datetime): The timestamp of the code execution"
+        "description": "Represents the result of a code execution.\n\nAttributes:\n    id (str): The unique identifier for the code execution\n    stdout (str): The standard output from the code execution.\n    stderr (str): The standard error from the code execution.\n    logging (str): Any logging output generated during the code execution.\n    message (str): The message to display to the user about the code execution.\n    code (str): The code that was executed.\n    formatted_print (str): The formatted print output from the code execution.\n    role (ConversationRole): The role of the message sender (user/assistant/system)\n    status (ProcessResponseStatus): The status of the code execution\n    timestamp (datetime): The timestamp of the code execution"
+      },
+      "ConfigResponse": {
+        "properties": {
+          "version": {
+            "type": "string",
+            "title": "Version",
+            "description": "Configuration schema version for compatibility"
+          },
+          "metadata": {
+            "type": "object",
+            "title": "Metadata",
+            "description": "Metadata about the configuration"
+          },
+          "values": {
+            "type": "object",
+            "title": "Values",
+            "description": "Configuration settings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "version",
+          "metadata",
+          "values"
+        ],
+        "title": "ConfigResponse",
+        "description": "Response containing configuration settings.\n\nAttributes:\n    version: Configuration schema version for compatibility\n    metadata: Metadata about the configuration\n    values: Configuration settings"
+      },
+      "ConfigUpdate": {
+        "properties": {
+          "conversation_length": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Length",
+            "description": "Number of conversation messages to retain"
+          },
+          "detail_length": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail Length",
+            "description": "Maximum length of detailed conversation history"
+          },
+          "max_learnings_history": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Learnings History",
+            "description": "Maximum number of learning entries to retain"
+          },
+          "hosting": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hosting",
+            "description": "AI model hosting provider"
+          },
+          "model_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Name",
+            "description": "Name of the AI model to use"
+          },
+          "auto_save_conversation": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auto Save Conversation",
+            "description": "Whether to automatically save the conversation"
+          }
+        },
+        "type": "object",
+        "title": "ConfigUpdate",
+        "description": "Data for updating configuration settings.\n\nAttributes:\n    conversation_length: Number of conversation messages to retain\n    detail_length: Maximum length of detailed conversation history\n    max_learnings_history: Maximum number of learning entries to retain\n    hosting: AI model hosting provider\n    model_name: Name of the AI model to use\n    auto_save_conversation: Whether to automatically save the conversation"
       },
       "ConversationRecord": {
         "properties": {
@@ -2467,6 +2734,10 @@
     {
       "name": "Jobs",
       "description": "Job management endpoints"
+    },
+    {
+      "name": "Configuration",
+      "description": "Configuration management endpoints"
     }
   ]
 }
