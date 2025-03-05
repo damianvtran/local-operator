@@ -136,6 +136,7 @@ def test_create_agent_from_conversation_with_user_messages(
     ]
     executor.code_history = [
         CodeExecutionResult(
+            id="test_code_execution_id",
             stdout="",
             stderr="",
             logging="",
@@ -154,6 +155,7 @@ def test_create_agent_from_conversation_with_user_messages(
     expected_history = conversation_history[:4]
     expected_execution_history = [
         CodeExecutionResult(
+            id="test_code_execution_id",
             stdout="",
             stderr="",
             logging="",
@@ -164,6 +166,7 @@ def test_create_agent_from_conversation_with_user_messages(
             status=ProcessResponseStatus.SUCCESS,
         )
     ]
+
     assert (
         saved_history.conversation == expected_history
     ), f"Expected conversation history {expected_history}, got {saved_history}"
