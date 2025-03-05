@@ -396,20 +396,22 @@ class Operator:
                     print("\n\033[1;31m✗ Error encountered while auto-saving conversation:\033[0m")
                     print(f"\033[1;36m│ Error Details:\033[0m\n{error_str}")
 
+            # Save the conversation history if an agent is being used and training mode is enabled.
+            # Save on each step to ensure the conversation history is up to date for
+            # server mode.
+            if self.training_mode and self.current_agent:
+                self.agent_registry.save_agent_conversation(
+                    self.current_agent.id,
+                    self.executor.conversation_history,
+                    self.executor.code_history,
+                )
+
             # Break out of the agent flow if the user cancels the code execution
             if (
                 result.status == ProcessResponseStatus.CANCELLED
                 or result.status == ProcessResponseStatus.INTERRUPTED
             ):
                 break
-
-        # Save the conversation history if an agent is being used and training mode is enabled
-        if self.training_mode and self.current_agent:
-            self.agent_registry.save_agent_conversation(
-                self.current_agent.id,
-                self.executor.conversation_history,
-                self.executor.code_history,
-            )
 
         if os.environ.get("LOCAL_OPERATOR_DEBUG") == "true":
             self.print_conversation_history()
