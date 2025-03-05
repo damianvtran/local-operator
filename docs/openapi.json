@@ -47,11 +47,11 @@
                   "summary": "Example Request",
                   "value": {
                     "prompt": "Print 'Hello, world!'",
-                    "hosting": "openai",
-                    "model": "gpt-4o",
+                    "hosting": "openrouter",
+                    "model": "google/gemini-2.0-flash-001",
                     "context": [],
                     "options": {
-                      "temperature": 0.7,
+                      "temperature": 0.2,
                       "top_p": 0.9
                     }
                   }
@@ -114,20 +114,20 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ChatRequest"
+                "$ref": "#/components/schemas/AgentChatRequest"
               },
               "examples": {
                 "example": {
                   "summary": "Example Request with Agent",
                   "value": {
                     "prompt": "How do I implement a binary search in Python?",
-                    "hosting": "openai",
-                    "model": "gpt-4o",
-                    "context": [],
+                    "hosting": "openrouter",
+                    "model": "google/gemini-2.0-flash-001",
                     "options": {
-                      "temperature": 0.7,
+                      "temperature": 0.2,
                       "top_p": 0.9
-                    }
+                    },
+                    "persist_conversation": false
                   }
                 }
               }
@@ -177,11 +177,11 @@
                   "summary": "Example Async Request",
                   "value": {
                     "prompt": "Print 'Hello, world!'",
-                    "hosting": "openai",
-                    "model": "gpt-4o",
+                    "hosting": "openrouter",
+                    "model": "google/gemini-2.0-flash-001",
                     "context": [],
                     "options": {
-                      "temperature": 0.7,
+                      "temperature": 0.2,
                       "top_p": 0.9
                     }
                   }
@@ -197,7 +197,80 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CRUDResponse_Dict_str__Any__"
+                  "$ref": "#/components/schemas/CRUDResponse_JobResultSchema_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/chat/agents/{agent_id}/async": {
+      "post": {
+        "tags": [
+          "Chat"
+        ],
+        "summary": "Process agent chat request asynchronously",
+        "description": "Accepts a prompt and optional context/configuration, retrieves the specified agent from the registry, starts an asynchronous job to process the request and returns a job ID.",
+        "operationId": "chat_with_agent_async_v1_chat_agents__agent_id__async_post",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "ID of the agent to use for the chat",
+              "examples": [
+                "agent123"
+              ],
+              "title": "Agent Id"
+            },
+            "description": "ID of the agent to use for the chat"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentChatRequest"
+              },
+              "examples": {
+                "example": {
+                  "summary": "Example Async Agent Request",
+                  "value": {
+                    "prompt": "How do I implement a binary search in Python?",
+                    "hosting": "openrouter",
+                    "model": "google/gemini-2.0-flash-001",
+                    "options": {
+                      "temperature": 0.2,
+                      "top_p": 0.9
+                    },
+                    "persist_conversation": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_JobResultSchema_"
                 }
               }
             }
@@ -1240,6 +1313,50 @@
         "title": "Agent",
         "description": "Representation of an Agent."
       },
+      "AgentChatRequest": {
+        "properties": {
+          "hosting": {
+            "type": "string",
+            "title": "Hosting"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model"
+          },
+          "prompt": {
+            "type": "string",
+            "title": "Prompt"
+          },
+          "stream": {
+            "type": "boolean",
+            "title": "Stream",
+            "default": false
+          },
+          "options": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChatOptions"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "persist_conversation": {
+            "type": "boolean",
+            "title": "Persist Conversation",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "hosting",
+          "model",
+          "prompt"
+        ],
+        "title": "AgentChatRequest",
+        "description": "Request body for chat generation endpoint.\n\nAttributes:\n    hosting: Name of the hosting service to use for generation\n    model: Name of the model to use for generation\n    prompt: The prompt to generate a response for\n    stream: Whether to stream the response token by token. Default: False\n    options: Optional generation parameters to override defaults\n    persist_conversation: Whether to persist the conversation history by\n    continuously updating the agent's conversation history with each new message.\n    Default: False"
+      },
       "AgentCreate": {
         "properties": {
           "name": {
@@ -1697,7 +1814,7 @@
         ],
         "title": "CRUDResponse[ChatResponse]"
       },
-      "CRUDResponse_Dict_str__Any__": {
+      "CRUDResponse_JobResultSchema_": {
         "properties": {
           "status": {
             "type": "integer",
@@ -1710,13 +1827,12 @@
           "result": {
             "anyOf": [
               {
-                "type": "object"
+                "$ref": "#/components/schemas/JobResultSchema"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Result"
+            ]
           }
         },
         "type": "object",
@@ -1724,7 +1840,7 @@
           "status",
           "message"
         ],
-        "title": "CRUDResponse[Dict[str, Any]]"
+        "title": "CRUDResponse[JobResultSchema]"
       },
       "CRUDResponse_str_": {
         "properties": {
@@ -2124,6 +2240,157 @@
         },
         "type": "object",
         "title": "HTTPValidationError"
+      },
+      "JobResult": {
+        "properties": {
+          "response": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response"
+          },
+          "context": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context"
+          },
+          "stats": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stats"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "title": "JobResult",
+        "description": "Model representing the result of a completed job."
+      },
+      "JobResultSchema": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id",
+            "description": "Unique identifier for the job"
+          },
+          "agent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Id",
+            "description": "ID of the agent associated with the job"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus",
+            "description": "Current status of the job"
+          },
+          "prompt": {
+            "type": "string",
+            "title": "Prompt",
+            "description": "The prompt that was submitted for processing"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model",
+            "description": "The model used for processing"
+          },
+          "hosting": {
+            "type": "string",
+            "title": "Hosting",
+            "description": "The hosting service used"
+          },
+          "created_at": {
+            "type": "number",
+            "title": "Created At",
+            "description": "Timestamp when the job was created"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At",
+            "description": "Timestamp when job processing started"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At",
+            "description": "Timestamp when job completed"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JobResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Result data containing response, context, and stats"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "prompt",
+          "model",
+          "hosting",
+          "created_at"
+        ],
+        "title": "JobResultSchema",
+        "description": "Schema for job result data.\n\nAttributes:\n    id: Unique identifier for the job\n    agent_id: Optional ID of the agent associated with the job\n    status: Current status of the job\n    prompt: The prompt that was submitted for processing\n    model: The model used for processing\n    hosting: The hosting service used\n    created_at: Timestamp when the job was created\n    started_at: Optional timestamp when the job processing started\n    completed_at: Optional timestamp when the job completed\n    result: Optional result data containing response, context, and stats"
       },
       "JobStatus": {
         "type": "string",
