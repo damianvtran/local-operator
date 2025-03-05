@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
 from local_operator.jobs import JobManager, JobStatus
 from local_operator.server.dependencies import get_job_manager
+from local_operator.server.models.schemas import CRUDResponse
 
 router = APIRouter(tags=["Jobs"])
 logger = logging.getLogger("local_operator.server.routes.jobs")
@@ -80,11 +81,11 @@ async def get_job_status(
 
         job_summary = job_manager.get_job_summary(job)
 
-        return {
-            "status": 200,
-            "message": "Job status retrieved",
-            "result": job_summary,
-        }
+        return CRUDResponse(
+            status=200,
+            message="Job status retrieved",
+            result=job_summary,
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail=f'Job with ID "{job_id}" not found')
     except HTTPException:
@@ -177,14 +178,14 @@ async def list_jobs(
         jobs = await job_manager.list_jobs(agent_id=agent_id, status=status)
         job_summaries = [job_manager.get_job_summary(job) for job in jobs]
 
-        return {
-            "status": 200,
-            "message": "Jobs retrieved successfully",
-            "result": {
+        return CRUDResponse(
+            status=200,
+            message="Jobs retrieved successfully",
+            result={
                 "jobs": job_summaries,
                 "count": len(job_summaries),
             },
-        }
+        )
     except Exception:
         logger.exception("Unexpected error while listing jobs")
         raise HTTPException(status_code=500, detail="Internal Server Error")
@@ -260,10 +261,10 @@ async def cancel_job(
                 detail=f"Job {job_id} cannot be cancelled (already completed or failed)",
             )
 
-        return {
-            "status": 200,
-            "message": f"Job {job_id} cancelled successfully",
-        }
+        return CRUDResponse(
+            status=200,
+            message=f"Job {job_id} cancelled successfully",
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail=f'Job with ID "{job_id}" not found')
     except HTTPException:
@@ -327,13 +328,13 @@ async def cleanup_jobs(
     """
     try:
         removed_count = await job_manager.cleanup_old_jobs(max_age_hours=max_age_hours)
-        return {
-            "status": 200,
-            "message": "Cleanup completed successfully",
-            "result": {
+        return CRUDResponse(
+            status=200,
+            message="Cleanup completed successfully",
+            result={
                 "removed_count": removed_count,
             },
-        }
+        )
     except Exception:
         logger.exception("Unexpected error during job cleanup")
         raise HTTPException(status_code=500, detail="Internal Server Error")
