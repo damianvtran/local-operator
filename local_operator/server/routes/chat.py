@@ -149,7 +149,7 @@ async def chat_endpoint(
 
 
 @router.post(
-    "/v1/chat/agents/{agent_id}/sync",
+    "/v1/chat/agents/{agent_id}",
     response_model=CRUDResponse[ChatResponse],
     summary="Process chat request using a specific agent",
     description=(
