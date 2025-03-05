@@ -12,7 +12,7 @@ import pytest
 
 from local_operator.agents import AgentEditFields
 from local_operator.jobs import JobStatus
-from local_operator.server.models.schemas import ChatRequest
+from local_operator.server.models.schemas import AgentChatRequest, ChatRequest
 from local_operator.types import ConversationRecord, ConversationRole
 
 
@@ -69,7 +69,6 @@ async def test_chat_sync_with_agent_success(
     mock_create_operator,
 ):
     """Test chat with a specific agent."""
-    from local_operator.agents import AgentEditFields
 
     # Create a test agent
     agent = dummy_registry.create_agent(
@@ -107,6 +106,86 @@ async def test_chat_sync_with_agent_success(
     assert stats.get("total_tokens") > 0
     assert stats.get("prompt_tokens") > 0
     assert stats.get("completion_tokens") > 0
+
+
+@pytest.mark.asyncio
+async def test_chat_with_agent_persist_conversation(
+    test_app_client,
+    dummy_executor,
+    dummy_registry,
+    mock_create_operator,
+):
+    """Test chat with a specific agent with conversation persistence across multiple requests."""
+    # Create a test agent
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="Test Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description="",
+            last_message="",
+        )
+    )
+    agent_id = agent.id
+
+    # First request
+    first_prompt = "Hello agent, how are you?"
+    first_payload = AgentChatRequest(
+        hosting="openai",
+        model="gpt-4",
+        prompt=first_prompt,
+        persist_conversation=True,
+    )
+
+    first_response = await test_app_client.post(
+        f"/v1/chat/agents/{agent_id}", json=first_payload.model_dump()
+    )
+
+    assert first_response.status_code == 200
+    first_data = first_response.json()
+    first_result = first_data.get("result")
+    assert first_result.get("response") == "dummy operator response"
+    first_conversation = first_result.get("context")
+    assert isinstance(first_conversation, list)
+
+    # Second request - should include history from first request
+    second_prompt = "Tell me more about yourself"
+    second_payload = AgentChatRequest(
+        hosting="openai",
+        model="gpt-4",
+        prompt=second_prompt,
+        persist_conversation=True,
+    )
+
+    second_response = await test_app_client.post(
+        f"/v1/chat/agents/{agent_id}", json=second_payload.model_dump()
+    )
+
+    assert second_response.status_code == 200
+    second_data = second_response.json()
+    second_result = second_data.get("result")
+    assert second_result.get("response") == "dummy operator response"
+    second_conversation = second_result.get("context")
+    assert isinstance(second_conversation, list)
+
+    # Verify the second conversation contains both prompts
+    first_prompt_in_history = any(
+        msg.get("content") == first_prompt and msg.get("role") == ConversationRole.USER.value
+        for msg in second_conversation
+    )
+    second_prompt_in_history = any(
+        msg.get("content") == second_prompt and msg.get("role") == ConversationRole.USER.value
+        for msg in second_conversation
+    )
+
+    assert first_prompt_in_history, "First prompt should be in the conversation history"
+    assert second_prompt_in_history, "Second prompt should be in the conversation history"
+
+    # The second conversation should be longer than the first
+    assert len(second_conversation) > len(
+        first_conversation
+    ), "Second conversation should contain more messages than the first"
 
 
 @pytest.mark.asyncio
@@ -340,6 +419,158 @@ async def test_chat_with_agent_async_success(
     assert mock_job_manager.update_job_status.call_args_list[0][0][1] == JobStatus.PROCESSING
     # Last call should update to COMPLETED
     assert mock_job_manager.update_job_status.call_args_list[-1][0][1] == JobStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_chat_with_agent_async_persist_conversation(
+    test_app_client,
+    dummy_executor,
+    dummy_registry,
+    mock_create_operator,
+    mock_job_manager,
+):
+    """Test async chat with agent with conversation persistence across multiple requests."""
+    # Create a test agent
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="Test Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description="",
+            last_message="",
+        )
+    )
+    agent_id = agent.id
+
+    # Setup for first job
+    first_job = MagicMock()
+    first_job.id = "first-job-id"
+    first_job.status = JobStatus.PENDING
+    first_job.created_at = datetime.now(timezone.utc).timestamp()
+    first_job.started_at = None
+    first_job.completed_at = None
+    mock_job_manager.create_job.return_value = first_job
+
+    # Store the first task for testing
+    first_task = None
+
+    def register_first_task(job_id, task):
+        nonlocal first_task
+        first_task = task
+        return None
+
+    mock_job_manager.register_task.side_effect = register_first_task
+
+    # First request
+    first_prompt = "Hello agent, how are you?"
+    first_payload = AgentChatRequest(
+        hosting="openai",
+        model="gpt-4",
+        prompt=first_prompt,
+        persist_conversation=True,
+    )
+
+    first_response = await test_app_client.post(
+        f"/v1/chat/agents/{agent_id}/async", json=first_payload.model_dump()
+    )
+
+    assert first_response.status_code == 202
+    first_data = first_response.json()
+    first_result = first_data.get("result")
+    assert first_result.get("id") == "first-job-id"
+    assert first_result.get("agent_id") == agent_id
+    assert first_result.get("status") == JobStatus.PENDING.value
+
+    # Verify the first task was created and registered
+    assert first_task is not None
+
+    # Run the first background task directly
+    await first_task  # type: ignore
+
+    # Verify first job status was updated correctly
+    assert mock_job_manager.update_job_status.call_count >= 2
+    assert mock_job_manager.update_job_status.call_args_list[0][0][1] == JobStatus.PROCESSING
+    assert mock_job_manager.update_job_status.call_args_list[-1][0][1] == JobStatus.COMPLETED
+
+    # Setup for second job
+    second_job = MagicMock()
+    second_job.id = "second-job-id"
+    second_job.status = JobStatus.PENDING
+    second_job.created_at = datetime.now(timezone.utc).timestamp()
+    second_job.started_at = None
+    second_job.completed_at = None
+    mock_job_manager.create_job.return_value = second_job
+
+    # Store the second task for testing
+    second_task = None
+
+    def register_second_task(job_id, task):
+        nonlocal second_task
+        second_task = task
+        return None
+
+    mock_job_manager.register_task.side_effect = register_second_task
+
+    # Second request - should include history from first request
+    second_prompt = "Tell me more about yourself"
+    second_payload = AgentChatRequest(
+        hosting="openai",
+        model="gpt-4",
+        prompt=second_prompt,
+        persist_conversation=True,
+    )
+
+    second_response = await test_app_client.post(
+        f"/v1/chat/agents/{agent_id}/async", json=second_payload.model_dump()
+    )
+
+    assert second_response.status_code == 202
+    second_data = second_response.json()
+    second_result = second_data.get("result")
+    assert second_result.get("id") == "second-job-id"
+    assert second_result.get("agent_id") == agent_id
+    assert second_result.get("status") == JobStatus.PENDING.value
+
+    # Verify the second task was created and registered
+    assert second_task is not None
+
+    # Run the second background task directly
+    await second_task  # type: ignore
+
+    # Verify second job status was updated correctly
+    assert mock_job_manager.update_job_status.call_count >= 4
+
+    # Extract the conversation history from the operator after the second job
+    # This requires accessing the conversation history that was passed to update_job_status
+    # Get the last call to update_job_status with COMPLETED status
+    completed_calls = [
+        call
+        for call in mock_job_manager.update_job_status.call_args_list
+        if call[0][1] == JobStatus.COMPLETED
+    ]
+    assert len(completed_calls) >= 2
+
+    # The result passed to the second COMPLETED update should contain our conversation
+    second_job_result = completed_calls[-1][0][2]
+    assert second_job_result is not None
+
+    # Extract conversation from the result - JobResult is a Pydantic model, not a dict
+    conversation = second_job_result.context
+    assert isinstance(conversation, list)
+
+    # Verify the conversation contains both prompts
+    first_prompt_in_history = any(
+        msg.get("content") == first_prompt and msg.get("role") == ConversationRole.USER.value
+        for msg in conversation
+    )
+    second_prompt_in_history = any(
+        msg.get("content") == second_prompt and msg.get("role") == ConversationRole.USER.value
+        for msg in conversation
+    )
+
+    assert first_prompt_in_history, "First prompt should be in the conversation history"
+    assert second_prompt_in_history, "Second prompt should be in the conversation history"
 
 
 @pytest.mark.asyncio
