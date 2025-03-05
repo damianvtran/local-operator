@@ -1,10 +1,11 @@
 """Types module containing enums and type definitions used throughout the local-operator package."""
 
+import uuid
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ConversationRole(str, Enum):
@@ -185,6 +186,7 @@ class CodeExecutionResult(BaseModel):
     """Represents the result of a code execution.
 
     Attributes:
+        id (str): The unique identifier for the code execution
         stdout (str): The standard output from the code execution.
         stderr (str): The standard error from the code execution.
         logging (str): Any logging output generated during the code execution.
@@ -196,6 +198,7 @@ class CodeExecutionResult(BaseModel):
         timestamp (datetime): The timestamp of the code execution
     """
 
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     stdout: str
     stderr: str
     logging: str
