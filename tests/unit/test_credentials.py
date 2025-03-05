@@ -112,6 +112,26 @@ def test_config_file_permissions(temp_config):
     assert manager.config_file.stat().st_mode & 0o777 == 0o600
 
 
+def test_get_credential_from_env(temp_config, monkeypatch):
+    """Test retrieving a credential from environment variables."""
+    manager = CredentialManager(config_dir=temp_config.parent)
+
+    # Set environment variable but not in config file
+    monkeypatch.setenv("ENV_ONLY_API_KEY", "env_test_key")
+
+    # Verify the credential is retrieved from environment
+    credential = manager.get_credential("ENV_ONLY_API_KEY")
+    assert credential.get_secret_value() == "env_test_key"
+
+    # Verify it was added to the credentials dict but not written to file
+    assert "ENV_ONLY_API_KEY" in manager.credentials
+
+    # Verify it wasn't written to the config file
+    with open(temp_config, "r") as f:
+        content = f.read()
+    assert "ENV_ONLY_API_KEY=env_test_key" not in content
+
+
 # Windows-specific tests
 @pytest.mark.skipif(os.name != "nt", reason="Windows-specific tests")
 def test_windows_credential_manager_initialization(temp_config):

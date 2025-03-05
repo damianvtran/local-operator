@@ -333,3 +333,35 @@ class ConfigResponse(BaseModel):
     version: str = Field(..., description="Configuration schema version for compatibility")
     metadata: Dict[str, Any] = Field(..., description="Metadata about the configuration")
     values: Dict[str, Any] = Field(..., description="Configuration settings")
+
+
+class CredentialUpdate(BaseModel):
+    """Data for updating a credential.
+
+    Attributes:
+        key: The credential key to update
+        value: The new value for the credential
+    """
+
+    key: str = Field(..., description="The credential key to update")
+    value: str = Field(..., description="The new value for the credential")
+
+
+class CredentialKey(BaseModel):
+    """Representation of a credential key.
+
+    Attributes:
+        key: The credential key name
+    """
+
+    key: str = Field(..., description="The credential key name")
+
+
+class CredentialListResult(BaseModel):
+    """Result containing a list of credential keys.
+
+    Attributes:
+        keys: List of credential keys
+    """
+
+    keys: List[str] = Field(..., description="List of credential keys")
