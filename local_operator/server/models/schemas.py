@@ -265,3 +265,25 @@ class JobResultSchema(BaseModel):
     result: Optional[JobResult] = Field(
         None, description="Result data containing response, context, and stats"
     )
+
+
+class AgentChatRequest(BaseModel):
+    """Request body for chat generation endpoint.
+
+    Attributes:
+        hosting: Name of the hosting service to use for generation
+        model: Name of the model to use for generation
+        prompt: The prompt to generate a response for
+        stream: Whether to stream the response token by token. Default: False
+        options: Optional generation parameters to override defaults
+        persist_conversation: Whether to persist the conversation history by
+        continuously updating the agent's conversation history with each new message.
+        Default: False
+    """
+
+    hosting: str
+    model: str
+    prompt: str
+    stream: bool = False
+    options: Optional[ChatOptions] = None
+    persist_conversation: bool = False

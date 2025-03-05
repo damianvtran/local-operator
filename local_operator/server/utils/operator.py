@@ -5,10 +5,8 @@ Utility functions for creating and managing operators in the Local Operator API.
 import logging
 from typing import cast
 
-from fastapi import HTTPException
-
 from local_operator.admin import add_admin_tools
-from local_operator.agents import AgentRegistry
+from local_operator.agents import AgentConversation, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
@@ -51,6 +49,7 @@ def create_operator(
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
     current_agent=None,
+    persist_conversation: bool = False,
 ) -> Operator:
     """Create a LocalCodeExecutor for a single chat request using the provided managers
     and the hosting/model provided in the request.
@@ -62,20 +61,30 @@ def create_operator(
         config_manager: The configuration manager
         agent_registry: The agent registry for managing agents
         current_agent: Optional current agent to use
-
+        persist_conversation: Whether to persist the conversation history by
+            continuously updating the agent's conversation history with each new message.
+            Default: False
     Returns:
         Operator: The configured operator instance
 
     Raises:
         ValueError: If hosting is not set or model configuration fails
-        HTTPException: If server configuration is not initialized
     """
-    if credential_manager is None or config_manager is None or agent_registry is None:
-        raise HTTPException(status_code=500, detail="Server configuration not initialized")
     agent_registry = cast(AgentRegistry, agent_registry)
 
     if not request_hosting:
         raise ValueError("Hosting is not set")
+
+    agent_conversation_data = None
+
+    if current_agent:
+        agent_conversation_data = agent_registry.load_agent_conversation(current_agent.id)
+    else:
+        agent_conversation_data = AgentConversation(
+            version="",
+            conversation=[],
+            execution_history=[],
+        )
 
     model_configuration = configure_model(
         hosting=request_hosting,
@@ -88,9 +97,13 @@ def create_operator(
 
     executor = LocalCodeExecutor(
         model_configuration=model_configuration,
-        max_conversation_history=100,
-        detail_conversation_length=10,
+        max_conversation_history=config_manager.get_config_value("max_conversation_history", 100),
+        detail_conversation_length=config_manager.get_config_value(
+            "detail_conversation_length", 35
+        ),
+        max_learnings_history=config_manager.get_config_value("max_learnings_history", 50),
         can_prompt_user=False,
+        agent=current_agent,
     )
 
     operator = Operator(
@@ -101,10 +114,14 @@ def create_operator(
         type=OperatorType.SERVER,
         agent_registry=agent_registry,
         current_agent=current_agent,
-        training_mode=False,
+        training_mode=persist_conversation,
+        auto_save_conversation=False,
     )
 
     tool_registry = build_tool_registry(executor, agent_registry, config_manager)
     executor.set_tool_registry(tool_registry)
+
+    executor.load_conversation_history(agent_conversation_data.conversation)
+    executor.load_execution_history(agent_conversation_data.execution_history)
 
     return operator

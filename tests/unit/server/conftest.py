@@ -6,7 +6,7 @@ including mock clients, executors, and dependencies needed for API testing.
 """
 
 from typing import List
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -183,20 +183,9 @@ def mock_create_operator(monkeypatch):
     Returns:
         function: The mocked create_operator function
     """
-
-    def _mock_create_operator(
-        request_hosting,
-        request_model,
-        credential_manager,
-        config_manager,
-        agent_registry,
-        current_agent=None,
-    ):
-        print("Returning dummy operator")
-        return DummyOperator(DummyExecutor())
-
-    monkeypatch.setattr("local_operator.server.routes.chat.create_operator", _mock_create_operator)
-    return _mock_create_operator
+    dummy_operator = DummyOperator(DummyExecutor())
+    with patch("local_operator.server.routes.chat.create_operator", return_value=dummy_operator):
+        yield dummy_operator
 
 
 @pytest.fixture
