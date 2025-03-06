@@ -130,6 +130,14 @@ def test_print_cli_banner_with_agent(monkeypatch, mock_config_manager):
         description="test description",
         last_message="test last message",
         last_message_datetime=datetime.now(),
+        temperature=0.7,
+        top_p=1.0,
+        top_k=None,
+        max_tokens=2048,
+        stop=None,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+        seed=None,
     )
 
     print_cli_banner(mock_config_manager, current_agent=agent, training_mode=False)
@@ -162,6 +170,14 @@ def test_print_cli_banner_with_agent_and_config(monkeypatch, mock_config_manager
         description="test description",
         last_message="test last message",
         last_message_datetime=datetime.now(),
+        temperature=0.7,
+        top_p=1.0,
+        top_k=None,
+        max_tokens=2048,
+        stop=None,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+        seed=None,
     )
 
     print_cli_banner(mock_config_manager, current_agent=agent, training_mode=False)
@@ -197,6 +213,14 @@ def test_print_cli_banner_with_agent_and_training(monkeypatch, mock_config_manag
         description="test description",
         last_message="test last message",
         last_message_datetime=datetime.now(),
+        temperature=0.7,
+        top_p=1.0,
+        top_k=None,
+        max_tokens=2048,
+        stop=None,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+        seed=None,
     )
 
     print_cli_banner(mock_config_manager, current_agent=agent, training_mode=True)

@@ -29,6 +29,14 @@ def test_create_agent_success(temp_agents_dir: Path):
         model="test-model",
         description="test description",
         last_message="test last message",
+        temperature=0.7,
+        top_p=1.0,
+        top_k=20,
+        max_tokens=2048,
+        stop=["stop"],
+        frequency_penalty=0.12,
+        presence_penalty=0.34,
+        seed=42,
     )
     agent = registry.create_agent(edit_metadata)
     agents = registry.list_agents()
@@ -42,6 +50,14 @@ def test_create_agent_success(temp_agents_dir: Path):
     assert created_agent.description == "test description"
     assert created_agent.last_message == "test last message"
     assert created_agent.last_message_datetime is not None
+    assert created_agent.temperature == 0.7
+    assert created_agent.top_p == 1.0
+    assert created_agent.top_k == 20
+    assert created_agent.max_tokens == 2048
+    assert created_agent.stop == ["stop"]
+    assert created_agent.frequency_penalty == 0.12
+    assert created_agent.presence_penalty == 0.34
+    assert created_agent.seed == 42
     # Verify that agents.json file is created
     agents_file = temp_agents_dir / "agents.json"
     assert agents_file.exists()
@@ -64,6 +80,14 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
         model="test-model",
         description="",
         last_message="",
+        temperature=0.7,
+        top_p=1.0,
+        top_k=None,
+        max_tokens=2048,
+        stop=None,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+        seed=None,
     )
     registry.create_agent(edit_metadata)
     with pytest.raises(ValueError) as exc_info:
@@ -76,6 +100,14 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 model="",
                 description="",
                 last_message="",
+                temperature=0.7,
+                top_p=1.0,
+                top_k=None,
+                max_tokens=2048,
+                stop=None,
+                frequency_penalty=0.0,
+                presence_penalty=0.0,
+                seed=None,
             )
         )
     assert f"Agent with name {agent_name} already exists" in str(exc_info.value)
@@ -93,6 +125,14 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 model="test-model",
                 description="",
                 last_message="",
+                temperature=0.7,
+                top_p=1.0,
+                top_k=None,
+                max_tokens=2048,
+                stop=None,
+                frequency_penalty=0.0,
+                presence_penalty=0.0,
+                seed=None,
             ),
             "update": AgentEditFields(
                 name="Updated Agent",
@@ -101,6 +141,14 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 model=None,
                 description=None,
                 last_message=None,
+                temperature=None,
+                top_p=None,
+                top_k=None,
+                max_tokens=None,
+                stop=None,
+                frequency_penalty=None,
+                presence_penalty=None,
+                seed=None,
             ),
             "expected_name": "Updated Agent",
             "expected_prompt": "original prompt",
@@ -116,6 +164,14 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 model="test-model",
                 description="",
                 last_message="",
+                temperature=0.7,
+                top_p=1.0,
+                top_k=None,
+                max_tokens=2048,
+                stop=None,
+                frequency_penalty=0.0,
+                presence_penalty=0.0,
+                seed=None,
             ),
             "update": AgentEditFields(
                 name=None,
@@ -124,6 +180,14 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 model=None,
                 description=None,
                 last_message=None,
+                temperature=None,
+                top_p=None,
+                top_k=None,
+                max_tokens=None,
+                stop=None,
+                frequency_penalty=None,
+                presence_penalty=None,
+                seed=None,
             ),
             "expected_name": "Test Agent",
             "expected_prompt": "New security prompt",
@@ -139,6 +203,14 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 model="test-model",
                 description="",
                 last_message="",
+                temperature=0.7,
+                top_p=1.0,
+                top_k=None,
+                max_tokens=2048,
+                stop=None,
+                frequency_penalty=0.0,
+                presence_penalty=0.0,
+                seed=None,
             ),
             "update": AgentEditFields(
                 name=None,
@@ -147,6 +219,14 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 model=None,
                 description=None,
                 last_message=None,
+                temperature=None,
+                top_p=None,
+                top_k=None,
+                max_tokens=None,
+                stop=None,
+                frequency_penalty=None,
+                presence_penalty=None,
+                seed=None,
             ),
             "expected_name": "Test Agent",
             "expected_prompt": "original prompt",
@@ -162,6 +242,14 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 model="test-model",
                 description="",
                 last_message="",
+                temperature=0.7,
+                top_p=1.0,
+                top_k=None,
+                max_tokens=2048,
+                stop=None,
+                frequency_penalty=0.0,
+                presence_penalty=0.0,
+                seed=None,
             ),
             "update": AgentEditFields(
                 name=None,
@@ -170,6 +258,14 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 model="new-model",
                 description=None,
                 last_message=None,
+                temperature=None,
+                top_p=None,
+                top_k=None,
+                max_tokens=None,
+                stop=None,
+                frequency_penalty=None,
+                presence_penalty=None,
+                seed=None,
             ),
             "expected_name": "Test Agent",
             "expected_prompt": "original prompt",
@@ -185,6 +281,14 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 model="test-model",
                 description="",
                 last_message="",
+                temperature=0.7,
+                top_p=1.0,
+                top_k=None,
+                max_tokens=2048,
+                stop=None,
+                frequency_penalty=0.0,
+                presence_penalty=0.0,
+                seed=None,
             ),
             "update": AgentEditFields(
                 name="Updated Agent",
@@ -193,6 +297,14 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 model="new-model",
                 description="new description",
                 last_message="new message",
+                temperature=0.8,
+                top_p=0.9,
+                top_k=50,
+                max_tokens=1024,
+                stop=["stop"],
+                frequency_penalty=0.1,
+                presence_penalty=0.2,
+                seed=42,
             ),
             "expected_name": "Updated Agent",
             "expected_prompt": "New security prompt",
@@ -208,6 +320,14 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 model="test-model",
                 description="",
                 last_message="",
+                temperature=0.7,
+                top_p=1.0,
+                top_k=None,
+                max_tokens=2048,
+                stop=None,
+                frequency_penalty=0.0,
+                presence_penalty=0.0,
+                seed=None,
             ),
             "update": AgentEditFields(
                 name=None,
@@ -216,6 +336,14 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 model=None,
                 description=None,
                 last_message=None,
+                temperature=None,
+                top_p=None,
+                top_k=None,
+                max_tokens=None,
+                stop=None,
+                frequency_penalty=None,
+                presence_penalty=None,
+                seed=None,
             ),
             "expected_name": "Test Agent",
             "expected_prompt": "original prompt",
@@ -231,9 +359,30 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 model="test-model",
                 description="",
                 last_message="",
+                temperature=0.7,
+                top_p=1.0,
+                top_k=None,
+                max_tokens=2048,
+                stop=None,
+                frequency_penalty=0.0,
+                presence_penalty=0.0,
+                seed=None,
             ),
             "update": AgentEditFields(
-                name="", security_prompt="", hosting="", model="", description="", last_message=""
+                name="",
+                security_prompt="",
+                hosting="",
+                model="",
+                description="",
+                last_message="",
+                temperature=0.0,
+                top_p=0.0,
+                top_k=0,
+                max_tokens=0,
+                stop=[],
+                frequency_penalty=0.0,
+                presence_penalty=0.0,
+                seed=0,
             ),
             "expected_name": "",
             "expected_prompt": "",
@@ -280,6 +429,14 @@ def test_delete_agent(temp_agents_dir: Path):
             model="",
             description="",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
 
@@ -316,6 +473,14 @@ def test_list_agents(temp_agents_dir: Path):
             model="",
             description="",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     agent2 = registry.create_agent(
@@ -326,6 +491,14 @@ def test_list_agents(temp_agents_dir: Path):
             model="",
             description="",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     agents = registry.list_agents()
@@ -347,6 +520,14 @@ def test_save_and_load_conversation(temp_agents_dir: Path):
             model="",
             description="",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
 
@@ -383,6 +564,14 @@ def test_load_nonexistent_conversation(temp_agents_dir: Path):
             model="",
             description="",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     conversation_file = temp_agents_dir / f"{agent.id}_conversation.json"
@@ -406,6 +595,14 @@ def test_update_agent_not_found(temp_agents_dir: Path):
                 model="",
                 description="",
                 last_message="",
+                temperature=0.7,
+                top_p=1.0,
+                top_k=None,
+                max_tokens=2048,
+                stop=None,
+                frequency_penalty=0.0,
+                presence_penalty=0.0,
+                seed=None,
             ),
         )
 
@@ -434,6 +631,14 @@ def test_create_agent_save_failure(temp_agents_dir: Path, monkeypatch):
                 model="",
                 description="",
                 last_message="",
+                temperature=0.7,
+                top_p=1.0,
+                top_k=None,
+                max_tokens=2048,
+                stop=None,
+                frequency_penalty=0.0,
+                presence_penalty=0.0,
+                seed=None,
             )
         )
     assert str(exc_info.value) == "Fake write failure"
@@ -450,6 +655,14 @@ def test_clone_agent(temp_agents_dir: Path):
             model="",
             description="",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
 
@@ -501,6 +714,14 @@ def test_clone_agent_duplicate_name(temp_agents_dir: Path):
             model="",
             description="",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     registry.create_agent(
@@ -511,6 +732,14 @@ def test_clone_agent_duplicate_name(temp_agents_dir: Path):
             model="",
             description="",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
 
@@ -531,6 +760,14 @@ def test_get_agent_by_name(temp_agents_dir: Path):
             model="",
             description="",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
 

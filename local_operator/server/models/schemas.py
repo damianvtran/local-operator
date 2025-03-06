@@ -144,6 +144,46 @@ class Agent(BaseModel):
         ...,
         description="The date and time of the last message sent to the agent.",
     )
+    temperature: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Controls randomness in responses. Higher values like 0.8 make output more "
+        "random, while lower values like 0.2 make it more focused and deterministic.",
+    )
+    top_p: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Controls cumulative probability of tokens to sample from. Higher "
+        "values (0.95) keep more options, lower values (0.1) are more selective.",
+    )
+    top_k: Optional[int] = Field(
+        None,
+        description="Limits tokens to sample from at each step. Lower values (10) are "
+        "more selective, higher values (100) allow more variety.",
+    )
+    max_tokens: Optional[int] = Field(
+        None,
+        description="Maximum tokens to generate. Model may generate fewer if response completes "
+        "before reaching limit.",
+    )
+    stop: Optional[List[str]] = Field(
+        None, description="List of strings that will stop generation when encountered."
+    )
+    frequency_penalty: Optional[float] = Field(
+        None,
+        description="Reduces repetition by lowering likelihood of repeated tokens. "
+        "Range from -2.0 to 2.0.",
+    )
+    presence_penalty: Optional[float] = Field(
+        None,
+        description="Increases diversity by lowering likelihood of prompt tokens. "
+        "Range from -2.0 to 2.0.",
+    )
+    seed: Optional[int] = Field(
+        None, description="Random number seed for deterministic generation."
+    )
 
 
 class AgentCreate(BaseModel):
@@ -167,6 +207,45 @@ class AgentCreate(BaseModel):
         None,
         description="A description of the agent. Defaults to ''.",
     )
+    temperature: float | None = Field(
+        None,
+        description="Controls randomness in responses. Higher values like 0.8 make "
+        "output more random, while lower values like 0.2 make it more focused and "
+        "deterministic.",
+    )
+    top_p: float | None = Field(
+        None,
+        description="Controls cumulative probability of tokens to sample from. Higher "
+        "values (0.95) keep more options, lower values (0.1) are more selective.",
+    )
+    top_k: int | None = Field(
+        None,
+        description="Limits tokens to sample from at each step. Lower values (10) are "
+        "more selective, higher values (100) allow more variety.",
+    )
+    max_tokens: int | None = Field(
+        None,
+        description="Maximum tokens to generate. Model may generate fewer if response completes "
+        "before reaching limit.",
+    )
+    stop: List[str] | None = Field(
+        None,
+        description="List of strings that will stop generation when encountered.",
+    )
+    frequency_penalty: float | None = Field(
+        None,
+        description="Reduces repetition by lowering likelihood of repeated tokens. "
+        "Range from -2.0 to 2.0.",
+    )
+    presence_penalty: float | None = Field(
+        None,
+        description="Increases diversity by lowering likelihood of prompt tokens. "
+        "Range from -2.0 to 2.0.",
+    )
+    seed: int | None = Field(
+        None,
+        description="Random number seed for deterministic generation.",
+    )
 
 
 class AgentUpdate(BaseModel):
@@ -189,6 +268,44 @@ class AgentUpdate(BaseModel):
     description: str | None = Field(
         None,
         description="A description of the agent.  Defaults to ''.",
+    )
+    temperature: float | None = Field(
+        None,
+        description="Controls randomness in responses. Higher values like 0.8 make output more "
+        "random, while lower values like 0.2 make it more focused and deterministic.",
+    )
+    top_p: float | None = Field(
+        None,
+        description="Controls cumulative probability of tokens to sample from. Higher "
+        "values (0.95) keep more options, lower values (0.1) are more selective.",
+    )
+    top_k: int | None = Field(
+        None,
+        description="Limits tokens to sample from at each step. Lower values (10) are more "
+        "selective, higher values (100) allow more variety.",
+    )
+    max_tokens: int | None = Field(
+        None,
+        description="Maximum tokens to generate. Model may generate fewer if response completes "
+        "before reaching limit.",
+    )
+    stop: List[str] | None = Field(
+        None,
+        description="List of strings that will stop generation when encountered.",
+    )
+    frequency_penalty: float | None = Field(
+        None,
+        description="Reduces repetition by lowering likelihood of repeated tokens. "
+        "Range from -2.0 to 2.0.",
+    )
+    presence_penalty: float | None = Field(
+        None,
+        description="Increases diversity by lowering likelihood of prompt tokens. "
+        "Range from -2.0 to 2.0.",
+    )
+    seed: int | None = Field(
+        None,
+        description="Random number seed for deterministic generation.",
     )
 
 
