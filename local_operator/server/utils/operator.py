@@ -3,10 +3,11 @@ Utility functions for creating and managing operators in the Local Operator API.
 """
 
 import logging
-from typing import cast
+from typing import Optional, cast
 
 from local_operator.admin import add_admin_tools
 from local_operator.agents import AgentConversation, AgentRegistry
+from local_operator.clients.openrouter import OpenRouterClient
 from local_operator.clients.serpapi import SerpApiClient
 from local_operator.clients.tavily import TavilyClient
 from local_operator.config import ConfigManager
@@ -96,8 +97,28 @@ def create_operator(
 
     agent_conversation_data = None
 
+    chat_args = {}
+
     if current_agent:
         agent_conversation_data = agent_registry.load_agent_conversation(current_agent.id)
+
+        if current_agent.temperature:
+            chat_args["temperature"] = current_agent.temperature
+        if current_agent.top_p:
+            chat_args["top_p"] = current_agent.top_p
+        if current_agent.top_k:
+            chat_args["top_k"] = current_agent.top_k
+        if current_agent.max_tokens:
+            chat_args["max_tokens"] = current_agent.max_tokens
+        if current_agent.stop:
+            chat_args["stop"] = current_agent.stop
+        if current_agent.frequency_penalty:
+            chat_args["frequency_penalty"] = current_agent.frequency_penalty
+        if current_agent.presence_penalty:
+            chat_args["presence_penalty"] = current_agent.presence_penalty
+        if current_agent.seed:
+            chat_args["seed"] = current_agent.seed
+
     else:
         agent_conversation_data = AgentConversation(
             version="",
@@ -105,10 +126,19 @@ def create_operator(
             execution_history=[],
         )
 
+    model_info_client: Optional[OpenRouterClient] = None
+
+    if request_hosting == "openrouter":
+        model_info_client = OpenRouterClient(
+            credential_manager.get_credential("OPENROUTER_API_KEY")
+        )
+
     model_configuration = configure_model(
         hosting=request_hosting,
         model_name=request_model,
         credential_manager=credential_manager,
+        model_info_client=model_info_client,
+        **chat_args,
     )
 
     if not model_configuration.instance:
