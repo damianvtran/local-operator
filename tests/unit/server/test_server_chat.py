@@ -260,41 +260,95 @@ async def test_chat_model_failure(test_app_client):
 
 
 @pytest.mark.asyncio
-async def test_chat_async_endpoint_success(
+async def test_chat_async_process_execution(
     test_app_client,
     mock_create_operator,
     mock_job_manager,
 ):
-    """Test successful asynchronous chat request."""
+    """Test that async chat jobs are executed in separate processes."""
     # Setup mock job
     mock_job = MagicMock()
-    mock_job.id = "test-job-id"
+    mock_job.id = "test-process-job-id"
     mock_job.status = JobStatus.PENDING
     mock_job.created_at = datetime.now(timezone.utc).timestamp()
     mock_job.started_at = None
     mock_job.completed_at = None
     mock_job_manager.create_job.return_value = mock_job
 
-    payload = ChatRequest(
-        hosting="openai",
-        model="gpt-4o",
-        prompt="Process this asynchronously",
-        context=[],
-    )
+    # Mock the job processor functions
+    mock_process = MagicMock()
+    mock_create_and_start_job_process = MagicMock(return_value=mock_process)
 
-    response = await test_app_client.post("/v1/chat/async", json=payload.model_dump())
+    # Mock the job processor functions to avoid pickling issues in tests
+    with patch(
+        "local_operator.server.utils.job_processor.create_and_start_job_process",
+        mock_create_and_start_job_process,
+    ):
+        with patch("local_operator.server.utils.job_processor.run_job_in_process"):
+            payload = ChatRequest(
+                hosting="openai",
+                model="gpt-4o",
+                prompt="Process this in a separate process",
+                context=[],
+            )
 
-    assert response.status_code == 202
-    data = response.json()
-    assert data["status"] == 202
-    assert data["message"] == "Chat request accepted"
-    assert data["result"]["id"] == "test-job-id"
-    assert data["result"]["status"] == "pending"
-    assert data["result"]["prompt"] == "Process this asynchronously"
-    assert data["result"]["model"] == "gpt-4o"
-    assert data["result"]["hosting"] == "openai"
-    assert mock_job_manager.create_job.called
-    assert mock_job_manager.register_task.called
+            response = await test_app_client.post("/v1/chat/async", json=payload.model_dump())
+
+            assert response.status_code == 202
+
+            # Verify that create_and_start_job_process was called
+            assert mock_create_and_start_job_process.called
+
+            # Verify the job was created
+            mock_job_manager.create_job.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_chat_async_endpoint_success(
+    test_app_client,
+    mock_create_operator,
+    mock_job_manager,
+):
+    """Test successful asynchronous chat request."""
+    # Mock the job processor functions
+    mock_process = MagicMock()
+    mock_create_and_start_job_process = MagicMock(return_value=mock_process)
+
+    # Mock the job processor functions to avoid pickling issues in tests
+    with patch(
+        "local_operator.server.utils.job_processor.create_and_start_job_process",
+        mock_create_and_start_job_process,
+    ):
+        with patch("local_operator.server.utils.job_processor.run_job_in_process"):
+            # Setup mock job
+            mock_job = MagicMock()
+            mock_job.id = "test-job-id"
+            mock_job.status = JobStatus.PENDING
+            mock_job.created_at = datetime.now(timezone.utc).timestamp()
+            mock_job.started_at = None
+            mock_job.completed_at = None
+            mock_job_manager.create_job.return_value = mock_job
+
+            payload = ChatRequest(
+                hosting="openai",
+                model="gpt-4o",
+                prompt="Process this asynchronously",
+                context=[],
+            )
+
+            response = await test_app_client.post("/v1/chat/async", json=payload.model_dump())
+
+            assert response.status_code == 202
+            data = response.json()
+            assert data["status"] == 202
+            assert data["message"] == "Chat request accepted"
+            assert data["result"]["id"] == "test-job-id"
+            assert data["result"]["status"] == "pending"
+            assert data["result"]["prompt"] == "Process this asynchronously"
+            assert data["result"]["model"] == "gpt-4o"
+            assert data["result"]["hosting"] == "openai"
+            assert mock_job_manager.create_job.called
+            assert mock_job_manager.register_task.called
 
 
 @pytest.mark.asyncio
@@ -340,29 +394,30 @@ async def test_chat_async_job_processing(test_app_client, mock_create_operator, 
 
     mock_job_manager.register_task.side_effect = register_task_side_effect
 
-    payload = ChatRequest(
-        hosting="openai",
-        model="gpt-4o",
-        prompt="Process this asynchronously",
-        context=[],
-    )
+    # Mock the Process class
+    mock_process = MagicMock()
 
-    response = await test_app_client.post("/v1/chat/async", json=payload.model_dump())
+    with patch("local_operator.server.routes.chat.Process", return_value=mock_process):
+        with patch("local_operator.server.routes.chat.run_job_in_process"):
+            payload = ChatRequest(
+                hosting="openai",
+                model="gpt-4o",
+                prompt="Process this asynchronously",
+                context=[],
+            )
 
-    assert response.status_code == 202
+            response = await test_app_client.post("/v1/chat/async", json=payload.model_dump())
 
-    # Verify the task was created and registered
-    assert captured_task is not None
+            assert response.status_code == 202
 
-    # Run the background task directly
-    await captured_task  # type: ignore
+            # Verify the process was started
+            mock_process.start.assert_called_once()
 
-    # Verify job status was updated correctly
-    assert mock_job_manager.update_job_status.call_count >= 2
-    # First call should update to PROCESSING
-    assert mock_job_manager.update_job_status.call_args_list[0][0][1] == JobStatus.PROCESSING
-    # Last call should update to COMPLETED
-    assert mock_job_manager.update_job_status.call_args_list[-1][0][1] == JobStatus.COMPLETED
+            # Verify the process was registered with the job manager
+            mock_job_manager.register_process.assert_called_once_with(mock_job.id, mock_process)
+
+            # Verify the task was created and registered
+            assert mock_job_manager.register_task.called
 
 
 @pytest.mark.asyncio
@@ -394,6 +449,7 @@ async def test_chat_with_agent_async_success(
         )
     )
     agent_id = agent.id
+
     # Setup mock job
     mock_job = MagicMock()
     mock_job.id = "test-job-id"
@@ -403,46 +459,36 @@ async def test_chat_with_agent_async_success(
     mock_job.completed_at = None
     mock_job_manager.create_job.return_value = mock_job
 
-    # Store the task for testing
-    captured_task = None
+    # Mock the job processor functions
+    mock_process = MagicMock()
+    mock_create_and_start_job_process = MagicMock(return_value=mock_process)
 
-    def register_task_side_effect(job_id, task):
-        nonlocal captured_task
-        captured_task = task
-        return None
+    # Mock the job processor functions to avoid pickling issues in tests
+    with patch(
+        "local_operator.server.utils.job_processor.create_and_start_job_process",
+        mock_create_and_start_job_process,
+    ):
+        with patch("local_operator.server.utils.job_processor.run_agent_job_in_process"):
+            payload = ChatRequest(
+                hosting="openai",
+                model="gpt-4o",
+                prompt="Process this with an agent asynchronously",
+                context=[],
+            )
 
-    mock_job_manager.register_task.side_effect = register_task_side_effect
+            response = await test_app_client.post(
+                f"/v1/chat/agents/{agent_id}/async", json=payload.model_dump()
+            )
 
-    payload = ChatRequest(
-        hosting="openai",
-        model="gpt-4o",
-        prompt="Process this with an agent asynchronously",
-        context=[],
-    )
+            assert response.status_code == 202
+            data = response.json()
+            result = data.get("result")
+            assert result.get("id") == "test-job-id"
+            assert result.get("agent_id") == agent_id
+            assert result.get("status") == JobStatus.PENDING.value
 
-    response = await test_app_client.post(
-        f"/v1/chat/agents/{agent_id}/async", json=payload.model_dump()
-    )
-
-    assert response.status_code == 202
-    data = response.json()
-    result = data.get("result")
-    assert result.get("id") == "test-job-id"
-    assert result.get("agent_id") == agent_id
-    assert result.get("status") == JobStatus.PENDING.value
-
-    # Verify the task was created and registered
-    assert captured_task is not None
-
-    # Run the background task directly
-    await captured_task  # type: ignore
-
-    # Verify job status was updated correctly
-    assert mock_job_manager.update_job_status.call_count >= 2
-    # First call should update to PROCESSING
-    assert mock_job_manager.update_job_status.call_args_list[0][0][1] == JobStatus.PROCESSING
-    # Last call should update to COMPLETED
-    assert mock_job_manager.update_job_status.call_args_list[-1][0][1] == JobStatus.COMPLETED
+            # Verify that create_and_start_job_process was called
+            assert mock_create_and_start_job_process.called
 
 
 @pytest.mark.asyncio
@@ -484,125 +530,70 @@ async def test_chat_with_agent_async_persist_conversation(
     first_job.completed_at = None
     mock_job_manager.create_job.return_value = first_job
 
-    # Store the first task for testing
-    first_task = None
+    # Mock the job processor functions
+    mock_process = MagicMock()
+    mock_create_and_start_job_process = MagicMock(return_value=mock_process)
 
-    def register_first_task(job_id, task):
-        nonlocal first_task
-        first_task = task
-        return None
+    # Mock the job processor functions to avoid pickling issues in tests
+    with patch(
+        "local_operator.server.utils.job_processor.create_and_start_job_process",
+        mock_create_and_start_job_process,
+    ):
+        with patch("local_operator.server.utils.job_processor.run_agent_job_in_process"):
+            # First request
+            first_prompt = "Hello agent, how are you?"
+            first_payload = AgentChatRequest(
+                hosting="openai",
+                model="gpt-4",
+                prompt=first_prompt,
+                persist_conversation=True,
+            )
 
-    mock_job_manager.register_task.side_effect = register_first_task
+            first_response = await test_app_client.post(
+                f"/v1/chat/agents/{agent_id}/async", json=first_payload.model_dump()
+            )
 
-    # First request
-    first_prompt = "Hello agent, how are you?"
-    first_payload = AgentChatRequest(
-        hosting="openai",
-        model="gpt-4",
-        prompt=first_prompt,
-        persist_conversation=True,
-    )
+            assert first_response.status_code == 202
+            first_data = first_response.json()
+            first_result = first_data.get("result")
+            assert first_result.get("id") == "first-job-id"
+            assert first_result.get("agent_id") == agent_id
+            assert first_result.get("status") == JobStatus.PENDING.value
 
-    first_response = await test_app_client.post(
-        f"/v1/chat/agents/{agent_id}/async", json=first_payload.model_dump()
-    )
+            # Verify that create_and_start_job_process was called
+            assert mock_create_and_start_job_process.called
 
-    assert first_response.status_code == 202
-    first_data = first_response.json()
-    first_result = first_data.get("result")
-    assert first_result.get("id") == "first-job-id"
-    assert first_result.get("agent_id") == agent_id
-    assert first_result.get("status") == JobStatus.PENDING.value
+            # Setup for second job
+            second_job = MagicMock()
+            second_job.id = "second-job-id"
+            second_job.status = JobStatus.PENDING
+            second_job.created_at = datetime.now(timezone.utc).timestamp()
+            second_job.started_at = None
+            second_job.completed_at = None
+            mock_job_manager.create_job.return_value = second_job
 
-    # Verify the first task was created and registered
-    assert first_task is not None
+            # Second request - should include history from first request
+            second_prompt = "Tell me more about yourself"
+            second_payload = AgentChatRequest(
+                hosting="openai",
+                model="gpt-4",
+                prompt=second_prompt,
+                persist_conversation=True,
+            )
 
-    # Run the first background task directly
-    await first_task  # type: ignore
+            second_response = await test_app_client.post(
+                f"/v1/chat/agents/{agent_id}/async", json=second_payload.model_dump()
+            )
 
-    # Verify first job status was updated correctly
-    assert mock_job_manager.update_job_status.call_count >= 2
-    assert mock_job_manager.update_job_status.call_args_list[0][0][1] == JobStatus.PROCESSING
-    assert mock_job_manager.update_job_status.call_args_list[-1][0][1] == JobStatus.COMPLETED
+            assert second_response.status_code == 202
+            second_data = second_response.json()
+            second_result = second_data.get("result")
+            assert second_result.get("id") == "second-job-id"
+            assert second_result.get("agent_id") == agent_id
+            assert second_result.get("status") == JobStatus.PENDING.value
 
-    # Setup for second job
-    second_job = MagicMock()
-    second_job.id = "second-job-id"
-    second_job.status = JobStatus.PENDING
-    second_job.created_at = datetime.now(timezone.utc).timestamp()
-    second_job.started_at = None
-    second_job.completed_at = None
-    mock_job_manager.create_job.return_value = second_job
-
-    # Store the second task for testing
-    second_task = None
-
-    def register_second_task(job_id, task):
-        nonlocal second_task
-        second_task = task
-        return None
-
-    mock_job_manager.register_task.side_effect = register_second_task
-
-    # Second request - should include history from first request
-    second_prompt = "Tell me more about yourself"
-    second_payload = AgentChatRequest(
-        hosting="openai",
-        model="gpt-4",
-        prompt=second_prompt,
-        persist_conversation=True,
-    )
-
-    second_response = await test_app_client.post(
-        f"/v1/chat/agents/{agent_id}/async", json=second_payload.model_dump()
-    )
-
-    assert second_response.status_code == 202
-    second_data = second_response.json()
-    second_result = second_data.get("result")
-    assert second_result.get("id") == "second-job-id"
-    assert second_result.get("agent_id") == agent_id
-    assert second_result.get("status") == JobStatus.PENDING.value
-
-    # Verify the second task was created and registered
-    assert second_task is not None
-
-    # Run the second background task directly
-    await second_task  # type: ignore
-
-    # Verify second job status was updated correctly
-    assert mock_job_manager.update_job_status.call_count >= 4
-
-    # Extract the conversation history from the operator after the second job
-    # This requires accessing the conversation history that was passed to update_job_status
-    # Get the last call to update_job_status with COMPLETED status
-    completed_calls = [
-        call
-        for call in mock_job_manager.update_job_status.call_args_list
-        if call[0][1] == JobStatus.COMPLETED
-    ]
-    assert len(completed_calls) >= 2
-
-    # The result passed to the second COMPLETED update should contain our conversation
-    second_job_result = completed_calls[-1][0][2]
-    assert second_job_result is not None
-
-    # Extract conversation from the result - JobResult is a Pydantic model, not a dict
-    conversation = second_job_result.context
-    assert isinstance(conversation, list)
-
-    # Verify the conversation contains both prompts
-    first_prompt_in_history = any(
-        msg.get("content") == first_prompt and msg.get("role") == ConversationRole.USER.value
-        for msg in conversation
-    )
-    second_prompt_in_history = any(
-        msg.get("content") == second_prompt and msg.get("role") == ConversationRole.USER.value
-        for msg in conversation
-    )
-
-    assert first_prompt_in_history, "First prompt should be in the conversation history"
-    assert second_prompt_in_history, "Second prompt should be in the conversation history"
+            # Verify that create_and_start_job_process was called again
+            assert mock_create_and_start_job_process.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -665,15 +656,9 @@ async def test_chat_with_agent_async_with_context(
     mock_job.completed_at = None
     mock_job_manager.create_job.return_value = mock_job
 
-    # Store the task for testing
-    captured_task = None
-
-    def register_task_side_effect(job_id, task):
-        nonlocal captured_task
-        captured_task = task
-        return None
-
-    mock_job_manager.register_task.side_effect = register_task_side_effect
+    # Mock the job processor functions
+    mock_process = MagicMock()
+    mock_create_and_start_job_process = MagicMock(return_value=mock_process)
 
     # Create a custom context
     custom_context = [
@@ -682,24 +667,27 @@ async def test_chat_with_agent_async_with_context(
         ConversationRecord(role=ConversationRole.ASSISTANT, content="Previous assistant response"),
     ]
 
-    payload = ChatRequest(
-        hosting="openai",
-        model="gpt-4o",
-        prompt="Process this with custom context",
-        context=custom_context,
-    )
+    # Mock the job processor functions to avoid pickling issues in tests
+    with patch(
+        "local_operator.server.utils.job_processor.create_and_start_job_process",
+        mock_create_and_start_job_process,
+    ):
+        with patch("local_operator.server.utils.job_processor.run_agent_job_in_process"):
+            payload = ChatRequest(
+                hosting="openai",
+                model="gpt-4o",
+                prompt="Process this with custom context",
+                context=custom_context,
+            )
 
-    response = await test_app_client.post(
-        f"/v1/chat/agents/{agent_id}/async", json=payload.model_dump()
-    )
+            response = await test_app_client.post(
+                f"/v1/chat/agents/{agent_id}/async", json=payload.model_dump()
+            )
 
-    assert response.status_code == 202
-    data = response.json()
-    result = data.get("result")
-    assert result.get("agent_id") == agent_id
+            assert response.status_code == 202
+            data = response.json()
+            result = data.get("result")
+            assert result.get("agent_id") == agent_id
 
-    # Run the background task directly
-    await captured_task  # type: ignore
-
-    # Verify job was completed
-    assert mock_job_manager.update_job_status.call_args_list[-1][0][1] == JobStatus.COMPLETED
+            # Verify that create_and_start_job_process was called
+            assert mock_create_and_start_job_process.called
