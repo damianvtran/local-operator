@@ -16,7 +16,7 @@ from local_operator.jobs import JobManager, JobStatus
 
 
 def update_job_status_in_process(
-    job_id: str, job_manager: JobManager, queue: Queue[Union[bool, str]]
+    job_id: str, job_manager: JobManager, queue: "Queue[Union[bool, str]]"
 ):
     """
     Update a job's status in a separate process.
@@ -99,7 +99,7 @@ async def test_job_status_update_across_processes():
 
 
 def update_job_status_with_shared_queue(
-    job_id: str, status_queue: Queue[tuple[str, JobStatus, Any]]
+    job_id: str, status_queue: "Queue[tuple[str, JobStatus, Any]]"
 ):
     """
     Update a job's status using a shared queue to communicate with the parent process.

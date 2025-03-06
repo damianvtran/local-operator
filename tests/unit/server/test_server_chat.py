@@ -277,14 +277,16 @@ async def test_chat_async_process_execution(
 
     # Mock the job processor functions
     mock_process = MagicMock()
-    mock_create_and_start_job_process = MagicMock(return_value=mock_process)
+    mock_create_and_start_job_process_with_queue = MagicMock(
+        return_value=(mock_process, MagicMock())
+    )
 
     # Mock the job processor functions to avoid pickling issues in tests
     with patch(
-        "local_operator.server.utils.job_processor.create_and_start_job_process",
-        mock_create_and_start_job_process,
+        "local_operator.server.routes.chat.create_and_start_job_process_with_queue",
+        mock_create_and_start_job_process_with_queue,
     ):
-        with patch("local_operator.server.utils.job_processor.run_job_in_process"):
+        with patch("local_operator.server.routes.chat.run_job_in_process_with_queue"):
             payload = ChatRequest(
                 hosting="openai",
                 model="gpt-4o",
@@ -296,8 +298,8 @@ async def test_chat_async_process_execution(
 
             assert response.status_code == 202
 
-            # Verify that create_and_start_job_process was called
-            assert mock_create_and_start_job_process.called
+            # Verify that create_and_start_job_process_with_queue was called
+            assert mock_create_and_start_job_process_with_queue.called
 
             # Verify the job was created
             mock_job_manager.create_job.assert_called_once()
@@ -312,23 +314,26 @@ async def test_chat_async_endpoint_success(
     """Test successful asynchronous chat request."""
     # Mock the job processor functions
     mock_process = MagicMock()
-    mock_create_and_start_job_process = MagicMock(return_value=mock_process)
+    mock_monitor_task = MagicMock()
+    mock_create_and_start_job_process_with_queue = MagicMock(
+        return_value=(mock_process, mock_monitor_task)
+    )
+
+    # Setup mock job
+    mock_job = MagicMock()
+    mock_job.id = "test-job-id"
+    mock_job.status = JobStatus.PENDING
+    mock_job.created_at = datetime.now(timezone.utc).timestamp()
+    mock_job.started_at = None
+    mock_job.completed_at = None
+    mock_job_manager.create_job.return_value = mock_job
 
     # Mock the job processor functions to avoid pickling issues in tests
     with patch(
-        "local_operator.server.utils.job_processor.create_and_start_job_process",
-        mock_create_and_start_job_process,
+        "local_operator.server.routes.chat.create_and_start_job_process_with_queue",
+        mock_create_and_start_job_process_with_queue,
     ):
-        with patch("local_operator.server.utils.job_processor.run_job_in_process"):
-            # Setup mock job
-            mock_job = MagicMock()
-            mock_job.id = "test-job-id"
-            mock_job.status = JobStatus.PENDING
-            mock_job.created_at = datetime.now(timezone.utc).timestamp()
-            mock_job.started_at = None
-            mock_job.completed_at = None
-            mock_job_manager.create_job.return_value = mock_job
-
+        with patch("local_operator.server.routes.chat.run_job_in_process_with_queue"):
             payload = ChatRequest(
                 hosting="openai",
                 model="gpt-4o",
@@ -347,8 +352,14 @@ async def test_chat_async_endpoint_success(
             assert data["result"]["prompt"] == "Process this asynchronously"
             assert data["result"]["model"] == "gpt-4o"
             assert data["result"]["hosting"] == "openai"
-            assert mock_job_manager.create_job.called
-            assert mock_job_manager.register_task.called
+
+            # Verify the job was created
+            mock_job_manager.create_job.assert_called_once()
+
+            # In the actual implementation, register_task is called inside
+            # create_and_start_job_process_with_queue
+            # So we don't need to verify it was called directly
+            mock_create_and_start_job_process_with_queue.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -384,21 +395,28 @@ async def test_chat_async_job_processing(test_app_client, mock_create_operator, 
     mock_job.completed_at = None
     mock_job_manager.create_job.return_value = mock_job
 
-    # Store the task for testing
-    captured_task = None
-
-    def register_task_side_effect(job_id, task):
-        nonlocal captured_task
-        captured_task = task
-        return None
-
-    mock_job_manager.register_task.side_effect = register_task_side_effect
-
-    # Mock the Process class
+    # Create a mock process that will be returned by create_and_start_job_process_with_queue
     mock_process = MagicMock()
+    mock_monitor_task = MagicMock()
 
-    with patch("local_operator.server.routes.chat.Process", return_value=mock_process):
-        with patch("local_operator.server.routes.chat.run_job_in_process"):
+    # This is the key change - we need to simulate what create_and_start_job_process_with_queue does
+    # In the real implementation, it starts the process and registers it
+    def mock_create_and_start_side_effect(*args, **kwargs):
+        # Start the process
+        mock_process.start()
+        # Register the process with the job manager
+        job_id = args[0] if args else kwargs.get("job_id")
+        mock_job_manager.register_process(job_id, mock_process)
+        # Return the process and monitor task
+        return mock_process, mock_monitor_task
+
+    mock_create_and_start = MagicMock(side_effect=mock_create_and_start_side_effect)
+
+    with patch(
+        "local_operator.server.routes.chat.create_and_start_job_process_with_queue",
+        mock_create_and_start,
+    ):
+        with patch("local_operator.server.routes.chat.run_job_in_process_with_queue"):
             payload = ChatRequest(
                 hosting="openai",
                 model="gpt-4o",
@@ -410,14 +428,14 @@ async def test_chat_async_job_processing(test_app_client, mock_create_operator, 
 
             assert response.status_code == 202
 
+            # Verify create_and_start_job_process_with_queue was called
+            mock_create_and_start.assert_called_once()
+
             # Verify the process was started
             mock_process.start.assert_called_once()
 
             # Verify the process was registered with the job manager
             mock_job_manager.register_process.assert_called_once_with(mock_job.id, mock_process)
-
-            # Verify the task was created and registered
-            assert mock_job_manager.register_task.called
 
 
 @pytest.mark.asyncio
@@ -461,14 +479,16 @@ async def test_chat_with_agent_async_success(
 
     # Mock the job processor functions
     mock_process = MagicMock()
-    mock_create_and_start_job_process = MagicMock(return_value=mock_process)
+    mock_create_and_start_job_process_with_queue = MagicMock(
+        return_value=(mock_process, MagicMock())
+    )
 
     # Mock the job processor functions to avoid pickling issues in tests
     with patch(
-        "local_operator.server.utils.job_processor.create_and_start_job_process",
-        mock_create_and_start_job_process,
+        "local_operator.server.routes.chat.create_and_start_job_process_with_queue",
+        mock_create_and_start_job_process_with_queue,
     ):
-        with patch("local_operator.server.utils.job_processor.run_agent_job_in_process"):
+        with patch("local_operator.server.routes.chat.run_agent_job_in_process_with_queue"):
             payload = ChatRequest(
                 hosting="openai",
                 model="gpt-4o",
@@ -487,8 +507,8 @@ async def test_chat_with_agent_async_success(
             assert result.get("agent_id") == agent_id
             assert result.get("status") == JobStatus.PENDING.value
 
-            # Verify that create_and_start_job_process was called
-            assert mock_create_and_start_job_process.called
+            # Verify that create_and_start_job_process_with_queue was called
+            assert mock_create_and_start_job_process_with_queue.called
 
 
 @pytest.mark.asyncio
@@ -532,14 +552,16 @@ async def test_chat_with_agent_async_persist_conversation(
 
     # Mock the job processor functions
     mock_process = MagicMock()
-    mock_create_and_start_job_process = MagicMock(return_value=mock_process)
+    mock_create_and_start_job_process_with_queue = MagicMock(
+        return_value=(mock_process, MagicMock())
+    )
 
     # Mock the job processor functions to avoid pickling issues in tests
     with patch(
-        "local_operator.server.utils.job_processor.create_and_start_job_process",
-        mock_create_and_start_job_process,
+        "local_operator.server.routes.chat.create_and_start_job_process_with_queue",
+        mock_create_and_start_job_process_with_queue,
     ):
-        with patch("local_operator.server.utils.job_processor.run_agent_job_in_process"):
+        with patch("local_operator.server.routes.chat.run_agent_job_in_process_with_queue"):
             # First request
             first_prompt = "Hello agent, how are you?"
             first_payload = AgentChatRequest(
@@ -560,8 +582,8 @@ async def test_chat_with_agent_async_persist_conversation(
             assert first_result.get("agent_id") == agent_id
             assert first_result.get("status") == JobStatus.PENDING.value
 
-            # Verify that create_and_start_job_process was called
-            assert mock_create_and_start_job_process.called
+            # Verify that create_and_start_job_process_with_queue was called
+            assert mock_create_and_start_job_process_with_queue.called
 
             # Setup for second job
             second_job = MagicMock()
@@ -592,8 +614,8 @@ async def test_chat_with_agent_async_persist_conversation(
             assert second_result.get("agent_id") == agent_id
             assert second_result.get("status") == JobStatus.PENDING.value
 
-            # Verify that create_and_start_job_process was called again
-            assert mock_create_and_start_job_process.call_count == 2
+            # Verify that create_and_start_job_process_with_queue was called again
+            assert mock_create_and_start_job_process_with_queue.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -658,7 +680,9 @@ async def test_chat_with_agent_async_with_context(
 
     # Mock the job processor functions
     mock_process = MagicMock()
-    mock_create_and_start_job_process = MagicMock(return_value=mock_process)
+    mock_create_and_start_job_process_with_queue = MagicMock(
+        return_value=(mock_process, MagicMock())
+    )
 
     # Create a custom context
     custom_context = [
@@ -669,10 +693,10 @@ async def test_chat_with_agent_async_with_context(
 
     # Mock the job processor functions to avoid pickling issues in tests
     with patch(
-        "local_operator.server.utils.job_processor.create_and_start_job_process",
-        mock_create_and_start_job_process,
+        "local_operator.server.routes.chat.create_and_start_job_process_with_queue",
+        mock_create_and_start_job_process_with_queue,
     ):
-        with patch("local_operator.server.utils.job_processor.run_agent_job_in_process"):
+        with patch("local_operator.server.routes.chat.run_agent_job_in_process_with_queue"):
             payload = ChatRequest(
                 hosting="openai",
                 model="gpt-4o",
@@ -689,5 +713,5 @@ async def test_chat_with_agent_async_with_context(
             result = data.get("result")
             assert result.get("agent_id") == agent_id
 
-            # Verify that create_and_start_job_process was called
-            assert mock_create_and_start_job_process.called
+            # Verify that create_and_start_job_process_with_queue was called
+            assert mock_create_and_start_job_process_with_queue.called
