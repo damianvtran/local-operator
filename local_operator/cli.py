@@ -610,6 +610,8 @@ def main() -> int:
         hosting = config_manager.get_config_value("hosting")
         model_name = config_manager.get_config_value("model_name")
 
+        chat_args = {}
+
         if agent:
             # Get conversation history if agent name provided
             agent_conversation_data = agent_registry.load_agent_conversation(agent.id)
@@ -619,6 +621,23 @@ def main() -> int:
                 hosting = agent.hosting
             if agent.model:
                 model_name = agent.model
+            if agent.temperature:
+                chat_args["temperature"] = agent.temperature
+            if agent.top_p:
+                chat_args["top_p"] = agent.top_p
+            if agent.top_k:
+                chat_args["top_k"] = agent.top_k
+            if agent.max_tokens:
+                chat_args["max_tokens"] = agent.max_tokens
+            if agent.stop:
+                chat_args["stop"] = agent.stop
+            if agent.frequency_penalty:
+                chat_args["frequency_penalty"] = agent.frequency_penalty
+            if agent.presence_penalty:
+                chat_args["presence_penalty"] = agent.presence_penalty
+            if agent.seed:
+                chat_args["seed"] = agent.seed
+
         else:
             agent_conversation_data = AgentConversation(
                 version="",
@@ -634,7 +653,7 @@ def main() -> int:
             )
 
         model_configuration = configure_model(
-            hosting, model_name, credential_manager, model_info_client
+            hosting, model_name, credential_manager, model_info_client, **chat_args
         )
 
         if not model_configuration.instance:
