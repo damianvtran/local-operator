@@ -5,6 +5,9 @@ This module contains the FastAPI route handlers for configuration-related endpoi
 """
 
 import logging
+import os
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, cast
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,10 +20,15 @@ from local_operator.server.models.schemas import (
     ConfigResponse,
     ConfigUpdate,
     CRUDResponse,
+    SystemPromptResponse,
+    SystemPromptUpdate,
 )
 
 router = APIRouter(tags=["Configuration"])
 logger = logging.getLogger("local_operator.server.routes.config")
+
+# Path to the system prompt file
+SYSTEM_PROMPT_FILE = Path(os.path.expanduser("~/.local-operator/system_prompt.md"))
 
 
 @router.get(
@@ -175,3 +183,130 @@ async def update_config(
     except Exception as e:
         logger.exception("Error updating configuration")
         raise HTTPException(status_code=500, detail=f"Error updating configuration: {e}")
+
+
+@router.get(
+    "/v1/config/system-prompt",
+    response_model=CRUDResponse[SystemPromptResponse],
+    summary="Get system prompt",
+    description="Retrieve the current system prompt content.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "description": "System prompt retrieved successfully",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "status": 200,
+                            "message": "System prompt retrieved successfully",
+                            "result": {
+                                "content": "You are Local Operator, an AI assistant...",
+                                "last_modified": "2024-01-01T12:00:00",
+                            },
+                        }
+                    }
+                },
+            },
+            "404": {
+                "description": "System prompt file not found",
+                "content": {
+                    "application/json": {"example": {"detail": "System prompt file not found"}}
+                },
+            },
+        },
+    },
+)
+async def get_system_prompt():
+    """
+    Retrieve the current system prompt content.
+    """
+    try:
+        if not SYSTEM_PROMPT_FILE.exists():
+            response = CRUDResponse(
+                status=204,
+                message="System prompt retrieved, system prompt is empty",
+                result=SystemPromptResponse(content="", last_modified=""),
+            )
+
+            return JSONResponse(status_code=204, content=jsonable_encoder(response))
+
+        content = SYSTEM_PROMPT_FILE.read_text(encoding="utf-8")
+        last_modified = datetime.fromtimestamp(SYSTEM_PROMPT_FILE.stat().st_mtime).isoformat()
+
+        return CRUDResponse(
+            status=200,
+            message="System prompt retrieved successfully",
+            result=SystemPromptResponse(content=content, last_modified=last_modified),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error retrieving system prompt")
+        raise HTTPException(status_code=500, detail=f"Error retrieving system prompt: {e}")
+
+
+@router.patch(
+    "/v1/config/system-prompt",
+    response_model=CRUDResponse[SystemPromptResponse],
+    summary="Update system prompt",
+    description="Update the system prompt content.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "example": {
+                            "summary": "Update System Prompt Example",
+                            "value": {
+                                "content": "You are Local Operator, an AI assistant...",
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "description": "System prompt updated successfully",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "status": 200,
+                            "message": "System prompt updated successfully",
+                            "result": {
+                                "content": "You are Local Operator, an AI assistant...",
+                                "last_modified": "2024-01-01T12:00:00",
+                            },
+                        }
+                    }
+                },
+            },
+        },
+    },
+)
+async def update_system_prompt(system_prompt_update: SystemPromptUpdate):
+    """
+    Update the system prompt content.
+    """
+    try:
+        # Create directory if it doesn't exist
+        SYSTEM_PROMPT_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+        # Write the updated content to the file
+        SYSTEM_PROMPT_FILE.write_text(system_prompt_update.content, encoding="utf-8")
+
+        # Get the updated timestamp
+        last_modified = datetime.fromtimestamp(SYSTEM_PROMPT_FILE.stat().st_mtime).isoformat()
+
+        response = CRUDResponse(
+            status=200,
+            message="System prompt updated successfully",
+            result=SystemPromptResponse(
+                content=system_prompt_update.content, last_modified=last_modified
+            ),
+        )
+
+        return JSONResponse(status_code=200, content=jsonable_encoder(response))
+    except Exception as e:
+        logger.exception("Error updating system prompt")
+        raise HTTPException(status_code=500, detail=f"Error updating system prompt: {e}")

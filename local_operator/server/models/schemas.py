@@ -335,6 +335,30 @@ class ConfigResponse(BaseModel):
     values: Dict[str, Any] = Field(..., description="Configuration settings")
 
 
+class SystemPromptResponse(BaseModel):
+    """Response containing the system prompt content.
+
+    Attributes:
+        content: The content of the system prompt
+        last_modified: Timestamp when the system prompt was last modified
+    """
+
+    content: str = Field(..., description="The content of the system prompt")
+    last_modified: str = Field(
+        ..., description="Timestamp when the system prompt was last modified"
+    )
+
+
+class SystemPromptUpdate(BaseModel):
+    """Data for updating the system prompt.
+
+    Attributes:
+        content: The new content for the system prompt
+    """
+
+    content: str = Field(..., description="The new content for the system prompt")
+
+
 class CredentialUpdate(BaseModel):
     """Data for updating a credential.
 
