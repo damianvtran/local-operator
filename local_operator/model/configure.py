@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import requests
 from langchain_anthropic import ChatAnthropic
@@ -35,6 +35,14 @@ class ModelConfiguration:
         ChatOllama).
         info (ModelInfo): Information about the model, such as pricing and rate limits.
         api_key (Optional[SecretStr]): API key for the model.
+        temperature (float): The temperature for the model.
+        top_p (float): The top_p for the model.
+        top_k (Optional[int]): The top_k for the model.
+        max_tokens (Optional[int]): The max_tokens for the model.
+        frequency_penalty (Optional[float]): The frequency_penalty for the model.
+        presence_penalty (Optional[float]): The presence_penalty for the model.
+        stop (Optional[List[str]]): The stop for the model.
+        seed (Optional[int]): The seed for the model.
     """
 
     hosting: str
@@ -42,6 +50,14 @@ class ModelConfiguration:
     instance: ModelType
     info: ModelInfo
     api_key: Optional[SecretStr] = None
+    temperature: float = DEFAULT_TEMPERATURE
+    top_p: float = DEFAULT_TOP_P
+    top_k: Optional[int] = None
+    max_tokens: Optional[int] = None
+    frequency_penalty: Optional[float] = None
+    presence_penalty: Optional[float] = None
+    stop: Optional[List[str]] = None
+    seed: Optional[int] = None
 
     def __init__(
         self,
@@ -50,12 +66,28 @@ class ModelConfiguration:
         instance: ModelType,
         info: ModelInfo,
         api_key: Optional[SecretStr] = None,
+        temperature: float = DEFAULT_TEMPERATURE,
+        top_p: float = DEFAULT_TOP_P,
+        top_k: Optional[int] = None,
+        max_tokens: Optional[int] = None,
+        frequency_penalty: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
+        stop: Optional[List[str]] = None,
+        seed: Optional[int] = None,
     ):
         self.hosting = hosting
         self.name = name
         self.instance = instance
         self.info = info
         self.api_key = api_key
+        self.temperature = temperature
+        self.top_p = top_p
+        self.top_k = top_k
+        self.max_tokens = max_tokens
+        self.frequency_penalty = frequency_penalty
+        self.presence_penalty = presence_penalty
+        self.stop = stop
+        self.seed = seed
 
 
 def _check_model_exists_payload(hosting: str, model: str, response_data: Dict[str, Any]) -> bool:
@@ -197,6 +229,14 @@ def configure_model(
     model_name: str,
     credential_manager: CredentialManager,
     model_info_client: Optional[OpenRouterClient] = None,
+    temperature: float = DEFAULT_TEMPERATURE,
+    top_p: float = DEFAULT_TOP_P,
+    top_k: Optional[int] = None,
+    max_tokens: Optional[int] = None,
+    frequency_penalty: Optional[float] = None,
+    presence_penalty: Optional[float] = None,
+    stop: Optional[List[str]] = None,
+    seed: Optional[int] = None,
 ) -> ModelConfiguration:
     """Configure and return the appropriate model based on hosting platform.
 
@@ -205,6 +245,17 @@ def configure_model(
         model_name (str): Model name to use
         credential_manager: CredentialManager instance for API key management
         model_info_client: OpenRouterClient instance for model info
+        temperature (float, optional): Controls randomness in responses. Defaults to
+        DEFAULT_TEMPERATURE.
+        top_p (float, optional): Controls diversity via nucleus sampling. Defaults to DEFAULT_TOP_P.
+        top_k (Optional[int], optional): Limits token selection to top k options. Defaults to None.
+        max_tokens (Optional[int], optional): Maximum tokens to generate. Defaults to None.
+        frequency_penalty (Optional[float], optional): Reduces repetition of tokens.
+        Defaults to None.
+        presence_penalty (Optional[float], optional): Reduces likelihood of prompt tokens.
+        Defaults to None.
+        stop (Optional[List[str]], optional): Sequences that stop generation. Defaults to None.
+        seed (Optional[int], optional): Random seed for deterministic generation. Defaults to None.
 
     Returns:
         ModelConfiguration: Config object containing the configured model instance and API
@@ -223,6 +274,14 @@ def configure_model(
             name=model_name,
             instance=ChatMock(),
             info=ModelInfo(),
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            max_tokens=max_tokens,
+            frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty,
+            stop=stop,
+            seed=seed,
         )
     if hosting == "noop":
         return ModelConfiguration(
@@ -230,6 +289,14 @@ def configure_model(
             name=model_name,
             instance=ChatNoop(),
             info=ModelInfo(),
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            max_tokens=max_tokens,
+            frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty,
+            stop=stop,
+            seed=seed,
         )
 
     configured_model = None
@@ -242,13 +309,26 @@ def configure_model(
         api_key = credential_manager.get_credential("DEEPSEEK_API_KEY")
         if not api_key:
             api_key = credential_manager.prompt_for_credential("DEEPSEEK_API_KEY")
-        configured_model = ChatOpenAI(
-            api_key=api_key,
-            temperature=DEFAULT_TEMPERATURE,
-            top_p=DEFAULT_TOP_P,
-            base_url=base_url,
-            model=model_name,
-        )
+
+        model_kwargs = {
+            "api_key": api_key,
+            "temperature": temperature,
+            "top_p": top_p,
+            "base_url": base_url,
+            "model": model_name,
+        }
+        if max_tokens is not None:
+            model_kwargs["max_tokens"] = max_tokens
+        if frequency_penalty is not None:
+            model_kwargs["frequency_penalty"] = frequency_penalty
+        if presence_penalty is not None:
+            model_kwargs["presence_penalty"] = presence_penalty
+        if stop is not None:
+            model_kwargs["stop"] = stop
+        if seed is not None:
+            model_kwargs["seed"] = seed
+
+        configured_model = ChatOpenAI(**model_kwargs)
 
     elif hosting == "openai":
         if not model_name:
@@ -256,13 +336,28 @@ def configure_model(
         api_key = credential_manager.get_credential("OPENAI_API_KEY")
         if not api_key:
             api_key = credential_manager.prompt_for_credential("OPENAI_API_KEY")
-        temperature = 1.0 if model_name.startswith(("o1", "o3")) else DEFAULT_TEMPERATURE
-        configured_model = ChatOpenAI(
-            api_key=api_key,
-            temperature=temperature,
-            top_p=DEFAULT_TOP_P,
-            model=model_name,
-        )
+
+        # Override temperature for specific models
+        model_temperature = 1.0 if model_name.startswith(("o1", "o3")) else temperature
+
+        model_kwargs = {
+            "api_key": api_key,
+            "temperature": model_temperature,
+            "top_p": top_p,
+            "model": model_name,
+        }
+        if max_tokens is not None:
+            model_kwargs["max_tokens"] = max_tokens
+        if frequency_penalty is not None:
+            model_kwargs["frequency_penalty"] = frequency_penalty
+        if presence_penalty is not None:
+            model_kwargs["presence_penalty"] = presence_penalty
+        if stop is not None:
+            model_kwargs["stop"] = stop
+        if seed is not None:
+            model_kwargs["seed"] = seed
+
+        configured_model = ChatOpenAI(**model_kwargs)
 
     elif hosting == "openrouter":
         if not model_name:
@@ -270,18 +365,31 @@ def configure_model(
         api_key = credential_manager.get_credential("OPENROUTER_API_KEY")
         if not api_key:
             api_key = credential_manager.prompt_for_credential("OPENROUTER_API_KEY")
-        configured_model = ChatOpenAI(
-            api_key=api_key,
-            temperature=DEFAULT_TEMPERATURE,
-            top_p=DEFAULT_TOP_P,
-            model=model_name,
-            base_url="https://openrouter.ai/api/v1",
-            default_headers={
+
+        model_kwargs = {
+            "api_key": api_key,
+            "temperature": temperature,
+            "top_p": top_p,
+            "model": model_name,
+            "base_url": "https://openrouter.ai/api/v1",
+            "default_headers": {
                 "HTTP-Referer": "https://local-operator.com",
                 "X-Title": "Local Operator",
                 "X-Description": "AI agents doing work for you on your own device",
             },
-        )
+        }
+        if max_tokens is not None:
+            model_kwargs["max_tokens"] = max_tokens
+        if frequency_penalty is not None:
+            model_kwargs["frequency_penalty"] = frequency_penalty
+        if presence_penalty is not None:
+            model_kwargs["presence_penalty"] = presence_penalty
+        if stop is not None:
+            model_kwargs["stop"] = stop
+        if seed is not None:
+            model_kwargs["seed"] = seed
+
+        configured_model = ChatOpenAI(**model_kwargs)
 
     elif hosting == "anthropic":
         if not model_name:
@@ -293,14 +401,18 @@ def configure_model(
         if not api_key:
             raise ValueError("Anthropic API key is required")
 
-        configured_model = ChatAnthropic(
-            api_key=api_key,
-            temperature=DEFAULT_TEMPERATURE,
-            top_p=DEFAULT_TOP_P,
-            model_name=model_name,
-            timeout=None,
-            stop=None,
-        )
+        model_kwargs = {
+            "api_key": api_key,
+            "temperature": temperature,
+            "top_p": top_p,
+            "model_name": model_name,
+            "timeout": None,
+            "stop": stop,
+        }
+        if max_tokens is not None:
+            model_kwargs["max_tokens"] = max_tokens
+
+        configured_model = ChatAnthropic(**model_kwargs)
 
     elif hosting == "kimi":
         if not model_name:
@@ -308,13 +420,26 @@ def configure_model(
         api_key = credential_manager.get_credential("KIMI_API_KEY")
         if not api_key:
             api_key = credential_manager.prompt_for_credential("KIMI_API_KEY")
-        configured_model = ChatOpenAI(
-            api_key=api_key,
-            temperature=DEFAULT_TEMPERATURE,
-            top_p=DEFAULT_TOP_P,
-            model=model_name,
-            base_url="https://api.moonshot.cn/v1",
-        )
+
+        model_kwargs = {
+            "api_key": api_key,
+            "temperature": temperature,
+            "top_p": top_p,
+            "model": model_name,
+            "base_url": "https://api.moonshot.cn/v1",
+        }
+        if max_tokens is not None:
+            model_kwargs["max_tokens"] = max_tokens
+        if frequency_penalty is not None:
+            model_kwargs["frequency_penalty"] = frequency_penalty
+        if presence_penalty is not None:
+            model_kwargs["presence_penalty"] = presence_penalty
+        if stop is not None:
+            model_kwargs["stop"] = stop
+        if seed is not None:
+            model_kwargs["seed"] = seed
+
+        configured_model = ChatOpenAI(**model_kwargs)
 
     elif hosting == "alibaba":
         if not model_name:
@@ -322,13 +447,26 @@ def configure_model(
         api_key = credential_manager.get_credential("ALIBABA_CLOUD_API_KEY")
         if not api_key:
             api_key = credential_manager.prompt_for_credential("ALIBABA_CLOUD_API_KEY")
-        configured_model = ChatOpenAI(
-            api_key=api_key,
-            temperature=DEFAULT_TEMPERATURE,
-            top_p=DEFAULT_TOP_P,
-            model=model_name,
-            base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-        )
+
+        model_kwargs = {
+            "api_key": api_key,
+            "temperature": temperature,
+            "top_p": top_p,
+            "model": model_name,
+            "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        }
+        if max_tokens is not None:
+            model_kwargs["max_tokens"] = max_tokens
+        if frequency_penalty is not None:
+            model_kwargs["frequency_penalty"] = frequency_penalty
+        if presence_penalty is not None:
+            model_kwargs["presence_penalty"] = presence_penalty
+        if stop is not None:
+            model_kwargs["stop"] = stop
+        if seed is not None:
+            model_kwargs["seed"] = seed
+
+        configured_model = ChatOpenAI(**model_kwargs)
 
     elif hosting == "google":
         if not model_name:
@@ -336,12 +474,21 @@ def configure_model(
         api_key = credential_manager.get_credential("GOOGLE_AI_STUDIO_API_KEY")
         if not api_key:
             api_key = credential_manager.prompt_for_credential("GOOGLE_AI_STUDIO_API_KEY")
-        configured_model = ChatGoogleGenerativeAI(
-            api_key=api_key,
-            temperature=DEFAULT_TEMPERATURE,
-            top_p=DEFAULT_TOP_P,
-            model=model_name,
-        )
+
+        model_kwargs = {
+            "api_key": api_key,
+            "temperature": temperature,
+            "top_p": top_p,
+            "model": model_name,
+        }
+        if max_tokens is not None:
+            model_kwargs["max_tokens"] = max_tokens
+        if top_k is not None:
+            model_kwargs["top_k"] = top_k
+        if stop is not None:
+            model_kwargs["stop"] = stop
+
+        configured_model = ChatGoogleGenerativeAI(**model_kwargs)
 
     elif hosting == "mistral":
         if not model_name:
@@ -349,22 +496,44 @@ def configure_model(
         api_key = credential_manager.get_credential("MISTRAL_API_KEY")
         if not api_key:
             api_key = credential_manager.prompt_for_credential("MISTRAL_API_KEY")
-        configured_model = ChatOpenAI(
-            api_key=api_key,
-            temperature=DEFAULT_TEMPERATURE,
-            top_p=DEFAULT_TOP_P,
-            model=model_name,
-            base_url="https://api.mistral.ai/v1",
-        )
+
+        model_kwargs = {
+            "api_key": api_key,
+            "temperature": temperature,
+            "top_p": top_p,
+            "model": model_name,
+            "base_url": "https://api.mistral.ai/v1",
+        }
+        if max_tokens is not None:
+            model_kwargs["max_tokens"] = max_tokens
+        if frequency_penalty is not None:
+            model_kwargs["frequency_penalty"] = frequency_penalty
+        if presence_penalty is not None:
+            model_kwargs["presence_penalty"] = presence_penalty
+        if stop is not None:
+            model_kwargs["stop"] = stop
+        if seed is not None:
+            model_kwargs["seed"] = seed
+
+        configured_model = ChatOpenAI(**model_kwargs)
 
     elif hosting == "ollama":
         if not model_name:
             raise ValueError("Model is required for ollama hosting")
-        configured_model = ChatOllama(
-            model=model_name,
-            temperature=DEFAULT_TEMPERATURE,
-            top_p=DEFAULT_TOP_P,
-        )
+
+        model_kwargs = {
+            "model": model_name,
+            "temperature": temperature,
+            "top_p": top_p,
+        }
+        if max_tokens is not None:
+            model_kwargs["max_tokens"] = max_tokens
+        if top_k is not None:
+            model_kwargs["top_k"] = top_k
+        if stop is not None:
+            model_kwargs["stop"] = stop
+
+        configured_model = ChatOllama(**model_kwargs)
 
     else:
         raise ValueError(f"Unsupported hosting platform: {hosting}")
@@ -385,6 +554,14 @@ def configure_model(
         instance=configured_model,
         info=model_info,
         api_key=api_key,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        max_tokens=max_tokens,
+        frequency_penalty=frequency_penalty,
+        presence_penalty=presence_penalty,
+        stop=stop,
+        seed=seed,
     )
 
 

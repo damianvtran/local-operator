@@ -6,7 +6,7 @@ in the Local Operator API.
 """
 
 from datetime import datetime
-from typing import Generic, List, Optional, TypeVar
+from typing import Any, Dict, Generic, List, Optional, TypeVar
 
 from pydantic import BaseModel, Field
 
@@ -144,6 +144,46 @@ class Agent(BaseModel):
         ...,
         description="The date and time of the last message sent to the agent.",
     )
+    temperature: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Controls randomness in responses. Higher values like 0.8 make output more "
+        "random, while lower values like 0.2 make it more focused and deterministic.",
+    )
+    top_p: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Controls cumulative probability of tokens to sample from. Higher "
+        "values (0.95) keep more options, lower values (0.1) are more selective.",
+    )
+    top_k: Optional[int] = Field(
+        None,
+        description="Limits tokens to sample from at each step. Lower values (10) are "
+        "more selective, higher values (100) allow more variety.",
+    )
+    max_tokens: Optional[int] = Field(
+        None,
+        description="Maximum tokens to generate. Model may generate fewer if response completes "
+        "before reaching limit.",
+    )
+    stop: Optional[List[str]] = Field(
+        None, description="List of strings that will stop generation when encountered."
+    )
+    frequency_penalty: Optional[float] = Field(
+        None,
+        description="Reduces repetition by lowering likelihood of repeated tokens. "
+        "Range from -2.0 to 2.0.",
+    )
+    presence_penalty: Optional[float] = Field(
+        None,
+        description="Increases diversity by lowering likelihood of prompt tokens. "
+        "Range from -2.0 to 2.0.",
+    )
+    seed: Optional[int] = Field(
+        None, description="Random number seed for deterministic generation."
+    )
 
 
 class AgentCreate(BaseModel):
@@ -167,6 +207,45 @@ class AgentCreate(BaseModel):
         None,
         description="A description of the agent. Defaults to ''.",
     )
+    temperature: float | None = Field(
+        None,
+        description="Controls randomness in responses. Higher values like 0.8 make "
+        "output more random, while lower values like 0.2 make it more focused and "
+        "deterministic.",
+    )
+    top_p: float | None = Field(
+        None,
+        description="Controls cumulative probability of tokens to sample from. Higher "
+        "values (0.95) keep more options, lower values (0.1) are more selective.",
+    )
+    top_k: int | None = Field(
+        None,
+        description="Limits tokens to sample from at each step. Lower values (10) are "
+        "more selective, higher values (100) allow more variety.",
+    )
+    max_tokens: int | None = Field(
+        None,
+        description="Maximum tokens to generate. Model may generate fewer if response completes "
+        "before reaching limit.",
+    )
+    stop: List[str] | None = Field(
+        None,
+        description="List of strings that will stop generation when encountered.",
+    )
+    frequency_penalty: float | None = Field(
+        None,
+        description="Reduces repetition by lowering likelihood of repeated tokens. "
+        "Range from -2.0 to 2.0.",
+    )
+    presence_penalty: float | None = Field(
+        None,
+        description="Increases diversity by lowering likelihood of prompt tokens. "
+        "Range from -2.0 to 2.0.",
+    )
+    seed: int | None = Field(
+        None,
+        description="Random number seed for deterministic generation.",
+    )
 
 
 class AgentUpdate(BaseModel):
@@ -184,11 +263,49 @@ class AgentUpdate(BaseModel):
     )
     model: str | None = Field(
         None,
-        description="The model to use for the agent. Defaults to 'openai/gpt-4o-mini'.",
+        description="The model to use for the agent. Defaults to 'google/gemini-2.0-flash-001'.",
     )
     description: str | None = Field(
         None,
         description="A description of the agent.  Defaults to ''.",
+    )
+    temperature: float | None = Field(
+        None,
+        description="Controls randomness in responses. Higher values like 0.8 make output more "
+        "random, while lower values like 0.2 make it more focused and deterministic.",
+    )
+    top_p: float | None = Field(
+        None,
+        description="Controls cumulative probability of tokens to sample from. Higher "
+        "values (0.95) keep more options, lower values (0.1) are more selective.",
+    )
+    top_k: int | None = Field(
+        None,
+        description="Limits tokens to sample from at each step. Lower values (10) are more "
+        "selective, higher values (100) allow more variety.",
+    )
+    max_tokens: int | None = Field(
+        None,
+        description="Maximum tokens to generate. Model may generate fewer if response completes "
+        "before reaching limit.",
+    )
+    stop: List[str] | None = Field(
+        None,
+        description="List of strings that will stop generation when encountered.",
+    )
+    frequency_penalty: float | None = Field(
+        None,
+        description="Reduces repetition by lowering likelihood of repeated tokens. "
+        "Range from -2.0 to 2.0.",
+    )
+    presence_penalty: float | None = Field(
+        None,
+        description="Increases diversity by lowering likelihood of prompt tokens. "
+        "Range from -2.0 to 2.0.",
+    )
+    seed: int | None = Field(
+        None,
+        description="Random number seed for deterministic generation.",
     )
 
 
@@ -291,3 +408,101 @@ class AgentChatRequest(BaseModel):
     options: Optional[ChatOptions] = None
     persist_conversation: bool = False
     user_message_id: Optional[str] = None
+
+
+class ConfigUpdate(BaseModel):
+    """Data for updating configuration settings.
+
+    Attributes:
+        conversation_length: Number of conversation messages to retain
+        detail_length: Maximum length of detailed conversation history
+        max_learnings_history: Maximum number of learning entries to retain
+        hosting: AI model hosting provider
+        model_name: Name of the AI model to use
+        auto_save_conversation: Whether to automatically save the conversation
+    """
+
+    conversation_length: Optional[int] = Field(
+        None, description="Number of conversation messages to retain", ge=1
+    )
+    detail_length: Optional[int] = Field(
+        None, description="Maximum length of detailed conversation history", ge=1
+    )
+    max_learnings_history: Optional[int] = Field(
+        None, description="Maximum number of learning entries to retain", ge=1
+    )
+    hosting: Optional[str] = Field(None, description="AI model hosting provider")
+    model_name: Optional[str] = Field(None, description="Name of the AI model to use")
+    auto_save_conversation: Optional[bool] = Field(
+        None, description="Whether to automatically save the conversation"
+    )
+
+
+class ConfigResponse(BaseModel):
+    """Response containing configuration settings.
+
+    Attributes:
+        version: Configuration schema version for compatibility
+        metadata: Metadata about the configuration
+        values: Configuration settings
+    """
+
+    version: str = Field(..., description="Configuration schema version for compatibility")
+    metadata: Dict[str, Any] = Field(..., description="Metadata about the configuration")
+    values: Dict[str, Any] = Field(..., description="Configuration settings")
+
+
+class SystemPromptResponse(BaseModel):
+    """Response containing the system prompt content.
+
+    Attributes:
+        content: The content of the system prompt
+        last_modified: Timestamp when the system prompt was last modified
+    """
+
+    content: str = Field(..., description="The content of the system prompt")
+    last_modified: str = Field(
+        ..., description="Timestamp when the system prompt was last modified"
+    )
+
+
+class SystemPromptUpdate(BaseModel):
+    """Data for updating the system prompt.
+
+    Attributes:
+        content: The new content for the system prompt
+    """
+
+    content: str = Field(..., description="The new content for the system prompt")
+
+
+class CredentialUpdate(BaseModel):
+    """Data for updating a credential.
+
+    Attributes:
+        key: The credential key to update
+        value: The new value for the credential
+    """
+
+    key: str = Field(..., description="The credential key to update")
+    value: str = Field(..., description="The new value for the credential")
+
+
+class CredentialKey(BaseModel):
+    """Representation of a credential key.
+
+    Attributes:
+        key: The credential key name
+    """
+
+    key: str = Field(..., description="The credential key name")
+
+
+class CredentialListResult(BaseModel):
+    """Result containing a list of credential keys.
+
+    Attributes:
+        keys: List of credential keys
+    """
+
+    keys: List[str] = Field(..., description="List of credential keys")

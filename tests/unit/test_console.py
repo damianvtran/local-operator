@@ -2,21 +2,26 @@ import asyncio
 import io
 import sys
 from datetime import datetime
+from unittest.mock import patch
 
 import pytest
 
 from local_operator.agents import AgentData
 from local_operator.console import (
+    ExecutionSection,
+    VerbosityLevel,
     condense_logging,
     format_agent_output,
     format_error_output,
     format_success_output,
+    log_action_error,
     log_retry_error,
     print_agent_response,
     print_cli_banner,
     print_execution_section,
     print_task_interrupted,
     spinner_context,
+    with_spinner,
 )
 from local_operator.types import ActionType
 
@@ -125,6 +130,14 @@ def test_print_cli_banner_with_agent(monkeypatch, mock_config_manager):
         description="test description",
         last_message="test last message",
         last_message_datetime=datetime.now(),
+        temperature=0.7,
+        top_p=1.0,
+        top_k=None,
+        max_tokens=2048,
+        stop=None,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+        seed=None,
     )
 
     print_cli_banner(mock_config_manager, current_agent=agent, training_mode=False)
@@ -157,6 +170,14 @@ def test_print_cli_banner_with_agent_and_config(monkeypatch, mock_config_manager
         description="test description",
         last_message="test last message",
         last_message_datetime=datetime.now(),
+        temperature=0.7,
+        top_p=1.0,
+        top_k=None,
+        max_tokens=2048,
+        stop=None,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+        seed=None,
     )
 
     print_cli_banner(mock_config_manager, current_agent=agent, training_mode=False)
@@ -192,6 +213,14 @@ def test_print_cli_banner_with_agent_and_training(monkeypatch, mock_config_manag
         description="test description",
         last_message="test last message",
         last_message_datetime=datetime.now(),
+        temperature=0.7,
+        top_p=1.0,
+        top_k=None,
+        max_tokens=2048,
+        stop=None,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+        seed=None,
     )
 
     print_cli_banner(mock_config_manager, current_agent=agent, training_mode=True)
@@ -216,7 +245,7 @@ async def test_spinner_cancellation(monkeypatch):
     monkeypatch.setattr(sys, "stdout", output)
 
     # Start the spinner and let it run briefly
-    async with spinner_context("Testing spinner"):
+    async with spinner_context("Testing spinner", verbosity_level=VerbosityLevel.VERBOSE):
         await asyncio.sleep(0.25)
 
     # The spinner should clear the line on cancellation by writing "\r" at the end.
@@ -228,7 +257,7 @@ async def test_spinner_context_basic_functionality(monkeypatch):
     output = io.StringIO()
     monkeypatch.setattr(sys, "stdout", output)
 
-    async with spinner_context("Testing spinner"):
+    async with spinner_context("Testing spinner", verbosity_level=VerbosityLevel.VERBOSE):
         await asyncio.sleep(0.1)
 
     # Check that the spinner message was displayed
@@ -243,7 +272,9 @@ async def test_spinner_context_with_exception(monkeypatch):
     monkeypatch.setattr(sys, "stdout", output)
 
     try:
-        async with spinner_context("Testing spinner with exception"):
+        async with spinner_context(
+            "Testing spinner with exception", verbosity_level=VerbosityLevel.VERBOSE
+        ):
             await asyncio.sleep(0.1)
             raise ValueError("Test exception")
     except ValueError:
@@ -260,9 +291,9 @@ async def test_spinner_context_nested(monkeypatch):
     output = io.StringIO()
     monkeypatch.setattr(sys, "stdout", output)
 
-    async with spinner_context("Outer spinner"):
+    async with spinner_context("Outer spinner", verbosity_level=VerbosityLevel.VERBOSE):
         await asyncio.sleep(0.1)
-        async with spinner_context("Inner spinner"):
+        async with spinner_context("Inner spinner", verbosity_level=VerbosityLevel.VERBOSE):
             await asyncio.sleep(0.1)
 
     # Check that both spinner messages were displayed
@@ -363,7 +394,9 @@ def test_print_execution_section_header(
 ) -> None:
     output: io.StringIO = io.StringIO()
     monkeypatch.setattr(sys, "stdout", output)
-    print_execution_section("header", step=step, action=action_type)
+    print_execution_section(
+        "header", step=step, action=action_type, verbosity_level=VerbosityLevel.VERBOSE
+    )
     result: str = output.getvalue()
     assert expected_output in result
     assert "╭─" in result
@@ -373,7 +406,9 @@ def test_print_execution_section_code(monkeypatch):
     output = io.StringIO()
     monkeypatch.setattr(sys, "stdout", output)
     test_code = "print('Hello')"
-    print_execution_section("code", content=test_code, action=ActionType.CODE)
+    print_execution_section(
+        "code", content=test_code, action=ActionType.CODE, verbosity_level=VerbosityLevel.VERBOSE
+    )
     result = output.getvalue()
     assert "Executing:" in result
     assert "print('Hello')" in result
@@ -383,7 +418,12 @@ def test_print_execution_section_result(monkeypatch):
     output = io.StringIO()
     monkeypatch.setattr(sys, "stdout", output)
     test_result = "Result is 42"
-    print_execution_section("result", content=test_result, action=ActionType.CODE)
+    print_execution_section(
+        "result",
+        content=test_result,
+        action=ActionType.CODE,
+        verbosity_level=VerbosityLevel.VERBOSE,
+    )
     result = output.getvalue()
     assert "Result:" in result
     assert "Result is 42" in result
@@ -392,7 +432,9 @@ def test_print_execution_section_result(monkeypatch):
 def test_print_execution_section_footer(monkeypatch):
     output = io.StringIO()
     monkeypatch.setattr(sys, "stdout", output)
-    print_execution_section("footer", action=ActionType.CODE)
+    print_execution_section(
+        "footer", action=ActionType.CODE, verbosity_level=VerbosityLevel.VERBOSE
+    )
     result = output.getvalue()
     assert "╰" in result
 
@@ -400,7 +442,7 @@ def test_print_execution_section_footer(monkeypatch):
 def test_print_task_interrupted(monkeypatch):
     output = io.StringIO()
     monkeypatch.setattr(sys, "stdout", output)
-    print_task_interrupted()
+    print_task_interrupted(verbosity_level=VerbosityLevel.VERBOSE)
     result = output.getvalue()
     assert "Task Interrupted" in result
     assert "User requested to stop current task" in result
@@ -414,7 +456,7 @@ def test_print_agent_response(monkeypatch):
 
     test_step = 3
     test_content = "This is a test response"
-    print_agent_response(test_step, test_content)
+    print_agent_response(test_step, test_content, verbosity_level=VerbosityLevel.VERBOSE)
 
     result = output.getvalue()
     assert f"Agent Response (Step {test_step})" in result
@@ -429,7 +471,7 @@ def test_print_agent_response_multiline(monkeypatch):
 
     test_step = 1
     test_content = "Line 1\nLine 2\nLine 3"
-    print_agent_response(test_step, test_content)
+    print_agent_response(test_step, test_content, verbosity_level=VerbosityLevel.VERBOSE)
 
     result = output.getvalue()
     assert f"Agent Response (Step {test_step})" in result
@@ -438,6 +480,120 @@ def test_print_agent_response_multiline(monkeypatch):
     assert "Line 3" in result
     assert "╭─" in result
     assert "╰" in result
+
+
+def test_print_task_interrupted_quiet(monkeypatch):
+    output = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    print_task_interrupted(verbosity_level=VerbosityLevel.QUIET)
+    result = output.getvalue()
+    assert result == ""
+
+
+def test_print_agent_response_quiet(monkeypatch):
+    output = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    print_agent_response(1, "Test content", verbosity_level=VerbosityLevel.QUIET)
+    result = output.getvalue()
+    assert result == ""
+
+
+def test_print_execution_section_quiet(monkeypatch):
+    output = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+
+    # Test all section types with quiet verbosity
+    print_execution_section(
+        ExecutionSection.HEADER,
+        verbosity_level=VerbosityLevel.QUIET,
+        step=1,
+        action=ActionType.CODE,
+    )
+
+    print_execution_section(
+        ExecutionSection.CODE, verbosity_level=VerbosityLevel.QUIET, content="print('test')"
+    )
+
+    print_execution_section(
+        ExecutionSection.RESULT, verbosity_level=VerbosityLevel.QUIET, content="test output"
+    )
+
+    print_execution_section(
+        ExecutionSection.WRITE,
+        verbosity_level=VerbosityLevel.QUIET,
+        file_path="test.txt",
+        content="test content",
+    )
+
+    print_execution_section(
+        ExecutionSection.EDIT,
+        verbosity_level=VerbosityLevel.QUIET,
+        file_path="test.txt",
+        replacements=[{"find": "old", "replace": "new"}],
+    )
+
+    print_execution_section(
+        ExecutionSection.READ, verbosity_level=VerbosityLevel.QUIET, file_path="test.txt"
+    )
+
+    print_execution_section(
+        ExecutionSection.TOKEN_USAGE,
+        verbosity_level=VerbosityLevel.QUIET,
+        data={"prompt_tokens": 100, "completion_tokens": 50, "cost": 0.002},
+    )
+
+    print_execution_section(ExecutionSection.FOOTER, verbosity_level=VerbosityLevel.QUIET)
+
+    result = output.getvalue()
+    assert result == ""
+
+
+@pytest.mark.asyncio
+async def test_spinner_context_quiet():
+    # Test that spinner doesn't run with quiet verbosity
+    spinner_ran = False
+
+    async def mock_spinner(message):
+        nonlocal spinner_ran
+        spinner_ran = True
+        await asyncio.sleep(0.1)
+
+    with patch("local_operator.console.spinner", mock_spinner):
+        async with spinner_context("Testing", VerbosityLevel.QUIET):
+            await asyncio.sleep(0.1)
+
+    assert not spinner_ran
+
+
+@pytest.mark.asyncio
+async def test_with_spinner_quiet():
+    # Test that spinner doesn't run with quiet verbosity
+    spinner_ran = False
+
+    async def mock_spinner(message):
+        nonlocal spinner_ran
+        spinner_ran = True
+        await asyncio.sleep(0.1)
+
+    async def test_func():
+        return "result"
+
+    with patch("local_operator.console.spinner", mock_spinner):
+        result = await with_spinner("Testing", VerbosityLevel.QUIET, test_func)
+
+    assert result == "result"
+    assert not spinner_ran
+
+
+def test_log_action_error_quiet(monkeypatch):
+    output = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+
+    error = ValueError("Test error")
+    log_action_error(error, "test action", VerbosityLevel.QUIET)
+
+    result = output.getvalue()
+    assert result == ""
 
 
 condense_test_case_console_output = """
