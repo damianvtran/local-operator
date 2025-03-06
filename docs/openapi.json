@@ -351,7 +351,13 @@
                         "model": "openai/gpt-4o-mini",
                         "description": "An example agent",
                         "last_message": "Hello, how can I help?",
-                        "last_message_datetime": "2024-01-01T12:00:00"
+                        "last_message_datetime": "2024-01-01T12:00:00",
+                        "temperature": 0.7,
+                        "top_p": 1.0,
+                        "top_k": 20,
+                        "max_tokens": 2048,
+                        "frequency_penalty": 0.0,
+                        "presence_penalty": 0.0
                       }
                     ]
                   }
@@ -1598,6 +1604,109 @@
             "format": "date-time",
             "title": "Last Message Datetime",
             "description": "The date and time of the last message sent to the agent."
+          },
+          "temperature": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temperature",
+            "description": "Controls randomness in responses. Higher values like 0.8 make output more random, while lower values like 0.2 make it more focused and deterministic."
+          },
+          "top_p": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top P",
+            "description": "Controls cumulative probability of tokens to sample from. Higher values (0.95) keep more options, lower values (0.1) are more selective."
+          },
+          "top_k": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top K",
+            "description": "Limits tokens to sample from at each step. Lower values (10) are more selective, higher values (100) allow more variety."
+          },
+          "max_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Tokens",
+            "description": "Maximum tokens to generate. Model may generate fewer if response completes before reaching limit."
+          },
+          "stop": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop",
+            "description": "List of strings that will stop generation when encountered."
+          },
+          "frequency_penalty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frequency Penalty",
+            "description": "Reduces repetition by lowering likelihood of repeated tokens. Range from -2.0 to 2.0."
+          },
+          "presence_penalty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Presence Penalty",
+            "description": "Increases diversity by lowering likelihood of prompt tokens. Range from -2.0 to 2.0."
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seed",
+            "description": "Random number seed for deterministic generation."
           }
         },
         "type": "object",
@@ -1720,6 +1829,105 @@
             ],
             "title": "Description",
             "description": "A description of the agent. Defaults to ''."
+          },
+          "temperature": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temperature",
+            "description": "Controls randomness in responses. Higher values like 0.8 make output more random, while lower values like 0.2 make it more focused and deterministic."
+          },
+          "top_p": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top P",
+            "description": "Controls cumulative probability of tokens to sample from. Higher values (0.95) keep more options, lower values (0.1) are more selective."
+          },
+          "top_k": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top K",
+            "description": "Limits tokens to sample from at each step. Lower values (10) are more selective, higher values (100) allow more variety."
+          },
+          "max_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Tokens",
+            "description": "Maximum tokens to generate. Model may generate fewer if response completes before reaching limit."
+          },
+          "stop": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop",
+            "description": "List of strings that will stop generation when encountered."
+          },
+          "frequency_penalty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frequency Penalty",
+            "description": "Reduces repetition by lowering likelihood of repeated tokens. Range from -2.0 to 2.0."
+          },
+          "presence_penalty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Presence Penalty",
+            "description": "Increases diversity by lowering likelihood of prompt tokens. Range from -2.0 to 2.0."
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seed",
+            "description": "Random number seed for deterministic generation."
           }
         },
         "type": "object",
@@ -1949,6 +2157,105 @@
             ],
             "title": "Description",
             "description": "A description of the agent.  Defaults to ''."
+          },
+          "temperature": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temperature",
+            "description": "Controls randomness in responses. Higher values like 0.8 make output more random, while lower values like 0.2 make it more focused and deterministic."
+          },
+          "top_p": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top P",
+            "description": "Controls cumulative probability of tokens to sample from. Higher values (0.95) keep more options, lower values (0.1) are more selective."
+          },
+          "top_k": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top K",
+            "description": "Limits tokens to sample from at each step. Lower values (10) are more selective, higher values (100) allow more variety."
+          },
+          "max_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Tokens",
+            "description": "Maximum tokens to generate. Model may generate fewer if response completes before reaching limit."
+          },
+          "stop": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop",
+            "description": "List of strings that will stop generation when encountered."
+          },
+          "frequency_penalty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frequency Penalty",
+            "description": "Reduces repetition by lowering likelihood of repeated tokens. Range from -2.0 to 2.0."
+          },
+          "presence_penalty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Presence Penalty",
+            "description": "Increases diversity by lowering likelihood of prompt tokens. Range from -2.0 to 2.0."
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seed",
+            "description": "Random number seed for deterministic generation."
           }
         },
         "type": "object",
