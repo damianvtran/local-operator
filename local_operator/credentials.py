@@ -91,7 +91,7 @@ class CredentialManager:
             if key in os.environ:
                 self.set_credential(key, os.environ[key], write=False)
 
-        return self.credentials[key]
+        return self.credentials.get(key, SecretStr(""))
 
     def list_credential_keys(self, non_empty: bool = True) -> List[str]:
         """List all credential keys from the config file.
