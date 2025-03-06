@@ -257,7 +257,8 @@
                       "temperature": 0.2,
                       "top_p": 0.9
                     },
-                    "persist_conversation": false
+                    "persist_conversation": false,
+                    "user_message_id": ""
                   }
                 }
               }
@@ -350,7 +351,13 @@
                         "model": "openai/gpt-4o-mini",
                         "description": "An example agent",
                         "last_message": "Hello, how can I help?",
-                        "last_message_datetime": "2024-01-01T12:00:00"
+                        "last_message_datetime": "2024-01-01T12:00:00",
+                        "temperature": 0.7,
+                        "top_p": 1.0,
+                        "top_k": 20,
+                        "max_tokens": 2048,
+                        "frequency_penalty": 0.0,
+                        "presence_penalty": 0.0
                       }
                     ]
                   }
@@ -1238,6 +1245,303 @@
           }
         }
       }
+    },
+    "/v1/config": {
+      "get": {
+        "tags": [
+          "Configuration"
+        ],
+        "summary": "Get configuration",
+        "description": "Retrieve the current configuration settings.",
+        "operationId": "get_config_v1_config_get",
+        "responses": {
+          "200": {
+            "description": "Configuration retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ConfigResponse_"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "Configuration retrieved successfully",
+                  "result": {
+                    "version": "0.2.16",
+                    "metadata": {
+                      "created_at": "2024-01-01T00:00:00",
+                      "last_modified": "2024-01-01T12:00:00",
+                      "description": "Local Operator configuration file"
+                    },
+                    "values": {
+                      "conversation_length": 100,
+                      "detail_length": 35,
+                      "max_learnings_history": 50,
+                      "hosting": "openrouter",
+                      "model_name": "openai/gpt-4o-mini",
+                      "auto_save_conversation": false
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Configuration"
+        ],
+        "summary": "Update configuration",
+        "description": "Update the configuration settings with new values.",
+        "operationId": "update_config_v1_config_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigUpdate"
+              },
+              "examples": {
+                "example": {
+                  "summary": "Update Configuration Example",
+                  "value": {
+                    "conversation_length": 150,
+                    "detail_length": 50,
+                    "hosting": "openrouter",
+                    "model_name": "openai/gpt-4o-mini",
+                    "auto_save_conversation": true
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Configuration updated successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ConfigResponse_"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "Configuration updated successfully",
+                  "result": {
+                    "version": "0.2.16",
+                    "metadata": {
+                      "created_at": "2024-01-01T00:00:00",
+                      "last_modified": "2024-01-01T12:00:00",
+                      "description": "Local Operator configuration file"
+                    },
+                    "values": {
+                      "conversation_length": 150,
+                      "detail_length": 50,
+                      "max_learnings_history": 50,
+                      "hosting": "openrouter",
+                      "model_name": "openai/gpt-4o-mini",
+                      "auto_save_conversation": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/config/system-prompt": {
+      "get": {
+        "tags": [
+          "Configuration"
+        ],
+        "summary": "Get system prompt",
+        "description": "Retrieve the current system prompt content.",
+        "operationId": "get_system_prompt_v1_config_system_prompt_get",
+        "responses": {
+          "200": {
+            "description": "System prompt retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_SystemPromptResponse_"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "System prompt retrieved successfully",
+                  "result": {
+                    "content": "You are Local Operator, an AI assistant...",
+                    "last_modified": "2024-01-01T12:00:00"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "System prompt file not found",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "System prompt file not found"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Configuration"
+        ],
+        "summary": "Update system prompt",
+        "description": "Update the system prompt content.",
+        "operationId": "update_system_prompt_v1_config_system_prompt_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SystemPromptUpdate"
+              },
+              "examples": {
+                "example": {
+                  "summary": "Update System Prompt Example",
+                  "value": {
+                    "content": "You are Local Operator, an AI assistant..."
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "System prompt updated successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_SystemPromptResponse_"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "System prompt updated successfully",
+                  "result": {
+                    "content": "You are Local Operator, an AI assistant...",
+                    "last_modified": "2024-01-01T12:00:00"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/credentials": {
+      "get": {
+        "tags": [
+          "Credentials"
+        ],
+        "summary": "List credentials",
+        "description": "Retrieve a list of credential keys (without their values).",
+        "operationId": "list_credentials_v1_credentials_get",
+        "responses": {
+          "200": {
+            "description": "Credentials list retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_CredentialListResult_"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "Credentials retrieved successfully",
+                  "result": {
+                    "keys": [
+                      "OPENAI_API_KEY",
+                      "SERPAPI_API_KEY",
+                      "TAVILY_API_KEY"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Credentials"
+        ],
+        "summary": "Update a credential",
+        "description": "Update an existing credential or create a new one with the provided key and value.",
+        "operationId": "update_credential_v1_credentials_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CredentialUpdate"
+              },
+              "examples": {
+                "example": {
+                  "summary": "Update Credential Example",
+                  "value": {
+                    "key": "OPENAI_API_KEY",
+                    "value": "sk-abcdefghijklmnopqrstuvwxyz"
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Credential updated successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "Credential updated successfully",
+                  "result": {}
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1300,6 +1604,109 @@
             "format": "date-time",
             "title": "Last Message Datetime",
             "description": "The date and time of the last message sent to the agent."
+          },
+          "temperature": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temperature",
+            "description": "Controls randomness in responses. Higher values like 0.8 make output more random, while lower values like 0.2 make it more focused and deterministic."
+          },
+          "top_p": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top P",
+            "description": "Controls cumulative probability of tokens to sample from. Higher values (0.95) keep more options, lower values (0.1) are more selective."
+          },
+          "top_k": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top K",
+            "description": "Limits tokens to sample from at each step. Lower values (10) are more selective, higher values (100) allow more variety."
+          },
+          "max_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Tokens",
+            "description": "Maximum tokens to generate. Model may generate fewer if response completes before reaching limit."
+          },
+          "stop": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop",
+            "description": "List of strings that will stop generation when encountered."
+          },
+          "frequency_penalty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frequency Penalty",
+            "description": "Reduces repetition by lowering likelihood of repeated tokens. Range from -2.0 to 2.0."
+          },
+          "presence_penalty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Presence Penalty",
+            "description": "Increases diversity by lowering likelihood of prompt tokens. Range from -2.0 to 2.0."
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seed",
+            "description": "Random number seed for deterministic generation."
           }
         },
         "type": "object",
@@ -1346,6 +1753,17 @@
             "type": "boolean",
             "title": "Persist Conversation",
             "default": false
+          },
+          "user_message_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Message Id"
           }
         },
         "type": "object",
@@ -1355,7 +1773,7 @@
           "prompt"
         ],
         "title": "AgentChatRequest",
-        "description": "Request body for chat generation endpoint.\n\nAttributes:\n    hosting: Name of the hosting service to use for generation\n    model: Name of the model to use for generation\n    prompt: The prompt to generate a response for\n    stream: Whether to stream the response token by token. Default: False\n    options: Optional generation parameters to override defaults\n    persist_conversation: Whether to persist the conversation history by\n    continuously updating the agent's conversation history with each new message.\n    Default: False"
+        "description": "Request body for chat generation endpoint.\n\nAttributes:\n    hosting: Name of the hosting service to use for generation\n    model: Name of the model to use for generation\n    prompt: The prompt to generate a response for\n    stream: Whether to stream the response token by token. Default: False\n    options: Optional generation parameters to override defaults\n    persist_conversation: Whether to persist the conversation history by\n    continuously updating the agent's conversation history with each new message.\n    Default: False\n    user_message_id: Optional ID of the user message to assign to the first user message\n        in the conversation.  This is used by the UI to prevent duplicate user\n        messages after the initial render."
       },
       "AgentCreate": {
         "properties": {
@@ -1411,6 +1829,105 @@
             ],
             "title": "Description",
             "description": "A description of the agent. Defaults to ''."
+          },
+          "temperature": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temperature",
+            "description": "Controls randomness in responses. Higher values like 0.8 make output more random, while lower values like 0.2 make it more focused and deterministic."
+          },
+          "top_p": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top P",
+            "description": "Controls cumulative probability of tokens to sample from. Higher values (0.95) keep more options, lower values (0.1) are more selective."
+          },
+          "top_k": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top K",
+            "description": "Limits tokens to sample from at each step. Lower values (10) are more selective, higher values (100) allow more variety."
+          },
+          "max_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Tokens",
+            "description": "Maximum tokens to generate. Model may generate fewer if response completes before reaching limit."
+          },
+          "stop": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop",
+            "description": "List of strings that will stop generation when encountered."
+          },
+          "frequency_penalty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frequency Penalty",
+            "description": "Reduces repetition by lowering likelihood of repeated tokens. Range from -2.0 to 2.0."
+          },
+          "presence_penalty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Presence Penalty",
+            "description": "Increases diversity by lowering likelihood of prompt tokens. Range from -2.0 to 2.0."
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seed",
+            "description": "Random number seed for deterministic generation."
           }
         },
         "type": "object",
@@ -1627,7 +2144,7 @@
               }
             ],
             "title": "Model",
-            "description": "The model to use for the agent. Defaults to 'openai/gpt-4o-mini'."
+            "description": "The model to use for the agent. Defaults to 'google/gemini-2.0-flash-001'."
           },
           "description": {
             "anyOf": [
@@ -1640,6 +2157,105 @@
             ],
             "title": "Description",
             "description": "A description of the agent.  Defaults to ''."
+          },
+          "temperature": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temperature",
+            "description": "Controls randomness in responses. Higher values like 0.8 make output more random, while lower values like 0.2 make it more focused and deterministic."
+          },
+          "top_p": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top P",
+            "description": "Controls cumulative probability of tokens to sample from. Higher values (0.95) keep more options, lower values (0.1) are more selective."
+          },
+          "top_k": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top K",
+            "description": "Limits tokens to sample from at each step. Lower values (10) are more selective, higher values (100) allow more variety."
+          },
+          "max_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Tokens",
+            "description": "Maximum tokens to generate. Model may generate fewer if response completes before reaching limit."
+          },
+          "stop": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop",
+            "description": "List of strings that will stop generation when encountered."
+          },
+          "frequency_penalty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frequency Penalty",
+            "description": "Reduces repetition by lowering likelihood of repeated tokens. Range from -2.0 to 2.0."
+          },
+          "presence_penalty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Presence Penalty",
+            "description": "Increases diversity by lowering likelihood of prompt tokens. Range from -2.0 to 2.0."
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seed",
+            "description": "Random number seed for deterministic generation."
           }
         },
         "type": "object",
@@ -1814,6 +2430,62 @@
         ],
         "title": "CRUDResponse[ChatResponse]"
       },
+      "CRUDResponse_ConfigResponse_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConfigResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[ConfigResponse]"
+      },
+      "CRUDResponse_CredentialListResult_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CredentialListResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[CredentialListResult]"
+      },
       "CRUDResponse_JobResultSchema_": {
         "properties": {
           "status": {
@@ -1841,6 +2513,34 @@
           "message"
         ],
         "title": "CRUDResponse[JobResultSchema]"
+      },
+      "CRUDResponse_SystemPromptResponse_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SystemPromptResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[SystemPromptResponse]"
       },
       "CRUDResponse_str_": {
         "properties": {
@@ -2078,6 +2778,10 @@
       },
       "CodeExecutionResult": {
         "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
           "stdout": {
             "type": "string",
             "title": "Stdout"
@@ -2133,7 +2837,116 @@
           "status"
         ],
         "title": "CodeExecutionResult",
-        "description": "Represents the result of a code execution.\n\nAttributes:\n    stdout (str): The standard output from the code execution.\n    stderr (str): The standard error from the code execution.\n    logging (str): Any logging output generated during the code execution.\n    message (str): The message to display to the user about the code execution.\n    code (str): The code that was executed.\n    formatted_print (str): The formatted print output from the code execution.\n    role (ConversationRole): The role of the message sender (user/assistant/system)\n    status (ProcessResponseStatus): The status of the code execution\n    timestamp (datetime): The timestamp of the code execution"
+        "description": "Represents the result of a code execution.\n\nAttributes:\n    id (str): The unique identifier for the code execution\n    stdout (str): The standard output from the code execution.\n    stderr (str): The standard error from the code execution.\n    logging (str): Any logging output generated during the code execution.\n    message (str): The message to display to the user about the code execution.\n    code (str): The code that was executed.\n    formatted_print (str): The formatted print output from the code execution.\n    role (ConversationRole): The role of the message sender (user/assistant/system)\n    status (ProcessResponseStatus): The status of the code execution\n    timestamp (datetime): The timestamp of the code execution"
+      },
+      "ConfigResponse": {
+        "properties": {
+          "version": {
+            "type": "string",
+            "title": "Version",
+            "description": "Configuration schema version for compatibility"
+          },
+          "metadata": {
+            "type": "object",
+            "title": "Metadata",
+            "description": "Metadata about the configuration"
+          },
+          "values": {
+            "type": "object",
+            "title": "Values",
+            "description": "Configuration settings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "version",
+          "metadata",
+          "values"
+        ],
+        "title": "ConfigResponse",
+        "description": "Response containing configuration settings.\n\nAttributes:\n    version: Configuration schema version for compatibility\n    metadata: Metadata about the configuration\n    values: Configuration settings"
+      },
+      "ConfigUpdate": {
+        "properties": {
+          "conversation_length": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Length",
+            "description": "Number of conversation messages to retain"
+          },
+          "detail_length": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail Length",
+            "description": "Maximum length of detailed conversation history"
+          },
+          "max_learnings_history": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Learnings History",
+            "description": "Maximum number of learning entries to retain"
+          },
+          "hosting": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hosting",
+            "description": "AI model hosting provider"
+          },
+          "model_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Name",
+            "description": "Name of the AI model to use"
+          },
+          "auto_save_conversation": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auto Save Conversation",
+            "description": "Whether to automatically save the conversation"
+          }
+        },
+        "type": "object",
+        "title": "ConfigUpdate",
+        "description": "Data for updating configuration settings.\n\nAttributes:\n    conversation_length: Number of conversation messages to retain\n    detail_length: Maximum length of detailed conversation history\n    max_learnings_history: Maximum number of learning entries to retain\n    hosting: AI model hosting provider\n    model_name: Name of the AI model to use\n    auto_save_conversation: Whether to automatically save the conversation"
       },
       "ConversationRecord": {
         "properties": {
@@ -2227,6 +3040,45 @@
         ],
         "title": "ConversationRole",
         "description": "Enum representing the different roles in a conversation with an AI model.\n\nUsed to track who sent each message in the conversation history.\nMaps to the standard roles used by LangChain message types."
+      },
+      "CredentialListResult": {
+        "properties": {
+          "keys": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Keys",
+            "description": "List of credential keys"
+          }
+        },
+        "type": "object",
+        "required": [
+          "keys"
+        ],
+        "title": "CredentialListResult",
+        "description": "Result containing a list of credential keys.\n\nAttributes:\n    keys: List of credential keys"
+      },
+      "CredentialUpdate": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key",
+            "description": "The credential key to update"
+          },
+          "value": {
+            "type": "string",
+            "title": "Value",
+            "description": "The new value for the credential"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "value"
+        ],
+        "title": "CredentialUpdate",
+        "description": "Data for updating a credential.\n\nAttributes:\n    key: The credential key to update\n    value: The new value for the credential"
       },
       "HTTPValidationError": {
         "properties": {
@@ -2416,6 +3268,42 @@
         "title": "ProcessResponseStatus",
         "description": "Status codes for process_response results."
       },
+      "SystemPromptResponse": {
+        "properties": {
+          "content": {
+            "type": "string",
+            "title": "Content",
+            "description": "The content of the system prompt"
+          },
+          "last_modified": {
+            "type": "string",
+            "title": "Last Modified",
+            "description": "Timestamp when the system prompt was last modified"
+          }
+        },
+        "type": "object",
+        "required": [
+          "content",
+          "last_modified"
+        ],
+        "title": "SystemPromptResponse",
+        "description": "Response containing the system prompt content.\n\nAttributes:\n    content: The content of the system prompt\n    last_modified: Timestamp when the system prompt was last modified"
+      },
+      "SystemPromptUpdate": {
+        "properties": {
+          "content": {
+            "type": "string",
+            "title": "Content",
+            "description": "The new content for the system prompt"
+          }
+        },
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "title": "SystemPromptUpdate",
+        "description": "Data for updating the system prompt.\n\nAttributes:\n    content: The new content for the system prompt"
+      },
       "ValidationError": {
         "properties": {
           "loc": {
@@ -2467,6 +3355,14 @@
     {
       "name": "Jobs",
       "description": "Job management endpoints"
+    },
+    {
+      "name": "Configuration",
+      "description": "Configuration management endpoints"
+    },
+    {
+      "name": "Credentials",
+      "description": "Credential management endpoints"
     }
   ]
 }

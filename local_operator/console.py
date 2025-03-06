@@ -38,6 +38,15 @@ class ExecutionSection(Enum):
     READ = "read"
 
 
+class VerbosityLevel(int, Enum):
+    """The level of detail to output from the operator in the CLI."""
+
+    QUIET = 0
+    INFO = 1
+    VERBOSE = 2
+    DEBUG = 3
+
+
 def wrap_text_to_width(text: str, max_width: int, first_line_prefix: str = "") -> list[str]:
     """
     Wrap text to a specified width, handling a prefix on the first line.
@@ -181,11 +190,14 @@ T = TypeVar("T")
 
 
 @asynccontextmanager
-async def spinner_context(message: str) -> AsyncGenerator[None, None]:
+async def spinner_context(
+    message: str, verbosity_level: VerbosityLevel
+) -> AsyncGenerator[None, None]:
     """Context manager for displaying a spinner during async operations.
 
     Args:
         message: The message to display alongside the spinner
+        verbosity_level: The verbosity level to use for the spinner
 
     Yields:
         None
@@ -196,18 +208,27 @@ async def spinner_context(message: str) -> AsyncGenerator[None, None]:
             result = await some_long_running_operation()
         ```
     """
-    spinner_task = asyncio.create_task(spinner(message))
+    spinner_task = None
+    if verbosity_level >= VerbosityLevel.VERBOSE:
+        spinner_task = asyncio.create_task(spinner(message))
     try:
         yield
     finally:
-        spinner_task.cancel()
-        try:
-            await spinner_task
-        except asyncio.CancelledError:
-            pass
+        if spinner_task:
+            spinner_task.cancel()
+            try:
+                await spinner_task
+            except asyncio.CancelledError:
+                pass
 
 
-async def with_spinner(message: str, coro_func: Callable[..., Awaitable[T]], *args, **kwargs) -> T:
+async def with_spinner(
+    message: str,
+    verbosity_level: VerbosityLevel,
+    coro_func: Callable[..., Awaitable[T]],
+    *args,
+    **kwargs,
+) -> T:
     """Execute a coroutine function with a spinner.
 
     Args:
@@ -228,17 +249,20 @@ async def with_spinner(message: str, coro_func: Callable[..., Awaitable[T]], *ar
         )
         ```
     """
-    async with spinner_context(message):
+    async with spinner_context(message, verbosity_level):
         return await coro_func(*args, **kwargs)
 
 
-def log_action_error(error: Exception, action: str) -> None:
+def log_action_error(error: Exception, action: str, verbosity_level: VerbosityLevel) -> None:
     """Log an error that occurred during an action, including the traceback.
 
     Args:
         error (Exception): The error that occurred.
         action (str): The action that occurred.
     """
+    if verbosity_level < VerbosityLevel.VERBOSE:
+        return
+
     error_str = str(error)
     print(f"\n\033[1;31m✗ Error during {action}:\033[0m")
     print("\033[1;34m╞══════════════════════════════════════════════════╡\033[0m")
@@ -320,14 +344,18 @@ def format_success_output(output: tuple[str, str, str]) -> str:
     return print_str
 
 
-def print_agent_response(step: int, content: str) -> None:
+def print_agent_response(step: int, content: str, verbosity_level: VerbosityLevel) -> None:
     """
     Print the agent's response with formatted styling.
 
     Args:
         step (int): The current step number
         content (str): The agent's response content to display
+        verbosity_level (VerbosityLevel): The verbosity level to use for the section.
     """
+    if verbosity_level < VerbosityLevel.INFO:
+        return
+
     print(f"\n\033[1;36m╭─ Agent Response (Step {step}) ──────────────────────────\033[0m")
     print(content)
     print("\033[1;36m╰══════════════════════════════════════════════════╯\033[0m")
@@ -335,6 +363,7 @@ def print_agent_response(step: int, content: str) -> None:
 
 def print_execution_section(
     section: ExecutionSection | str,
+    verbosity_level: VerbosityLevel,
     *,
     step: int | None = None,
     content: str = "",
@@ -353,9 +382,22 @@ def print_execution_section(
             - CODE: Prints the code to be executed; requires 'content'.
             - RESULT: Prints the result of code execution; requires 'content'.
             - FOOTER: Prints a footer.
+            - TOKEN_USAGE: Prints the token usage for the current session.
+            - WRITE: Prints the content of a file to be written.
+            - EDIT: Prints the content of a file to be edited.
+            - READ: Prints the content of a file to be read.
+        verbosity_level (VerbosityLevel): The verbosity level to use for the section.
         step (int, optional): The step number (required for "header").
         content (str, optional): The content to be printed for the "code" or "result" sections.
+        data (dict[str, Any], optional): Data to be printed for the "token_usage" section.
+        file_path (str, optional): The path to the file to be read or written.
+        replacements (list[dict[str, str]], optional): The replacements to be made in
+        the "edit" section.
+        action (ActionType, optional): The action to be printed for the "header" section.
     """
+    if verbosity_level < VerbosityLevel.VERBOSE:
+        return
+
     if isinstance(section, str):
         try:
             section = ExecutionSection(section)
@@ -411,10 +453,13 @@ def print_execution_section(
         print("\033[1;36m╰══════════════════════════════════════════════════╯\033[0m")
 
 
-def print_task_interrupted() -> None:
+def print_task_interrupted(verbosity_level: VerbosityLevel) -> None:
     """
     Print a section indicating that the task was interrupted.
     """
+    if verbosity_level < VerbosityLevel.INFO:
+        return
+
     print("\n\033[1;33m╭─ Task Interrupted ───────────────────────────────────\033[0m")
     print("\033[1;33m│ User requested to stop current task\033[0m")
     print("\033[1;33m╰══════════════════════════════════════════════════╯\033[0m\n")

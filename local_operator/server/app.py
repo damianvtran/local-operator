@@ -17,7 +17,7 @@ from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.jobs import JobManager
-from local_operator.server.routes import agents, chat, health, jobs
+from local_operator.server.routes import agents, chat, config, credentials, health, jobs
 
 logger = logging.getLogger("local_operator.server")
 
@@ -60,6 +60,8 @@ app = FastAPI(
         {"name": "Chat", "description": "Chat generation endpoints"},
         {"name": "Agents", "description": "Agent management endpoints"},
         {"name": "Jobs", "description": "Job management endpoints"},
+        {"name": "Configuration", "description": "Configuration management endpoints"},
+        {"name": "Credentials", "description": "Credential management endpoints"},
     ],
 )
 
@@ -90,4 +92,14 @@ app.include_router(
 # /v1/jobs
 app.include_router(
     jobs.router,
+)
+
+# /v1/config
+app.include_router(
+    config.router,
+)
+
+# /v1/credentials
+app.include_router(
+    credentials.router,
 )

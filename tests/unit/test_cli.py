@@ -32,6 +32,14 @@ def mock_agent():
         description="test description",
         last_message="test last message",
         last_message_datetime=datetime.now(),
+        temperature=0.7,
+        top_p=1.0,
+        top_k=None,
+        max_tokens=2048,
+        stop=None,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+        seed=None,
     )
     return mock_agent
 
@@ -260,6 +268,14 @@ def test_agents_list_command_with_agents(mock_agent_registry):
             description="test description",
             last_message="test last message",
             last_message_datetime=datetime.now(),
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         ),
         AgentData(
             id="2",
@@ -272,6 +288,14 @@ def test_agents_list_command_with_agents(mock_agent_registry):
             description="test description",
             last_message="test last message",
             last_message_datetime=datetime.now(),
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         ),
     ]
     mock_agent_registry.list_agents.return_value = mock_agents
@@ -295,6 +319,14 @@ def test_agents_create_command_with_name(mock_agent_registry):
         description="test description",
         last_message="test last message",
         last_message_datetime=datetime.now(),
+        temperature=0.7,
+        top_p=1.0,
+        top_k=None,
+        max_tokens=2048,
+        stop=None,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+        seed=None,
     )
     mock_agent_registry.create_agent.return_value = mock_agent
     result = agents_create_command("TestAgent", mock_agent_registry)
@@ -326,6 +358,14 @@ def test_agents_delete_command_success(mock_agent_registry):
         description="test description",
         last_message="test last message",
         last_message_datetime=datetime.now(),
+        temperature=0.7,
+        top_p=1.0,
+        top_k=None,
+        max_tokens=2048,
+        stop=None,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+        seed=None,
     )
     mock_agent_registry.list_agents.return_value = [mock_agent]
     result = agents_delete_command("TestAgent", mock_agent_registry)

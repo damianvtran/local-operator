@@ -8,8 +8,8 @@ for accessing them when needed.
 import getpass
 import os
 from pathlib import Path
+from typing import Dict, List
 
-from dotenv import load_dotenv
 from pydantic import SecretStr
 
 # Name of the file used to store credentials in .env format
@@ -26,17 +26,37 @@ class CredentialManager:
     Attributes:
         config_dir (Path): Directory where credential files are stored
         config_file (Path): Path to the credentials file
+        credentials (Dict[str, SecretStr]): Dictionary of credentials
     """
 
     config_dir: Path
     config_file: Path
+    credentials: Dict[str, SecretStr]
 
     def __init__(self, config_dir: Path):
         self.config_dir = config_dir
         self.config_file = self.config_dir / CREDENTIALS_FILE_NAME
         self._ensure_config_exists()
-        # Load environment variables from config file
-        load_dotenv(self.config_file)
+        self.load_from_file()
+
+    def load_from_file(self) -> Dict[str, SecretStr]:
+        """Load credentials from the config file."""
+        self.credentials = {}
+
+        with open(self.config_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line and "=" in line and not line.startswith("#"):
+                    key, value = line.split("=", 1)
+                    self.credentials[key] = SecretStr(value)
+
+        return self.credentials
+
+    def write_to_file(self):
+        """Write credentials to the config file."""
+        with open(self.config_file, "w") as f:
+            for key, value in self.credentials.items():
+                f.write(f"{key}={value.get_secret_value()}\n")
 
     def _ensure_config_exists(self):
         """Ensure the credentials configuration file exists and has proper permissions.
@@ -53,6 +73,10 @@ class CredentialManager:
             self.config_file.touch()
             self.config_file.chmod(0o600)
 
+    def get_credentials(self) -> Dict[str, SecretStr]:
+        """Get all credentials from the config file."""
+        return self.credentials
+
     def get_credential(self, key: str) -> SecretStr:
         """Retrieve the credential from config file.
 
@@ -62,9 +86,31 @@ class CredentialManager:
         Returns:
             SecretStr: The credential value wrapped in SecretStr
         """
-        return SecretStr(os.getenv(key, ""))
+        if key not in self.credentials:
+            # Check if the key is in the environment variables
+            if key in os.environ:
+                self.set_credential(key, os.environ[key], write=False)
 
-    def set_credential(self, key: str, value: str):
+        return self.credentials.get(key, SecretStr(""))
+
+    def list_credential_keys(self, non_empty: bool = True) -> List[str]:
+        """List all credential keys from the config file.
+
+        Args:
+            non_empty (bool): Whether to filter out empty credentials
+
+        Returns:
+            List[str]: List of credential keys
+        """
+        output = []
+
+        for key, value in self.get_credentials().items():
+            if not non_empty or value:
+                output.append(key)
+
+        return output
+
+    def set_credential(self, key: str, value: str, write: bool = True):
         """Set the credential in the config file.
         If the key already exists, it will be updated.
         If the key does not exist, it will be added.
@@ -72,25 +118,12 @@ class CredentialManager:
         Args:
             key (str): The environment variable key to set
             value (str): The credential value to set
+            write (bool): Whether to write the credential to the config file
         """
-        with open(self.config_file, "r") as f:
-            lines = f.readlines()
+        self.credentials[key] = SecretStr(value)
 
-        with open(self.config_file, "w") as f:
-            line_updated = False
-            for line in lines:
-                if line.startswith(f"{key}="):
-                    f.write(f"{key}={value}\n")
-                    line_updated = True
-                else:
-                    f.write(line)
-            if not line_updated:
-                f.write(f"\n{key}={value}\n")
-
-        self.config_file.chmod(0o600)
-
-        # Reload environment variables
-        load_dotenv(self.config_file, override=True)
+        if write:
+            self.write_to_file()
 
     def prompt_for_credential(
         self, key: str, reason: str = "not found in configuration"
@@ -131,13 +164,8 @@ class CredentialManager:
             raise ValueError(f"\033[1;31m{key} is required for this step.\033[0m")
 
         # Save the new API key to config file
-        with open(self.config_file, "a") as f:
-            f.write(f"\n{key}={credential}\n")
-        self.config_file.chmod(0o600)
+        self.set_credential(key, credential, write=True)
 
         print("\n\033[1;32m✓ Credential successfully saved!\033[0m")
-
-        # Reload environment variables
-        load_dotenv(self.config_file, override=True)
 
         return SecretStr(credential)

@@ -99,6 +99,14 @@ def create_agent_from_conversation_tool(
                 model="",
                 description="",
                 last_message="",
+                temperature=None,
+                top_p=None,
+                top_k=None,
+                max_tokens=None,
+                stop=None,
+                frequency_penalty=None,
+                presence_penalty=None,
+                seed=None,
             )
         )
         agent_registry.save_agent_conversation(
@@ -252,6 +260,14 @@ def create_agent_tool(agent_registry: AgentRegistry) -> Callable[[str, Optional[
                 model="",
                 description="",
                 last_message="",
+                temperature=None,
+                top_p=None,
+                top_k=None,
+                max_tokens=None,
+                stop=None,
+                frequency_penalty=None,
+                presence_penalty=None,
+                seed=None,
             )
         )
 
