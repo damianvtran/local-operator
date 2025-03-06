@@ -32,6 +32,32 @@ async def test_list_credentials_success(test_app_client, mock_credential_manager
 
 
 @pytest.mark.asyncio
+async def test_list_credentials_non_empty_only(test_app_client, mock_credential_manager):
+    """Test retrieving only non-empty credentials."""
+    # Set some credentials with values and some with empty values
+    mock_credential_manager.set_credential("OPENAI_API_KEY", "test-key")
+    mock_credential_manager.set_credential("EMPTY_API_KEY", "")
+    mock_credential_manager.set_credential("SERPAPI_API_KEY", "test-key2")
+    mock_credential_manager.set_credential("ANOTHER_EMPTY_KEY", "")
+
+    response = await test_app_client.get("/v1/credentials")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("status") == 200
+    assert data.get("message") == "Credentials retrieved successfully"
+    result = data.get("result")
+    assert "keys" in result
+
+    # Only non-empty credentials should be in the list
+    assert "OPENAI_API_KEY" in result["keys"]
+    assert "SERPAPI_API_KEY" in result["keys"]
+    assert "EMPTY_API_KEY" not in result["keys"]
+    assert "ANOTHER_EMPTY_KEY" not in result["keys"]
+    assert len(result["keys"]) == 2
+
+
+@pytest.mark.asyncio
 async def test_list_credentials_empty(test_app_client, mock_credential_manager):
     """Test retrieving credentials list when empty."""
     response = await test_app_client.get("/v1/credentials")
