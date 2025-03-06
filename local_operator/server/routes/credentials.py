@@ -54,12 +54,9 @@ async def list_credentials(
     """
     try:
         # Get credentials from the credential manager
-        credentials = credential_manager.get_credentials()
+        non_empty_credentials = credential_manager.list_credential_keys(non_empty=True)
 
-        # Extract just the keys
-        keys = list(credentials.keys())
-
-        result = CredentialListResult(keys=keys)
+        result = CredentialListResult(keys=non_empty_credentials)
 
         return CRUDResponse(
             status=200,
