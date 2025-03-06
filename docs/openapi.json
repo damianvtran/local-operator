@@ -1354,6 +1354,102 @@
         }
       }
     },
+    "/v1/config/system-prompt": {
+      "get": {
+        "tags": [
+          "Configuration"
+        ],
+        "summary": "Get system prompt",
+        "description": "Retrieve the current system prompt content.",
+        "operationId": "get_system_prompt_v1_config_system_prompt_get",
+        "responses": {
+          "200": {
+            "description": "System prompt retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_SystemPromptResponse_"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "System prompt retrieved successfully",
+                  "result": {
+                    "content": "You are Local Operator, an AI assistant...",
+                    "last_modified": "2024-01-01T12:00:00"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "System prompt file not found",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "System prompt file not found"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Configuration"
+        ],
+        "summary": "Update system prompt",
+        "description": "Update the system prompt content.",
+        "operationId": "update_system_prompt_v1_config_system_prompt_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SystemPromptUpdate"
+              },
+              "examples": {
+                "example": {
+                  "summary": "Update System Prompt Example",
+                  "value": {
+                    "content": "You are Local Operator, an AI assistant..."
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "System prompt updated successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_SystemPromptResponse_"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "System prompt updated successfully",
+                  "result": {
+                    "content": "You are Local Operator, an AI assistant...",
+                    "last_modified": "2024-01-01T12:00:00"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/credentials": {
       "get": {
         "tags": [
@@ -2111,6 +2207,34 @@
         ],
         "title": "CRUDResponse[JobResultSchema]"
       },
+      "CRUDResponse_SystemPromptResponse_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SystemPromptResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[SystemPromptResponse]"
+      },
       "CRUDResponse_str_": {
         "properties": {
           "status": {
@@ -2836,6 +2960,42 @@
         ],
         "title": "ProcessResponseStatus",
         "description": "Status codes for process_response results."
+      },
+      "SystemPromptResponse": {
+        "properties": {
+          "content": {
+            "type": "string",
+            "title": "Content",
+            "description": "The content of the system prompt"
+          },
+          "last_modified": {
+            "type": "string",
+            "title": "Last Modified",
+            "description": "Timestamp when the system prompt was last modified"
+          }
+        },
+        "type": "object",
+        "required": [
+          "content",
+          "last_modified"
+        ],
+        "title": "SystemPromptResponse",
+        "description": "Response containing the system prompt content.\n\nAttributes:\n    content: The content of the system prompt\n    last_modified: Timestamp when the system prompt was last modified"
+      },
+      "SystemPromptUpdate": {
+        "properties": {
+          "content": {
+            "type": "string",
+            "title": "Content",
+            "description": "The new content for the system prompt"
+          }
+        },
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "title": "SystemPromptUpdate",
+        "description": "Data for updating the system prompt.\n\nAttributes:\n    content: The new content for the system prompt"
       },
       "ValidationError": {
         "properties": {
