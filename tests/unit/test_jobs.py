@@ -1,10 +1,12 @@
 import asyncio
+import os
 import time
-from unittest.mock import AsyncMock
+from multiprocessing import Process
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from local_operator.jobs import Job, JobManager, JobResult, JobStatus
+from local_operator.jobs import Job, JobContext, JobManager, JobResult, JobStatus
 
 
 @pytest.fixture
@@ -259,6 +261,118 @@ def test_get_job_summary(job_manager, sample_job, sample_job_result):
     assert minimal_summary["started_at"] is None
     assert minimal_summary["completed_at"] is None
     assert minimal_summary["result"] is None
+
+
+def test_job_context():
+    """Test the JobContext class for isolating working directories."""
+    # Save the original working directory
+    original_cwd = os.getcwd()
+
+    # Create a temporary directory for testing
+    temp_dir = os.path.join(original_cwd, "temp_test_dir")
+    os.makedirs(temp_dir, exist_ok=True)
+
+    try:
+        # Test that the context manager properly changes and restores the working directory
+        with JobContext() as context:
+            # Change directory within the context
+            context.change_directory(temp_dir)
+            # Verify the directory was changed
+            assert os.getcwd() == temp_dir
+
+        # Verify the directory was restored after exiting the context
+        assert os.getcwd() == original_cwd
+    finally:
+        # Clean up the temporary directory
+        if os.path.exists(temp_dir):
+            os.rmdir(temp_dir)
+
+
+@pytest.mark.asyncio
+async def test_register_process(job_manager):
+    """Test registering a process with a job."""
+    # Create a mock process
+    mock_process = MagicMock(spec=Process)
+
+    # Register the process
+    job_id = "test-job-id"
+    job_manager.register_process(job_id, mock_process)
+
+    # Verify the process was registered
+    assert job_manager._processes[job_id] == mock_process
+
+
+@pytest.mark.asyncio
+async def test_cancel_job_with_process(job_manager, sample_job):
+    """Test cancelling a job with an associated process."""
+    # Setup job with a mock task and process
+    mock_task = AsyncMock(spec=asyncio.Task)
+    mock_task.done.return_value = False
+    sample_job.task = mock_task
+    sample_job.status = JobStatus.PROCESSING
+    job_manager.jobs[sample_job.id] = sample_job
+
+    # Create and register a mock process
+    mock_process = MagicMock(spec=Process)
+    mock_process.is_alive.return_value = True
+    job_manager._processes[sample_job.id] = mock_process
+
+    # Test successful cancellation
+    with patch.object(job_manager, "update_job_status"):
+        result = await job_manager.cancel_job(sample_job.id)
+        assert result is True
+
+        # Verify the task was cancelled
+        mock_task.cancel.assert_called_once()
+
+        # Verify the process was terminated
+        mock_process.terminate.assert_called_once()
+        mock_process.join.assert_called_once()
+
+        # Verify the process was removed from the dictionary
+        assert sample_job.id not in job_manager._processes
+
+
+@pytest.mark.asyncio
+async def test_cleanup_old_jobs_with_processes(job_manager):
+    """Test cleaning up old jobs with associated processes."""
+    current_time = time.time()
+
+    # Create an old processing job
+    old_processing_job = Job(
+        prompt="Old processing", model="gpt-4", hosting="openai", status=JobStatus.PROCESSING
+    )
+    old_processing_job.created_at = current_time - 30 * 3600  # 30 hours old
+
+    # Add a mock task
+    mock_task = AsyncMock(spec=asyncio.Task)
+    mock_task.done.return_value = False
+    old_processing_job.task = mock_task
+
+    # Add the job to the manager
+    job_manager.jobs[old_processing_job.id] = old_processing_job
+
+    # Create and register a mock process
+    mock_process = MagicMock(spec=Process)
+    mock_process.is_alive.return_value = True
+    job_manager._processes[old_processing_job.id] = mock_process
+
+    # Test cleanup
+    removed_count = await job_manager.cleanup_old_jobs()
+
+    # Verify the job was removed
+    assert removed_count == 1
+    assert old_processing_job.id not in job_manager.jobs
+
+    # Verify the task was cancelled
+    mock_task.cancel.assert_called_once()
+
+    # Verify the process was terminated
+    mock_process.terminate.assert_called_once()
+    mock_process.join.assert_called_once()
+
+    # Verify the process was removed from the dictionary
+    assert old_processing_job.id not in job_manager._processes
 
 
 @pytest.mark.asyncio

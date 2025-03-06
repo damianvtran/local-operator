@@ -4,7 +4,6 @@ Chat endpoints for the Local Operator API.
 This module contains the FastAPI route handlers for chat-related endpoints.
 """
 
-import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Path
@@ -15,7 +14,7 @@ from tiktoken import encoding_for_model
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
-from local_operator.jobs import JobManager, JobResult, JobStatus
+from local_operator.jobs import JobManager
 from local_operator.server.dependencies import (
     get_agent_registry,
     get_config_manager,
@@ -29,6 +28,13 @@ from local_operator.server.models.schemas import (
     ChatStats,
     CRUDResponse,
     JobResultSchema,
+)
+
+# Import job processor utilities when needed
+from local_operator.server.utils.job_processor_queue import (
+    create_and_start_job_process_with_queue,
+    run_agent_job_in_process_with_queue,
+    run_job_in_process_with_queue,
 )
 from local_operator.server.utils.operator import create_operator
 from local_operator.types import ConversationRecord
@@ -321,68 +327,32 @@ async def chat_async_endpoint(
         HTTPException: If there's an error setting up the job
     """
     try:
-        # Create the operator with the specified model
-        operator = create_operator(
-            request.hosting,
-            request.model,
-            credential_manager,
-            config_manager,
-            agent_registry,
-        )
-
-        model_instance = operator.executor.model_configuration.instance
-
-        # Initialize conversation history
-        if request.context:
-            conversation_history = [
-                ConversationRecord(role=msg.role, content=msg.content) for msg in request.context
-            ]
-            operator.executor.initialize_conversation_history(conversation_history, overwrite=True)
-        else:
-            try:
-                operator.executor.initialize_conversation_history()
-            except ValueError:
-                # Conversation history already initialized
-                pass
-
-        # Configure model options if provided
-        if request.options:
-            temperature = request.options.temperature or model_instance.temperature
-            if temperature is not None:
-                model_instance.temperature = temperature
-            model_instance.top_p = request.options.top_p or model_instance.top_p
 
         # Create a job in the job manager
         job = await job_manager.create_job(
             prompt=request.prompt,
             model=request.model,
             hosting=request.hosting,
-            agent_id=getattr(operator, "agent_id", None),
+            agent_id=None,
         )
 
-        # Define the background task
-        async def process_chat_job():
-            try:
-                await job_manager.update_job_status(job.id, JobStatus.PROCESSING)
-                response_json = await operator.handle_user_input(request.prompt)
-
-                # Create result with response and context
-                result = JobResult(
-                    response=response_json.response if response_json is not None else "",
-                    context=[
-                        {"role": msg.role, "content": msg.content}
-                        for msg in operator.executor.conversation_history
-                    ],
-                )
-
-                await job_manager.update_job_status(job.id, JobStatus.COMPLETED, result)
-            except Exception as e:
-                logger.exception(f"Job {job.id} failed: {str(e)}")
-                await job_manager.update_job_status(job.id, JobStatus.FAILED, {"error": str(e)})
-
-        # Create and register the task
-        task = asyncio.create_task(process_chat_job())
-        await job_manager.register_task(job.id, task)
+        # Create and start a process for the job using the utility function
+        create_and_start_job_process_with_queue(
+            job_id=job.id,
+            process_func=run_job_in_process_with_queue,
+            args=(
+                job.id,
+                request.prompt,
+                request.model,
+                request.hosting,
+                credential_manager,
+                config_manager,
+                agent_registry,
+                request.context if request.context else None,
+                request.options.model_dump() if request.options else None,
+            ),
+            job_manager=job_manager,
+        )
 
         # Return job information
         response = CRUDResponse(
@@ -477,31 +447,10 @@ async def chat_with_agent_async(
     try:
         # Retrieve the specific agent from the registry
         try:
-            agent_obj = agent_registry.get_agent(agent_id)
+            agent_registry.get_agent(agent_id)
         except KeyError as e:
             logger.exception("Error retrieving agent")
             raise HTTPException(status_code=404, detail=f"Agent not found: {e}")
-
-        # Create a new operator for this request using the provided hosting and model
-        operator = create_operator(
-            request_hosting=request.hosting,
-            request_model=request.model,
-            credential_manager=credential_manager,
-            config_manager=config_manager,
-            agent_registry=agent_registry,
-            current_agent=agent_obj,
-            persist_conversation=request.persist_conversation,
-        )
-
-        # Get the model instance for configuration
-        model_instance = operator.executor.model_configuration.instance
-
-        # Configure model options if provided
-        if request.options:
-            temperature = request.options.temperature or model_instance.temperature
-            if temperature is not None:
-                model_instance.temperature = temperature
-            model_instance.top_p = request.options.top_p or model_instance.top_p
 
         # Create a job in the job manager
         job = await job_manager.create_job(
@@ -511,31 +460,24 @@ async def chat_with_agent_async(
             agent_id=agent_id,
         )
 
-        # Define the background task
-        async def process_chat_job():
-            try:
-                await job_manager.update_job_status(job.id, JobStatus.PROCESSING)
-                response_json = await operator.handle_user_input(
-                    request.prompt, request.user_message_id
-                )
-
-                # Create result with response and context
-                result = JobResult(
-                    response=response_json.response if response_json is not None else "",
-                    context=[
-                        {"role": msg.role, "content": msg.content}
-                        for msg in operator.executor.conversation_history
-                    ],
-                )
-
-                await job_manager.update_job_status(job.id, JobStatus.COMPLETED, result)
-            except Exception as e:
-                logger.exception(f"Job {job.id} failed: {str(e)}")
-                await job_manager.update_job_status(job.id, JobStatus.FAILED, {"error": str(e)})
-
-        # Create and register the task
-        task = asyncio.create_task(process_chat_job())
-        await job_manager.register_task(job.id, task)
+        # Create and start a process for the job
+        create_and_start_job_process_with_queue(
+            job_id=job.id,
+            process_func=run_agent_job_in_process_with_queue,
+            args=(
+                job.id,
+                request.prompt,
+                request.model,
+                request.hosting,
+                agent_id,
+                credential_manager,
+                config_manager,
+                agent_registry,
+                request.persist_conversation,
+                request.user_message_id,
+            ),
+            job_manager=job_manager,
+        )
 
         # Return job information
         response = CRUDResponse(
