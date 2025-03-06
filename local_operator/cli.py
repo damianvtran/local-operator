@@ -441,6 +441,14 @@ def agents_create_command(name: str, agent_registry: AgentRegistry) -> int:
             model=None,
             description=None,
             last_message=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
         )
     )
     print("\n\033[1;32m╭─ Created New Agent ───────────────────────────\033[0m")
@@ -582,6 +590,14 @@ def main() -> int:
                         model=None,
                         description=None,
                         last_message=None,
+                        temperature=None,
+                        top_p=None,
+                        top_k=None,
+                        max_tokens=None,
+                        stop=None,
+                        frequency_penalty=None,
+                        presence_penalty=None,
+                        seed=None,
                     )
                 )
                 print("\n\033[1;32m╭─ Created New Agent ───────────────────────────\033[0m")

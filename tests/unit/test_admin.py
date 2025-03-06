@@ -205,6 +205,7 @@ def test_save_agent_training_with_agent(
     ]
     execution_history = [
         CodeExecutionResult(
+            id="test_code_execution_id",
             stdout="",
             stderr="",
             logging="",
@@ -215,6 +216,7 @@ def test_save_agent_training_with_agent(
             status=ProcessResponseStatus.SUCCESS,
         ),
         CodeExecutionResult(
+            id="test_code_execution_id2",
             stdout="",
             stderr="",
             logging="",
@@ -235,6 +237,14 @@ def test_save_agent_training_with_agent(
             model="",
             description="",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     executor.agent = agent
@@ -265,6 +275,14 @@ def test_list_agent_info_without_id(agent_registry: AgentRegistry) -> None:
             model="",
             description="",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     agent2 = agent_registry.create_agent(
@@ -275,6 +293,14 @@ def test_list_agent_info_without_id(agent_registry: AgentRegistry) -> None:
             model="",
             description="",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     list_tool = list_agent_info_tool(agent_registry)
@@ -298,6 +324,14 @@ def test_list_agent_info_with_id(agent_registry: AgentRegistry) -> None:
             model="",
             description="",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     list_tool = list_agent_info_tool(agent_registry)
@@ -331,6 +365,14 @@ def test_edit_agent_tool(agent_registry: AgentRegistry) -> None:
             model="",
             description="",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     edit_tool = edit_agent_tool(agent_registry)
@@ -343,6 +385,14 @@ def test_edit_agent_tool(agent_registry: AgentRegistry) -> None:
             model="",
             description="",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         ),
     )
     assert updated_agent is not None, "edit_agent_tool returned None"
@@ -364,6 +414,14 @@ def test_delete_agent_tool(agent_registry: AgentRegistry) -> None:
             model="",
             description="",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     delete_tool = delete_agent_tool(agent_registry)
@@ -384,6 +442,14 @@ def test_get_agent_info_tool_without_id(agent_registry: AgentRegistry) -> None:
             model="",
             description="",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     agent_registry.create_agent(
@@ -394,6 +460,14 @@ def test_get_agent_info_tool_without_id(agent_registry: AgentRegistry) -> None:
             model="",
             description="",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     get_tool = get_agent_info_tool(agent_registry)
@@ -413,6 +487,14 @@ def test_get_agent_info_tool_with_id(agent_registry: AgentRegistry) -> None:
             model="",
             description="",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     get_tool = get_agent_info_tool(agent_registry)

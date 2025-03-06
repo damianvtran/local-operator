@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -45,6 +45,24 @@ class AgentData(BaseModel):
         description="The date and time of the last message sent to the agent.  "
         "Defaults to the current UTC time.",
     )
+    temperature: Optional[float] = Field(
+        None, ge=0.0, le=1.0, description="Controls randomness in responses"
+    )
+    top_p: Optional[float] = Field(
+        None, ge=0.0, le=1.0, description="Controls cumulative probability of tokens to sample from"
+    )
+    top_k: Optional[int] = Field(None, description="Limits tokens to sample from at each step")
+    max_tokens: Optional[int] = Field(None, description="Maximum tokens to generate")
+    stop: Optional[List[str]] = Field(
+        None, description="List of strings that will stop generation when encountered"
+    )
+    frequency_penalty: Optional[float] = Field(
+        None, description="Reduces repetition by lowering likelihood of repeated tokens"
+    )
+    presence_penalty: Optional[float] = Field(
+        None, description="Increases diversity by lowering likelihood of prompt tokens"
+    )
+    seed: Optional[int] = Field(None, description="Random number seed for deterministic generation")
 
 
 class AgentEditFields(BaseModel):
@@ -74,6 +92,24 @@ class AgentEditFields(BaseModel):
         None,
         description="The last message sent to the agent.  Defaults to ''.",
     )
+    temperature: Optional[float] = Field(
+        None, ge=0.0, le=1.0, description="Controls randomness in responses"
+    )
+    top_p: Optional[float] = Field(
+        None, ge=0.0, le=1.0, description="Controls cumulative probability of tokens to sample from"
+    )
+    top_k: Optional[int] = Field(None, description="Limits tokens to sample from at each step")
+    max_tokens: Optional[int] = Field(None, description="Maximum tokens to generate")
+    stop: Optional[List[str]] = Field(
+        None, description="List of strings that will stop generation when encountered"
+    )
+    frequency_penalty: Optional[float] = Field(
+        None, description="Reduces repetition by lowering likelihood of repeated tokens"
+    )
+    presence_penalty: Optional[float] = Field(
+        None, description="Increases diversity by lowering likelihood of prompt tokens"
+    )
+    seed: Optional[int] = Field(None, description="Random number seed for deterministic generation")
 
 
 class AgentConversation(BaseModel):
@@ -180,6 +216,14 @@ class AgentRegistry:
             description=agent_edit_metadata.description or "",
             last_message=agent_edit_metadata.last_message or "",
             last_message_datetime=datetime.now(timezone.utc),
+            temperature=agent_edit_metadata.temperature,
+            top_p=agent_edit_metadata.top_p,
+            top_k=agent_edit_metadata.top_k,
+            max_tokens=agent_edit_metadata.max_tokens,
+            stop=agent_edit_metadata.stop,
+            frequency_penalty=agent_edit_metadata.frequency_penalty,
+            presence_penalty=agent_edit_metadata.presence_penalty,
+            seed=agent_edit_metadata.seed,
         )
 
         return self.save_agent(agent_metadata)
@@ -319,6 +363,14 @@ class AgentRegistry:
                 model=original_agent.model,
                 description=original_agent.description,
                 last_message=original_agent.last_message,
+                temperature=original_agent.temperature,
+                top_p=original_agent.top_p,
+                top_k=original_agent.top_k,
+                max_tokens=original_agent.max_tokens,
+                stop=original_agent.stop,
+                frequency_penalty=original_agent.frequency_penalty,
+                presence_penalty=original_agent.presence_penalty,
+                seed=original_agent.seed,
             )
         )
 
@@ -484,6 +536,14 @@ class AgentRegistry:
             description="Automatic capture of your last conversation with a Local Operator agent.",
             last_message="",
             last_message_datetime=datetime.now(timezone.utc),
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
         )
 
         return self.save_agent(agent_metadata)

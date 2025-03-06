@@ -79,6 +79,14 @@ async def test_chat_sync_with_agent_success(
             model="gpt-4",
             description="",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     agent_id = agent.id
@@ -125,6 +133,14 @@ async def test_chat_with_agent_persist_conversation(
             model="gpt-4",
             description="",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     agent_id = agent.id
@@ -367,6 +383,14 @@ async def test_chat_with_agent_async_success(
             hosting="openai",
             model="gpt-4o",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     agent_id = agent.id
@@ -439,6 +463,14 @@ async def test_chat_with_agent_async_persist_conversation(
             model="gpt-4",
             description="",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     agent_id = agent.id
@@ -612,6 +644,14 @@ async def test_chat_with_agent_async_with_context(
             hosting="openai",
             model="gpt-4o",
             last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     agent_id = agent.id

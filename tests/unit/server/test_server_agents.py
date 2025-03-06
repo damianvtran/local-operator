@@ -34,6 +34,14 @@ async def test_update_agent_success(test_app_client, dummy_registry: AgentRegist
             model="gpt-4",
             description="Original description",
             last_message="Original last message",
+            temperature=0.2,
+            top_p=0.5,
+            top_k=10,
+            max_tokens=100,
+            stop=["\n"],
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=1234567890,
         )
     )
     agent_id = original_agent.id
@@ -44,6 +52,14 @@ async def test_update_agent_success(test_app_client, dummy_registry: AgentRegist
         hosting="anthropic",
         model="claude-2",
         description="New description",
+        temperature=0.3,
+        top_p=0.6,
+        top_k=15,
+        max_tokens=150,
+        stop=["\n"],
+        frequency_penalty=0.1,
+        presence_penalty=0.1,
+        seed=1234567890,
     )
 
     response = await test_app_client.patch(
@@ -62,6 +78,14 @@ async def test_update_agent_success(test_app_client, dummy_registry: AgentRegist
     assert result["model"] == "claude-2"
     assert result["description"] == "New description"
     assert result["last_message"] == "Original last message"
+    assert result["temperature"] == 0.3
+    assert result["top_p"] == 0.6
+    assert result["top_k"] == 15
+    assert result["max_tokens"] == 150
+    assert result["stop"] == ["\n"]
+    assert result["frequency_penalty"] == 0.1
+    assert result["presence_penalty"] == 0.1
+    assert result["seed"] == 1234567890
     # Pydantic serializes datetime to ISO 8601 format with 'T' separator and 'Z' for UTC
     assert result[
         "last_message_datetime"
@@ -80,6 +104,14 @@ async def test_update_agent_single_field(test_app_client, dummy_registry: AgentR
             model="gpt-4",
             description=None,
             last_message=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     agent_id = agent.id
@@ -91,6 +123,14 @@ async def test_update_agent_single_field(test_app_client, dummy_registry: AgentR
         model=None,
         description=None,
         last_message=None,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        max_tokens=None,
+        stop=None,
+        frequency_penalty=None,
+        presence_penalty=None,
+        seed=None,
     )
 
     response = await test_app_client.patch(
@@ -107,6 +147,11 @@ async def test_update_agent_single_field(test_app_client, dummy_registry: AgentR
     assert result["security_prompt"] == "Original Security"
     assert result["hosting"] == "openai"
     assert result["model"] == "gpt-4"
+    assert result["temperature"] == 0.7
+    assert result["top_p"] == 1.0
+    assert result["max_tokens"] == 2048
+    assert result["frequency_penalty"] == 0.0
+    assert result["presence_penalty"] == 0.0
 
 
 @pytest.mark.asyncio
@@ -119,6 +164,14 @@ async def test_update_agent_not_found(test_app_client, dummy_registry: AgentRegi
         model=None,
         description=None,
         last_message=None,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        max_tokens=None,
+        stop=None,
+        frequency_penalty=None,
+        presence_penalty=None,
+        seed=None,
     )
     non_existent_agent_id = "nonexistent"
 
@@ -143,6 +196,14 @@ async def test_delete_agent_success(test_app_client, dummy_registry: AgentRegist
             model="gpt-4",
             description=None,
             last_message=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     agent_id = agent.id
@@ -180,6 +241,14 @@ async def test_create_agent_success(dummy_registry: AgentRegistry):
         hosting="openai",
         model="gpt-4",
         description="",
+        temperature=0.7,
+        top_p=1.0,
+        top_k=None,
+        max_tokens=2048,
+        stop=None,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+        seed=None,
     )
 
     transport = ASGITransport(app=app)
@@ -195,6 +264,11 @@ async def test_create_agent_success(dummy_registry: AgentRegistry):
     assert result["security_prompt"] == create_payload.security_prompt
     assert result["hosting"] == create_payload.hosting
     assert result["model"] == create_payload.model
+    assert result["temperature"] == create_payload.temperature
+    assert result["top_p"] == create_payload.top_p
+    assert result["max_tokens"] == create_payload.max_tokens
+    assert result["frequency_penalty"] == create_payload.frequency_penalty
+    assert result["presence_penalty"] == create_payload.presence_penalty
     assert "id" in result
 
 
@@ -207,6 +281,14 @@ async def test_create_agent_invalid_data(dummy_registry: AgentRegistry):
         hosting="",
         model="",
         description="",
+        temperature=0.7,
+        top_p=1.0,
+        top_k=None,
+        max_tokens=2048,
+        stop=None,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+        seed=None,
     )  # Invalid empty name
 
     transport = ASGITransport(app=app)
@@ -229,6 +311,14 @@ async def test_list_agents_pagination(test_app_client, dummy_registry: AgentRegi
                 model="gpt-4",
                 description=None,
                 last_message=None,
+                temperature=0.7,
+                top_p=1.0,
+                top_k=None,
+                max_tokens=2048,
+                stop=None,
+                frequency_penalty=0.0,
+                presence_penalty=0.0,
+                seed=None,
             )
         )
 
@@ -261,6 +351,14 @@ async def test_get_agent_success(test_app_client, dummy_registry: AgentRegistry)
             model="gpt-4",
             description=None,
             last_message=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     agent_id = agent.id
@@ -275,6 +373,11 @@ async def test_get_agent_success(test_app_client, dummy_registry: AgentRegistry)
     assert result["security_prompt"] == "Test Security"
     assert result["hosting"] == "openai"
     assert result["model"] == "gpt-4"
+    assert result["temperature"] == 0.7
+    assert result["top_p"] == 1.0
+    assert result["max_tokens"] == 2048
+    assert result["frequency_penalty"] == 0.0
+    assert result["presence_penalty"] == 0.0
 
 
 @pytest.mark.asyncio
@@ -301,6 +404,14 @@ async def test_get_agent_conversation_empty(test_app_client, dummy_registry: Age
             model="gpt-4",
             description=None,
             last_message=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     agent_id = agent.id
@@ -336,6 +447,14 @@ async def test_get_agent_conversation_pagination_default(
             model="gpt-4",
             description=None,
             last_message=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     agent_id = agent.id
@@ -385,6 +504,14 @@ async def test_get_agent_conversation_pagination_second_page(
             model="gpt-4",
             description=None,
             last_message=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     agent_id = agent.id
@@ -434,6 +561,14 @@ async def test_get_agent_conversation_custom_per_page(
             model="gpt-4",
             description=None,
             last_message=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     agent_id = agent.id
@@ -482,6 +617,14 @@ async def test_get_agent_conversation_page_out_of_bounds(
             model="gpt-4",
             description=None,
             last_message=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     agent_id = agent.id
@@ -532,6 +675,14 @@ async def test_get_agent_execution_history(test_app_client, dummy_registry: Agen
             model="gpt-4",
             description=None,
             last_message=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     agent_id = agent.id
@@ -585,6 +736,14 @@ async def test_get_agent_execution_history_pagination(
             model="gpt-4",
             description=None,
             last_message=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     agent_id = agent.id
@@ -649,6 +808,14 @@ async def test_get_agent_execution_history_page_out_of_bounds(
             model="gpt-4",
             description=None,
             last_message=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     agent_id = agent.id
@@ -706,6 +873,14 @@ async def test_get_agent_execution_history_empty(test_app_client, dummy_registry
             model="gpt-4",
             description=None,
             last_message=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
         )
     )
     agent_id = agent.id
