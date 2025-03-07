@@ -75,11 +75,31 @@ class JobContext:
     Context for running a job in an isolated environment.
 
     This class provides an isolated context for a job to run in, allowing it to
-    change working directories without affecting the parent process.
+    change working directories without affecting the parent process. When used with
+    a context manager (with statement), it automatically saves the original working
+    directory and restores it when the context is exited, ensuring that the parent
+    process's working directory remains unchanged.
+
+    Example usage:
+        ```python
+        # Create a new job context
+        job_context = JobContext()
+
+        # Use the context manager to ensure the original directory is restored
+        with job_context:
+            # Change to the agent's working directory if needed
+            if agent.current_working_directory != ".":
+                job_context.change_directory(agent.current_working_directory)
+
+            # Run operations in the agent's working directory
+            # ...
+
+        # After the with block, we're back in the original directory
+        ```
     """
 
     def __init__(self) -> None:
-        """Initialize the JobContext."""
+        """Initialize the JobContext by saving the current working directory."""
         self.original_cwd = os.getcwd()
 
     def __enter__(self) -> "JobContext":
@@ -93,6 +113,9 @@ class JobContext:
     def change_directory(self, path: str) -> None:
         """
         Change the working directory for this context.
+
+        This method changes the current working directory to the specified path.
+        The original working directory will still be restored when the context is exited.
 
         Args:
             path: The path to change to

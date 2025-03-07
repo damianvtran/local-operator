@@ -173,6 +173,13 @@ def run_agent_job_in_process(
                 # Retrieve the agent
                 agent_obj = agent_registry.get_agent(agent_id)
 
+                # Change to the agent's current working directory if it exists
+                if (
+                    agent_obj.current_working_directory
+                    and agent_obj.current_working_directory != "."
+                ):
+                    job_context.change_directory(agent_obj.current_working_directory)
+
                 # Create a new operator for this process
                 process_operator = create_operator(
                     request_hosting=hosting,
