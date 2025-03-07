@@ -7,7 +7,11 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from local_operator.types import CodeExecutionResult, ConversationRecord
+from local_operator.types import (
+    CodeExecutionResult,
+    ConversationRecord,
+    ConversationRole,
+)
 
 
 class AgentData(BaseModel):
@@ -622,4 +626,30 @@ class AgentRegistry:
             agent_id,
             conversation_history,
             code_history,
+        )
+
+        assistant_messages = [
+            record.message for record in code_history if record.role == ConversationRole.ASSISTANT
+        ]
+
+        last_assistant_message = assistant_messages[-1]
+
+        self.update_agent(
+            agent_id,
+            AgentEditFields(
+                name=None,
+                security_prompt=None,
+                hosting=None,
+                model=None,
+                description=None,
+                last_message=last_assistant_message,
+                temperature=None,
+                top_p=None,
+                top_k=None,
+                max_tokens=None,
+                stop=None,
+                frequency_penalty=None,
+                presence_penalty=None,
+                seed=None,
+            ),
         )
