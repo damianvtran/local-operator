@@ -126,6 +126,7 @@ unknown_model_info: ModelInfo = ModelInfo(
     supports_prompt_cache=False,
     input_price=0.0,
     output_price=0.0,
+    description="Unknown model with default settings",
 )
 """
 Default ModelInfo when model is unknown.
@@ -146,6 +147,7 @@ anthropic_models: Dict[str, ModelInfo] = {
         output_price=15.0,
         cache_writes_price=3.75,
         cache_reads_price=0.3,
+        description="Anthropic's latest balanced model with excellent performance",
     ),
     "claude-3-5-haiku-20241022": ModelInfo(
         max_tokens=8192,
@@ -156,6 +158,7 @@ anthropic_models: Dict[str, ModelInfo] = {
         output_price=4.0,
         cache_writes_price=1.0,
         cache_reads_price=0.08,
+        description="Fast and efficient model for simpler tasks",
     ),
     "claude-3-opus-20240229": ModelInfo(
         max_tokens=4096,
@@ -166,6 +169,7 @@ anthropic_models: Dict[str, ModelInfo] = {
         output_price=75.0,
         cache_writes_price=18.75,
         cache_reads_price=1.5,
+        description="Anthropic's most powerful model for complex tasks",
     ),
     "claude-3-haiku-20240307": ModelInfo(
         max_tokens=4096,
@@ -176,6 +180,7 @@ anthropic_models: Dict[str, ModelInfo] = {
         output_price=1.25,
         cache_writes_price=0.3,
         cache_reads_price=0.03,
+        description="Fast and efficient model for simpler tasks",
     ),
 }
 
@@ -191,6 +196,7 @@ ollama_default_model_info: ModelInfo = ModelInfo(
     supports_prompt_cache=False,
     input_price=0.0,
     output_price=0.0,
+    description="Local model hosting with Ollama",
 )
 
 # TODO: Add fetch for token, context window, image support
@@ -203,6 +209,7 @@ openrouter_default_model_info: ModelInfo = ModelInfo(
     output_price=0.0,
     cache_writes_price=0.0,
     cache_reads_price=0.0,
+    description="Access to various AI models from different providers through a single API",
 )
 
 openai_model_info_sane_defaults: ModelInfo = ModelInfo(
@@ -212,6 +219,7 @@ openai_model_info_sane_defaults: ModelInfo = ModelInfo(
     supports_prompt_cache=False,
     input_price=0,
     output_price=0,
+    description="OpenAI's API provides access to GPT-4o, o3-mini, and other models",
 )
 
 google_models: Dict[str, ModelInfo] = {
@@ -222,6 +230,7 @@ google_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0,
         output_price=0,
+        description="Google's latest multimodal model with excellent performance",
     ),
     "gemini-2.0-flash-lite-preview-02-05": ModelInfo(
         max_tokens=8192,
@@ -230,6 +239,7 @@ google_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0,
         output_price=0,
+        description="Lighter version of Gemini 2.0 Flash",
     ),
     "gemini-2.0-pro-exp-02-05": ModelInfo(
         max_tokens=8192,
@@ -238,6 +248,7 @@ google_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0,
         output_price=0,
+        description="Google's most powerful Gemini model",
     ),
     "gemini-2.0-flash-thinking-exp-01-21": ModelInfo(
         max_tokens=65_536,
@@ -246,6 +257,7 @@ google_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0,
         output_price=0,
+        description="Experimental Gemini model with thinking capabilities",
     ),
     "gemini-2.0-flash-thinking-exp-1219": ModelInfo(
         max_tokens=8192,
@@ -254,6 +266,7 @@ google_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0,
         output_price=0,
+        description="Experimental Gemini model with thinking capabilities",
     ),
     "gemini-2.0-flash-exp": ModelInfo(
         max_tokens=8192,
@@ -262,6 +275,7 @@ google_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0,
         output_price=0,
+        description="Experimental version of Gemini 2.0 Flash",
     ),
     "gemini-1.5-flash-002": ModelInfo(
         max_tokens=8192,
@@ -270,6 +284,7 @@ google_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0,
         output_price=0,
+        description="Fast and efficient multimodal model",
     ),
     "gemini-1.5-flash-exp-0827": ModelInfo(
         max_tokens=8192,
@@ -278,6 +293,7 @@ google_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0,
         output_price=0,
+        description="Experimental version of Gemini 1.5 Flash",
     ),
 }
 
@@ -293,6 +309,7 @@ deepseek_models: Dict[str, ModelInfo] = {
         output_price=0.28,
         cache_writes_price=0.14,
         cache_reads_price=0.014,
+        description="General purpose chat model",
     ),
     "deepseek-reasoner": ModelInfo(
         max_tokens=8_000,
@@ -303,6 +320,7 @@ deepseek_models: Dict[str, ModelInfo] = {
         output_price=2.19,
         cache_writes_price=0.55,
         cache_reads_price=0.14,
+        description="Specialized for complex reasoning tasks",
     ),
 }
 
@@ -316,6 +334,7 @@ qwen_models: Dict[str, ModelInfo] = {
         output_price=0.006,
         cache_writes_price=0.002,
         cache_reads_price=0.006,
+        description="Specialized for code generation and understanding",
     ),
     "qwen2.5-coder-14b-instruct": ModelInfo(
         max_tokens=8_192,
@@ -326,6 +345,7 @@ qwen_models: Dict[str, ModelInfo] = {
         output_price=0.006,
         cache_writes_price=0.002,
         cache_reads_price=0.006,
+        description="Medium-sized code-specialized model",
     ),
     "qwen2.5-coder-7b-instruct": ModelInfo(
         max_tokens=8_192,
@@ -336,6 +356,7 @@ qwen_models: Dict[str, ModelInfo] = {
         output_price=0.002,
         cache_writes_price=0.001,
         cache_reads_price=0.002,
+        description="Efficient code-specialized model",
     ),
     "qwen2.5-coder-3b-instruct": ModelInfo(
         max_tokens=8_192,
@@ -346,6 +367,7 @@ qwen_models: Dict[str, ModelInfo] = {
         output_price=0.0,
         cache_writes_price=0.0,
         cache_reads_price=0.0,
+        description="Compact code-specialized model",
     ),
     "qwen2.5-coder-1.5b-instruct": ModelInfo(
         max_tokens=8_192,
@@ -356,6 +378,7 @@ qwen_models: Dict[str, ModelInfo] = {
         output_price=0.0,
         cache_writes_price=0.0,
         cache_reads_price=0.0,
+        description="Very compact code-specialized model",
     ),
     "qwen2.5-coder-0.5b-instruct": ModelInfo(
         max_tokens=8_192,
@@ -366,6 +389,7 @@ qwen_models: Dict[str, ModelInfo] = {
         output_price=0.0,
         cache_writes_price=0.0,
         cache_reads_price=0.0,
+        description="Smallest code-specialized model",
     ),
     "qwen-coder-plus-latest": ModelInfo(
         max_tokens=129_024,
@@ -376,6 +400,7 @@ qwen_models: Dict[str, ModelInfo] = {
         output_price=7,
         cache_writes_price=3.5,
         cache_reads_price=7,
+        description="Advanced code generation model",
     ),
     "qwen-plus-latest": ModelInfo(
         max_tokens=129_024,
@@ -386,6 +411,7 @@ qwen_models: Dict[str, ModelInfo] = {
         output_price=2,
         cache_writes_price=0.8,
         cache_reads_price=0.2,
+        description="Balanced performance Qwen model",
     ),
     "qwen-turbo-latest": ModelInfo(
         max_tokens=1_000_000,
@@ -396,6 +422,7 @@ qwen_models: Dict[str, ModelInfo] = {
         output_price=2,
         cache_writes_price=0.8,
         cache_reads_price=2,
+        description="Fast and efficient Qwen model",
     ),
     "qwen-max-latest": ModelInfo(
         max_tokens=30_720,
@@ -406,6 +433,7 @@ qwen_models: Dict[str, ModelInfo] = {
         output_price=9.6,
         cache_writes_price=2.4,
         cache_reads_price=9.6,
+        description="Alibaba's most powerful Qwen model",
     ),
     "qwen-coder-plus": ModelInfo(
         max_tokens=129_024,
@@ -416,6 +444,7 @@ qwen_models: Dict[str, ModelInfo] = {
         output_price=7,
         cache_writes_price=3.5,
         cache_reads_price=7,
+        description="Advanced code generation model",
     ),
     "qwen-plus": ModelInfo(
         max_tokens=129_024,
@@ -426,6 +455,7 @@ qwen_models: Dict[str, ModelInfo] = {
         output_price=2,
         cache_writes_price=0.8,
         cache_reads_price=0.2,
+        description="Balanced performance Qwen model",
     ),
     "qwen-turbo": ModelInfo(
         max_tokens=1_000_000,
@@ -436,6 +466,7 @@ qwen_models: Dict[str, ModelInfo] = {
         output_price=0.6,
         cache_writes_price=0.3,
         cache_reads_price=0.6,
+        description="Fast and efficient Qwen model",
     ),
     "qwen-max": ModelInfo(
         max_tokens=30_720,
@@ -446,6 +477,7 @@ qwen_models: Dict[str, ModelInfo] = {
         output_price=9.6,
         cache_writes_price=2.4,
         cache_reads_price=9.6,
+        description="Alibaba's most powerful Qwen model",
     ),
     "deepseek-v3": ModelInfo(
         max_tokens=8_000,
@@ -456,6 +488,7 @@ qwen_models: Dict[str, ModelInfo] = {
         output_price=0.28,
         cache_writes_price=0.14,
         cache_reads_price=0.014,
+        description="General purpose chat model",
     ),
     "deepseek-r1": ModelInfo(
         max_tokens=8_000,
@@ -466,6 +499,7 @@ qwen_models: Dict[str, ModelInfo] = {
         output_price=2.19,
         cache_writes_price=0.55,
         cache_reads_price=0.14,
+        description="Specialized for complex reasoning tasks",
     ),
     "qwen-vl-max": ModelInfo(
         max_tokens=30_720,
@@ -476,6 +510,7 @@ qwen_models: Dict[str, ModelInfo] = {
         output_price=9,
         cache_writes_price=3,
         cache_reads_price=9,
+        description="Multimodal Qwen model with vision capabilities",
     ),
     "qwen-vl-max-latest": ModelInfo(
         max_tokens=129_024,
@@ -486,6 +521,7 @@ qwen_models: Dict[str, ModelInfo] = {
         output_price=9,
         cache_writes_price=3,
         cache_reads_price=9,
+        description="Multimodal Qwen model with vision capabilities",
     ),
     "qwen-vl-plus": ModelInfo(
         max_tokens=6_000,
@@ -496,6 +532,7 @@ qwen_models: Dict[str, ModelInfo] = {
         output_price=4.5,
         cache_writes_price=1.5,
         cache_reads_price=4.5,
+        description="Balanced multimodal Qwen model",
     ),
     "qwen-vl-plus-latest": ModelInfo(
         max_tokens=129_024,
@@ -506,6 +543,7 @@ qwen_models: Dict[str, ModelInfo] = {
         output_price=4.5,
         cache_writes_price=1.5,
         cache_reads_price=4.5,
+        description="Balanced multimodal Qwen model",
     ),
 }
 
@@ -517,6 +555,7 @@ mistral_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=2.0,
         output_price=6.0,
+        description="Mistral's most powerful model",
     ),
     "pixtral-large-2411": ModelInfo(
         max_tokens=131_000,
@@ -525,6 +564,7 @@ mistral_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=2.0,
         output_price=6.0,
+        description="Mistral's multimodal model with image capabilities",
     ),
     "ministral-3b-2410": ModelInfo(
         max_tokens=131_000,
@@ -533,6 +573,7 @@ mistral_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0.04,
         output_price=0.04,
+        description="Compact 3B parameter model for efficient inference",
     ),
     "ministral-8b-2410": ModelInfo(
         max_tokens=131_000,
@@ -541,6 +582,7 @@ mistral_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0.1,
         output_price=0.1,
+        description="Medium-sized 8B parameter model balancing performance and efficiency",
     ),
     "mistral-small-2501": ModelInfo(
         max_tokens=32_000,
@@ -549,6 +591,7 @@ mistral_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0.1,
         output_price=0.3,
+        description="Fast and efficient model for simpler tasks",
     ),
     "pixtral-12b-2409": ModelInfo(
         max_tokens=131_000,
@@ -557,6 +600,7 @@ mistral_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0.15,
         output_price=0.15,
+        description="12B parameter multimodal model with vision capabilities",
     ),
     "open-mistral-nemo-2407": ModelInfo(
         max_tokens=131_000,
@@ -565,6 +609,7 @@ mistral_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0.15,
         output_price=0.15,
+        description="Open-source version of Mistral optimized with NVIDIA NeMo",
     ),
     "open-codestral-mamba": ModelInfo(
         max_tokens=256_000,
@@ -573,6 +618,7 @@ mistral_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0.15,
         output_price=0.15,
+        description="Open-source code-specialized model using Mamba architecture",
     ),
     "codestral-2501": ModelInfo(
         max_tokens=256_000,
@@ -581,6 +627,7 @@ mistral_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0.3,
         output_price=0.9,
+        description="Specialized for code generation and understanding",
     ),
 }
 
@@ -593,6 +640,7 @@ litellm_model_info_sane_defaults: ModelInfo = ModelInfo(
     supports_prompt_cache=False,
     input_price=0,
     output_price=0,
+    description="LiteLLM proxy for accessing various AI models",
 )
 
 YUAN_TO_USD = 0.14
@@ -607,6 +655,7 @@ kimi_models: Dict[str, ModelInfo] = {
         output_price=12.00 * YUAN_TO_USD,
         cache_writes_price=24.00 * YUAN_TO_USD,
         cache_reads_price=0.02 * YUAN_TO_USD,
+        description="General purpose language model with 8K context",
     ),
     "moonshot-v1-32k": ModelInfo(
         max_tokens=8192,
@@ -617,6 +666,7 @@ kimi_models: Dict[str, ModelInfo] = {
         output_price=24.00 * YUAN_TO_USD,
         cache_writes_price=24.00 * YUAN_TO_USD,
         cache_reads_price=0.02 * YUAN_TO_USD,
+        description="General purpose language model with 32K context",
     ),
     "moonshot-v1-128k": ModelInfo(
         max_tokens=8192,
@@ -627,6 +677,7 @@ kimi_models: Dict[str, ModelInfo] = {
         output_price=60.00 * YUAN_TO_USD,
         cache_writes_price=24.00 * YUAN_TO_USD,
         cache_reads_price=0.02 * YUAN_TO_USD,
+        description="General purpose language model with 128K context",
     ),
     "moonshot-v1-8k-vision-preview": ModelInfo(
         max_tokens=8192,
@@ -637,6 +688,7 @@ kimi_models: Dict[str, ModelInfo] = {
         output_price=12.00 * YUAN_TO_USD,
         cache_writes_price=24.00 * YUAN_TO_USD,
         cache_reads_price=0.02 * YUAN_TO_USD,
+        description="Multimodal model with 8K context",
     ),
     "moonshot-v1-32k-vision-preview": ModelInfo(
         max_tokens=8192,
@@ -647,6 +699,7 @@ kimi_models: Dict[str, ModelInfo] = {
         output_price=24.00 * YUAN_TO_USD,
         cache_writes_price=24.00 * YUAN_TO_USD,
         cache_reads_price=0.02 * YUAN_TO_USD,
+        description="Multimodal model with 32K context",
     ),
     "moonshot-v1-128k-vision-preview": ModelInfo(
         max_tokens=8192,
@@ -657,5 +710,6 @@ kimi_models: Dict[str, ModelInfo] = {
         output_price=60.00 * YUAN_TO_USD,
         cache_writes_price=24.00 * YUAN_TO_USD,
         cache_reads_price=0.02 * YUAN_TO_USD,
+        description="Multimodal model with 128K context",
     ),
 }
