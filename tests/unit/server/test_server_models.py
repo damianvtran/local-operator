@@ -150,8 +150,7 @@ def test_list_models_with_openrouter(mock_list_models, client, mock_credential_m
         # Find the OpenRouter models in the response
         openrouter_models = [m for m in models if m.get("provider") == "openrouter"]
 
-        # There should be at least the default OpenRouter model plus the two mock models
-        assert len(openrouter_models) >= 3
+        assert len(openrouter_models) == 2
 
         # Check for the mock models
         model1 = next((m for m in openrouter_models if m.get("id") == "model1"), None)
@@ -187,5 +186,4 @@ def test_list_models_no_api_key(mock_list_models, client, mock_credential_manage
 
         # There should be at least one OpenRouter model (the default one)
         openrouter_models = [m for m in models if m.get("provider") == "openrouter"]
-        assert len(openrouter_models) >= 1
-        assert openrouter_models[0]["id"] == "openrouter"
+        assert len(openrouter_models) == 0
