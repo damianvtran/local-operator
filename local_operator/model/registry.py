@@ -176,7 +176,7 @@ def get_model_info(hosting: str, model: str) -> ModelInfo:
         if model in google_models:
             return google_models[model]
     elif hosting == "openai":
-        return openai_model_info_sane_defaults
+        return openai_models[model]
     elif hosting == "openrouter":
         return openrouter_default_model_info
     elif hosting == "alibaba":
@@ -301,17 +301,145 @@ openrouter_default_model_info: ModelInfo = ModelInfo(
     name="OpenRouter",
 )
 
-openai_model_info_sane_defaults: ModelInfo = ModelInfo(
-    max_tokens=-1,
-    context_window=128_000,
-    supports_images=True,
-    supports_prompt_cache=False,
-    input_price=0,
-    output_price=0,
-    description="OpenAI's API provides access to GPT-4o, o3-mini, and other models",
-    id="openai",
-    name="OpenAI",
-)
+openai_models: Dict[str, ModelInfo] = {
+    "gpt-4-turbo-preview": ModelInfo(
+        max_tokens=128_000,
+        context_window=128_000,
+        supports_images=True,
+        supports_prompt_cache=False,
+        input_price=0.01,
+        output_price=0.03,
+        description="Most capable GPT-4 model, optimized for speed. Currently points to "
+        "gpt-4-0125-preview.",
+        id="gpt-4-turbo-preview",
+        name="GPT-4 Turbo",
+    ),
+    "gpt-4-vision-preview": ModelInfo(
+        max_tokens=128_000,
+        context_window=128_000,
+        supports_images=True,
+        supports_prompt_cache=False,
+        input_price=0.01,
+        output_price=0.03,
+        description="GPT-4 Turbo with the ability to understand images",
+        id="gpt-4-vision-preview",
+        name="GPT-4 Vision",
+    ),
+    "gpt-4": ModelInfo(
+        max_tokens=8192,
+        context_window=8192,
+        supports_images=False,
+        supports_prompt_cache=False,
+        input_price=0.03,
+        output_price=0.06,
+        description="More capable than any GPT-3.5 model, able to do more complex tasks",
+        id="gpt-4",
+        name="GPT-4",
+    ),
+    "gpt-3.5-turbo": ModelInfo(
+        max_tokens=16385,
+        context_window=16385,
+        supports_images=False,
+        supports_prompt_cache=False,
+        input_price=0.0005,
+        output_price=0.0015,
+        description="Most capable GPT-3.5 model, optimized for chat at 1/10th the cost of GPT-4",
+        id="gpt-3.5-turbo",
+        name="GPT-3.5 Turbo",
+    ),
+    "gpt-3.5-turbo-16k": ModelInfo(
+        max_tokens=16385,
+        context_window=16385,
+        supports_images=False,
+        supports_prompt_cache=False,
+        input_price=0.001,
+        output_price=0.002,
+        description="Same capabilities as standard GPT-3.5 Turbo but with longer context",
+        id="gpt-3.5-turbo-16k",
+        name="GPT-3.5 Turbo 16K",
+    ),
+    "gpt-4o": ModelInfo(
+        max_tokens=32768,
+        context_window=32768,
+        supports_images=False,
+        supports_prompt_cache=False,
+        input_price=0.01,
+        output_price=0.03,
+        description="Optimized GPT-4 model with improved performance and reliability",
+        id="gpt-4o",
+        name="GPT-4 Optimized",
+    ),
+    "gpt-4o-mini": ModelInfo(
+        max_tokens=16384,
+        context_window=16384,
+        supports_images=False,
+        supports_prompt_cache=False,
+        input_price=0.005,
+        output_price=0.015,
+        description="Smaller optimized GPT-4 model with good balance of performance and cost",
+        id="gpt-4o-mini",
+        name="GPT-4 Optimized Mini",
+    ),
+    "o3-mini": ModelInfo(
+        max_tokens=8192,
+        context_window=8192,
+        supports_images=False,
+        supports_prompt_cache=False,
+        input_price=0.0005,
+        output_price=0.0015,
+        description="Reasoning model with advanced capabilities on math, science, and coding.",
+        id="o3-mini",
+        name="O3 Mini",
+    ),
+    "o3-mini-high": ModelInfo(
+        max_tokens=16384,
+        context_window=16384,
+        supports_images=False,
+        supports_prompt_cache=False,
+        input_price=0.001,
+        output_price=0.002,
+        description="Reasoning model with advanced capabilities on math, science, and "
+        "coding pre-set to highest reasoning effort.",
+        id="o3-mini-high",
+        name="O3 Mini High",
+    ),
+    "o1-preview": ModelInfo(
+        max_tokens=32768,
+        context_window=32768,
+        supports_images=True,
+        supports_prompt_cache=False,
+        input_price=0.015,
+        output_price=0.035,
+        description="Preview version of O1 model with multimodal capabilities",
+        id="o1-preview",
+        name="O1 Preview",
+    ),
+    "o1": ModelInfo(
+        max_tokens=32768,
+        context_window=32768,
+        supports_images=True,
+        supports_prompt_cache=False,
+        input_price=0.015,
+        output_price=0.035,
+        description="Advanced reasoning model with high performance on math, science, and "
+        "coding tasks.",
+        id="o1",
+        name="o1",
+    ),
+    "o1-mini": ModelInfo(
+        max_tokens=16384,
+        context_window=16384,
+        supports_images=True,
+        supports_prompt_cache=False,
+        input_price=0.008,
+        output_price=0.02,
+        description="Compact version of O1 model with high performance on math, science, "
+        "and coding tasks.",
+        id="o1-mini",
+        name="o1 Mini",
+    ),
+}
+
 
 google_models: Dict[str, ModelInfo] = {
     "gemini-2.0-flash-001": ModelInfo(
