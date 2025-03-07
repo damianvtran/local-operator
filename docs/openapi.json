@@ -1575,15 +1575,24 @@
                   "message": "Providers retrieved successfully",
                   "result": {
                     "providers": [
-                      "anthropic",
-                      "openai",
-                      "google",
-                      "mistral",
-                      "ollama",
-                      "openrouter",
-                      "deepseek",
-                      "kimi",
-                      "alibaba"
+                      {
+                        "id": "openai",
+                        "name": "OpenAI",
+                        "description": "OpenAI's API provides access to GPT-4o",
+                        "url": "https://platform.openai.com/",
+                        "requiredCredentials": [
+                          "OPENAI_API_KEY"
+                        ]
+                      },
+                      {
+                        "id": "anthropic",
+                        "name": "Anthropic",
+                        "description": "Anthropic's Claude models for AI assistants",
+                        "url": "https://www.anthropic.com/",
+                        "requiredCredentials": [
+                          "ANTHROPIC_API_KEY"
+                        ]
+                      }
                     ]
                   }
                 }
@@ -3568,13 +3577,11 @@
           "input_price": {
             "type": "number",
             "title": "Input Price",
-            "description": "Cost per million input tokens",
             "default": 0.0
           },
           "output_price": {
             "type": "number",
             "title": "Output Price",
-            "description": "Cost per million output tokens",
             "default": 0.0
           },
           "max_tokens": {
@@ -3586,8 +3593,7 @@
                 "type": "null"
               }
             ],
-            "title": "Max Tokens",
-            "description": "Maximum number of tokens supported"
+            "title": "Max Tokens"
           },
           "context_window": {
             "anyOf": [
@@ -3598,8 +3604,7 @@
                 "type": "null"
               }
             ],
-            "title": "Context Window",
-            "description": "Context window size"
+            "title": "Context Window"
           },
           "supports_images": {
             "anyOf": [
@@ -3610,13 +3615,11 @@
                 "type": "null"
               }
             ],
-            "title": "Supports Images",
-            "description": "Whether the model supports images"
+            "title": "Supports Images"
           },
           "supports_prompt_cache": {
             "type": "boolean",
             "title": "Supports Prompt Cache",
-            "description": "Whether the model supports prompt caching",
             "default": false
           },
           "cache_writes_price": {
@@ -3628,8 +3631,7 @@
                 "type": "null"
               }
             ],
-            "title": "Cache Writes Price",
-            "description": "Cost per million tokens for cache writes"
+            "title": "Cache Writes Price"
           },
           "cache_reads_price": {
             "anyOf": [
@@ -3640,25 +3642,32 @@
                 "type": "null"
               }
             ],
-            "title": "Cache Reads Price",
-            "description": "Cost per million tokens for cache reads"
+            "title": "Cache Reads Price"
           },
           "description": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Description",
             "description": "Description of the model"
+          },
+          "id": {
+            "type": "string",
+            "title": "Id",
+            "description": "Unique identifier for the model"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Display name for the model"
           }
         },
         "type": "object",
+        "required": [
+          "description",
+          "id",
+          "name"
+        ],
         "title": "ModelInfo",
-        "description": "Information about a model.\n\nAttributes:\n    input_price: Cost per million input tokens\n    output_price: Cost per million output tokens\n    max_tokens: Maximum number of tokens supported by the model\n    context_window: Context window size of the model\n    supports_images: Whether the model supports images\n    supports_prompt_cache: Whether the model supports prompt caching\n    cache_writes_price: Cost per million tokens for cache writes\n    cache_reads_price: Cost per million tokens for cache reads\n    description: Description of the model"
+        "description": "Represents the pricing information for a given model.\n\nAttributes:\n    input_price (float): Cost per million input tokens.\n    output_price (float): Cost per million output tokens.\n    max_tokens (Optional[int]): Maximum number of tokens supported by the model.\n    context_window (Optional[int]): Context window size of the model.\n    supports_images (Optional[bool]): Whether the model supports images.\n    supports_prompt_cache (bool): Whether the model supports prompt caching.\n    cache_writes_price (Optional[float]): Cost per million tokens for cache writes.\n    cache_reads_price (Optional[float]): Cost per million tokens for cache reads.\n    description (Optional[str]): Description of the model."
       },
       "ModelListResponse": {
         "properties": {
@@ -3721,15 +3730,57 @@
         "title": "ProcessResponseStatus",
         "description": "Status codes for process_response results."
       },
-      "ProviderListResponse": {
+      "ProviderDetail": {
         "properties": {
-          "providers": {
+          "id": {
+            "type": "string",
+            "title": "Id",
+            "description": "Unique identifier for the provider"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Display name for the provider"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description",
+            "description": "Description of the provider"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url",
+            "description": "URL to the provider's platform"
+          },
+          "requiredCredentials": {
             "items": {
               "type": "string"
             },
             "type": "array",
+            "title": "Requiredcredentials",
+            "description": "List of required credential keys"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "url",
+          "requiredCredentials"
+        ],
+        "title": "ProviderDetail",
+        "description": "Model for provider details.\n\nAttributes:\n    id: Unique identifier for the provider\n    name: Display name for the provider\n    description: Description of the provider\n    url: URL to the provider's platform\n    requiredCredentials: List of required credential keys"
+      },
+      "ProviderListResponse": {
+        "properties": {
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderDetail"
+            },
+            "type": "array",
             "title": "Providers",
-            "description": "List of model providers"
+            "description": "List of provider details"
           }
         },
         "type": "object",
@@ -3737,18 +3788,27 @@
           "providers"
         ],
         "title": "ProviderListResponse",
-        "description": "Response for listing providers.\n\nAttributes:\n    providers: List of model providers",
+        "description": "Response for listing providers.\n\nAttributes:\n    providers: List of provider details",
         "example": {
           "providers": [
-            "anthropic",
-            "openai",
-            "google",
-            "mistral",
-            "ollama",
-            "openrouter",
-            "deepseek",
-            "kimi",
-            "alibaba"
+            {
+              "description": "OpenAI's API provides access to GPT-4o and other models",
+              "id": "openai",
+              "name": "OpenAI",
+              "requiredCredentials": [
+                "OPENAI_API_KEY"
+              ],
+              "url": "https://platform.openai.com/"
+            },
+            {
+              "description": "Anthropic's Claude models for safe, helpful AI assistants",
+              "id": "anthropic",
+              "name": "Anthropic",
+              "requiredCredentials": [
+                "ANTHROPIC_API_KEY"
+              ],
+              "url": "https://www.anthropic.com/"
+            }
           ]
         }
       },
