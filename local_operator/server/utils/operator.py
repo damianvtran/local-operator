@@ -154,6 +154,8 @@ def create_operator(
         can_prompt_user=False,
         agent=current_agent,
         verbosity_level=VerbosityLevel.QUIET,
+        agent_registry=agent_registry,
+        persist_conversation=persist_conversation,
     )
 
     operator = Operator(
@@ -164,7 +166,6 @@ def create_operator(
         type=OperatorType.SERVER,
         agent_registry=agent_registry,
         current_agent=current_agent,
-        training_mode=persist_conversation,
         auto_save_conversation=False,
         verbosity_level=VerbosityLevel.QUIET,
     )

@@ -266,17 +266,18 @@ def create_and_start_job_process_with_queue(
 
     # Create a task to monitor the status queue
     async def monitor_status_queue():
+        current_job_id = job_id  # Capture job_id in closure to avoid unbound variable issue
         try:
             while process.is_alive() or not status_queue.empty():
                 if not status_queue.empty():
-                    job_id, status, result = status_queue.get()
-                    await job_manager.update_job_status(job_id, status, result)
+                    received_job_id, status, result = status_queue.get()
+                    await job_manager.update_job_status(received_job_id, status, result)
                 await asyncio.sleep(0.01)
         except asyncio.CancelledError:
             # Task was cancelled, clean up
             pass
         except Exception as e:
-            logger.exception(f"Error monitoring status queue for job {job_id}: {str(e)}")
+            logger.exception(f"Error monitoring status queue for job {current_job_id}: {str(e)}")
 
     # Start the monitor task
     monitor_task = asyncio.create_task(monitor_status_queue())
