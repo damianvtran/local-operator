@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 # AgentEditFields will be used in the routes module
 from local_operator.jobs import JobResult, JobStatus
+from local_operator.model.registry import ModelInfo, ProviderDetail
 from local_operator.types import CodeExecutionResult, ConversationRecord
 
 
@@ -523,39 +524,6 @@ class CredentialListResult(BaseModel):
     keys: List[str] = Field(..., description="List of credential keys")
 
 
-# Model-related schemas
-class ModelInfo(BaseModel):
-    """Information about a model.
-
-    Attributes:
-        input_price: Cost per million input tokens
-        output_price: Cost per million output tokens
-        max_tokens: Maximum number of tokens supported by the model
-        context_window: Context window size of the model
-        supports_images: Whether the model supports images
-        supports_prompt_cache: Whether the model supports prompt caching
-        cache_writes_price: Cost per million tokens for cache writes
-        cache_reads_price: Cost per million tokens for cache reads
-        description: Description of the model
-    """
-
-    input_price: float = Field(0.0, description="Cost per million input tokens")
-    output_price: float = Field(0.0, description="Cost per million output tokens")
-    max_tokens: Optional[int] = Field(None, description="Maximum number of tokens supported")
-    context_window: Optional[int] = Field(None, description="Context window size")
-    supports_images: Optional[bool] = Field(None, description="Whether the model supports images")
-    supports_prompt_cache: bool = Field(
-        False, description="Whether the model supports prompt caching"
-    )
-    cache_writes_price: Optional[float] = Field(
-        None, description="Cost per million tokens for cache writes"
-    )
-    cache_reads_price: Optional[float] = Field(
-        None, description="Cost per million tokens for cache reads"
-    )
-    description: Optional[str] = Field(None, description="Description of the model")
-
-
 class ModelEntry(BaseModel):
     """A single model entry.
 
@@ -642,10 +610,10 @@ class ProviderListResponse(BaseModel):
     """Response for listing providers.
 
     Attributes:
-        providers: List of model providers
+        providers: List of provider details
     """
 
-    providers: List[str] = Field(..., description="List of model providers")
+    providers: List[ProviderDetail] = Field(..., description="List of provider details")
 
     class Config:
         """Pydantic model configuration."""
@@ -653,15 +621,20 @@ class ProviderListResponse(BaseModel):
         json_schema_extra = {
             "example": {
                 "providers": [
-                    "anthropic",
-                    "openai",
-                    "google",
-                    "mistral",
-                    "ollama",
-                    "openrouter",
-                    "deepseek",
-                    "kimi",
-                    "alibaba",
+                    {
+                        "id": "openai",
+                        "name": "OpenAI",
+                        "description": "OpenAI's API provides access to GPT-4o and other models",
+                        "url": "https://platform.openai.com/",
+                        "requiredCredentials": ["OPENAI_API_KEY"],
+                    },
+                    {
+                        "id": "anthropic",
+                        "name": "Anthropic",
+                        "description": "Anthropic's Claude models for safe, helpful AI assistants",
+                        "url": "https://www.anthropic.com/",
+                        "requiredCredentials": ["ANTHROPIC_API_KEY"],
+                    },
                 ]
             }
         }

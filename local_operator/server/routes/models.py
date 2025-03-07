@@ -5,13 +5,14 @@ This module contains the FastAPI route handlers for model-related endpoints.
 """
 
 import logging
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from local_operator.clients.openrouter import OpenRouterClient
 from local_operator.credentials import CredentialManager
 from local_operator.model.registry import (
+    ProviderDetail,
     SupportedHostingProviders,
     anthropic_models,
     deepseek_models,
@@ -26,6 +27,7 @@ from local_operator.model.registry import (
 from local_operator.server.dependencies import get_credential_manager
 from local_operator.server.models.schemas import (
     CRUDResponse,
+    ModelEntry,
     ModelInfo,
     ModelListResponse,
     ProviderListResponse,
@@ -50,15 +52,20 @@ logger = logging.getLogger("local_operator.server.routes.models")
                         "message": "Providers retrieved successfully",
                         "result": {
                             "providers": [
-                                "anthropic",
-                                "openai",
-                                "google",
-                                "mistral",
-                                "ollama",
-                                "openrouter",
-                                "deepseek",
-                                "kimi",
-                                "alibaba",
+                                {
+                                    "id": "openai",
+                                    "name": "OpenAI",
+                                    "description": "OpenAI's API provides access to GPT-4o",
+                                    "url": "https://platform.openai.com/",
+                                    "requiredCredentials": ["OPENAI_API_KEY"],
+                                },
+                                {
+                                    "id": "anthropic",
+                                    "name": "Anthropic",
+                                    "description": "Anthropic's Claude models for AI assistants",
+                                    "url": "https://www.anthropic.com/",
+                                    "requiredCredentials": ["ANTHROPIC_API_KEY"],
+                                },
                             ]
                         },
                     }
@@ -73,19 +80,83 @@ logger = logging.getLogger("local_operator.server.routes.models")
 )
 async def list_providers():
     """
-    List all available model providers.
+    List all available model providers with their details.
 
     Returns:
-        CRUDResponse: A response containing the list of providers.
+        CRUDResponse: A response containing the list of provider objects with their details.
     """
     try:
-        # Get the list of providers from the registry
-        providers = SupportedHostingProviders
+        # Define provider details
+        provider_details = [
+            ProviderDetail(
+                id="openai",
+                name="OpenAI",
+                description="OpenAI's API provides access to GPT-4o and other models",
+                url="https://platform.openai.com/",
+                requiredCredentials=["OPENAI_API_KEY"],
+            ),
+            ProviderDetail(
+                id="anthropic",
+                name="Anthropic",
+                description="Anthropic's Claude models for AI assistants",
+                url="https://www.anthropic.com/",
+                requiredCredentials=["ANTHROPIC_API_KEY"],
+            ),
+            ProviderDetail(
+                id="google",
+                name="Google",
+                description="Google's Gemini models for multimodal AI capabilities",
+                url="https://ai.google.dev/",
+                requiredCredentials=["GOOGLE_AI_STUDIO_API_KEY"],
+            ),
+            ProviderDetail(
+                id="mistral",
+                name="Mistral AI",
+                description="Mistral AI's open and proprietary language models",
+                url="https://mistral.ai/",
+                requiredCredentials=["MISTRAL_API_KEY"],
+            ),
+            ProviderDetail(
+                id="ollama",
+                name="Ollama",
+                description="Run open-source large language models locally",
+                url="https://ollama.ai/",
+                requiredCredentials=[],
+            ),
+            ProviderDetail(
+                id="openrouter",
+                name="OpenRouter",
+                description="Access to multiple AI models through a unified API",
+                url="https://openrouter.ai/",
+                requiredCredentials=["OPENROUTER_API_KEY"],
+            ),
+            ProviderDetail(
+                id="deepseek",
+                name="DeepSeek",
+                description="DeepSeek's language models for various AI applications",
+                url="https://deepseek.ai/",
+                requiredCredentials=["DEEPSEEK_API_KEY"],
+            ),
+            ProviderDetail(
+                id="kimi",
+                name="Kimi",
+                description="Moonshot AI's Kimi models for Chinese and English language tasks",
+                url="https://moonshot.cn/",
+                requiredCredentials=["KIMI_API_KEY"],
+            ),
+            ProviderDetail(
+                id="alibaba",
+                name="Alibaba Cloud",
+                description="Alibaba's Qwen models for natural language processing",
+                url="https://www.alibabacloud.com/",
+                requiredCredentials=["ALIBABA_CLOUD_API_KEY"],
+            ),
+        ]
 
         return CRUDResponse(
             status=200,
             message="Providers retrieved successfully",
-            result=ProviderListResponse(providers=providers),
+            result=ProviderListResponse(providers=provider_details),
         )
     except Exception:
         logger.exception("Unexpected error while retrieving providers")
@@ -175,93 +246,106 @@ async def list_models(
         HTTPException: If provider is invalid or on server error
     """
     try:
-        models = []
+        models: List[ModelEntry] = []
+        providers_to_check: List[ProviderDetail] = []
 
-        providers_to_check = [provider] if provider else SupportedHostingProviders
+        if provider:
+            if provider not in [p.id for p in SupportedHostingProviders]:
+                raise HTTPException(status_code=404, detail=f"Provider not found: {provider}")
 
-        if provider and provider not in SupportedHostingProviders:
-            raise HTTPException(status_code=404, detail=f"Provider not found: {provider}")
+            providers_to_check = [p for p in SupportedHostingProviders if p.id == provider]
+        else:
+            providers_to_check = SupportedHostingProviders
 
         # Add models from each provider
-        for provider in providers_to_check:
-            if provider == "anthropic":
+        for provider_detail in providers_to_check:
+            if provider_detail.id == "anthropic":
                 for model_name, model_info in anthropic_models.items():
                     models.append(
-                        {
-                            "id": model_name,
-                            "provider": provider,
-                            "info": model_info.model_dump(),
-                        }
+                        ModelEntry(
+                            id=model_name,
+                            name=model_info.name,
+                            provider=provider_detail.id,
+                            info=model_info,
+                        )
                     )
-            elif provider == "deepseek":
+            elif provider_detail.id == "deepseek":
                 for model_name, model_info in deepseek_models.items():
                     models.append(
-                        {
-                            "id": model_name,
-                            "provider": provider,
-                            "info": model_info.model_dump(),
-                        }
+                        ModelEntry(
+                            id=model_name,
+                            name=model_info.name,
+                            provider=provider_detail.id,
+                            info=model_info,
+                        )
                     )
-            elif provider == "google":
+            elif provider_detail.id == "google":
                 for model_name, model_info in google_models.items():
                     models.append(
-                        {
-                            "id": model_name,
-                            "provider": provider,
-                            "info": model_info.model_dump(),
-                        }
+                        ModelEntry(
+                            id=model_name,
+                            name=model_info.name,
+                            provider=provider_detail.id,
+                            info=model_info,
+                        )
                     )
-            elif provider == "kimi":
+            elif provider_detail.id == "kimi":
                 for model_name, model_info in kimi_models.items():
                     models.append(
-                        {
-                            "id": model_name,
-                            "provider": provider,
-                            "info": model_info.model_dump(),
-                        }
+                        ModelEntry(
+                            id=model_name,
+                            name=model_info.name,
+                            provider=provider_detail.id,
+                            info=model_info,
+                        )
                     )
-            elif provider == "mistral":
+            elif provider_detail.id == "mistral":
                 for model_name, model_info in mistral_models.items():
                     models.append(
-                        {
-                            "id": model_name,
-                            "provider": provider,
-                            "info": model_info.model_dump(),
-                        }
+                        ModelEntry(
+                            id=model_name,
+                            name=model_info.name,
+                            provider=provider_detail.id,
+                            info=model_info,
+                        )
                     )
-            elif provider == "ollama":
+            elif provider_detail.id == "ollama":
                 models.append(
-                    {
-                        "id": "ollama",
-                        "provider": provider,
-                        "info": ollama_default_model_info.model_dump(),
-                    }
+                    ModelEntry(
+                        id="ollama",
+                        name=ollama_default_model_info.name,
+                        provider=provider_detail.id,
+                        info=ollama_default_model_info,
+                    )
                 )
-            elif provider == "openai":
+            elif provider_detail.id == "openai":
                 models.append(
-                    {
-                        "id": "openai",
-                        "provider": provider,
-                        "info": openai_model_info_sane_defaults.model_dump(),
-                    }
+                    ModelEntry(
+                        id="openai",
+                        name=openai_model_info_sane_defaults.name,
+                        provider=provider_detail.id,
+                        info=openai_model_info_sane_defaults,
+                    )
                 )
-            elif provider == "alibaba":
+            elif provider_detail.id == "alibaba":
                 for model_name, model_info in qwen_models.items():
                     models.append(
-                        {
-                            "id": model_name,
-                            "provider": provider,
-                            "info": model_info.model_dump(),
-                        }
+                        ModelEntry(
+                            id=model_name,
+                            name=model_info.name,
+                            provider=provider_detail.id,
+                            info=model_info,
+                        )
                     )
-            elif provider == "openrouter":
+            elif provider_detail.id == "openrouter":
                 # First add the default model info
                 models.append(
-                    {
-                        "id": "openrouter",
-                        "provider": provider,
-                        "info": openrouter_default_model_info.model_dump(),
-                    }
+                    ModelEntry(
+                        id="openrouter",
+                        name=openrouter_default_model_info.name,
+                        provider=provider_detail.id,
+                        info=openrouter_default_model_info,
+                    )
                 )
 
                 # Then try to get OpenRouter models if API key is configured
@@ -278,6 +362,8 @@ async def list_models(
                         for model in openrouter_models.data:
                             # Get model info
                             model_info = ModelInfo(
+                                id=model.id,
+                                name=model.name,
                                 input_price=model.pricing.prompt * 1_000_000,
                                 output_price=model.pricing.completion * 1_000_000,
                                 max_tokens=None,
@@ -294,12 +380,12 @@ async def list_models(
                             )
 
                             models.append(
-                                {
-                                    "id": model.id,
-                                    "name": model.name,
-                                    "provider": "openrouter",
-                                    "info": model_info.model_dump(),
-                                }
+                                ModelEntry(
+                                    id=model.id,
+                                    name=model.name,
+                                    provider="openrouter",
+                                    info=model_info,
+                                )
                             )
                     except Exception:
                         # Continue without OpenRouter models

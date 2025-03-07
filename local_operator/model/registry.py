@@ -1,17 +1,90 @@
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
+
+
+class ProviderDetail(BaseModel):
+    """Model for provider details.
+
+    Attributes:
+        id: Unique identifier for the provider
+        name: Display name for the provider
+        description: Description of the provider
+        url: URL to the provider's platform
+        requiredCredentials: List of required credential keys
+    """
+
+    id: str = Field(..., description="Unique identifier for the provider")
+    name: str = Field(..., description="Display name for the provider")
+    description: str = Field(..., description="Description of the provider")
+    url: str = Field(..., description="URL to the provider's platform")
+    requiredCredentials: List[str] = Field(..., description="List of required credential keys")
+
 
 SupportedHostingProviders = [
-    "anthropic",
-    "ollama",
-    "deepseek",
-    "google",
-    "openai",
-    "openrouter",
-    "alibaba",
-    "kimi",
-    "mistral",
+    ProviderDetail(
+        id="openai",
+        name="OpenAI",
+        description="OpenAI's API provides access to GPT-4o and other models",
+        url="https://platform.openai.com/",
+        requiredCredentials=["OPENAI_API_KEY"],
+    ),
+    ProviderDetail(
+        id="anthropic",
+        name="Anthropic",
+        description="Anthropic's Claude models for AI assistants",
+        url="https://www.anthropic.com/",
+        requiredCredentials=["ANTHROPIC_API_KEY"],
+    ),
+    ProviderDetail(
+        id="google",
+        name="Google",
+        description="Google's Gemini models for multimodal AI capabilities",
+        url="https://ai.google.dev/",
+        requiredCredentials=["GOOGLE_AI_STUDIO_API_KEY"],
+    ),
+    ProviderDetail(
+        id="mistral",
+        name="Mistral AI",
+        description="Mistral AI's open and proprietary language models",
+        url="https://mistral.ai/",
+        requiredCredentials=["MISTRAL_API_KEY"],
+    ),
+    ProviderDetail(
+        id="ollama",
+        name="Ollama",
+        description="Run open-source large language models locally",
+        url="https://ollama.ai/",
+        requiredCredentials=[],
+    ),
+    ProviderDetail(
+        id="openrouter",
+        name="OpenRouter",
+        description="Access to multiple AI models through a unified API",
+        url="https://openrouter.ai/",
+        requiredCredentials=["OPENROUTER_API_KEY"],
+    ),
+    ProviderDetail(
+        id="deepseek",
+        name="DeepSeek",
+        description="DeepSeek's language models for various AI applications",
+        url="https://deepseek.ai/",
+        requiredCredentials=["DEEPSEEK_API_KEY"],
+    ),
+    ProviderDetail(
+        id="kimi",
+        name="Kimi",
+        description="Moonshot AI's Kimi models for Chinese and English language tasks",
+        url="https://moonshot.cn/",
+        requiredCredentials=["KIMI_API_KEY"],
+    ),
+    ProviderDetail(
+        id="alibaba",
+        name="Alibaba Cloud",
+        description="Alibaba's Qwen models for natural language processing",
+        url="https://www.alibabacloud.com/",
+        requiredCredentials=["ALIBABA_CLOUD_API_KEY"],
+    ),
 ]
 """List of supported model hosting providers.
 
@@ -55,7 +128,9 @@ class ModelInfo(BaseModel):
     supports_prompt_cache: bool = False
     cache_writes_price: Optional[float] = None
     cache_reads_price: Optional[float] = None
-    description: Optional[str] = None
+    description: str = Field(..., description="Description of the model")
+    id: str = Field(..., description="Unique identifier for the model")
+    name: str = Field(..., description="Display name for the model")
 
     @field_validator("input_price", "output_price")
     def price_must_be_non_negative(cls, value: float) -> float:
@@ -120,6 +195,8 @@ def get_model_info(hosting: str, model: str) -> ModelInfo:
 
 
 unknown_model_info: ModelInfo = ModelInfo(
+    id="unknown",
+    name="Unknown",
     max_tokens=-1,
     context_window=-1,
     supports_images=False,
@@ -139,6 +216,8 @@ the absence of specific model details.
 
 anthropic_models: Dict[str, ModelInfo] = {
     "claude-3-5-sonnet-20241022": ModelInfo(
+        id="claude-3-5-sonnet-20241022",
+        name="Claude 3.5 Sonnet",
         max_tokens=8192,
         context_window=200_000,
         supports_images=True,
@@ -150,6 +229,8 @@ anthropic_models: Dict[str, ModelInfo] = {
         description="Anthropic's latest balanced model with excellent performance",
     ),
     "claude-3-5-haiku-20241022": ModelInfo(
+        id="claude-3-5-haiku-20241022",
+        name="Claude 3.5 Haiku",
         max_tokens=8192,
         context_window=200_000,
         supports_images=False,
@@ -161,6 +242,8 @@ anthropic_models: Dict[str, ModelInfo] = {
         description="Fast and efficient model for simpler tasks",
     ),
     "claude-3-opus-20240229": ModelInfo(
+        id="claude-3-opus-20240229",
+        name="Claude 3 Opus",
         max_tokens=4096,
         context_window=200_000,
         supports_images=True,
@@ -172,6 +255,8 @@ anthropic_models: Dict[str, ModelInfo] = {
         description="Anthropic's most powerful model for complex tasks",
     ),
     "claude-3-haiku-20240307": ModelInfo(
+        id="claude-3-haiku-20240307",
+        name="Claude 3 Haiku",
         max_tokens=4096,
         context_window=200_000,
         supports_images=True,
@@ -197,6 +282,8 @@ ollama_default_model_info: ModelInfo = ModelInfo(
     input_price=0.0,
     output_price=0.0,
     description="Local model hosting with Ollama",
+    id="ollama",
+    name="Ollama",
 )
 
 # TODO: Add fetch for token, context window, image support
@@ -210,6 +297,8 @@ openrouter_default_model_info: ModelInfo = ModelInfo(
     cache_writes_price=0.0,
     cache_reads_price=0.0,
     description="Access to various AI models from different providers through a single API",
+    id="openrouter",
+    name="OpenRouter",
 )
 
 openai_model_info_sane_defaults: ModelInfo = ModelInfo(
@@ -220,6 +309,8 @@ openai_model_info_sane_defaults: ModelInfo = ModelInfo(
     input_price=0,
     output_price=0,
     description="OpenAI's API provides access to GPT-4o, o3-mini, and other models",
+    id="openai",
+    name="OpenAI",
 )
 
 google_models: Dict[str, ModelInfo] = {
@@ -231,8 +322,12 @@ google_models: Dict[str, ModelInfo] = {
         input_price=0,
         output_price=0,
         description="Google's latest multimodal model with excellent performance",
+        id="gemini-2.0-flash-001",
+        name="Gemini 2.0 Flash",
     ),
     "gemini-2.0-flash-lite-preview-02-05": ModelInfo(
+        id="gemini-2.0-flash-lite-preview-02-05",
+        name="Gemini 2.0 Flash Lite Preview",
         max_tokens=8192,
         context_window=1_048_576,
         supports_images=True,
@@ -242,6 +337,8 @@ google_models: Dict[str, ModelInfo] = {
         description="Lighter version of Gemini 2.0 Flash",
     ),
     "gemini-2.0-pro-exp-02-05": ModelInfo(
+        id="gemini-2.0-pro-exp-02-05",
+        name="Gemini 2.0 Pro Exp",
         max_tokens=8192,
         context_window=2_097_152,
         supports_images=True,
@@ -251,6 +348,8 @@ google_models: Dict[str, ModelInfo] = {
         description="Google's most powerful Gemini model",
     ),
     "gemini-2.0-flash-thinking-exp-01-21": ModelInfo(
+        id="gemini-2.0-flash-thinking-exp-01-21",
+        name="Gemini 2.0 Flash Thinking Exp",
         max_tokens=65_536,
         context_window=1_048_576,
         supports_images=True,
@@ -260,6 +359,8 @@ google_models: Dict[str, ModelInfo] = {
         description="Experimental Gemini model with thinking capabilities",
     ),
     "gemini-2.0-flash-thinking-exp-1219": ModelInfo(
+        id="gemini-2.0-flash-thinking-exp-1219",
+        name="Gemini 2.0 Flash Thinking Exp",
         max_tokens=8192,
         context_window=32_767,
         supports_images=True,
@@ -269,6 +370,8 @@ google_models: Dict[str, ModelInfo] = {
         description="Experimental Gemini model with thinking capabilities",
     ),
     "gemini-2.0-flash-exp": ModelInfo(
+        id="gemini-2.0-flash-exp",
+        name="Gemini 2.0 Flash Exp",
         max_tokens=8192,
         context_window=1_048_576,
         supports_images=True,
@@ -278,6 +381,8 @@ google_models: Dict[str, ModelInfo] = {
         description="Experimental version of Gemini 2.0 Flash",
     ),
     "gemini-1.5-flash-002": ModelInfo(
+        id="gemini-1.5-flash-002",
+        name="Gemini 1.5 Flash 002",
         max_tokens=8192,
         context_window=1_048_576,
         supports_images=True,
@@ -287,6 +392,8 @@ google_models: Dict[str, ModelInfo] = {
         description="Fast and efficient multimodal model",
     ),
     "gemini-1.5-flash-exp-0827": ModelInfo(
+        id="gemini-1.5-flash-exp-0827",
+        name="Gemini 1.5 Flash Exp 0827",
         max_tokens=8192,
         context_window=1_048_576,
         supports_images=True,
@@ -301,6 +408,8 @@ google_models["gemini-2.0-flash"] = google_models["gemini-2.0-flash-001"]
 
 deepseek_models: Dict[str, ModelInfo] = {
     "deepseek-chat": ModelInfo(
+        id="deepseek-chat",
+        name="Deepseek Chat",
         max_tokens=8_000,
         context_window=64_000,
         supports_images=False,
@@ -312,6 +421,8 @@ deepseek_models: Dict[str, ModelInfo] = {
         description="General purpose chat model",
     ),
     "deepseek-reasoner": ModelInfo(
+        id="deepseek-reasoner",
+        name="Deepseek Reasoner",
         max_tokens=8_000,
         context_window=64_000,
         supports_images=False,
@@ -326,6 +437,8 @@ deepseek_models: Dict[str, ModelInfo] = {
 
 qwen_models: Dict[str, ModelInfo] = {
     "qwen2.5-coder-32b-instruct": ModelInfo(
+        id="qwen2.5-coder-32b-instruct",
+        name="Qwen 2.5 Coder 32B Instruct",
         max_tokens=8_192,
         context_window=131_072,
         supports_images=False,
@@ -337,6 +450,8 @@ qwen_models: Dict[str, ModelInfo] = {
         description="Specialized for code generation and understanding",
     ),
     "qwen2.5-coder-14b-instruct": ModelInfo(
+        id="qwen2.5-coder-14b-instruct",
+        name="Qwen 2.5 Coder 14B Instruct",
         max_tokens=8_192,
         context_window=131_072,
         supports_images=False,
@@ -348,6 +463,8 @@ qwen_models: Dict[str, ModelInfo] = {
         description="Medium-sized code-specialized model",
     ),
     "qwen2.5-coder-7b-instruct": ModelInfo(
+        id="qwen2.5-coder-7b-instruct",
+        name="Qwen 2.5 Coder 7B Instruct",
         max_tokens=8_192,
         context_window=131_072,
         supports_images=False,
@@ -359,6 +476,8 @@ qwen_models: Dict[str, ModelInfo] = {
         description="Efficient code-specialized model",
     ),
     "qwen2.5-coder-3b-instruct": ModelInfo(
+        id="qwen2.5-coder-3b-instruct",
+        name="Qwen 2.5 Coder 3B Instruct",
         max_tokens=8_192,
         context_window=32_768,
         supports_images=False,
@@ -370,6 +489,8 @@ qwen_models: Dict[str, ModelInfo] = {
         description="Compact code-specialized model",
     ),
     "qwen2.5-coder-1.5b-instruct": ModelInfo(
+        id="qwen2.5-coder-1.5b-instruct",
+        name="Qwen 2.5 Coder 1.5B Instruct",
         max_tokens=8_192,
         context_window=32_768,
         supports_images=False,
@@ -381,6 +502,8 @@ qwen_models: Dict[str, ModelInfo] = {
         description="Very compact code-specialized model",
     ),
     "qwen2.5-coder-0.5b-instruct": ModelInfo(
+        id="qwen2.5-coder-0.5b-instruct",
+        name="Qwen 2.5 Coder 0.5B Instruct",
         max_tokens=8_192,
         context_window=32_768,
         supports_images=False,
@@ -392,6 +515,8 @@ qwen_models: Dict[str, ModelInfo] = {
         description="Smallest code-specialized model",
     ),
     "qwen-coder-plus-latest": ModelInfo(
+        id="qwen-coder-plus-latest",
+        name="Qwen Coder Plus Latest",
         max_tokens=129_024,
         context_window=131_072,
         supports_images=False,
@@ -403,6 +528,8 @@ qwen_models: Dict[str, ModelInfo] = {
         description="Advanced code generation model",
     ),
     "qwen-plus-latest": ModelInfo(
+        id="qwen-plus-latest",
+        name="Qwen Plus Latest",
         max_tokens=129_024,
         context_window=131_072,
         supports_images=False,
@@ -414,6 +541,8 @@ qwen_models: Dict[str, ModelInfo] = {
         description="Balanced performance Qwen model",
     ),
     "qwen-turbo-latest": ModelInfo(
+        id="qwen-turbo-latest",
+        name="Qwen Turbo Latest",
         max_tokens=1_000_000,
         context_window=1_000_000,
         supports_images=False,
@@ -425,6 +554,8 @@ qwen_models: Dict[str, ModelInfo] = {
         description="Fast and efficient Qwen model",
     ),
     "qwen-max-latest": ModelInfo(
+        id="qwen-max-latest",
+        name="Qwen Max Latest",
         max_tokens=30_720,
         context_window=32_768,
         supports_images=False,
@@ -436,6 +567,8 @@ qwen_models: Dict[str, ModelInfo] = {
         description="Alibaba's most powerful Qwen model",
     ),
     "qwen-coder-plus": ModelInfo(
+        id="qwen-coder-plus",
+        name="Qwen Coder Plus",
         max_tokens=129_024,
         context_window=131_072,
         supports_images=False,
@@ -447,6 +580,8 @@ qwen_models: Dict[str, ModelInfo] = {
         description="Advanced code generation model",
     ),
     "qwen-plus": ModelInfo(
+        id="qwen-plus",
+        name="Qwen Plus",
         max_tokens=129_024,
         context_window=131_072,
         supports_images=False,
@@ -458,6 +593,8 @@ qwen_models: Dict[str, ModelInfo] = {
         description="Balanced performance Qwen model",
     ),
     "qwen-turbo": ModelInfo(
+        id="qwen-turbo",
+        name="Qwen Turbo",
         max_tokens=1_000_000,
         context_window=1_000_000,
         supports_images=False,
@@ -469,6 +606,8 @@ qwen_models: Dict[str, ModelInfo] = {
         description="Fast and efficient Qwen model",
     ),
     "qwen-max": ModelInfo(
+        id="qwen-max",
+        name="Qwen Max",
         max_tokens=30_720,
         context_window=32_768,
         supports_images=False,
@@ -480,6 +619,8 @@ qwen_models: Dict[str, ModelInfo] = {
         description="Alibaba's most powerful Qwen model",
     ),
     "deepseek-v3": ModelInfo(
+        id="deepseek-v3",
+        name="Deepseek V3",
         max_tokens=8_000,
         context_window=64_000,
         supports_images=False,
@@ -491,6 +632,8 @@ qwen_models: Dict[str, ModelInfo] = {
         description="General purpose chat model",
     ),
     "deepseek-r1": ModelInfo(
+        id="deepseek-r1",
+        name="Deepseek R1",
         max_tokens=8_000,
         context_window=64_000,
         supports_images=False,
@@ -502,6 +645,8 @@ qwen_models: Dict[str, ModelInfo] = {
         description="Specialized for complex reasoning tasks",
     ),
     "qwen-vl-max": ModelInfo(
+        id="qwen-vl-max",
+        name="Qwen VL Max",
         max_tokens=30_720,
         context_window=32_768,
         supports_images=True,
@@ -513,6 +658,8 @@ qwen_models: Dict[str, ModelInfo] = {
         description="Multimodal Qwen model with vision capabilities",
     ),
     "qwen-vl-max-latest": ModelInfo(
+        id="qwen-vl-max-latest",
+        name="Qwen VL Max Latest",
         max_tokens=129_024,
         context_window=131_072,
         supports_images=True,
@@ -524,6 +671,8 @@ qwen_models: Dict[str, ModelInfo] = {
         description="Multimodal Qwen model with vision capabilities",
     ),
     "qwen-vl-plus": ModelInfo(
+        id="qwen-vl-plus",
+        name="Qwen VL Plus",
         max_tokens=6_000,
         context_window=8_000,
         supports_images=True,
@@ -535,6 +684,8 @@ qwen_models: Dict[str, ModelInfo] = {
         description="Balanced multimodal Qwen model",
     ),
     "qwen-vl-plus-latest": ModelInfo(
+        id="qwen-vl-plus-latest",
+        name="Qwen VL Plus Latest",
         max_tokens=129_024,
         context_window=131_072,
         supports_images=True,
@@ -549,6 +700,8 @@ qwen_models: Dict[str, ModelInfo] = {
 
 mistral_models: Dict[str, ModelInfo] = {
     "mistral-large-2411": ModelInfo(
+        id="mistral-large-2411",
+        name="Mistral Large 2411",
         max_tokens=131_000,
         context_window=131_000,
         supports_images=False,
@@ -558,6 +711,8 @@ mistral_models: Dict[str, ModelInfo] = {
         description="Mistral's most powerful model",
     ),
     "pixtral-large-2411": ModelInfo(
+        id="pixtral-large-2411",
+        name="Pixtral Large 2411",
         max_tokens=131_000,
         context_window=131_000,
         supports_images=True,
@@ -567,6 +722,8 @@ mistral_models: Dict[str, ModelInfo] = {
         description="Mistral's multimodal model with image capabilities",
     ),
     "ministral-3b-2410": ModelInfo(
+        id="ministral-3b-2410",
+        name="Ministral 3B 2410",
         max_tokens=131_000,
         context_window=131_000,
         supports_images=False,
@@ -576,6 +733,8 @@ mistral_models: Dict[str, ModelInfo] = {
         description="Compact 3B parameter model for efficient inference",
     ),
     "ministral-8b-2410": ModelInfo(
+        id="ministral-8b-2410",
+        name="Ministral 8B 2410",
         max_tokens=131_000,
         context_window=131_000,
         supports_images=False,
@@ -585,6 +744,8 @@ mistral_models: Dict[str, ModelInfo] = {
         description="Medium-sized 8B parameter model balancing performance and efficiency",
     ),
     "mistral-small-2501": ModelInfo(
+        id="mistral-small-2501",
+        name="Mistral Small 2501",
         max_tokens=32_000,
         context_window=32_000,
         supports_images=False,
@@ -594,6 +755,8 @@ mistral_models: Dict[str, ModelInfo] = {
         description="Fast and efficient model for simpler tasks",
     ),
     "pixtral-12b-2409": ModelInfo(
+        id="pixtral-12b-2409",
+        name="Pixtral 12B 2409",
         max_tokens=131_000,
         context_window=131_000,
         supports_images=True,
@@ -603,6 +766,8 @@ mistral_models: Dict[str, ModelInfo] = {
         description="12B parameter multimodal model with vision capabilities",
     ),
     "open-mistral-nemo-2407": ModelInfo(
+        id="open-mistral-nemo-2407",
+        name="Open Mistral Nemo 2407",
         max_tokens=131_000,
         context_window=131_000,
         supports_images=False,
@@ -612,6 +777,8 @@ mistral_models: Dict[str, ModelInfo] = {
         description="Open-source version of Mistral optimized with NVIDIA NeMo",
     ),
     "open-codestral-mamba": ModelInfo(
+        id="open-codestral-mamba",
+        name="Open Codestral Mamba",
         max_tokens=256_000,
         context_window=256_000,
         supports_images=False,
@@ -621,6 +788,8 @@ mistral_models: Dict[str, ModelInfo] = {
         description="Open-source code-specialized model using Mamba architecture",
     ),
     "codestral-2501": ModelInfo(
+        id="codestral-2501",
+        name="Codestral 2501",
         max_tokens=256_000,
         context_window=256_000,
         supports_images=False,
@@ -634,6 +803,8 @@ mistral_models: Dict[str, ModelInfo] = {
 mistral_models["mistral-large-latest"] = mistral_models["mistral-large-2411"]
 
 litellm_model_info_sane_defaults: ModelInfo = ModelInfo(
+    id="litellm_model_info_sane_defaults",
+    name="LiteLLM Model Info Sane Defaults",
     max_tokens=-1,
     context_window=128_000,
     supports_images=True,
@@ -647,6 +818,8 @@ YUAN_TO_USD = 0.14
 
 kimi_models: Dict[str, ModelInfo] = {
     "moonshot-v1-8k": ModelInfo(
+        id="moonshot-v1-8k",
+        name="Moonshot V1 8K",
         max_tokens=8192,
         context_window=8192,
         supports_images=False,
@@ -658,6 +831,8 @@ kimi_models: Dict[str, ModelInfo] = {
         description="General purpose language model with 8K context",
     ),
     "moonshot-v1-32k": ModelInfo(
+        id="moonshot-v1-32k",
+        name="Moonshot V1 32K",
         max_tokens=8192,
         context_window=32_768,
         supports_images=False,
@@ -669,6 +844,8 @@ kimi_models: Dict[str, ModelInfo] = {
         description="General purpose language model with 32K context",
     ),
     "moonshot-v1-128k": ModelInfo(
+        id="moonshot-v1-128k",
+        name="Moonshot V1 128K",
         max_tokens=8192,
         context_window=131_072,
         supports_images=False,
@@ -680,6 +857,8 @@ kimi_models: Dict[str, ModelInfo] = {
         description="General purpose language model with 128K context",
     ),
     "moonshot-v1-8k-vision-preview": ModelInfo(
+        id="moonshot-v1-8k-vision-preview",
+        name="Moonshot V1 8K Vision Preview",
         max_tokens=8192,
         context_window=8192,
         supports_images=True,
@@ -691,6 +870,8 @@ kimi_models: Dict[str, ModelInfo] = {
         description="Multimodal model with 8K context",
     ),
     "moonshot-v1-32k-vision-preview": ModelInfo(
+        id="moonshot-v1-32k-vision-preview",
+        name="Moonshot V1 32K Vision Preview",
         max_tokens=8192,
         context_window=32_768,
         supports_images=True,
@@ -702,6 +883,8 @@ kimi_models: Dict[str, ModelInfo] = {
         description="Multimodal model with 32K context",
     ),
     "moonshot-v1-128k-vision-preview": ModelInfo(
+        id="moonshot-v1-128k-vision-preview",
+        name="Moonshot V1 128K Vision Preview",
         max_tokens=8192,
         context_window=131_072,
         supports_images=True,

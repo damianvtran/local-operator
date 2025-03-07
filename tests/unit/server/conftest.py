@@ -44,7 +44,11 @@ class DummyExecutor:
             hosting="test",
             name="test-model",
             instance=ChatMock(),
-            info=ModelInfo(),
+            info=ModelInfo(
+                id="test-model",
+                name="test-model",
+                description="Mock model",
+            ),
             api_key=None,
         )
         self.conversation_history = []
