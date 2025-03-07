@@ -556,14 +556,86 @@ class ModelInfo(BaseModel):
     description: Optional[str] = Field(None, description="Description of the model")
 
 
+class ModelEntry(BaseModel):
+    """A single model entry.
+
+    Attributes:
+        id: Unique identifier for the model
+        name: Optional display name for the model
+        provider: The provider of the model
+        info: Detailed information about the model
+    """
+
+    id: str = Field(..., description="Unique identifier for the model")
+    name: Optional[str] = Field(None, description="Display name for the model")
+    provider: str = Field(..., description="The provider of the model")
+    info: ModelInfo = Field(..., description="Detailed information about the model")
+
+    class Config:
+        """Pydantic model configuration."""
+
+        json_schema_extra = {
+            "example": {
+                "id": "claude-3-opus-20240229",
+                "provider": "anthropic",
+                "info": {
+                    "input_price": 15000.0,
+                    "output_price": 75000.0,
+                    "max_tokens": 200000,
+                    "context_window": 200000,
+                    "supports_images": True,
+                    "supports_prompt_cache": False,
+                    "description": "Most powerful Claude model for highly complex tasks",
+                },
+            }
+        }
+
+
 class ModelListResponse(BaseModel):
     """Response for listing models.
 
     Attributes:
-        models: List of models
+        models: List of model entries
     """
 
-    models: List[Dict[str, Any]] = Field(..., description="List of models")
+    models: List[ModelEntry] = Field(..., description="List of model entries")
+
+    class Config:
+        """Pydantic model configuration."""
+
+        json_schema_extra = {
+            "example": {
+                "models": [
+                    {
+                        "id": "claude-3-opus-20240229",
+                        "provider": "anthropic",
+                        "info": {
+                            "input_price": 15000.0,
+                            "output_price": 75000.0,
+                            "max_tokens": 200000,
+                            "context_window": 200000,
+                            "supports_images": True,
+                            "supports_prompt_cache": False,
+                            "description": "Most powerful Claude model for highly complex tasks",
+                        },
+                    },
+                    {
+                        "id": "gpt-4o",
+                        "name": "GPT-4o",
+                        "provider": "openai",
+                        "info": {
+                            "input_price": 5000.0,
+                            "output_price": 15000.0,
+                            "max_tokens": 128000,
+                            "context_window": 128000,
+                            "supports_images": True,
+                            "supports_prompt_cache": False,
+                            "description": "OpenAI's most advanced multimodal model",
+                        },
+                    },
+                ]
+            }
+        }
 
 
 class ProviderListResponse(BaseModel):
@@ -574,6 +646,25 @@ class ProviderListResponse(BaseModel):
     """
 
     providers: List[str] = Field(..., description="List of model providers")
+
+    class Config:
+        """Pydantic model configuration."""
+
+        json_schema_extra = {
+            "example": {
+                "providers": [
+                    "anthropic",
+                    "openai",
+                    "google",
+                    "mistral",
+                    "ollama",
+                    "openrouter",
+                    "deepseek",
+                    "kimi",
+                    "alibaba",
+                ]
+            }
+        }
 
 
 class ModelListQueryParams(BaseModel):

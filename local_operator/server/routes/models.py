@@ -7,7 +7,7 @@ This module contains the FastAPI route handlers for model-related endpoints.
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 
 from local_operator.clients.openrouter import OpenRouterClient
 from local_operator.credentials import CredentialManager
@@ -39,7 +39,37 @@ logger = logging.getLogger("local_operator.server.routes.models")
     "/v1/models/providers",
     response_model=CRUDResponse[ProviderListResponse],
     summary="List model providers",
-    description="Returns a list of available model providers.",
+    description="Returns a list of available model providers supported by the Local Operator API.",
+    responses={
+        200: {
+            "description": "List of providers retrieved successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": 200,
+                        "message": "Providers retrieved successfully",
+                        "result": {
+                            "providers": [
+                                "anthropic",
+                                "openai",
+                                "google",
+                                "mistral",
+                                "ollama",
+                                "openrouter",
+                                "deepseek",
+                                "kimi",
+                                "alibaba",
+                            ]
+                        },
+                    }
+                }
+            },
+        },
+        500: {
+            "description": "Internal server error",
+            "content": {"application/json": {"example": {"detail": "Internal Server Error"}}},
+        },
+    },
 )
 async def list_providers():
     """
@@ -63,253 +93,97 @@ async def list_providers():
 
 
 @router.get(
-    "/v1/models/list",
-    response_model=CRUDResponse[ModelListResponse],
-    summary="List models",
-    description="Returns a list of available models, optionally filtered by provider.",
-)
-async def list_models(
-    provider: Optional[str] = Query(None, description="Provider to filter models by")
-):
-    """
-    List available models, optionally filtered by provider.
-
-    Args:
-        provider: Optional provider name to filter models by
-
-    Returns:
-        CRUDResponse: A response containing the list of models.
-    """
-    try:
-        models = []
-
-        # If provider is specified, filter models by provider
-        if provider:
-            if provider == "anthropic":
-                for model_name, model_info in anthropic_models.items():
-                    models.append(
-                        {
-                            "id": model_name,
-                            "provider": provider,
-                            "info": model_info.model_dump(),
-                        }
-                    )
-            elif provider == "deepseek":
-                for model_name, model_info in deepseek_models.items():
-                    models.append(
-                        {
-                            "id": model_name,
-                            "provider": provider,
-                            "info": model_info.model_dump(),
-                        }
-                    )
-            elif provider == "google":
-                for model_name, model_info in google_models.items():
-                    models.append(
-                        {
-                            "id": model_name,
-                            "provider": provider,
-                            "info": model_info.model_dump(),
-                        }
-                    )
-            elif provider == "kimi":
-                for model_name, model_info in kimi_models.items():
-                    models.append(
-                        {
-                            "id": model_name,
-                            "provider": provider,
-                            "info": model_info.model_dump(),
-                        }
-                    )
-            elif provider == "mistral":
-                for model_name, model_info in mistral_models.items():
-                    models.append(
-                        {
-                            "id": model_name,
-                            "provider": provider,
-                            "info": model_info.model_dump(),
-                        }
-                    )
-            elif provider == "ollama":
-                models.append(
-                    {
-                        "id": "ollama",
-                        "provider": provider,
-                        "info": ollama_default_model_info.model_dump(),
-                    }
-                )
-            elif provider == "openai":
-                models.append(
-                    {
-                        "id": "openai",
-                        "provider": provider,
-                        "info": openai_model_info_sane_defaults.model_dump(),
-                    }
-                )
-            elif provider == "openrouter":
-                models.append(
-                    {
-                        "id": "openrouter",
-                        "provider": provider,
-                        "info": openrouter_default_model_info.model_dump(),
-                    }
-                )
-            elif provider == "alibaba":
-                for model_name, model_info in qwen_models.items():
-                    models.append(
-                        {
-                            "id": model_name,
-                            "provider": provider,
-                            "info": model_info.model_dump(),
-                        }
-                    )
-            else:
-                raise HTTPException(status_code=404, detail=f"Provider not found: {provider}")
-        else:
-            # If no provider is specified, return all models
-            # Anthropic models
-            for model_name, model_info in anthropic_models.items():
-                models.append(
-                    {
-                        "id": model_name,
-                        "provider": "anthropic",
-                        "info": model_info.model_dump(),
-                    }
-                )
-
-            # Deepseek models
-            for model_name, model_info in deepseek_models.items():
-                models.append(
-                    {
-                        "id": model_name,
-                        "provider": "deepseek",
-                        "info": model_info.model_dump(),
-                    }
-                )
-
-            # Google models
-            for model_name, model_info in google_models.items():
-                models.append(
-                    {
-                        "id": model_name,
-                        "provider": "google",
-                        "info": model_info.model_dump(),
-                    }
-                )
-
-            # Kimi models
-            for model_name, model_info in kimi_models.items():
-                models.append(
-                    {
-                        "id": model_name,
-                        "provider": "kimi",
-                        "info": model_info.model_dump(),
-                    }
-                )
-
-            # Mistral models
-            for model_name, model_info in mistral_models.items():
-                models.append(
-                    {
-                        "id": model_name,
-                        "provider": "mistral",
-                        "info": model_info.model_dump(),
-                    }
-                )
-
-            # Ollama models
-            models.append(
-                {
-                    "id": "ollama",
-                    "provider": "ollama",
-                    "info": ollama_default_model_info.model_dump(),
-                }
-            )
-
-            # OpenAI models
-            models.append(
-                {
-                    "id": "openai",
-                    "provider": "openai",
-                    "info": openai_model_info_sane_defaults.model_dump(),
-                }
-            )
-
-            # OpenRouter models
-            models.append(
-                {
-                    "id": "openrouter",
-                    "provider": "openrouter",
-                    "info": openrouter_default_model_info.model_dump(),
-                }
-            )
-
-            # Alibaba models
-            for model_name, model_info in qwen_models.items():
-                models.append(
-                    {
-                        "id": model_name,
-                        "provider": "alibaba",
-                        "info": model_info.model_dump(),
-                    }
-                )
-
-        return CRUDResponse(
-            status=200,
-            message="Models retrieved successfully",
-            result=ModelListResponse(models=models),
-        )
-    except HTTPException:
-        # Re-raise HTTP exceptions to preserve their status code and detail
-        raise
-    except Exception:
-        logger.exception("Unexpected error while retrieving models")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-
-
-@router.get(
     "/v1/models",
     response_model=CRUDResponse[ModelListResponse],
     summary="List all available models",
     description=(
         "Returns a list of all available models from all providers, including OpenRouter "
-        "models if API key is configured."
+        "models if API key is configured. Optionally filter by provider."
     ),
+    responses={
+        200: {
+            "description": "List of models retrieved successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": 200,
+                        "message": "Models retrieved successfully",
+                        "result": {
+                            "models": [
+                                {
+                                    "id": "claude-3-opus-20240229",
+                                    "provider": "anthropic",
+                                    "info": {
+                                        "input_price": 15.0,
+                                        "output_price": 75.0,
+                                        "max_tokens": 200000,
+                                        "context_window": 200000,
+                                        "supports_images": True,
+                                        "supports_prompt_cache": False,
+                                        "description": "Most powerful Claude model for "
+                                        "highly complex tasks",
+                                    },
+                                },
+                                {
+                                    "id": "gpt-4o",
+                                    "name": "GPT-4o",
+                                    "provider": "openrouter",
+                                    "info": {
+                                        "input_price": 5.0,
+                                        "output_price": 15.0,
+                                        "max_tokens": None,
+                                        "context_window": None,
+                                        "supports_images": None,
+                                        "supports_prompt_cache": False,
+                                        "description": "OpenAI's most advanced multimodal model",
+                                    },
+                                },
+                            ]
+                        },
+                    }
+                }
+            },
+        },
+        404: {
+            "description": "Provider not found",
+            "content": {"application/json": {"example": {"detail": "Provider not found: invalid"}}},
+        },
+        500: {
+            "description": "Internal server error",
+            "content": {"application/json": {"example": {"detail": "Internal Server Error"}}},
+        },
+    },
 )
-async def list_all_models(
+async def list_models(
     credential_manager: CredentialManager = Depends(get_credential_manager),
+    provider: Optional[str] = None,
 ):
     """
     List all available models from all providers.
 
     This endpoint returns models from the registry and also includes OpenRouter models
-    if the API key is configured.
+    if the API key is configured. Results can be filtered by provider.
 
     Args:
         credential_manager: Dependency for managing credentials
+        provider: Optional provider name to filter results
 
     Returns:
         CRUDResponse: A response containing the list of models.
+
+    Raises:
+        HTTPException: If provider is invalid or on server error
     """
     try:
         models = []
 
-        # Add models from the registry
-        from local_operator.model.registry import (
-            SupportedHostingProviders,
-            anthropic_models,
-            deepseek_models,
-            google_models,
-            kimi_models,
-            mistral_models,
-            ollama_default_model_info,
-            openai_model_info_sane_defaults,
-            openrouter_default_model_info,
-            qwen_models,
-        )
+        providers_to_check = [provider] if provider else SupportedHostingProviders
+
+        if provider and provider not in SupportedHostingProviders:
+            raise HTTPException(status_code=404, detail=f"Provider not found: {provider}")
 
         # Add models from each provider
-        for provider in SupportedHostingProviders:
+        for provider in providers_to_check:
             if provider == "anthropic":
                 for model_name, model_info in anthropic_models.items():
                     models.append(
