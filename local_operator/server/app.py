@@ -37,7 +37,9 @@ async def lifespan(app: FastAPI):
     agents_dir = config_dir / "agents"
     app.state.credential_manager = CredentialManager(config_dir=config_dir)
     app.state.config_manager = ConfigManager(config_dir=config_dir)
-    app.state.agent_registry = AgentRegistry(config_dir=agents_dir)
+    # Initialize AgentRegistry with a refresh interval of 3 seconds to ensure
+    # changes made by child processes are quickly reflected in the parent process
+    app.state.agent_registry = AgentRegistry(config_dir=agents_dir, refresh_interval=3.0)
     app.state.job_manager = JobManager()
     yield
     # Clean up on shutdown

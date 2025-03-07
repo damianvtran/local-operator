@@ -1,4 +1,5 @@
 import json
+import time
 import uuid
 from datetime import datetime, timezone
 from importlib.metadata import version
@@ -148,13 +149,16 @@ class AgentRegistry:
     config_dir: Path
     agents_file: Path
     _agents: Dict[str, AgentData]
+    _last_refresh_time: float
+    _refresh_interval: float
 
-    def __init__(self, config_dir: Path) -> None:
+    def __init__(self, config_dir: Path, refresh_interval: float = 5.0) -> None:
         """
         Initialize the AgentRegistry, loading metadata from agents.json.
 
         Args:
             config_dir (Path): Directory containing agents.json and conversation history files
+            refresh_interval (float): Time in seconds between refreshes of agent data from disk
         """
         self.config_dir = config_dir
         if not self.config_dir.exists():
@@ -162,6 +166,8 @@ class AgentRegistry:
 
         self.agents_file: Path = self.config_dir / "agents.json"
         self._agents: Dict[str, AgentData] = {}
+        self._last_refresh_time = time.time()
+        self._refresh_interval = refresh_interval
         self._load_agents_metadata()
 
     def _load_agents_metadata(self) -> None:
@@ -291,6 +297,9 @@ class AgentRegistry:
         if updated_metadata.last_message is not None:
             current_metadata.last_message_datetime = datetime.now(timezone.utc)
 
+        # Update the in-memory agent data
+        self._agents[agent_id] = current_metadata
+
         # Save updated agents metadata to file
         agents_list = [agent.model_dump() for agent in self._agents.values()]
         try:
@@ -392,6 +401,43 @@ class AgentRegistry:
             self.delete_agent(new_agent.id)
             raise Exception(f"Failed to copy conversation history: {str(e)}")
 
+    def _refresh_if_needed(self) -> None:
+        """
+        Refresh agent metadata from disk if the refresh interval has elapsed.
+        """
+        current_time = time.time()
+        if current_time - self._last_refresh_time > self._refresh_interval:
+            self._refresh_agents_metadata()
+            self._last_refresh_time = current_time
+
+    def _refresh_agents_metadata(self) -> None:
+        """
+        Reload agents' metadata from the agents.json file into memory.
+        This is used to refresh the in-memory state with changes made by other processes.
+        """
+        if self.agents_file.exists():
+            try:
+                with self.agents_file.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                # Create a new dictionary to store refreshed agents
+                refreshed_agents = {}
+
+                # Process each agent in the file
+                for item in data:
+                    try:
+                        agent = AgentData.model_validate(item)
+                        refreshed_agents[agent.id] = agent
+                    except Exception as e:
+                        # Log the error but continue processing other agents
+                        print(f"Error refreshing agent metadata: {str(e)}")
+
+                # Update the in-memory agents dictionary
+                self._agents = refreshed_agents
+            except Exception as e:
+                # Log the error but don't crash
+                print(f"Error refreshing agents metadata: {str(e)}")
+
     def get_agent(self, agent_id: str) -> AgentData:
         """
         Get an agent's metadata by ID.
@@ -405,6 +451,9 @@ class AgentRegistry:
         Raises:
             KeyError: If the agent_id does not exist
         """
+        # Refresh agent data from disk if needed
+        self._refresh_if_needed()
+
         if agent_id not in self._agents:
             raise KeyError(f"Agent with id {agent_id} not found")
         return self._agents[agent_id]
@@ -419,6 +468,9 @@ class AgentRegistry:
         Returns:
             AgentData | None: The agent's metadata if found, None otherwise.
         """
+        # Refresh agent data from disk if needed
+        self._refresh_if_needed()
+
         for agent in self._agents.values():
             if agent.name == name:
                 return agent
@@ -431,6 +483,9 @@ class AgentRegistry:
         Returns:
             List[AgentData]: A list of agent metadata objects.
         """
+        # Refresh agent data from disk if needed
+        self._refresh_if_needed()
+
         return list(self._agents.values())
 
     def load_agent_conversation(self, agent_id: str) -> AgentConversation:
@@ -448,6 +503,9 @@ class AgentRegistry:
                 objects.
                 Returns an empty list if no conversation history exists or if there's an error.
         """
+        # Refresh agent data from disk if needed
+        self._refresh_if_needed()
+
         conversation_file = self.config_dir / f"{agent_id}_conversation.json"
 
         if agent_id not in self._agents:
@@ -618,7 +676,13 @@ class AgentRegistry:
         the save operation if both the agent_registry and agent are available.
 
         No action is taken if either the agent_registry or agent is None.
+
+        This method ensures that the agent state is updated both in memory and on disk,
+        and forces a refresh of the in-memory state to ensure consistency across processes.
         """
+        # Refresh agent data from disk first to ensure we have the latest state
+        self._refresh_agents_metadata()
+
         if agent_id not in self._agents:
             raise KeyError(f"Agent with id {agent_id} not found")
 
@@ -628,28 +692,33 @@ class AgentRegistry:
             code_history,
         )
 
+        # Extract the last assistant message from code history
         assistant_messages = [
             record.message for record in code_history if record.role == ConversationRole.ASSISTANT
         ]
 
-        last_assistant_message = assistant_messages[-1]
+        if assistant_messages:
+            last_assistant_message = assistant_messages[-1]
 
-        self.update_agent(
-            agent_id,
-            AgentEditFields(
-                name=None,
-                security_prompt=None,
-                hosting=None,
-                model=None,
-                description=None,
-                last_message=last_assistant_message,
-                temperature=None,
-                top_p=None,
-                top_k=None,
-                max_tokens=None,
-                stop=None,
-                frequency_penalty=None,
-                presence_penalty=None,
-                seed=None,
-            ),
-        )
+            self.update_agent(
+                agent_id,
+                AgentEditFields(
+                    name=None,
+                    security_prompt=None,
+                    hosting=None,
+                    model=None,
+                    description=None,
+                    last_message=last_assistant_message,
+                    temperature=None,
+                    top_p=None,
+                    top_k=None,
+                    max_tokens=None,
+                    stop=None,
+                    frequency_penalty=None,
+                    presence_penalty=None,
+                    seed=None,
+                ),
+            )
+
+        # Reset the refresh timer to force other processes to refresh soon
+        self._last_refresh_time = 0
