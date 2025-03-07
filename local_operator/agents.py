@@ -600,3 +600,26 @@ class AgentRegistry:
                 objects.
         """
         return self.load_agent_conversation(agent_id).execution_history
+
+    def update_agent_state(
+        self,
+        agent_id: str,
+        conversation_history: List[ConversationRecord],
+        code_history: List[CodeExecutionResult],
+    ) -> None:
+        """Save the current agent's conversation history and code execution history.
+
+        This method persists the agent's state by saving the current conversation
+        and code execution history to the agent registry. The method only performs
+        the save operation if both the agent_registry and agent are available.
+
+        No action is taken if either the agent_registry or agent is None.
+        """
+        if agent_id not in self._agents:
+            raise KeyError(f"Agent with id {agent_id} not found")
+
+        self.save_agent_conversation(
+            agent_id,
+            conversation_history,
+            code_history,
+        )

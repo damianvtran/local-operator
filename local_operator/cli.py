@@ -699,6 +699,7 @@ def main() -> int:
             agent_registry=agent_registry,
             current_agent=agent,
             auto_save_conversation=auto_save_conversation and not single_execution_mode,
+            persist_agent_conversation=auto_save_conversation and not single_execution_mode,
         )
 
         tool_registry = build_tool_registry(

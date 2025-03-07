@@ -1411,6 +1411,13 @@ class LocalCodeExecutor:
 
         result = await self.perform_action(response)
 
+        if self.persist_conversation and self.agent_registry and self.agent:
+            self.agent_registry.update_agent_state(
+                self.agent.id,
+                self.conversation_history,
+                self.code_history,
+            )
+
         return result
 
     async def perform_action(self, response: ResponseJsonSchema) -> ProcessResponseOutput:
@@ -2137,19 +2144,3 @@ class LocalCodeExecutor:
             new_code_record.timestamp = datetime.now()
 
         self.code_history.append(new_code_record)
-
-    def update_agent_state(self) -> None:
-        """Save the current agent's conversation history and code execution history.
-
-        This method persists the agent's state by saving the current conversation
-        and code execution history to the agent registry. The method only performs
-        the save operation if both the agent_registry and agent are available.
-
-        No action is taken if either the agent_registry or agent is None.
-        """
-        if self.persist_conversation and self.agent_registry and self.agent:
-            self.agent_registry.save_agent_conversation(
-                self.agent.id,
-                self.conversation_history,
-                self.code_history,
-            )
