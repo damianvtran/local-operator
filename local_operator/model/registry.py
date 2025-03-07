@@ -2,6 +2,34 @@ from typing import Dict, Optional
 
 from pydantic import BaseModel, field_validator
 
+SupportedHostingProviders = [
+    "anthropic",
+    "ollama",
+    "deepseek",
+    "google",
+    "openai",
+    "openrouter",
+    "alibaba",
+    "kimi",
+    "mistral",
+]
+"""List of supported model hosting providers.
+
+This list contains the names of all supported AI model hosting providers that can be used
+with the Local Operator API. Each provider has its own set of available models and pricing.
+
+The supported providers are:
+- anthropic: Anthropic's Claude models
+- ollama: Local model hosting with Ollama
+- deepseek: DeepSeek's language models
+- google: Google's Gemini models
+- openai: OpenAI's GPT models
+- openrouter: OpenRouter model aggregator
+- alibaba: Alibaba's Qwen models
+- kimi: Kimi AI's models
+- mistral: Mistral AI's models
+"""
+
 
 class ModelInfo(BaseModel):
     """
