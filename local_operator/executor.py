@@ -476,6 +476,15 @@ class LocalCodeExecutor:
         self.agent_registry = agent_registry
         self.persist_conversation = persist_conversation
 
+        # Load agent context if agent and agent_registry are provided
+        if self.agent and self.agent_registry:
+            try:
+                agent_context = self.agent_registry.load_agent_context(self.agent.id)
+                if agent_context is not None:
+                    self.context = agent_context
+            except Exception as e:
+                print(f"Failed to load agent context: {str(e)}")
+
         self.reset_step_counter()
 
     def reset_step_counter(self):
@@ -1415,10 +1424,11 @@ class LocalCodeExecutor:
 
         if self.persist_conversation and self.agent_registry and self.agent:
             self.agent_registry.update_agent_state(
-                self.agent.id,
-                self.conversation_history,
-                self.code_history,
-                current_working_directory,
+                agent_id=self.agent.id,
+                conversation_history=self.conversation_history,
+                code_history=self.code_history,
+                current_working_directory=current_working_directory,
+                context=self.context,
             )
 
         return result
@@ -1889,7 +1899,7 @@ class LocalCodeExecutor:
         and human-readable file sizes.
 
         Args:
-            directory_index: Dictionary mapping directory paths to lists of
+            directory_index: Dictionary mapping directoryths to lists of
                 (filename, file_type, size) tuples
 
         Returns:

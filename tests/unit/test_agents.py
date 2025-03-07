@@ -1,4 +1,5 @@
 import json
+import ssl
 from pathlib import Path
 
 import pytest
@@ -850,3 +851,198 @@ def test_get_autosave_agent_not_found(temp_agents_dir: Path):
     # If the autosave agent doesn't exist, create it
     with pytest.raises(KeyError):
         registry.get_autosave_agent()
+
+
+def test_save_and_load_agent_context(temp_agents_dir: Path):
+    registry = AgentRegistry(temp_agents_dir)
+    agent_name = "Agent Context Test"
+    agent = registry.create_agent(
+        AgentEditFields(
+            name=agent_name,
+            security_prompt="",
+            hosting="",
+            model="",
+            description="",
+            last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+
+    # Create a test context
+    test_context = {
+        "variables": {"x": 10, "y": 20, "result": 30},
+        "functions": {"add": lambda a, b: a + b},
+        "objects": {"data": {"name": "test", "value": 42}},
+    }
+
+    # Save the context
+    registry.save_agent_context(agent.id, test_context)
+
+    # Verify context file exists
+    context_file = temp_agents_dir / f"{agent.id}_context.pkl"
+    assert context_file.exists()
+
+    # Load the context
+    loaded_context = registry.load_agent_context(agent.id)
+
+    # Verify the loaded context matches the original
+    assert loaded_context["variables"]["x"] == test_context["variables"]["x"]
+    assert loaded_context["variables"]["y"] == test_context["variables"]["y"]
+    assert loaded_context["variables"]["result"] == test_context["variables"]["result"]
+    assert loaded_context["objects"]["data"]["name"] == test_context["objects"]["data"]["name"]
+    assert loaded_context["objects"]["data"]["value"] == test_context["objects"]["data"]["value"]
+    # Note: We can't directly compare the function objects, but we can verify they work
+    assert loaded_context["functions"]["add"](5, 7) == 12
+
+
+def test_load_nonexistent_agent_context(temp_agents_dir: Path):
+    registry = AgentRegistry(temp_agents_dir)
+    agent = registry.create_agent(
+        AgentEditFields(
+            name="Agent No Context",
+            security_prompt=None,
+            hosting="",
+            model="",
+            description="",
+            last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+
+    # Load context for an agent that doesn't have one
+    context = registry.load_agent_context(agent.id)
+    assert context is None
+
+
+def test_update_agent_state_with_context(temp_agents_dir: Path):
+    registry = AgentRegistry(temp_agents_dir)
+    agent_name = "Agent State Context Test"
+    agent = registry.create_agent(
+        AgentEditFields(
+            name=agent_name,
+            security_prompt="",
+            hosting="",
+            model="",
+            description="",
+            last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+
+    # Create test data
+    conversation = [
+        ConversationRecord(role=ConversationRole.USER, content="Hello", should_summarize=True),
+        ConversationRecord(
+            role=ConversationRole.ASSISTANT, content="Hi there!", should_summarize=True
+        ),
+    ]
+    code_history = [
+        CodeExecutionResult(
+            role=ConversationRole.ASSISTANT,
+            message="Test execution",
+            code="print('test')",
+            stdout="test",
+            stderr="",
+            logging="",
+            formatted_print="",
+            status=ProcessResponseStatus.SUCCESS,
+        )
+    ]
+    test_context = {"variables": {"x": 1, "y": 2}, "functions": {"add": lambda a, b: a + b}}
+    test_working_dir = "/test/path"
+
+    # Update agent state
+    registry.update_agent_state(
+        agent.id, conversation, code_history, test_working_dir, test_context
+    )
+
+    # Verify conversation was saved
+    saved_conversation = registry.get_agent_conversation_history(agent.id)
+    assert len(saved_conversation) == 2
+    assert saved_conversation[0].role == ConversationRole.USER
+    assert saved_conversation[0].content == "Hello"
+    assert saved_conversation[1].role == ConversationRole.ASSISTANT
+    assert saved_conversation[1].content == "Hi there!"
+
+    # Verify code history was saved
+    saved_code_history = registry.get_agent_execution_history(agent.id)
+    assert len(saved_code_history) == 1
+    assert saved_code_history[0].message == "Test execution"
+    assert saved_code_history[0].code == "print('test')"
+
+    # Verify context was saved
+    loaded_context = registry.load_agent_context(agent.id)
+    assert loaded_context["variables"]["x"] == 1
+    assert loaded_context["variables"]["y"] == 2
+    assert loaded_context["functions"]["add"](1, 2) == 3
+
+    # Verify working directory was updated
+    updated_agent = registry.get_agent(agent.id)
+    assert updated_agent.current_working_directory == test_working_dir
+
+
+def test_update_agent_unpickleable_context(temp_agents_dir: Path):
+    registry = AgentRegistry(temp_agents_dir)
+    agent_name = "Test Agent"
+    edit_metadata = AgentEditFields(
+        name=agent_name,
+        security_prompt="test security prompt",
+        hosting="test-hosting",
+        model="test-model",
+        description="",
+        last_message="",
+        temperature=0.7,
+        top_p=1.0,
+        top_k=None,
+        max_tokens=2048,
+        stop=None,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+        seed=None,
+        current_working_directory=None,
+    )
+    agent = registry.create_agent(edit_metadata)
+
+    # Create test context with unpickleable object
+    unpickleable_context = {
+        "variables": {"x": 10, "y": 20},
+        "ssl_context": ssl.create_default_context(),
+    }
+
+    # Save the context
+    registry.save_agent_context(agent.id, unpickleable_context)
+
+    # Load and verify the context
+    loaded_context = registry.load_agent_context(agent.id)
+
+    # Verify the pickleable parts were saved
+    assert loaded_context["variables"]["x"] == 10
+    assert loaded_context["variables"]["y"] == 20
+
+    # Verify unpickleable object was converted to string
+    assert isinstance(loaded_context["ssl_context"], str)
+    assert "SSLContext" in loaded_context["ssl_context"]
