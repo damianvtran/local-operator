@@ -42,6 +42,7 @@ async def test_update_agent_success(test_app_client, dummy_registry: AgentRegist
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=1234567890,
+            current_working_directory=".",
         )
     )
     agent_id = original_agent.id
@@ -60,6 +61,7 @@ async def test_update_agent_success(test_app_client, dummy_registry: AgentRegist
         frequency_penalty=0.1,
         presence_penalty=0.1,
         seed=1234567890,
+        current_working_directory="/tmp/path",
     )
 
     response = await test_app_client.patch(
@@ -86,6 +88,7 @@ async def test_update_agent_success(test_app_client, dummy_registry: AgentRegist
     assert result["frequency_penalty"] == 0.1
     assert result["presence_penalty"] == 0.1
     assert result["seed"] == 1234567890
+    assert result["current_working_directory"] == "/tmp/path"
     # Pydantic serializes datetime to ISO 8601 format with 'T' separator and 'Z' for UTC
     assert result[
         "last_message_datetime"
@@ -112,6 +115,7 @@ async def test_update_agent_single_field(test_app_client, dummy_registry: AgentR
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=".",
         )
     )
     agent_id = agent.id
@@ -131,6 +135,7 @@ async def test_update_agent_single_field(test_app_client, dummy_registry: AgentR
         frequency_penalty=None,
         presence_penalty=None,
         seed=None,
+        current_working_directory=None,
     )
 
     response = await test_app_client.patch(
@@ -152,6 +157,7 @@ async def test_update_agent_single_field(test_app_client, dummy_registry: AgentR
     assert result["max_tokens"] == 2048
     assert result["frequency_penalty"] == 0.0
     assert result["presence_penalty"] == 0.0
+    assert result["current_working_directory"] == "."
 
 
 @pytest.mark.asyncio
@@ -172,6 +178,7 @@ async def test_update_agent_not_found(test_app_client, dummy_registry: AgentRegi
         frequency_penalty=None,
         presence_penalty=None,
         seed=None,
+        current_working_directory=None,
     )
     non_existent_agent_id = "nonexistent"
 
@@ -204,6 +211,7 @@ async def test_delete_agent_success(test_app_client, dummy_registry: AgentRegist
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     agent_id = agent.id
@@ -249,6 +257,7 @@ async def test_create_agent_success(dummy_registry: AgentRegistry):
         frequency_penalty=0.0,
         presence_penalty=0.0,
         seed=None,
+        current_working_directory=None,
     )
 
     transport = ASGITransport(app=app)
@@ -289,6 +298,7 @@ async def test_create_agent_invalid_data(dummy_registry: AgentRegistry):
         frequency_penalty=0.0,
         presence_penalty=0.0,
         seed=None,
+        current_working_directory=None,
     )  # Invalid empty name
 
     transport = ASGITransport(app=app)
@@ -319,6 +329,7 @@ async def test_list_agents_pagination(test_app_client, dummy_registry: AgentRegi
                 frequency_penalty=0.0,
                 presence_penalty=0.0,
                 seed=None,
+                current_working_directory=None,
             )
         )
 
@@ -337,6 +348,70 @@ async def test_list_agents_pagination(test_app_client, dummy_registry: AgentRegi
     data = response.json()
     result = data.get("result")
     assert len(result["agents"]) == 5
+
+
+@pytest.mark.asyncio
+async def test_list_agents_name_filter(test_app_client, dummy_registry: AgentRegistry):
+    """Test filtering agents by name."""
+    # Create test agents with different naming patterns
+    test_agents = [
+        "SearchAgent",
+        "Research Assistant",
+        "Code Helper",
+        "Search Engine",
+        "Assistant Bot",
+    ]
+
+    for name in test_agents:
+        dummy_registry.create_agent(
+            AgentEditFields(
+                name=name,
+                security_prompt="Test Security",
+                hosting="openai",
+                model="gpt-4",
+                description=None,
+                last_message=None,
+                temperature=0.7,
+                top_p=1.0,
+                top_k=None,
+                max_tokens=2048,
+                stop=None,
+                frequency_penalty=0.0,
+                presence_penalty=0.0,
+                seed=None,
+                current_working_directory=None,
+            )
+        )
+
+    # Test filtering by "Search" - should return 2 agents
+    response = await test_app_client.get("/v1/agents?name=search")
+    assert response.status_code == 200
+    data = response.json()
+    result = data.get("result")
+    assert result["total"] == 3
+    assert len(result["agents"]) == 3
+    agent_names = [agent["name"] for agent in result["agents"]]
+    assert "SearchAgent" in agent_names
+    assert "Search Engine" in agent_names
+
+    # Test filtering by "Assistant" - should return 2 agents
+    response = await test_app_client.get("/v1/agents?name=assistant")
+    assert response.status_code == 200
+    data = response.json()
+    result = data.get("result")
+    assert result["total"] == 2
+    assert len(result["agents"]) == 2
+    agent_names = [agent["name"] for agent in result["agents"]]
+    assert "Research Assistant" in agent_names
+    assert "Assistant Bot" in agent_names
+
+    # Test filtering by a non-existent name - should return 0 agents
+    response = await test_app_client.get("/v1/agents?name=NonExistent")
+    assert response.status_code == 200
+    data = response.json()
+    result = data.get("result")
+    assert result["total"] == 0
+    assert len(result["agents"]) == 0
 
 
 @pytest.mark.asyncio
@@ -359,6 +434,7 @@ async def test_get_agent_success(test_app_client, dummy_registry: AgentRegistry)
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     agent_id = agent.id
@@ -412,6 +488,7 @@ async def test_get_agent_conversation_empty(test_app_client, dummy_registry: Age
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     agent_id = agent.id
@@ -455,6 +532,7 @@ async def test_get_agent_conversation_pagination_default(
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     agent_id = agent.id
@@ -512,6 +590,7 @@ async def test_get_agent_conversation_pagination_second_page(
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     agent_id = agent.id
@@ -569,6 +648,7 @@ async def test_get_agent_conversation_custom_per_page(
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     agent_id = agent.id
@@ -625,6 +705,7 @@ async def test_get_agent_conversation_page_out_of_bounds(
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     agent_id = agent.id
@@ -683,6 +764,7 @@ async def test_get_agent_execution_history(test_app_client, dummy_registry: Agen
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     agent_id = agent.id
@@ -744,6 +826,7 @@ async def test_get_agent_execution_history_pagination(
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     agent_id = agent.id
@@ -816,6 +899,7 @@ async def test_get_agent_execution_history_page_out_of_bounds(
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     agent_id = agent.id
@@ -881,6 +965,7 @@ async def test_get_agent_execution_history_empty(test_app_client, dummy_registry
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     agent_id = agent.id

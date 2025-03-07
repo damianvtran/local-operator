@@ -107,6 +107,7 @@ def create_agent_from_conversation_tool(
                 frequency_penalty=None,
                 presence_penalty=None,
                 seed=None,
+                current_working_directory=None,
             )
         )
         agent_registry.save_agent_conversation(
@@ -268,6 +269,7 @@ def create_agent_tool(agent_registry: AgentRegistry) -> Callable[[str, Optional[
                 frequency_penalty=None,
                 presence_penalty=None,
                 seed=None,
+                current_working_directory=None,
             )
         )
 

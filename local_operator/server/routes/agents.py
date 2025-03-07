@@ -33,7 +33,8 @@ logger = logging.getLogger("local_operator.server.routes.agents")
     "/v1/agents",
     response_model=CRUDResponse[AgentListResult],
     summary="List agents",
-    description="Retrieve a paginated list of agents with their details.",
+    description="Retrieve a paginated list of agents with their details. Optionally filter "
+    "by agent name.",
     openapi_extra={
         "responses": {
             "200": {
@@ -81,12 +82,20 @@ async def list_agents(
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     page: int = Query(1, ge=1, description="Page number"),
     per_page: int = Query(10, ge=1, description="Number of agents per page"),
+    name: str = Query(None, description="Filter agents by name (case-insensitive)"),
 ):
     """
     Retrieve a paginated list of agents.
+
+    Optionally filter the list by agent name using the 'name' query parameter.
+    The filter is case-insensitive and matches agents whose names contain the provided string.
     """
     try:
         agents_list = agent_registry.list_agents()
+
+        # Filter by name if provided
+        if name:
+            agents_list = [agent for agent in agents_list if name.lower() in agent.name.lower()]
     except Exception as e:
         logger.exception("Error retrieving agents")
         raise HTTPException(status_code=500, detail=f"Error retrieving agents: {e}")

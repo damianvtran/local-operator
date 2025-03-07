@@ -138,6 +138,7 @@ def test_print_cli_banner_with_agent(monkeypatch, mock_config_manager):
         frequency_penalty=0.0,
         presence_penalty=0.0,
         seed=None,
+        current_working_directory=".",
     )
 
     print_cli_banner(mock_config_manager, current_agent=agent, training_mode=False)
@@ -178,6 +179,7 @@ def test_print_cli_banner_with_agent_and_config(monkeypatch, mock_config_manager
         frequency_penalty=0.0,
         presence_penalty=0.0,
         seed=None,
+        current_working_directory=".",
     )
 
     print_cli_banner(mock_config_manager, current_agent=agent, training_mode=False)
@@ -221,6 +223,7 @@ def test_print_cli_banner_with_agent_and_training(monkeypatch, mock_config_manag
         frequency_penalty=0.0,
         presence_penalty=0.0,
         seed=None,
+        current_working_directory=".",
     )
 
     print_cli_banner(mock_config_manager, current_agent=agent, training_mode=True)

@@ -245,6 +245,7 @@ def test_save_agent_training_with_agent(
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     executor.agent = agent
@@ -283,6 +284,7 @@ def test_list_agent_info_without_id(agent_registry: AgentRegistry) -> None:
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     agent2 = agent_registry.create_agent(
@@ -301,6 +303,7 @@ def test_list_agent_info_without_id(agent_registry: AgentRegistry) -> None:
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     list_tool = list_agent_info_tool(agent_registry)
@@ -332,6 +335,7 @@ def test_list_agent_info_with_id(agent_registry: AgentRegistry) -> None:
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     list_tool = list_agent_info_tool(agent_registry)
@@ -373,6 +377,7 @@ def test_edit_agent_tool(agent_registry: AgentRegistry) -> None:
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     edit_tool = edit_agent_tool(agent_registry)
@@ -393,6 +398,7 @@ def test_edit_agent_tool(agent_registry: AgentRegistry) -> None:
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         ),
     )
     assert updated_agent is not None, "edit_agent_tool returned None"
@@ -422,6 +428,7 @@ def test_delete_agent_tool(agent_registry: AgentRegistry) -> None:
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     delete_tool = delete_agent_tool(agent_registry)
@@ -450,6 +457,7 @@ def test_get_agent_info_tool_without_id(agent_registry: AgentRegistry) -> None:
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     agent_registry.create_agent(
@@ -468,6 +476,7 @@ def test_get_agent_info_tool_without_id(agent_registry: AgentRegistry) -> None:
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     get_tool = get_agent_info_tool(agent_registry)
@@ -495,6 +504,7 @@ def test_get_agent_info_tool_with_id(agent_registry: AgentRegistry) -> None:
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     get_tool = get_agent_info_tool(agent_registry)

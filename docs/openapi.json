@@ -295,7 +295,7 @@
           "Agents"
         ],
         "summary": "List agents",
-        "description": "Retrieve a paginated list of agents with their details.",
+        "description": "Retrieve a paginated list of agents with their details. Optionally filter by agent name.",
         "operationId": "list_agents_v1_agents_get",
         "parameters": [
           {
@@ -323,6 +323,17 @@
               "title": "Per Page"
             },
             "description": "Number of agents per page"
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Filter agents by name (case-insensitive)",
+              "title": "Name"
+            },
+            "description": "Filter agents by name (case-insensitive)"
           }
         ],
         "responses": {
@@ -1542,6 +1553,166 @@
           }
         }
       }
+    },
+    "/v1/models/providers": {
+      "get": {
+        "tags": [
+          "Models"
+        ],
+        "summary": "List model providers",
+        "description": "Returns a list of available model providers supported by the Local Operator API.",
+        "operationId": "list_providers_v1_models_providers_get",
+        "responses": {
+          "200": {
+            "description": "List of providers retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ProviderListResponse_"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "Providers retrieved successfully",
+                  "result": {
+                    "providers": [
+                      {
+                        "id": "openai",
+                        "name": "OpenAI",
+                        "description": "OpenAI's API provides access to GPT-4o",
+                        "url": "https://platform.openai.com/",
+                        "requiredCredentials": [
+                          "OPENAI_API_KEY"
+                        ]
+                      },
+                      {
+                        "id": "anthropic",
+                        "name": "Anthropic",
+                        "description": "Anthropic's Claude models for AI assistants",
+                        "url": "https://www.anthropic.com/",
+                        "requiredCredentials": [
+                          "ANTHROPIC_API_KEY"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Internal Server Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "tags": [
+          "Models"
+        ],
+        "summary": "List all available models",
+        "description": "Returns a list of all available models from all providers, including OpenRouter models if API key is configured. Optionally filter by provider.",
+        "operationId": "list_models_v1_models_get",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Provider"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of models retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ModelListResponse_"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "Models retrieved successfully",
+                  "result": {
+                    "models": [
+                      {
+                        "id": "claude-3-opus-20240229",
+                        "provider": "anthropic",
+                        "info": {
+                          "input_price": 15.0,
+                          "output_price": 75.0,
+                          "max_tokens": 200000,
+                          "context_window": 200000,
+                          "supports_images": true,
+                          "supports_prompt_cache": false,
+                          "description": "Most powerful Claude model for highly complex tasks"
+                        }
+                      },
+                      {
+                        "id": "gpt-4o",
+                        "name": "GPT-4o",
+                        "provider": "openrouter",
+                        "info": {
+                          "input_price": 5.0,
+                          "output_price": 15.0,
+                          "supports_prompt_cache": false,
+                          "description": "OpenAI's most advanced multimodal model"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Provider not found",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Provider not found: invalid"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Internal Server Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1707,6 +1878,19 @@
             ],
             "title": "Seed",
             "description": "Random number seed for deterministic generation."
+          },
+          "current_working_directory": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Working Directory",
+            "description": "The current working directory for the agent.  Updated whenever the agent changes its working directory through code execution.  Defaults to '.'",
+            "default": "."
           }
         },
         "type": "object",
@@ -1928,6 +2112,19 @@
             ],
             "title": "Seed",
             "description": "Random number seed for deterministic generation."
+          },
+          "current_working_directory": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Working Directory",
+            "description": "The current working directory for the agent.  Updated whenever the agent changes its working directory through code execution.  Defaults to '.'",
+            "default": "."
           }
         },
         "type": "object",
@@ -2256,6 +2453,18 @@
             ],
             "title": "Seed",
             "description": "Random number seed for deterministic generation."
+          },
+          "current_working_directory": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Working Directory",
+            "description": "The current working directory for the agent.  Updated whenever the agent changes its working directory through code execution."
           }
         },
         "type": "object",
@@ -2513,6 +2722,62 @@
           "message"
         ],
         "title": "CRUDResponse[JobResultSchema]"
+      },
+      "CRUDResponse_ModelListResponse_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelListResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[ModelListResponse]"
+      },
+      "CRUDResponse_ProviderListResponse_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderListResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[ProviderListResponse]"
       },
       "CRUDResponse_SystemPromptResponse_": {
         "properties": {
@@ -3256,6 +3521,203 @@
         "title": "JobStatus",
         "description": "Enum representing the possible states of a job."
       },
+      "ModelEntry": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id",
+            "description": "Unique identifier for the model"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name",
+            "description": "Display name for the model"
+          },
+          "provider": {
+            "type": "string",
+            "title": "Provider",
+            "description": "The provider of the model"
+          },
+          "info": {
+            "$ref": "#/components/schemas/ModelInfo",
+            "description": "Detailed information about the model"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "provider",
+          "info"
+        ],
+        "title": "ModelEntry",
+        "description": "A single model entry.\n\nAttributes:\n    id: Unique identifier for the model\n    name: Optional display name for the model\n    provider: The provider of the model\n    info: Detailed information about the model",
+        "example": {
+          "id": "claude-3-opus-20240229",
+          "info": {
+            "context_window": 200000,
+            "description": "Most powerful Claude model for highly complex tasks",
+            "input_price": 15000.0,
+            "max_tokens": 200000,
+            "output_price": 75000.0,
+            "supports_images": true,
+            "supports_prompt_cache": false
+          },
+          "provider": "anthropic"
+        }
+      },
+      "ModelInfo": {
+        "properties": {
+          "input_price": {
+            "type": "number",
+            "title": "Input Price",
+            "default": 0.0
+          },
+          "output_price": {
+            "type": "number",
+            "title": "Output Price",
+            "default": 0.0
+          },
+          "max_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Tokens"
+          },
+          "context_window": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Window"
+          },
+          "supports_images": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supports Images"
+          },
+          "supports_prompt_cache": {
+            "type": "boolean",
+            "title": "Supports Prompt Cache",
+            "default": false
+          },
+          "cache_writes_price": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Writes Price"
+          },
+          "cache_reads_price": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Reads Price"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description",
+            "description": "Description of the model"
+          },
+          "id": {
+            "type": "string",
+            "title": "Id",
+            "description": "Unique identifier for the model"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Display name for the model"
+          }
+        },
+        "type": "object",
+        "required": [
+          "description",
+          "id",
+          "name"
+        ],
+        "title": "ModelInfo",
+        "description": "Represents the pricing information for a given model.\n\nAttributes:\n    input_price (float): Cost per million input tokens.\n    output_price (float): Cost per million output tokens.\n    max_tokens (Optional[int]): Maximum number of tokens supported by the model.\n    context_window (Optional[int]): Context window size of the model.\n    supports_images (Optional[bool]): Whether the model supports images.\n    supports_prompt_cache (bool): Whether the model supports prompt caching.\n    cache_writes_price (Optional[float]): Cost per million tokens for cache writes.\n    cache_reads_price (Optional[float]): Cost per million tokens for cache reads.\n    description (Optional[str]): Description of the model."
+      },
+      "ModelListResponse": {
+        "properties": {
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/ModelEntry"
+            },
+            "type": "array",
+            "title": "Models",
+            "description": "List of model entries"
+          }
+        },
+        "type": "object",
+        "required": [
+          "models"
+        ],
+        "title": "ModelListResponse",
+        "description": "Response for listing models.\n\nAttributes:\n    models: List of model entries",
+        "example": {
+          "models": [
+            {
+              "id": "claude-3-opus-20240229",
+              "info": {
+                "context_window": 200000,
+                "description": "Most powerful Claude model for highly complex tasks",
+                "input_price": 15000.0,
+                "max_tokens": 200000,
+                "output_price": 75000.0,
+                "supports_images": true,
+                "supports_prompt_cache": false
+              },
+              "provider": "anthropic"
+            },
+            {
+              "id": "gpt-4o",
+              "info": {
+                "context_window": 128000,
+                "description": "OpenAI's most advanced multimodal model",
+                "input_price": 5000.0,
+                "max_tokens": 128000,
+                "output_price": 15000.0,
+                "supports_images": true,
+                "supports_prompt_cache": false
+              },
+              "name": "GPT-4o",
+              "provider": "openai"
+            }
+          ]
+        }
+      },
       "ProcessResponseStatus": {
         "type": "string",
         "enum": [
@@ -3267,6 +3729,88 @@
         ],
         "title": "ProcessResponseStatus",
         "description": "Status codes for process_response results."
+      },
+      "ProviderDetail": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id",
+            "description": "Unique identifier for the provider"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Display name for the provider"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description",
+            "description": "Description of the provider"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url",
+            "description": "URL to the provider's platform"
+          },
+          "requiredCredentials": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Requiredcredentials",
+            "description": "List of required credential keys"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "url",
+          "requiredCredentials"
+        ],
+        "title": "ProviderDetail",
+        "description": "Model for provider details.\n\nAttributes:\n    id: Unique identifier for the provider\n    name: Display name for the provider\n    description: Description of the provider\n    url: URL to the provider's platform\n    requiredCredentials: List of required credential keys"
+      },
+      "ProviderListResponse": {
+        "properties": {
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderDetail"
+            },
+            "type": "array",
+            "title": "Providers",
+            "description": "List of provider details"
+          }
+        },
+        "type": "object",
+        "required": [
+          "providers"
+        ],
+        "title": "ProviderListResponse",
+        "description": "Response for listing providers.\n\nAttributes:\n    providers: List of provider details",
+        "example": {
+          "providers": [
+            {
+              "description": "OpenAI's API provides access to GPT-4o and other models",
+              "id": "openai",
+              "name": "OpenAI",
+              "requiredCredentials": [
+                "OPENAI_API_KEY"
+              ],
+              "url": "https://platform.openai.com/"
+            },
+            {
+              "description": "Anthropic's Claude models for safe, helpful AI assistants",
+              "id": "anthropic",
+              "name": "Anthropic",
+              "requiredCredentials": [
+                "ANTHROPIC_API_KEY"
+              ],
+              "url": "https://www.anthropic.com/"
+            }
+          ]
+        }
       },
       "SystemPromptResponse": {
         "properties": {
@@ -3363,6 +3907,10 @@
     {
       "name": "Credentials",
       "description": "Credential management endpoints"
+    },
+    {
+      "name": "Models",
+      "description": "Model management endpoints"
     }
   ]
 }
