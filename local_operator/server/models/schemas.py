@@ -184,6 +184,11 @@ class Agent(BaseModel):
     seed: Optional[int] = Field(
         None, description="Random number seed for deterministic generation."
     )
+    current_working_directory: Optional[str] = Field(
+        ".",
+        description="The current working directory for the agent.  Updated whenever the "
+        "agent changes its working directory through code execution.  Defaults to '.'",
+    )
 
 
 class AgentCreate(BaseModel):
@@ -246,6 +251,11 @@ class AgentCreate(BaseModel):
         None,
         description="Random number seed for deterministic generation.",
     )
+    current_working_directory: str | None = Field(
+        ".",
+        description="The current working directory for the agent.  Updated whenever the "
+        "agent changes its working directory through code execution.  Defaults to '.'",
+    )
 
 
 class AgentUpdate(BaseModel):
@@ -306,6 +316,11 @@ class AgentUpdate(BaseModel):
     seed: int | None = Field(
         None,
         description="Random number seed for deterministic generation.",
+    )
+    current_working_directory: str | None = Field(
+        None,
+        description="The current working directory for the agent.  Updated whenever the "
+        "agent changes its working directory through code execution.",
     )
 
 

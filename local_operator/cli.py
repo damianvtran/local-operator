@@ -449,6 +449,7 @@ def agents_create_command(name: str, agent_registry: AgentRegistry) -> int:
             frequency_penalty=None,
             presence_penalty=None,
             seed=None,
+            current_working_directory=None,
         )
     )
     print("\n\033[1;32m╭─ Created New Agent ───────────────────────────\033[0m")
@@ -598,6 +599,7 @@ def main() -> int:
                         frequency_penalty=None,
                         presence_penalty=None,
                         seed=None,
+                        current_working_directory=None,
                     )
                 )
                 print("\n\033[1;32m╭─ Created New Agent ───────────────────────────\033[0m")

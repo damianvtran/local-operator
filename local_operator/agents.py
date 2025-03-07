@@ -68,6 +68,11 @@ class AgentData(BaseModel):
         None, description="Increases diversity by lowering likelihood of prompt tokens"
     )
     seed: Optional[int] = Field(None, description="Random number seed for deterministic generation")
+    current_working_directory: str = Field(
+        ".",
+        description="The current working directory for the agent.  Updated whenever the "
+        "agent changes its working directory through code execution.  Defaults to '.'",
+    )
 
 
 class AgentEditFields(BaseModel):
@@ -115,6 +120,11 @@ class AgentEditFields(BaseModel):
         None, description="Increases diversity by lowering likelihood of prompt tokens"
     )
     seed: Optional[int] = Field(None, description="Random number seed for deterministic generation")
+    current_working_directory: str | None = Field(
+        None,
+        description="The current working directory for the agent.  Updated whenever the "
+        "agent changes its working directory through code execution.",
+    )
 
 
 class AgentConversation(BaseModel):
@@ -234,6 +244,7 @@ class AgentRegistry:
             frequency_penalty=agent_edit_metadata.frequency_penalty,
             presence_penalty=agent_edit_metadata.presence_penalty,
             seed=agent_edit_metadata.seed,
+            current_working_directory=agent_edit_metadata.current_working_directory or ".",
         )
 
         return self.save_agent(agent_metadata)
@@ -384,6 +395,7 @@ class AgentRegistry:
                 frequency_penalty=original_agent.frequency_penalty,
                 presence_penalty=original_agent.presence_penalty,
                 seed=original_agent.seed,
+                current_working_directory=original_agent.current_working_directory,
             )
         )
 
@@ -606,6 +618,7 @@ class AgentRegistry:
             frequency_penalty=None,
             presence_penalty=None,
             seed=None,
+            current_working_directory=".",
         )
 
         return self.save_agent(agent_metadata)
@@ -717,6 +730,7 @@ class AgentRegistry:
                     frequency_penalty=None,
                     presence_penalty=None,
                     seed=None,
+                    current_working_directory=None,
                 ),
             )
 
