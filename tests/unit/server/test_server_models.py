@@ -44,9 +44,9 @@ def test_list_providers(client):
     assert "alibaba" in providers
 
 
-def test_list_models_no_provider(client):
+def test_list_models_no_provider(client, mock_credential_manager):
     """Test the list_models endpoint without a provider filter."""
-    response = client.get("/v1/models/list")
+    response = client.get("/v1/models")
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == 200
@@ -61,9 +61,9 @@ def test_list_models_no_provider(client):
     assert len(providers) > 1
 
 
-def test_list_models_with_provider(client):
+def test_list_models_with_provider(client, mock_credential_manager):
     """Test the list_models endpoint with a provider filter."""
-    response = client.get("/v1/models/list?provider=anthropic")
+    response = client.get("/v1/models?provider=anthropic")
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == 200
@@ -78,17 +78,17 @@ def test_list_models_with_provider(client):
         assert model["provider"] == "anthropic"
 
 
-def test_list_models_invalid_provider(client):
+def test_list_models_invalid_provider(client, mock_credential_manager):
     """Test the list_models endpoint with an invalid provider."""
-    response = client.get("/v1/models/list?provider=invalid")
+    response = client.get("/v1/models?provider=invalid")
     assert response.status_code == 404
     data = response.json()
     assert data["detail"] == "Provider not found: invalid"
 
 
 @patch.object(OpenRouterClient, "list_models")
-def test_list_all_models_with_openrouter(mock_list_models, client, mock_credential_manager):
-    """Test the list_all_models endpoint with OpenRouter models."""
+def test_list_models_with_openrouter(mock_list_models, client, mock_credential_manager):
+    """Test the list_models endpoint with OpenRouter models."""
     # Mock the OpenRouterClient.list_models method
     mock_pricing = OpenRouterModelPricing(prompt=0.001, completion=0.002)
     mock_model1 = OpenRouterModelData(
@@ -139,8 +139,8 @@ def test_list_all_models_with_openrouter(mock_list_models, client, mock_credenti
 
 
 @patch.object(OpenRouterClient, "list_models")
-def test_list_all_models_no_api_key(mock_list_models, client, mock_credential_manager):
-    """Test the list_all_models endpoint with no OpenRouter API key."""
+def test_list_models_no_api_key(mock_list_models, client, mock_credential_manager):
+    """Test the list_models endpoint with no OpenRouter API key."""
     # Set up a mock credential manager to return None for the API key
     with patch(
         "local_operator.credentials.CredentialManager.get_credential",
