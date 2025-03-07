@@ -4,8 +4,9 @@ import uuid
 from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
+import dill
 from pydantic import BaseModel, Field
 
 from local_operator.types import (
@@ -676,12 +677,83 @@ class AgentRegistry:
         """
         return self.load_agent_conversation(agent_id).execution_history
 
+    def save_agent_context(self, agent_id: str, context: Any) -> None:
+        """Save the agent's context to a file.
+
+        This method serializes the agent's context using dill and saves it to a file
+        named "{agent_id}_context.pkl" in the config directory. It handles unpicklable objects
+        by converting them to a serializable format.
+
+        Args:
+            agent_id (str): The unique identifier of the agent.
+            context (Any): The context to save, which can be any object.
+
+        Raises:
+            KeyError: If the agent with the specified ID does not exist.
+            Exception: If there is an error saving the context.
+        """
+        if agent_id not in self._agents:
+            raise KeyError(f"Agent with id {agent_id} not found")
+
+        context_file = self.config_dir / f"{agent_id}_context.pkl"
+
+        def convert_unpicklable(obj: Any) -> Any:
+            if isinstance(obj, dict):
+                return {k: convert_unpicklable(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return type(obj)(convert_unpicklable(x) for x in obj)
+            elif isinstance(obj, (int, float, str, bool, type(None))):
+                return obj
+            else:
+                try:
+                    dill.dumps(obj)
+                    return obj
+                except Exception:
+                    return str(obj)
+
+        try:
+            serializable_context = convert_unpicklable(context)
+            with context_file.open("wb") as f:
+                dill.dump(serializable_context, f)
+        except Exception as e:
+            raise Exception(f"Failed to save agent context: {str(e)}")
+
+    def load_agent_context(self, agent_id: str) -> Any:
+        """Load the agent's context from a file.
+
+        This method deserializes the agent's context using dill from a file
+        named "{agent_id}_context.pkl" in the config directory.
+
+        Args:
+            agent_id (str): The unique identifier of the agent.
+
+        Returns:
+            Any: The loaded context, or None if the context file doesn't exist.
+
+        Raises:
+            KeyError: If the agent with the specified ID does not exist.
+            Exception: If there is an error loading the context.
+        """
+        if agent_id not in self._agents:
+            raise KeyError(f"Agent with id {agent_id} not found")
+
+        context_file = self.config_dir / f"{agent_id}_context.pkl"
+        if not context_file.exists():
+            return None
+
+        try:
+            with context_file.open("rb") as f:
+                return dill.load(f)
+        except Exception as e:
+            raise Exception(f"Failed to load agent context: {str(e)}")
+
     def update_agent_state(
         self,
         agent_id: str,
         conversation_history: List[ConversationRecord],
         code_history: List[CodeExecutionResult],
         current_working_directory: Optional[str] = None,
+        context: Any = None,
     ) -> None:
         """Save the current agent's conversation history and code execution history.
 
@@ -694,6 +766,7 @@ class AgentRegistry:
             conversation_history: The list of conversation records to save.
             code_history: The list of code execution results to save.
             current_working_directory: Optional new working directory for the agent.
+            context: Optional context to save for the agent. If None, the context is not updated.
 
         Raises:
             KeyError: If the agent with the specified ID does not exist.
@@ -713,6 +786,10 @@ class AgentRegistry:
             conversation_history,
             code_history,
         )
+
+        # Save the context if provided
+        if context is not None:
+            self.save_agent_context(agent_id, context)
 
         # Extract the last assistant message from code history
         assistant_messages = [
