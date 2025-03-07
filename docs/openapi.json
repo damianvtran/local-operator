@@ -1553,6 +1553,102 @@
           }
         }
       }
+    },
+    "/v1/models/providers": {
+      "get": {
+        "tags": [
+          "Models"
+        ],
+        "summary": "List model providers",
+        "description": "Returns a list of available model providers.",
+        "operationId": "list_providers_v1_models_providers_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ProviderListResponse_"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/models/list": {
+      "get": {
+        "tags": [
+          "Models"
+        ],
+        "summary": "List models",
+        "description": "Returns a list of available models, optionally filtered by provider.",
+        "operationId": "list_models_v1_models_list_get",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Provider to filter models by",
+              "title": "Provider"
+            },
+            "description": "Provider to filter models by"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ModelListResponse_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "tags": [
+          "Models"
+        ],
+        "summary": "List all available models",
+        "description": "Returns a list of all available models from all providers, including OpenRouter models if API key is configured.",
+        "operationId": "list_all_models_v1_models_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ModelListResponse_"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2563,6 +2659,62 @@
         ],
         "title": "CRUDResponse[JobResultSchema]"
       },
+      "CRUDResponse_ModelListResponse_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelListResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[ModelListResponse]"
+      },
+      "CRUDResponse_ProviderListResponse_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderListResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[ProviderListResponse]"
+      },
       "CRUDResponse_SystemPromptResponse_": {
         "properties": {
           "status": {
@@ -3305,6 +3457,24 @@
         "title": "JobStatus",
         "description": "Enum representing the possible states of a job."
       },
+      "ModelListResponse": {
+        "properties": {
+          "models": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Models",
+            "description": "List of models"
+          }
+        },
+        "type": "object",
+        "required": [
+          "models"
+        ],
+        "title": "ModelListResponse",
+        "description": "Response for listing models.\n\nAttributes:\n    models: List of models"
+      },
       "ProcessResponseStatus": {
         "type": "string",
         "enum": [
@@ -3316,6 +3486,24 @@
         ],
         "title": "ProcessResponseStatus",
         "description": "Status codes for process_response results."
+      },
+      "ProviderListResponse": {
+        "properties": {
+          "providers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Providers",
+            "description": "List of model providers"
+          }
+        },
+        "type": "object",
+        "required": [
+          "providers"
+        ],
+        "title": "ProviderListResponse",
+        "description": "Response for listing providers.\n\nAttributes:\n    providers: List of model providers"
       },
       "SystemPromptResponse": {
         "properties": {
@@ -3412,6 +3600,10 @@
     {
       "name": "Credentials",
       "description": "Credential management endpoints"
+    },
+    {
+      "name": "Models",
+      "description": "Model management endpoints"
     }
   ]
 }
