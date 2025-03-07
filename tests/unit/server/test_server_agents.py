@@ -388,8 +388,8 @@ async def test_list_agents_name_filter(test_app_client, dummy_registry: AgentReg
     assert response.status_code == 200
     data = response.json()
     result = data.get("result")
-    assert result["total"] == 2
-    assert len(result["agents"]) == 2
+    assert result["total"] == 3
+    assert len(result["agents"]) == 3
     agent_names = [agent["name"] for agent in result["agents"]]
     assert "SearchAgent" in agent_names
     assert "Search Engine" in agent_names
