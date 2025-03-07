@@ -365,24 +365,22 @@ async def test_chat_async_endpoint_success(
 
 
 @pytest.mark.asyncio
-async def test_chat_async_endpoint_failure(test_app_client):
+async def test_chat_async_endpoint_failure(test_app_client, mock_job_manager):
     """Test handling of failure during async chat job setup."""
-    with patch(
-        "local_operator.server.routes.chat.create_operator",
-        side_effect=Exception("Failed to create operator"),
-    ):
-        payload = ChatRequest(
-            hosting="openai",
-            model="gpt-4o",
-            prompt="This should fail during setup",
-            context=[],
-        )
+    # Mock job manager to simulate failure
+    mock_job_manager.create_job.side_effect = Exception("Failed to create job")
 
-        response = await test_app_client.post("/v1/chat/async", json=payload.model_dump())
+    payload = ChatRequest(
+        hosting="openai", model="gpt-4o", prompt="This should fail during setup", context=[]
+    )
 
-        assert response.status_code == 500
-        data = response.json()
-        assert "Internal Server Error" in data.get("detail", "")
+    response = await test_app_client.post("/v1/chat/async", json=payload.model_dump())
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Internal Server Error"
+
+    # Verify job manager was called
+    mock_job_manager.create_job.assert_called_once()
 
 
 @pytest.mark.asyncio
