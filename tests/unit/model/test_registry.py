@@ -50,8 +50,8 @@ def test_get_model_info() -> None:
     assert model_info.context_window == 1_048_576
 
     # Test OpenAI
-    model_info = get_model_info("openai", "any")
-    assert model_info.max_tokens == -1
+    model_info = get_model_info("openai", "gpt-4o")
+    assert model_info.max_tokens == 32768
 
     # Test OpenRouter
     model_info = get_model_info("openrouter", "any")
