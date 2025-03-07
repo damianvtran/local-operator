@@ -120,7 +120,8 @@ class JobContext:
         Args:
             path: The path to change to
         """
-        os.chdir(path)
+        expanded_path = os.path.expanduser(path)
+        os.chdir(expanded_path)
 
 
 class JobManager:
