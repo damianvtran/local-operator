@@ -18,7 +18,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 from tiktoken import encoding_for_model
 
-from local_operator.agents import AgentData
+from local_operator.agents import AgentData, AgentRegistry
 from local_operator.console import (
     ExecutionSection,
     VerbosityLevel,
@@ -397,10 +397,13 @@ class LocalCodeExecutor:
         token_metrics (ExecutorTokenMetrics): Tracks token usage and
         cost metrics for model executions.
         agent (AgentData | None): The agent data for the current conversation.
+        agent_registry (AgentRegistry | None): The agent registry for the current conversation.
         tool_registry (ToolRegistry | None): The tool registry for the current conversation.
         learnings (List[str]): A list of learnings from the current conversation.
         current_plan (str | None): The current plan for the agent.
         code_history (List[CodeExecutionResult]): A list of code execution results.
+        persist_conversation (bool): Whether to persist the conversation history and code
+            execution history to the agent registry on each step.
     """
 
     context: Dict[str, Any]
@@ -413,10 +416,12 @@ class LocalCodeExecutor:
     can_prompt_user: bool
     token_metrics: ExecutorTokenMetrics
     agent: AgentData | None
+    agent_registry: AgentRegistry | None
     tool_registry: ToolRegistry | None
     learnings: List[str]
     current_plan: str | None
     code_history: List[CodeExecutionResult]
+    persist_conversation: bool
 
     def __init__(
         self,
@@ -428,6 +433,8 @@ class LocalCodeExecutor:
         agent: AgentData | None = None,
         max_learnings_history: int = 50,
         verbosity_level: VerbosityLevel = VerbosityLevel.VERBOSE,
+        agent_registry: AgentRegistry | None = None,
+        persist_conversation: bool = False,
     ):
         """Initialize the LocalCodeExecutor with a language model.
 
@@ -448,6 +455,9 @@ class LocalCodeExecutor:
             max_learnings_history (int): The maximum number of learnings to keep in history.
             verbosity_level (ExecutorVerbosityLevel): The level of detail to output
             from the executor.
+            agent_registry (AgentRegistry | None): The agent registry for the current conversation.
+            persist_conversation (bool): Whether to persist the conversation history and code
+                execution history to the agent registry on each step.
         """
         self.context = {}
         self.model_configuration = model_configuration
@@ -463,6 +473,8 @@ class LocalCodeExecutor:
         self.max_learnings_history = max_learnings_history
         self.code_history = []
         self.verbosity_level = verbosity_level
+        self.agent_registry = agent_registry
+        self.persist_conversation = persist_conversation
 
         self.reset_step_counter()
 
@@ -2125,3 +2137,19 @@ class LocalCodeExecutor:
             new_code_record.timestamp = datetime.now()
 
         self.code_history.append(new_code_record)
+
+    def update_agent_state(self) -> None:
+        """Save the current agent's conversation history and code execution history.
+
+        This method persists the agent's state by saving the current conversation
+        and code execution history to the agent registry. The method only performs
+        the save operation if both the agent_registry and agent are available.
+
+        No action is taken if either the agent_registry or agent is None.
+        """
+        if self.persist_conversation and self.agent_registry and self.agent:
+            self.agent_registry.save_agent_conversation(
+                self.agent.id,
+                self.conversation_history,
+                self.code_history,
+            )

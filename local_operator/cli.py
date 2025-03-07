@@ -686,6 +686,8 @@ def main() -> int:
             ),
             max_learnings_history=config_manager.get_config_value("max_learnings_history", 50),
             agent=agent,
+            agent_registry=agent_registry,
+            persist_conversation=training_mode,
         )
 
         operator = Operator(
@@ -696,7 +698,6 @@ def main() -> int:
             type=OperatorType.CLI,
             agent_registry=agent_registry,
             current_agent=agent,
-            training_mode=training_mode,
             auto_save_conversation=auto_save_conversation and not single_execution_mode,
         )
 

@@ -55,7 +55,6 @@ class Operator:
         executor_is_processing: Whether the executor is processing a response
         agent_registry: AgentRegistry instance for managing agents
         current_agent: The current agent to use for this session
-        training_mode: Whether the operator is in training mode.  If True, the operator will save
         the conversation history to the agent's directory after each completed task.  This
         allows the agent to learn from its experiences and improve its performance over time.
         Omit this flag to have the agent not store the conversation history, thus resetting it
@@ -70,7 +69,6 @@ class Operator:
     type: OperatorType
     agent_registry: AgentRegistry
     current_agent: AgentData | None
-    training_mode: bool
     auto_save_conversation: bool
 
     def __init__(
@@ -82,7 +80,6 @@ class Operator:
         type: OperatorType,
         agent_registry: AgentRegistry,
         current_agent: AgentData | None,
-        training_mode: bool,
         auto_save_conversation: bool = False,
         verbosity_level: VerbosityLevel = VerbosityLevel.VERBOSE,
     ):
@@ -96,9 +93,7 @@ class Operator:
             type (OperatorType): Type of operator (CLI or Server)
             agent_registry (AgentRegistry): Registry for managing AI agents
             current_agent (AgentData | None): The current agent to use for this session
-            training_mode (bool): Whether the operator is in training mode.
-                If True, the operator will save the conversation history to the agent's directory
-                after each completed task. This allows the agent to learn from its experiences
+            auto_save_conversation (bool): Whether to automatically save the conversation
                 and improve its performance over time.
                 Omit this flag to have the agent not store the conversation history, thus
                 resetting it after each session.
@@ -118,7 +113,6 @@ class Operator:
         self.type = type
         self.agent_registry = agent_registry
         self.current_agent = current_agent
-        self.training_mode = training_mode
         self.auto_save_conversation = auto_save_conversation
         self.verbosity_level = verbosity_level
 
@@ -416,16 +410,6 @@ class Operator:
                         )
                         print(f"\033[1;36m│ Error Details:\033[0m\n{error_str}")
 
-            # Save the conversation history if an agent is being used and training mode is enabled.
-            # Save on each step to ensure the conversation history is up to date for
-            # server mode.
-            if self.training_mode and self.current_agent:
-                self.agent_registry.save_agent_conversation(
-                    self.current_agent.id,
-                    self.executor.conversation_history,
-                    self.executor.code_history,
-                )
-
             # Break out of the agent flow if the user cancels the code execution
             if (
                 result.status == ProcessResponseStatus.CANCELLED
@@ -496,7 +480,9 @@ class Operator:
         - [DONE]: Model has completed its task
         - [BYE]: Gracefully exit the chat session
         """
-        print_cli_banner(self.config_manager, self.current_agent, self.training_mode)
+        print_cli_banner(
+            self.config_manager, self.current_agent, self.executor.persist_conversation
+        )
 
         try:
             self.executor.initialize_conversation_history()
