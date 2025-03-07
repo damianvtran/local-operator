@@ -20,8 +20,7 @@ from local_operator.model.registry import (
     kimi_models,
     mistral_models,
     ollama_default_model_info,
-    openai_model_info_sane_defaults,
-    openrouter_default_model_info,
+    openai_models,
     qwen_models,
 )
 from local_operator.server.dependencies import get_credential_manager
@@ -319,14 +318,15 @@ async def list_models(
                     )
                 )
             elif provider_detail.id == "openai":
-                models.append(
-                    ModelEntry(
-                        id="openai",
-                        name=openai_model_info_sane_defaults.name,
-                        provider=provider_detail.id,
-                        info=openai_model_info_sane_defaults,
+                for model_name, model_info in openai_models.items():
+                    models.append(
+                        ModelEntry(
+                            id=model_name,
+                            name=model_info.name,
+                            provider=provider_detail.id,
+                            info=model_info,
+                        )
                     )
-                )
             elif provider_detail.id == "alibaba":
                 for model_name, model_info in qwen_models.items():
                     models.append(
@@ -338,16 +338,6 @@ async def list_models(
                         )
                     )
             elif provider_detail.id == "openrouter":
-                # First add the default model info
-                models.append(
-                    ModelEntry(
-                        id="openrouter",
-                        name=openrouter_default_model_info.name,
-                        provider=provider_detail.id,
-                        info=openrouter_default_model_info,
-                    )
-                )
-
                 # Then try to get OpenRouter models if API key is configured
                 api_key = credential_manager.get_credential("OPENROUTER_API_KEY")
                 if api_key:
