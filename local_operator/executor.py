@@ -1411,11 +1411,14 @@ class LocalCodeExecutor:
 
         result = await self.perform_action(response)
 
+        current_working_directory = os.getcwd()
+
         if self.persist_conversation and self.agent_registry and self.agent:
             self.agent_registry.update_agent_state(
                 self.agent.id,
                 self.conversation_history,
                 self.code_history,
+                current_working_directory,
             )
 
         return result

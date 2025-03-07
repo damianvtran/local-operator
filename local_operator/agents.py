@@ -681,17 +681,26 @@ class AgentRegistry:
         agent_id: str,
         conversation_history: List[ConversationRecord],
         code_history: List[CodeExecutionResult],
+        current_working_directory: Optional[str] = None,
     ) -> None:
         """Save the current agent's conversation history and code execution history.
 
         This method persists the agent's state by saving the current conversation
-        and code execution history to the agent registry. The method only performs
-        the save operation if both the agent_registry and agent are available.
+        and code execution history to the agent registry. It also updates the agent's
+        last message and current working directory if provided.
 
-        No action is taken if either the agent_registry or agent is None.
+        Args:
+            agent_id: The unique identifier of the agent to update.
+            conversation_history: The list of conversation records to save.
+            code_history: The list of code execution results to save.
+            current_working_directory: Optional new working directory for the agent.
 
-        This method ensures that the agent state is updated both in memory and on disk,
-        and forces a refresh of the in-memory state to ensure consistency across processes.
+        Raises:
+            KeyError: If the agent with the specified ID does not exist.
+
+        Note:
+            This method refreshes agent metadata from disk before updating and
+            resets the refresh timer to ensure consistency across processes.
         """
         # Refresh agent data from disk first to ensure we have the latest state
         self._refresh_agents_metadata()
@@ -710,29 +719,31 @@ class AgentRegistry:
             record.message for record in code_history if record.role == ConversationRole.ASSISTANT
         ]
 
+        last_assistant_message = None
+
         if assistant_messages:
             last_assistant_message = assistant_messages[-1]
 
-            self.update_agent(
-                agent_id,
-                AgentEditFields(
-                    name=None,
-                    security_prompt=None,
-                    hosting=None,
-                    model=None,
-                    description=None,
-                    last_message=last_assistant_message,
-                    temperature=None,
-                    top_p=None,
-                    top_k=None,
-                    max_tokens=None,
-                    stop=None,
-                    frequency_penalty=None,
-                    presence_penalty=None,
-                    seed=None,
-                    current_working_directory=None,
-                ),
-            )
+        self.update_agent(
+            agent_id,
+            AgentEditFields(
+                name=None,
+                security_prompt=None,
+                hosting=None,
+                model=None,
+                description=None,
+                last_message=last_assistant_message,
+                temperature=None,
+                top_p=None,
+                top_k=None,
+                max_tokens=None,
+                stop=None,
+                frequency_penalty=None,
+                presence_penalty=None,
+                seed=None,
+                current_working_directory=current_working_directory,
+            ),
+        )
 
         # Reset the refresh timer to force other processes to refresh soon
         self._last_refresh_time = 0
