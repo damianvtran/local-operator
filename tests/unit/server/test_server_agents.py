@@ -351,6 +351,70 @@ async def test_list_agents_pagination(test_app_client, dummy_registry: AgentRegi
 
 
 @pytest.mark.asyncio
+async def test_list_agents_name_filter(test_app_client, dummy_registry: AgentRegistry):
+    """Test filtering agents by name."""
+    # Create test agents with different naming patterns
+    test_agents = [
+        "SearchAgent",
+        "Research Assistant",
+        "Code Helper",
+        "Search Engine",
+        "Assistant Bot",
+    ]
+
+    for name in test_agents:
+        dummy_registry.create_agent(
+            AgentEditFields(
+                name=name,
+                security_prompt="Test Security",
+                hosting="openai",
+                model="gpt-4",
+                description=None,
+                last_message=None,
+                temperature=0.7,
+                top_p=1.0,
+                top_k=None,
+                max_tokens=2048,
+                stop=None,
+                frequency_penalty=0.0,
+                presence_penalty=0.0,
+                seed=None,
+                current_working_directory=None,
+            )
+        )
+
+    # Test filtering by "Search" - should return 2 agents
+    response = await test_app_client.get("/v1/agents?name=search")
+    assert response.status_code == 200
+    data = response.json()
+    result = data.get("result")
+    assert result["total"] == 2
+    assert len(result["agents"]) == 2
+    agent_names = [agent["name"] for agent in result["agents"]]
+    assert "SearchAgent" in agent_names
+    assert "Search Engine" in agent_names
+
+    # Test filtering by "Assistant" - should return 2 agents
+    response = await test_app_client.get("/v1/agents?name=assistant")
+    assert response.status_code == 200
+    data = response.json()
+    result = data.get("result")
+    assert result["total"] == 2
+    assert len(result["agents"]) == 2
+    agent_names = [agent["name"] for agent in result["agents"]]
+    assert "Research Assistant" in agent_names
+    assert "Assistant Bot" in agent_names
+
+    # Test filtering by a non-existent name - should return 0 agents
+    response = await test_app_client.get("/v1/agents?name=NonExistent")
+    assert response.status_code == 200
+    data = response.json()
+    result = data.get("result")
+    assert result["total"] == 0
+    assert len(result["agents"]) == 0
+
+
+@pytest.mark.asyncio
 async def test_get_agent_success(test_app_client, dummy_registry: AgentRegistry):
     """Test getting a specific agent."""
     # Create a test agent
