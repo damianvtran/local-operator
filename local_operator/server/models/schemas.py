@@ -521,3 +521,66 @@ class CredentialListResult(BaseModel):
     """
 
     keys: List[str] = Field(..., description="List of credential keys")
+
+
+# Model-related schemas
+class ModelInfo(BaseModel):
+    """Information about a model.
+
+    Attributes:
+        input_price: Cost per million input tokens
+        output_price: Cost per million output tokens
+        max_tokens: Maximum number of tokens supported by the model
+        context_window: Context window size of the model
+        supports_images: Whether the model supports images
+        supports_prompt_cache: Whether the model supports prompt caching
+        cache_writes_price: Cost per million tokens for cache writes
+        cache_reads_price: Cost per million tokens for cache reads
+        description: Description of the model
+    """
+
+    input_price: float = Field(0.0, description="Cost per million input tokens")
+    output_price: float = Field(0.0, description="Cost per million output tokens")
+    max_tokens: Optional[int] = Field(None, description="Maximum number of tokens supported")
+    context_window: Optional[int] = Field(None, description="Context window size")
+    supports_images: Optional[bool] = Field(None, description="Whether the model supports images")
+    supports_prompt_cache: bool = Field(
+        False, description="Whether the model supports prompt caching"
+    )
+    cache_writes_price: Optional[float] = Field(
+        None, description="Cost per million tokens for cache writes"
+    )
+    cache_reads_price: Optional[float] = Field(
+        None, description="Cost per million tokens for cache reads"
+    )
+    description: Optional[str] = Field(None, description="Description of the model")
+
+
+class ModelListResponse(BaseModel):
+    """Response for listing models.
+
+    Attributes:
+        models: List of models
+    """
+
+    models: List[Dict[str, Any]] = Field(..., description="List of models")
+
+
+class ProviderListResponse(BaseModel):
+    """Response for listing providers.
+
+    Attributes:
+        providers: List of model providers
+    """
+
+    providers: List[str] = Field(..., description="List of model providers")
+
+
+class ModelListQueryParams(BaseModel):
+    """Query parameters for listing models.
+
+    Attributes:
+        provider: Optional provider to filter models by
+    """
+
+    provider: Optional[str] = Field(None, description="Provider to filter models by")
