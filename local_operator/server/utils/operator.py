@@ -168,6 +168,7 @@ def create_operator(
         current_agent=current_agent,
         auto_save_conversation=False,
         verbosity_level=VerbosityLevel.QUIET,
+        persist_agent_conversation=persist_conversation,
     )
 
     tool_registry = build_tool_registry(

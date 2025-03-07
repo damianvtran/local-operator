@@ -70,6 +70,8 @@ class Operator:
     agent_registry: AgentRegistry
     current_agent: AgentData | None
     auto_save_conversation: bool
+    verbosity_level: VerbosityLevel
+    persist_agent_conversation: bool
 
     def __init__(
         self,
@@ -82,6 +84,7 @@ class Operator:
         current_agent: AgentData | None,
         auto_save_conversation: bool = False,
         verbosity_level: VerbosityLevel = VerbosityLevel.VERBOSE,
+        persist_agent_conversation: bool = False,
     ):
         """Initialize the Operator with required components.
 
@@ -100,6 +103,8 @@ class Operator:
             auto_save_conversation (bool): Whether to automatically save the conversation
                 history to the agent's directory after each completed task.
             verbosity_level (VerbosityLevel): The verbosity level to use for the operator.
+            persist_agent_conversation (bool): Whether to persist the agent's conversation
+                history to the agent's directory after each completed task.
 
         The Operator class serves as the main interface for interacting with language models,
         managing configuration, credentials, and code execution. It handles both CLI and
@@ -115,7 +120,7 @@ class Operator:
         self.current_agent = current_agent
         self.auto_save_conversation = auto_save_conversation
         self.verbosity_level = verbosity_level
-
+        self.persist_agent_conversation = persist_agent_conversation
         if self.type == OperatorType.CLI:
             self._load_input_history()
             self._setup_interrupt_handler()
@@ -269,6 +274,15 @@ class Operator:
             ),
             None,
         )
+
+        # Save the conversation history and code execution history to the agent registry
+        # if the persist_conversation flag is set.
+        if self.persist_agent_conversation and self.agent_registry and self.current_agent:
+            self.agent_registry.update_agent_state(
+                self.current_agent.id,
+                self.executor.conversation_history,
+                self.executor.code_history,
+            )
 
         return response_content
 
