@@ -286,7 +286,11 @@ async def list_models(
                                 supports_prompt_cache=False,
                                 cache_writes_price=None,
                                 cache_reads_price=None,
-                                description=model.description,
+                                description=(
+                                    model.description
+                                    if hasattr(model, "description") and model.description
+                                    else f"OpenRouter model: {model.name}"
+                                ),
                             )
 
                             models.append(
