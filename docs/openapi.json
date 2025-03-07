@@ -295,7 +295,7 @@
           "Agents"
         ],
         "summary": "List agents",
-        "description": "Retrieve a paginated list of agents with their details.",
+        "description": "Retrieve a paginated list of agents with their details. Optionally filter by agent name.",
         "operationId": "list_agents_v1_agents_get",
         "parameters": [
           {
@@ -323,6 +323,17 @@
               "title": "Per Page"
             },
             "description": "Number of agents per page"
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Filter agents by name (case-insensitive)",
+              "title": "Name"
+            },
+            "description": "Filter agents by name (case-insensitive)"
           }
         ],
         "responses": {
@@ -1707,6 +1718,19 @@
             ],
             "title": "Seed",
             "description": "Random number seed for deterministic generation."
+          },
+          "current_working_directory": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Working Directory",
+            "description": "The current working directory for the agent.  Updated whenever the agent changes its working directory through code execution.  Defaults to '.'",
+            "default": "."
           }
         },
         "type": "object",
@@ -1928,6 +1952,19 @@
             ],
             "title": "Seed",
             "description": "Random number seed for deterministic generation."
+          },
+          "current_working_directory": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Working Directory",
+            "description": "The current working directory for the agent.  Updated whenever the agent changes its working directory through code execution.  Defaults to '.'",
+            "default": "."
           }
         },
         "type": "object",
@@ -2256,6 +2293,18 @@
             ],
             "title": "Seed",
             "description": "Random number seed for deterministic generation."
+          },
+          "current_working_directory": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Working Directory",
+            "description": "The current working directory for the agent.  Updated whenever the agent changes its working directory through code execution."
           }
         },
         "type": "object",
