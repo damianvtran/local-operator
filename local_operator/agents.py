@@ -1,13 +1,19 @@
 import json
+import time
 import uuid
 from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
+import dill
 from pydantic import BaseModel, Field
 
-from local_operator.types import CodeExecutionResult, ConversationRecord
+from local_operator.types import (
+    CodeExecutionResult,
+    ConversationRecord,
+    ConversationRole,
+)
 
 
 class AgentData(BaseModel):
@@ -63,6 +69,11 @@ class AgentData(BaseModel):
         None, description="Increases diversity by lowering likelihood of prompt tokens"
     )
     seed: Optional[int] = Field(None, description="Random number seed for deterministic generation")
+    current_working_directory: str = Field(
+        ".",
+        description="The current working directory for the agent.  Updated whenever the "
+        "agent changes its working directory through code execution.  Defaults to '.'",
+    )
 
 
 class AgentEditFields(BaseModel):
@@ -110,6 +121,11 @@ class AgentEditFields(BaseModel):
         None, description="Increases diversity by lowering likelihood of prompt tokens"
     )
     seed: Optional[int] = Field(None, description="Random number seed for deterministic generation")
+    current_working_directory: str | None = Field(
+        None,
+        description="The current working directory for the agent.  Updated whenever the "
+        "agent changes its working directory through code execution.",
+    )
 
 
 class AgentConversation(BaseModel):
@@ -144,13 +160,16 @@ class AgentRegistry:
     config_dir: Path
     agents_file: Path
     _agents: Dict[str, AgentData]
+    _last_refresh_time: float
+    _refresh_interval: float
 
-    def __init__(self, config_dir: Path) -> None:
+    def __init__(self, config_dir: Path, refresh_interval: float = 5.0) -> None:
         """
         Initialize the AgentRegistry, loading metadata from agents.json.
 
         Args:
             config_dir (Path): Directory containing agents.json and conversation history files
+            refresh_interval (float): Time in seconds between refreshes of agent data from disk
         """
         self.config_dir = config_dir
         if not self.config_dir.exists():
@@ -158,6 +177,8 @@ class AgentRegistry:
 
         self.agents_file: Path = self.config_dir / "agents.json"
         self._agents: Dict[str, AgentData] = {}
+        self._last_refresh_time = time.time()
+        self._refresh_interval = refresh_interval
         self._load_agents_metadata()
 
     def _load_agents_metadata(self) -> None:
@@ -224,6 +245,7 @@ class AgentRegistry:
             frequency_penalty=agent_edit_metadata.frequency_penalty,
             presence_penalty=agent_edit_metadata.presence_penalty,
             seed=agent_edit_metadata.seed,
+            current_working_directory=agent_edit_metadata.current_working_directory or ".",
         )
 
         return self.save_agent(agent_metadata)
@@ -286,6 +308,9 @@ class AgentRegistry:
 
         if updated_metadata.last_message is not None:
             current_metadata.last_message_datetime = datetime.now(timezone.utc)
+
+        # Update the in-memory agent data
+        self._agents[agent_id] = current_metadata
 
         # Save updated agents metadata to file
         agents_list = [agent.model_dump() for agent in self._agents.values()]
@@ -371,6 +396,7 @@ class AgentRegistry:
                 frequency_penalty=original_agent.frequency_penalty,
                 presence_penalty=original_agent.presence_penalty,
                 seed=original_agent.seed,
+                current_working_directory=original_agent.current_working_directory,
             )
         )
 
@@ -388,6 +414,43 @@ class AgentRegistry:
             self.delete_agent(new_agent.id)
             raise Exception(f"Failed to copy conversation history: {str(e)}")
 
+    def _refresh_if_needed(self) -> None:
+        """
+        Refresh agent metadata from disk if the refresh interval has elapsed.
+        """
+        current_time = time.time()
+        if current_time - self._last_refresh_time > self._refresh_interval:
+            self._refresh_agents_metadata()
+            self._last_refresh_time = current_time
+
+    def _refresh_agents_metadata(self) -> None:
+        """
+        Reload agents' metadata from the agents.json file into memory.
+        This is used to refresh the in-memory state with changes made by other processes.
+        """
+        if self.agents_file.exists():
+            try:
+                with self.agents_file.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                # Create a new dictionary to store refreshed agents
+                refreshed_agents = {}
+
+                # Process each agent in the file
+                for item in data:
+                    try:
+                        agent = AgentData.model_validate(item)
+                        refreshed_agents[agent.id] = agent
+                    except Exception as e:
+                        # Log the error but continue processing other agents
+                        print(f"Error refreshing agent metadata: {str(e)}")
+
+                # Update the in-memory agents dictionary
+                self._agents = refreshed_agents
+            except Exception as e:
+                # Log the error but don't crash
+                print(f"Error refreshing agents metadata: {str(e)}")
+
     def get_agent(self, agent_id: str) -> AgentData:
         """
         Get an agent's metadata by ID.
@@ -401,6 +464,9 @@ class AgentRegistry:
         Raises:
             KeyError: If the agent_id does not exist
         """
+        # Refresh agent data from disk if needed
+        self._refresh_if_needed()
+
         if agent_id not in self._agents:
             raise KeyError(f"Agent with id {agent_id} not found")
         return self._agents[agent_id]
@@ -415,6 +481,9 @@ class AgentRegistry:
         Returns:
             AgentData | None: The agent's metadata if found, None otherwise.
         """
+        # Refresh agent data from disk if needed
+        self._refresh_if_needed()
+
         for agent in self._agents.values():
             if agent.name == name:
                 return agent
@@ -427,6 +496,9 @@ class AgentRegistry:
         Returns:
             List[AgentData]: A list of agent metadata objects.
         """
+        # Refresh agent data from disk if needed
+        self._refresh_if_needed()
+
         return list(self._agents.values())
 
     def load_agent_conversation(self, agent_id: str) -> AgentConversation:
@@ -444,6 +516,9 @@ class AgentRegistry:
                 objects.
                 Returns an empty list if no conversation history exists or if there's an error.
         """
+        # Refresh agent data from disk if needed
+        self._refresh_if_needed()
+
         conversation_file = self.config_dir / f"{agent_id}_conversation.json"
 
         if agent_id not in self._agents:
@@ -544,6 +619,7 @@ class AgentRegistry:
             frequency_penalty=None,
             presence_penalty=None,
             seed=None,
+            current_working_directory=".",
         )
 
         return self.save_agent(agent_metadata)
@@ -600,3 +676,151 @@ class AgentRegistry:
                 objects.
         """
         return self.load_agent_conversation(agent_id).execution_history
+
+    def save_agent_context(self, agent_id: str, context: Any) -> None:
+        """Save the agent's context to a file.
+
+        This method serializes the agent's context using dill and saves it to a file
+        named "{agent_id}_context.pkl" in the config directory. It handles unpicklable objects
+        by converting them to a serializable format.
+
+        Args:
+            agent_id (str): The unique identifier of the agent.
+            context (Any): The context to save, which can be any object.
+
+        Raises:
+            KeyError: If the agent with the specified ID does not exist.
+            Exception: If there is an error saving the context.
+        """
+        if agent_id not in self._agents:
+            raise KeyError(f"Agent with id {agent_id} not found")
+
+        context_file = self.config_dir / f"{agent_id}_context.pkl"
+
+        def convert_unpicklable(obj: Any) -> Any:
+            if isinstance(obj, dict):
+                return {k: convert_unpicklable(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return type(obj)(convert_unpicklable(x) for x in obj)
+            elif isinstance(obj, (int, float, str, bool, type(None))):
+                return obj
+            else:
+                try:
+                    dill.dumps(obj)
+                    return obj
+                except Exception:
+                    return str(obj)
+
+        try:
+            serializable_context = convert_unpicklable(context)
+            with context_file.open("wb") as f:
+                dill.dump(serializable_context, f)
+        except Exception as e:
+            raise Exception(f"Failed to save agent context: {str(e)}")
+
+    def load_agent_context(self, agent_id: str) -> Any:
+        """Load the agent's context from a file.
+
+        This method deserializes the agent's context using dill from a file
+        named "{agent_id}_context.pkl" in the config directory.
+
+        Args:
+            agent_id (str): The unique identifier of the agent.
+
+        Returns:
+            Any: The loaded context, or None if the context file doesn't exist.
+
+        Raises:
+            KeyError: If the agent with the specified ID does not exist.
+            Exception: If there is an error loading the context.
+        """
+        if agent_id not in self._agents:
+            raise KeyError(f"Agent with id {agent_id} not found")
+
+        context_file = self.config_dir / f"{agent_id}_context.pkl"
+        if not context_file.exists():
+            return None
+
+        try:
+            with context_file.open("rb") as f:
+                return dill.load(f)
+        except Exception as e:
+            raise Exception(f"Failed to load agent context: {str(e)}")
+
+    def update_agent_state(
+        self,
+        agent_id: str,
+        conversation_history: List[ConversationRecord],
+        code_history: List[CodeExecutionResult],
+        current_working_directory: Optional[str] = None,
+        context: Any = None,
+    ) -> None:
+        """Save the current agent's conversation history and code execution history.
+
+        This method persists the agent's state by saving the current conversation
+        and code execution history to the agent registry. It also updates the agent's
+        last message and current working directory if provided.
+
+        Args:
+            agent_id: The unique identifier of the agent to update.
+            conversation_history: The list of conversation records to save.
+            code_history: The list of code execution results to save.
+            current_working_directory: Optional new working directory for the agent.
+            context: Optional context to save for the agent. If None, the context is not updated.
+
+        Raises:
+            KeyError: If the agent with the specified ID does not exist.
+
+        Note:
+            This method refreshes agent metadata from disk before updating and
+            resets the refresh timer to ensure consistency across processes.
+        """
+        # Refresh agent data from disk first to ensure we have the latest state
+        self._refresh_agents_metadata()
+
+        if agent_id not in self._agents:
+            raise KeyError(f"Agent with id {agent_id} not found")
+
+        self.save_agent_conversation(
+            agent_id,
+            conversation_history,
+            code_history,
+        )
+
+        # Save the context if provided
+        if context is not None:
+            self.save_agent_context(agent_id, context)
+
+        # Extract the last assistant message from code history
+        assistant_messages = [
+            record.message for record in code_history if record.role == ConversationRole.ASSISTANT
+        ]
+
+        last_assistant_message = None
+
+        if assistant_messages:
+            last_assistant_message = assistant_messages[-1]
+
+        self.update_agent(
+            agent_id,
+            AgentEditFields(
+                name=None,
+                security_prompt=None,
+                hosting=None,
+                model=None,
+                description=None,
+                last_message=last_assistant_message,
+                temperature=None,
+                top_p=None,
+                top_k=None,
+                max_tokens=None,
+                stop=None,
+                frequency_penalty=None,
+                presence_penalty=None,
+                seed=None,
+                current_working_directory=current_working_directory,
+            ),
+        )
+
+        # Reset the refresh timer to force other processes to refresh soon
+        self._last_refresh_time = 0

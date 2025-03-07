@@ -6,12 +6,36 @@ from local_operator.model.registry import ModelInfo, get_model_info
 def test_model_info_price_must_be_non_negative() -> None:
     """Test that the price_must_be_non_negative validator works correctly."""
     with pytest.raises(ValueError, match="Price must be non-negative."):
-        ModelInfo(input_price=-1, output_price=1)
+        ModelInfo(
+            id="test-model",
+            name="test-model",
+            description="Mock model",
+            input_price=-1,
+            output_price=1,
+        )
     with pytest.raises(ValueError, match="Price must be non-negative."):
-        ModelInfo(input_price=1, output_price=-1)
+        ModelInfo(
+            id="test-model",
+            name="test-model",
+            description="Mock model",
+            input_price=1,
+            output_price=-1,
+        )
     # Should not raise an error
-    ModelInfo(input_price=0, output_price=0)
-    ModelInfo(input_price=1, output_price=1)
+    ModelInfo(
+        id="test-model",
+        name="test-model",
+        description="Mock model",
+        input_price=0,
+        output_price=0,
+    )
+    ModelInfo(
+        id="test-model",
+        name="test-model",
+        description="Mock model",
+        input_price=1,
+        output_price=1,
+    )
 
 
 def test_get_model_info() -> None:
@@ -26,8 +50,8 @@ def test_get_model_info() -> None:
     assert model_info.context_window == 1_048_576
 
     # Test OpenAI
-    model_info = get_model_info("openai", "any")
-    assert model_info.max_tokens == -1
+    model_info = get_model_info("openai", "gpt-4o")
+    assert model_info.max_tokens == 32768
 
     # Test OpenRouter
     model_info = get_model_info("openrouter", "any")

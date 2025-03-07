@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 # AgentEditFields will be used in the routes module
 from local_operator.jobs import JobResult, JobStatus
+from local_operator.model.registry import ModelInfo, ProviderDetail
 from local_operator.types import CodeExecutionResult, ConversationRecord
 
 
@@ -184,6 +185,11 @@ class Agent(BaseModel):
     seed: Optional[int] = Field(
         None, description="Random number seed for deterministic generation."
     )
+    current_working_directory: Optional[str] = Field(
+        ".",
+        description="The current working directory for the agent.  Updated whenever the "
+        "agent changes its working directory through code execution.  Defaults to '.'",
+    )
 
 
 class AgentCreate(BaseModel):
@@ -246,6 +252,11 @@ class AgentCreate(BaseModel):
         None,
         description="Random number seed for deterministic generation.",
     )
+    current_working_directory: str | None = Field(
+        ".",
+        description="The current working directory for the agent.  Updated whenever the "
+        "agent changes its working directory through code execution.  Defaults to '.'",
+    )
 
 
 class AgentUpdate(BaseModel):
@@ -306,6 +317,11 @@ class AgentUpdate(BaseModel):
     seed: int | None = Field(
         None,
         description="Random number seed for deterministic generation.",
+    )
+    current_working_directory: str | None = Field(
+        None,
+        description="The current working directory for the agent.  Updated whenever the "
+        "agent changes its working directory through code execution.",
     )
 
 
@@ -506,3 +522,129 @@ class CredentialListResult(BaseModel):
     """
 
     keys: List[str] = Field(..., description="List of credential keys")
+
+
+class ModelEntry(BaseModel):
+    """A single model entry.
+
+    Attributes:
+        id: Unique identifier for the model
+        name: Optional display name for the model
+        provider: The provider of the model
+        info: Detailed information about the model
+    """
+
+    id: str = Field(..., description="Unique identifier for the model")
+    name: Optional[str] = Field(None, description="Display name for the model")
+    provider: str = Field(..., description="The provider of the model")
+    info: ModelInfo = Field(..., description="Detailed information about the model")
+
+    class Config:
+        """Pydantic model configuration."""
+
+        json_schema_extra = {
+            "example": {
+                "id": "claude-3-opus-20240229",
+                "provider": "anthropic",
+                "info": {
+                    "input_price": 15000.0,
+                    "output_price": 75000.0,
+                    "max_tokens": 200000,
+                    "context_window": 200000,
+                    "supports_images": True,
+                    "supports_prompt_cache": False,
+                    "description": "Most powerful Claude model for highly complex tasks",
+                },
+            }
+        }
+
+
+class ModelListResponse(BaseModel):
+    """Response for listing models.
+
+    Attributes:
+        models: List of model entries
+    """
+
+    models: List[ModelEntry] = Field(..., description="List of model entries")
+
+    class Config:
+        """Pydantic model configuration."""
+
+        json_schema_extra = {
+            "example": {
+                "models": [
+                    {
+                        "id": "claude-3-opus-20240229",
+                        "provider": "anthropic",
+                        "info": {
+                            "input_price": 15000.0,
+                            "output_price": 75000.0,
+                            "max_tokens": 200000,
+                            "context_window": 200000,
+                            "supports_images": True,
+                            "supports_prompt_cache": False,
+                            "description": "Most powerful Claude model for highly complex tasks",
+                        },
+                    },
+                    {
+                        "id": "gpt-4o",
+                        "name": "GPT-4o",
+                        "provider": "openai",
+                        "info": {
+                            "input_price": 5000.0,
+                            "output_price": 15000.0,
+                            "max_tokens": 128000,
+                            "context_window": 128000,
+                            "supports_images": True,
+                            "supports_prompt_cache": False,
+                            "description": "OpenAI's most advanced multimodal model",
+                        },
+                    },
+                ]
+            }
+        }
+
+
+class ProviderListResponse(BaseModel):
+    """Response for listing providers.
+
+    Attributes:
+        providers: List of provider details
+    """
+
+    providers: List[ProviderDetail] = Field(..., description="List of provider details")
+
+    class Config:
+        """Pydantic model configuration."""
+
+        json_schema_extra = {
+            "example": {
+                "providers": [
+                    {
+                        "id": "openai",
+                        "name": "OpenAI",
+                        "description": "OpenAI's API provides access to GPT-4o and other models",
+                        "url": "https://platform.openai.com/",
+                        "requiredCredentials": ["OPENAI_API_KEY"],
+                    },
+                    {
+                        "id": "anthropic",
+                        "name": "Anthropic",
+                        "description": "Anthropic's Claude models for safe, helpful AI assistants",
+                        "url": "https://www.anthropic.com/",
+                        "requiredCredentials": ["ANTHROPIC_API_KEY"],
+                    },
+                ]
+            }
+        }
+
+
+class ModelListQueryParams(BaseModel):
+    """Query parameters for listing models.
+
+    Attributes:
+        provider: Optional provider to filter models by
+    """
+
+    provider: Optional[str] = Field(None, description="Provider to filter models by")

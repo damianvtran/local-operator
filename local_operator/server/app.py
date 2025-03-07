@@ -17,7 +17,15 @@ from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.jobs import JobManager
-from local_operator.server.routes import agents, chat, config, credentials, health, jobs
+from local_operator.server.routes import (
+    agents,
+    chat,
+    config,
+    credentials,
+    health,
+    jobs,
+    models,
+)
 
 logger = logging.getLogger("local_operator.server")
 
@@ -37,7 +45,9 @@ async def lifespan(app: FastAPI):
     agents_dir = config_dir / "agents"
     app.state.credential_manager = CredentialManager(config_dir=config_dir)
     app.state.config_manager = ConfigManager(config_dir=config_dir)
-    app.state.agent_registry = AgentRegistry(config_dir=agents_dir)
+    # Initialize AgentRegistry with a refresh interval of 3 seconds to ensure
+    # changes made by child processes are quickly reflected in the parent process
+    app.state.agent_registry = AgentRegistry(config_dir=agents_dir, refresh_interval=3.0)
     app.state.job_manager = JobManager()
     yield
     # Clean up on shutdown
@@ -62,6 +72,7 @@ app = FastAPI(
         {"name": "Jobs", "description": "Job management endpoints"},
         {"name": "Configuration", "description": "Configuration management endpoints"},
         {"name": "Credentials", "description": "Credential management endpoints"},
+        {"name": "Models", "description": "Model management endpoints"},
     ],
 )
 
@@ -102,4 +113,9 @@ app.include_router(
 # /v1/credentials
 app.include_router(
     credentials.router,
+)
+
+# /v1/models
+app.include_router(
+    models.router,
 )

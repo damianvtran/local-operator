@@ -18,7 +18,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 from tiktoken import encoding_for_model
 
-from local_operator.agents import AgentData
+from local_operator.agents import AgentData, AgentRegistry
 from local_operator.console import (
     ExecutionSection,
     VerbosityLevel,
@@ -397,10 +397,13 @@ class LocalCodeExecutor:
         token_metrics (ExecutorTokenMetrics): Tracks token usage and
         cost metrics for model executions.
         agent (AgentData | None): The agent data for the current conversation.
+        agent_registry (AgentRegistry | None): The agent registry for the current conversation.
         tool_registry (ToolRegistry | None): The tool registry for the current conversation.
         learnings (List[str]): A list of learnings from the current conversation.
         current_plan (str | None): The current plan for the agent.
         code_history (List[CodeExecutionResult]): A list of code execution results.
+        persist_conversation (bool): Whether to persist the conversation history and code
+            execution history to the agent registry on each step.
     """
 
     context: Dict[str, Any]
@@ -413,10 +416,12 @@ class LocalCodeExecutor:
     can_prompt_user: bool
     token_metrics: ExecutorTokenMetrics
     agent: AgentData | None
+    agent_registry: AgentRegistry | None
     tool_registry: ToolRegistry | None
     learnings: List[str]
     current_plan: str | None
     code_history: List[CodeExecutionResult]
+    persist_conversation: bool
 
     def __init__(
         self,
@@ -428,6 +433,8 @@ class LocalCodeExecutor:
         agent: AgentData | None = None,
         max_learnings_history: int = 50,
         verbosity_level: VerbosityLevel = VerbosityLevel.VERBOSE,
+        agent_registry: AgentRegistry | None = None,
+        persist_conversation: bool = False,
     ):
         """Initialize the LocalCodeExecutor with a language model.
 
@@ -448,6 +455,9 @@ class LocalCodeExecutor:
             max_learnings_history (int): The maximum number of learnings to keep in history.
             verbosity_level (ExecutorVerbosityLevel): The level of detail to output
             from the executor.
+            agent_registry (AgentRegistry | None): The agent registry for the current conversation.
+            persist_conversation (bool): Whether to persist the conversation history and code
+                execution history to the agent registry on each step.
         """
         self.context = {}
         self.model_configuration = model_configuration
@@ -463,6 +473,17 @@ class LocalCodeExecutor:
         self.max_learnings_history = max_learnings_history
         self.code_history = []
         self.verbosity_level = verbosity_level
+        self.agent_registry = agent_registry
+        self.persist_conversation = persist_conversation
+
+        # Load agent context if agent and agent_registry are provided
+        if self.agent and self.agent_registry:
+            try:
+                agent_context = self.agent_registry.load_agent_context(self.agent.id)
+                if agent_context is not None:
+                    self.context = agent_context
+            except Exception as e:
+                print(f"Failed to load agent context: {str(e)}")
 
         self.reset_step_counter()
 
@@ -1399,6 +1420,17 @@ class LocalCodeExecutor:
 
         result = await self.perform_action(response)
 
+        current_working_directory = os.getcwd()
+
+        if self.persist_conversation and self.agent_registry and self.agent:
+            self.agent_registry.update_agent_state(
+                agent_id=self.agent.id,
+                conversation_history=self.conversation_history,
+                code_history=self.code_history,
+                current_working_directory=current_working_directory,
+                context=self.context,
+            )
+
         return result
 
     async def perform_action(self, response: ResponseJsonSchema) -> ProcessResponseOutput:
@@ -1867,7 +1899,7 @@ class LocalCodeExecutor:
         and human-readable file sizes.
 
         Args:
-            directory_index: Dictionary mapping directory paths to lists of
+            directory_index: Dictionary mapping directoryths to lists of
                 (filename, file_type, size) tuples
 
         Returns:

@@ -3,14 +3,18 @@ Job processing manager for Local Operator.
 
 This module provides functionality to track and manage asynchronous jobs
 for the Local Operator, including their status, associated agents, and timing information.
+It supports running jobs in isolated contexts that can change working directories
+without affecting the parent process.
 """
 
 import asyncio
 import logging
+import os
 import time
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
+from multiprocessing import Process
 from typing import Any, Dict, List, Optional, TypeVar, Union, cast
 
 from pydantic import BaseModel, Field, field_validator
@@ -66,18 +70,74 @@ class Job(BaseModel):
         return v
 
 
+class JobContext:
+    """
+    Context for running a job in an isolated environment.
+
+    This class provides an isolated context for a job to run in, allowing it to
+    change working directories without affecting the parent process. When used with
+    a context manager (with statement), it automatically saves the original working
+    directory and restores it when the context is exited, ensuring that the parent
+    process's working directory remains unchanged.
+
+    Example usage:
+        ```python
+        # Create a new job context
+        job_context = JobContext()
+
+        # Use the context manager to ensure the original directory is restored
+        with job_context:
+            # Change to the agent's working directory if needed
+            if agent.current_working_directory != ".":
+                job_context.change_directory(agent.current_working_directory)
+
+            # Run operations in the agent's working directory
+            # ...
+
+        # After the with block, we're back in the original directory
+        ```
+    """
+
+    def __init__(self) -> None:
+        """Initialize the JobContext by saving the current working directory."""
+        self.original_cwd = os.getcwd()
+
+    def __enter__(self) -> "JobContext":
+        """Enter the context."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Exit the context, restoring the original working directory."""
+        os.chdir(self.original_cwd)
+
+    def change_directory(self, path: str) -> None:
+        """
+        Change the working directory for this context.
+
+        This method changes the current working directory to the specified path.
+        The original working directory will still be restored when the context is exited.
+
+        Args:
+            path: The path to change to
+        """
+        expanded_path = os.path.expanduser(path)
+        os.chdir(expanded_path)
+
+
 class JobManager:
     """
     Manager for tracking and handling asynchronous jobs.
 
     This class provides methods to create, retrieve, update, and manage jobs
-    throughout their lifecycle.
+    throughout their lifecycle. Jobs can run in isolated contexts that can
+    change working directories without affecting the parent process.
     """
 
     def __init__(self) -> None:
         """Initialize the JobManager with an empty jobs dictionary."""
         self.jobs: Dict[str, Job] = {}
         self._lock = asyncio.Lock()
+        self._processes: Dict[str, Process] = {}
 
     async def create_job(
         self, prompt: str, model: str, hosting: str, agent_id: Optional[str] = None
@@ -184,9 +244,23 @@ class JobManager:
 
         return job
 
+    def register_process(self, job_id: str, process: Process) -> None:
+        """
+        Register a multiprocessing Process with a job.
+
+        Args:
+            job_id: The ID of the job
+            process: The Process to register
+        """
+        self._processes[job_id] = process
+
     async def cancel_job(self, job_id: str) -> bool:
         """
         Cancel a running job.
+
+        This method will terminate the process associated with the job if it exists,
+        and cancel the asyncio task if it exists. It will also update the job status
+        to CANCELLED.
 
         Args:
             job_id: The ID of the job to cancel
@@ -205,8 +279,24 @@ class JobManager:
         if job.status not in (JobStatus.PENDING, JobStatus.PROCESSING):
             return False
 
+        # Cancel the asyncio task if it exists
         if job.task and not job.task.done():
             job.task.cancel()
+
+        # Terminate the process if it exists
+        if job_id in self._processes:
+            process = self._processes[job_id]
+            if process.is_alive():
+                logger.info(f"Terminating process for job {job_id}")
+                process.terminate()
+                # Wait for the process to terminate
+                process.join(timeout=5)
+                # If the process is still alive, kill it
+                if process.is_alive():
+                    logger.warning(f"Process for job {job_id} did not terminate, killing it")
+                    process.kill()
+            # Remove the process from the dictionary
+            del self._processes[job_id]
 
         await self.update_job_status(
             job_id, JobStatus.CANCELLED, {"error": "Job cancelled by user"}
@@ -260,9 +350,21 @@ class JobManager:
             # For other jobs, check against creation time
             elif (current_time - job.created_at) > max_age_seconds:
                 # Cancel if still running
-                if job.status in (JobStatus.PENDING, JobStatus.PROCESSING) and job.task:
-                    if not job.task.done():
+                if job.status in (JobStatus.PENDING, JobStatus.PROCESSING):
+                    # Cancel the task if it exists
+                    if job.task and not job.task.done():
                         job.task.cancel()
+
+                    # Terminate the process if it exists
+                    if job_id in self._processes:
+                        process = self._processes[job_id]
+                        if process.is_alive():
+                            process.terminate()
+                            process.join(timeout=5)
+                            if process.is_alive():
+                                process.kill()
+                        del self._processes[job_id]
+
                 jobs_to_remove.append(job_id)
 
         async with self._lock:

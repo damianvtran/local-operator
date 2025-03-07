@@ -44,7 +44,11 @@ class DummyExecutor:
             hosting="test",
             name="test-model",
             instance=ChatMock(),
-            info=ModelInfo(),
+            info=ModelInfo(
+                id="test-model",
+                name="test-model",
+                description="Mock model",
+            ),
             api_key=None,
         )
         self.conversation_history = []
@@ -178,7 +182,8 @@ def test_app_client(temp_dir):
     # Set up test-specific state
     mock_credential_manager = CredentialManager(config_dir=temp_dir)
     mock_config_manager = ConfigManager(config_dir=temp_dir)
-    mock_agent_registry = AgentRegistry(config_dir=temp_dir)
+    # Use a shorter refresh interval for tests to ensure changes are quickly reflected
+    mock_agent_registry = AgentRegistry(config_dir=temp_dir, refresh_interval=1.0)
     mock_job_manager = JobManager()
 
     mock_credential_manager.get_credential = lambda key: SecretStr("test-credential")
@@ -200,7 +205,8 @@ def test_app_client(temp_dir):
 
 @pytest.fixture
 def dummy_registry(temp_dir):
-    registry = AgentRegistry(config_dir=temp_dir)
+    # Use a shorter refresh interval for tests to ensure changes are quickly reflected
+    registry = AgentRegistry(config_dir=temp_dir, refresh_interval=1.0)
     app.state.agent_registry = registry
     yield registry
     app.state.agent_registry = None

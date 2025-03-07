@@ -449,6 +449,7 @@ def agents_create_command(name: str, agent_registry: AgentRegistry) -> int:
             frequency_penalty=None,
             presence_penalty=None,
             seed=None,
+            current_working_directory=None,
         )
     )
     print("\n\033[1;32m╭─ Created New Agent ───────────────────────────\033[0m")
@@ -598,6 +599,7 @@ def main() -> int:
                         frequency_penalty=None,
                         presence_penalty=None,
                         seed=None,
+                        current_working_directory=None,
                     )
                 )
                 print("\n\033[1;32m╭─ Created New Agent ───────────────────────────\033[0m")
@@ -686,6 +688,8 @@ def main() -> int:
             ),
             max_learnings_history=config_manager.get_config_value("max_learnings_history", 50),
             agent=agent,
+            agent_registry=agent_registry,
+            persist_conversation=training_mode,
         )
 
         operator = Operator(
@@ -696,8 +700,8 @@ def main() -> int:
             type=OperatorType.CLI,
             agent_registry=agent_registry,
             current_agent=agent,
-            training_mode=training_mode,
             auto_save_conversation=auto_save_conversation and not single_execution_mode,
+            persist_agent_conversation=auto_save_conversation and not single_execution_mode,
         )
 
         tool_registry = build_tool_registry(
