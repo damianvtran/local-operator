@@ -33,15 +33,41 @@ def test_list_providers(client):
     assert "providers" in data["result"]
     providers = data["result"]["providers"]
     assert isinstance(providers, list)
-    assert "anthropic" in providers
-    assert "openai" in providers
-    assert "openrouter" in providers
-    assert "google" in providers
-    assert "ollama" in providers
-    assert "deepseek" in providers
-    assert "kimi" in providers
-    assert "mistral" in providers
-    assert "alibaba" in providers
+
+    # Verify each provider has the expected fields
+    for provider in providers:
+        assert "id" in provider
+        assert "name" in provider
+        assert "description" in provider
+        assert "url" in provider
+        assert "requiredCredentials" in provider
+        assert isinstance(provider["requiredCredentials"], list)
+
+    # Verify expected providers are present
+    provider_ids = [p["id"] for p in providers]
+    expected_providers = [
+        "openai",
+        "anthropic",
+        "google",
+        "mistral",
+        "ollama",
+        "openrouter",
+        "deepseek",
+        "kimi",
+        "alibaba",
+    ]
+    for provider_id in expected_providers:
+        assert provider_id in provider_ids
+
+    # Verify some specific provider details
+    openai = next(p for p in providers if p["id"] == "openai")
+    assert openai["name"] == "OpenAI"
+    assert openai["url"] == "https://platform.openai.com/"
+    assert openai["requiredCredentials"] == ["OPENAI_API_KEY"]
+
+    ollama = next(p for p in providers if p["id"] == "ollama")
+    assert ollama["name"] == "Ollama"
+    assert ollama["requiredCredentials"] == []
 
 
 def test_list_models_no_provider(client, mock_credential_manager):

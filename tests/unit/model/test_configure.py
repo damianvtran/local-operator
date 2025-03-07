@@ -345,7 +345,13 @@ def test_configure_model_mistral_fallback():
 
 def test_calculate_cost() -> None:
     """Test that the calculate_cost function works correctly."""
-    model_info = ModelInfo(input_price=1, output_price=2)
+    model_info = ModelInfo(
+        id="test-model",
+        name="test-model",
+        description="Mock model",
+        input_price=1,
+        output_price=2,
+    )
     input_tokens = 1000
     output_tokens = 2000
     expected_cost = (input_tokens / 1_000_000) * model_info.input_price + (
