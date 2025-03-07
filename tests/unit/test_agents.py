@@ -37,6 +37,7 @@ def test_create_agent_success(temp_agents_dir: Path):
         frequency_penalty=0.12,
         presence_penalty=0.34,
         seed=42,
+        current_working_directory="/tmp/path",
     )
     agent = registry.create_agent(edit_metadata)
     agents = registry.list_agents()
@@ -58,6 +59,7 @@ def test_create_agent_success(temp_agents_dir: Path):
     assert created_agent.frequency_penalty == 0.12
     assert created_agent.presence_penalty == 0.34
     assert created_agent.seed == 42
+    assert created_agent.current_working_directory == "/tmp/path"
     # Verify that agents.json file is created
     agents_file = temp_agents_dir / "agents.json"
     assert agents_file.exists()
@@ -88,6 +90,7 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
         frequency_penalty=0.0,
         presence_penalty=0.0,
         seed=None,
+        current_working_directory="/tmp/path",
     )
     registry.create_agent(edit_metadata)
     with pytest.raises(ValueError) as exc_info:
@@ -108,6 +111,7 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 frequency_penalty=0.0,
                 presence_penalty=0.0,
                 seed=None,
+                current_working_directory=None,
             )
         )
     assert f"Agent with name {agent_name} already exists" in str(exc_info.value)
@@ -133,6 +137,7 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 frequency_penalty=0.0,
                 presence_penalty=0.0,
                 seed=None,
+                current_working_directory=None,
             ),
             "update": AgentEditFields(
                 name="Updated Agent",
@@ -149,6 +154,7 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 frequency_penalty=None,
                 presence_penalty=None,
                 seed=None,
+                current_working_directory=None,
             ),
             "expected_name": "Updated Agent",
             "expected_prompt": "original prompt",
@@ -172,6 +178,7 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 frequency_penalty=0.0,
                 presence_penalty=0.0,
                 seed=None,
+                current_working_directory=None,
             ),
             "update": AgentEditFields(
                 name=None,
@@ -188,6 +195,7 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 frequency_penalty=None,
                 presence_penalty=None,
                 seed=None,
+                current_working_directory=None,
             ),
             "expected_name": "Test Agent",
             "expected_prompt": "New security prompt",
@@ -211,6 +219,7 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 frequency_penalty=0.0,
                 presence_penalty=0.0,
                 seed=None,
+                current_working_directory=None,
             ),
             "update": AgentEditFields(
                 name=None,
@@ -227,6 +236,7 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 frequency_penalty=None,
                 presence_penalty=None,
                 seed=None,
+                current_working_directory=None,
             ),
             "expected_name": "Test Agent",
             "expected_prompt": "original prompt",
@@ -250,6 +260,7 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 frequency_penalty=0.0,
                 presence_penalty=0.0,
                 seed=None,
+                current_working_directory=None,
             ),
             "update": AgentEditFields(
                 name=None,
@@ -266,6 +277,7 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 frequency_penalty=None,
                 presence_penalty=None,
                 seed=None,
+                current_working_directory=None,
             ),
             "expected_name": "Test Agent",
             "expected_prompt": "original prompt",
@@ -289,6 +301,7 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 frequency_penalty=0.0,
                 presence_penalty=0.0,
                 seed=None,
+                current_working_directory=None,
             ),
             "update": AgentEditFields(
                 name="Updated Agent",
@@ -305,6 +318,7 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 frequency_penalty=0.1,
                 presence_penalty=0.2,
                 seed=42,
+                current_working_directory=None,
             ),
             "expected_name": "Updated Agent",
             "expected_prompt": "New security prompt",
@@ -328,6 +342,7 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 frequency_penalty=0.0,
                 presence_penalty=0.0,
                 seed=None,
+                current_working_directory=None,
             ),
             "update": AgentEditFields(
                 name=None,
@@ -344,6 +359,7 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 frequency_penalty=None,
                 presence_penalty=None,
                 seed=None,
+                current_working_directory=None,
             ),
             "expected_name": "Test Agent",
             "expected_prompt": "original prompt",
@@ -367,6 +383,7 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 frequency_penalty=0.0,
                 presence_penalty=0.0,
                 seed=None,
+                current_working_directory=None,
             ),
             "update": AgentEditFields(
                 name="",
@@ -383,6 +400,7 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 frequency_penalty=0.0,
                 presence_penalty=0.0,
                 seed=0,
+                current_working_directory=None,
             ),
             "expected_name": "",
             "expected_prompt": "",
@@ -437,6 +455,7 @@ def test_delete_agent(temp_agents_dir: Path):
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
 
@@ -481,6 +500,7 @@ def test_list_agents(temp_agents_dir: Path):
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     agent2 = registry.create_agent(
@@ -499,6 +519,7 @@ def test_list_agents(temp_agents_dir: Path):
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     agents = registry.list_agents()
@@ -528,6 +549,7 @@ def test_save_and_load_conversation(temp_agents_dir: Path):
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
 
@@ -572,6 +594,7 @@ def test_load_nonexistent_conversation(temp_agents_dir: Path):
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     conversation_file = temp_agents_dir / f"{agent.id}_conversation.json"
@@ -603,6 +626,7 @@ def test_update_agent_not_found(temp_agents_dir: Path):
                 frequency_penalty=0.0,
                 presence_penalty=0.0,
                 seed=None,
+                current_working_directory=None,
             ),
         )
 
@@ -639,6 +663,7 @@ def test_create_agent_save_failure(temp_agents_dir: Path, monkeypatch):
                 frequency_penalty=0.0,
                 presence_penalty=0.0,
                 seed=None,
+                current_working_directory=None,
             )
         )
     assert str(exc_info.value) == "Fake write failure"
@@ -663,6 +688,7 @@ def test_clone_agent(temp_agents_dir: Path):
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
 
@@ -722,6 +748,7 @@ def test_clone_agent_duplicate_name(temp_agents_dir: Path):
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     registry.create_agent(
@@ -740,6 +767,7 @@ def test_clone_agent_duplicate_name(temp_agents_dir: Path):
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
 
@@ -768,6 +796,7 @@ def test_get_agent_by_name(temp_agents_dir: Path):
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
 

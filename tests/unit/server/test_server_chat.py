@@ -87,6 +87,7 @@ async def test_chat_sync_with_agent_success(
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     agent_id = agent.id
@@ -141,6 +142,7 @@ async def test_chat_with_agent_persist_conversation(
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     agent_id = agent.id
@@ -464,6 +466,7 @@ async def test_chat_with_agent_async_success(
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     agent_id = agent.id
@@ -537,6 +540,7 @@ async def test_chat_with_agent_async_persist_conversation(
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     agent_id = agent.id
@@ -665,6 +669,7 @@ async def test_chat_with_agent_async_with_context(
             frequency_penalty=0.0,
             presence_penalty=0.0,
             seed=None,
+            current_working_directory=None,
         )
     )
     agent_id = agent.id
