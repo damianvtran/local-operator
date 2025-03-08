@@ -1992,19 +1992,21 @@ class LocalCodeExecutor:
         directory_tree = self.format_directory_tree(list_working_directory())
         context_vars = get_context_vars_str(self.context)
 
-        return f"""<environment_details>
-        Current working directory: {cwd}
-        Current time: {current_time}
-        <git_status>
-        {git_status}
-        </git_status>
-        <directory_tree>
-        {directory_tree}
-        </directory_tree>
-        <execution_context_variables>
-        {context_vars}
-        </execution_context_variables>
-        </environment_details>"""
+        return f"""
+<environment_details>
+Current working directory: {cwd}
+Current time: {current_time}
+<git_status>
+{git_status}
+</git_status>
+<directory_tree>
+{directory_tree}
+</directory_tree>
+<execution_context_variables>
+{context_vars}
+</execution_context_variables>
+</environment_details>
+        """
 
     def _get_git_status(self) -> str:
         """Get the current git repository status.
@@ -2082,24 +2084,35 @@ class LocalCodeExecutor:
 
         # "Heads up display" for the agent
         hud_message = f"""
-        This is your "heads up display" to help you understand the current state of the
-        conversation and the environment.
+# Agent Heads Up Display
 
-        Use this information to help you complete the user's request.
+This is your "heads up display" to help you understand the current state of the
+conversation and the environment.
 
-        - environment_details: this is information about the files, variables, and other
-          details about the current state of the environment.  Use these in this and
-          future steps as needed instead of re-writing code.
-        {environment_details}
+Use this information to help you complete the user's request.
 
-        - learning_details: this is a notepad of things that you have learned from previous
-          conversations.
-        {learning_details}
+## Environment Details
+This is information about the files, variables, and other details about the current
+state of the environment.  Use these in this and future steps as needed instead of
+re-writing code.
 
-        - current_plan: this is the current and original plan that you made
-          based on the user's request.  Follow it closely and accurately and make sure
-          that you are making progress towards it.
-        {current_plan_details}
+### About Environment Details
+- git_status: this is the current git status of the working directory
+- directory_tree: this is a tree of the current working directory.  You can use this
+  to see what files and directories are available to you right here.
+- execution_context_variables: this is a list of variables that are available for use
+  in the current execution context.  You can use them in this step or future steps.
+
+{environment_details}
+
+## Learning Details
+This is a notepad of things that you have learned from previous conversations.
+{learning_details}
+
+## Current Plan
+This is the current and original plan that you made based on the user's request.
+Follow it closely and accurately and make sure that you are making progress towards it.
+{current_plan_details}
         """
 
         self.append_to_history(

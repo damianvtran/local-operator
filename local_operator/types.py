@@ -38,6 +38,7 @@ class ActionType(str, Enum):
     ASK = "ASK"
     BYE = "BYE"
     READ = "READ"
+    RESPOND = "RESPOND"
 
     def __str__(self) -> str:
         """Return the string representation of the ActionType enum.
@@ -134,14 +135,12 @@ class ResponseJsonSchema(BaseModel):
     """Schema for JSON responses from the language model.
 
     Attributes:
-        current_goal (str): The goal being attempted in the current step
         response (str): Natural language response explaining the actions being taken
         code (str): Python code to be executed to achieve the current goal
         action (str): Action to take next - one of: CONTINUE, DONE, ASK, BYE
         learnings (str): Learnings from the current step
     """
 
-    current_goal: str
     response: str
     code: str
     content: str

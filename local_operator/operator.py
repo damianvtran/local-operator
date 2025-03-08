@@ -29,10 +29,11 @@ from local_operator.notebook import save_code_history_to_notebook
 from local_operator.prompts import (
     PlanSystemPrompt,
     PlanUserPrompt,
-    ReflectionSystemPrompt,
+    ReflectionUserPrompt,
     create_system_prompt,
 )
 from local_operator.types import (
+    ActionType,
     ConversationRecord,
     ConversationRole,
     ProcessResponseStatus,
@@ -294,7 +295,7 @@ class Operator:
         It starts by creating a system prompt based on the available tools and the
         predefined reflection system prompt. The method then appends the current
         """
-        system_prompt = create_system_prompt(self.executor.tool_registry, ReflectionSystemPrompt)
+        system_prompt = create_system_prompt(self.executor.tool_registry, "")
 
         messages = [
             ConversationRecord(
@@ -309,7 +310,7 @@ class Operator:
         messages.append(
             ConversationRecord(
                 role=ConversationRole.USER,
-                content=PlanUserPrompt,
+                content=ReflectionUserPrompt,
             )
         )
 
@@ -377,6 +378,9 @@ class Operator:
         Raises:
             ValueError: If the model is not properly initialized
         """
+
+        self.executor.update_ephemeral_messages()
+
         self.executor.conversation_history.append(
             ConversationRecord(
                 role=ConversationRole.USER,
@@ -403,9 +407,9 @@ class Operator:
 
         response_json: ResponseJsonSchema | None = None
         response: BaseMessage | None = None
+
         self.executor.reset_step_counter()
         self.executor_is_processing = True
-        self.executor.update_ephemeral_messages()
 
         async with spinner_context(
             "Generating plan",
@@ -426,9 +430,6 @@ class Operator:
         ):
             if self.model_configuration is None:
                 raise ValueError("Model is not initialized")
-
-            # Add environment details, etc.
-            self.executor.update_ephemeral_messages()
 
             async with spinner_context(
                 "Generating response",
@@ -459,9 +460,9 @@ class Operator:
                             should_summarize=True,
                         ),
                         ConversationRecord(
-                            role=ConversationRole.SYSTEM,
+                            role=ConversationRole.USER,
                             content=(
-                                "[SYSTEM] Your attempted response failed JSON schema validation. "
+                                "Your attempted response failed JSON schema validation. "
                                 "Please review the validation errors and generate a valid "
                                 "response:\n\n"
                                 f"{error_details}\n\n"
@@ -478,18 +479,30 @@ class Operator:
 
             result = await self.executor.process_response(response_json)
 
-            # Reflect on the results of the last operation
-            async with spinner_context(
-                "Reflecting on the last step",
-                verbosity_level=self.verbosity_level,
-            ):
-                reflection = await self.generate_reflection()
+            # Update the "Agent Heads Up Display"
+            self.executor.update_ephemeral_messages()
 
-                if reflection and self.verbosity_level >= VerbosityLevel.VERBOSE:
-                    formatted_reflection = format_agent_output(reflection)
-                    print("\n\033[1;36m╭─ Agent Reflection ──────────────────────────────\033[0m")
-                    print(f"\033[1;36m│\033[0m {formatted_reflection}")
-                    print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
+            if (
+                response_json.action != ActionType.DONE
+                and response_json.action != ActionType.ASK
+                and response_json.action != ActionType.BYE
+            ):
+                # Reflect on the results of the last operation
+                async with spinner_context(
+                    "Reflecting on the last step",
+                    verbosity_level=self.verbosity_level,
+                ):
+                    reflection = await self.generate_reflection()
+
+                    if reflection and self.verbosity_level >= VerbosityLevel.VERBOSE:
+                        formatted_reflection = format_agent_output(reflection)
+                        print(
+                            "\n\033[1;36m╭─ Agent Reflection ──────────────────────────────\033[0m"
+                        )
+                        print(f"\033[1;36m│\033[0m {formatted_reflection}")
+                        print(
+                            "\033[1;36m╰──────────────────────────────────────────────────\033[0m\n"
+                        )
 
             # Auto-save on each step if enabled
             if self.auto_save_conversation:
