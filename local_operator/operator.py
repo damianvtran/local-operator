@@ -23,7 +23,7 @@ from local_operator.executor import (
     LocalCodeExecutor,
     process_json_response,
 )
-from local_operator.helpers import remove_think_tags
+from local_operator.helpers import clean_plain_text_response, remove_think_tags
 from local_operator.model.configure import ModelConfiguration
 from local_operator.notebook import save_code_history_to_notebook
 from local_operator.prompts import (
@@ -322,6 +322,9 @@ class Operator:
 
         # Remove think tags for reasoning models
         response_content = remove_think_tags(response_content)
+
+        # Clean the response content
+        response_content = clean_plain_text_response(response_content)
 
         self.executor.conversation_history.extend(
             [
