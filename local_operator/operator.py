@@ -29,6 +29,7 @@ from local_operator.notebook import save_code_history_to_notebook
 from local_operator.prompts import (
     PlanSystemPrompt,
     PlanUserPrompt,
+    ReflectionSystemPrompt,
     create_system_prompt,
 )
 from local_operator.types import (
@@ -251,7 +252,7 @@ class Operator:
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content=(
-                        "Please proceed according to the plan.  Choose appropriate actions "
+                        "Please proceed according to your plan.  Choose appropriate actions "
                         "and follow the JSON schema for your response.  Do not include any "
                         "other text or comments aside from the JSON object."
                     ),
@@ -261,6 +262,76 @@ class Operator:
         )
 
         self.executor.set_current_plan(response_content)
+        self.executor.add_to_code_history(
+            CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message=response_content,
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.SUCCESS,
+            ),
+            None,
+        )
+
+        # Save the conversation history and code execution history to the agent registry
+        # if the persist_conversation flag is set.
+        if self.persist_agent_conversation and self.agent_registry and self.current_agent:
+            self.agent_registry.update_agent_state(
+                self.current_agent.id,
+                self.executor.conversation_history,
+                self.executor.code_history,
+            )
+
+        return response_content
+
+    async def generate_reflection(self) -> str:
+        """Generate a reflection for the agent.
+
+        This method constructs a conversation with the agent to generate a reflection.
+        It starts by creating a system prompt based on the available tools and the
+        predefined reflection system prompt. The method then appends the current
+        """
+        system_prompt = create_system_prompt(self.executor.tool_registry, ReflectionSystemPrompt)
+
+        messages = [
+            ConversationRecord(
+                role=ConversationRole.SYSTEM,
+                content=system_prompt,
+                is_system_prompt=True,
+            ),
+        ]
+
+        messages.extend(self.executor.conversation_history[1:])
+
+        messages.append(
+            ConversationRecord(
+                role=ConversationRole.USER,
+                content=PlanUserPrompt,
+            )
+        )
+
+        response = await self.executor.invoke_model(messages)
+
+        response_content = (
+            response.content if isinstance(response.content, str) else str(response.content)
+        )
+
+        # Remove think tags for reasoning models
+        response_content = remove_think_tags(response_content)
+
+        self.executor.conversation_history.extend(
+            [
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content=response_content,
+                    should_summarize=False,
+                ),
+            ]
+        )
+
         self.executor.add_to_code_history(
             CodeExecutionResult(
                 stdout="",
@@ -342,7 +413,7 @@ class Operator:
         ):
             plan = await self.generate_plan()
 
-            if plan:
+            if plan and self.verbosity_level >= VerbosityLevel.VERBOSE:
                 formatted_plan = format_agent_output(plan)
                 print("\n\033[1;36m╭─ Agent Plan ──────────────────────────────────────\033[0m")
                 print(f"\033[1;36m│\033[0m {formatted_plan}")
@@ -406,6 +477,19 @@ class Operator:
                 continue
 
             result = await self.executor.process_response(response_json)
+
+            # Reflect on the results of the last operation
+            async with spinner_context(
+                "Reflecting on the last step",
+                verbosity_level=self.verbosity_level,
+            ):
+                reflection = await self.generate_reflection()
+
+                if reflection and self.verbosity_level >= VerbosityLevel.VERBOSE:
+                    formatted_reflection = format_agent_output(reflection)
+                    print("\n\033[1;36m╭─ Agent Reflection ──────────────────────────────\033[0m")
+                    print(f"\033[1;36m│\033[0m {formatted_reflection}")
+                    print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
 
             # Auto-save on each step if enabled
             if self.auto_save_conversation:
