@@ -981,3 +981,78 @@ async def test_get_agent_execution_history_empty(test_app_client, dummy_registry
     assert result.get("total") == 0
     assert result.get("count") == 0
     assert len(result.get("history", [])) == 0
+
+
+@pytest.mark.asyncio
+async def test_clear_agent_conversation(test_app_client, dummy_registry: AgentRegistry):
+    """Test clearing an agent's conversation history."""
+    # Create a test agent
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="Conversation Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description=None,
+            last_message=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+    agent_id = agent.id
+
+    # Create mock conversation records
+    mock_conversation = []
+    for i in range(5):
+        mock_conversation.append(
+            ConversationRecord(
+                role=ConversationRole.USER if i % 2 == 0 else ConversationRole.ASSISTANT,
+                content=f"Message {i+1}",
+                should_summarize=True,
+                timestamp=datetime.now(timezone.utc),
+            )
+        )
+
+    # Save the mock conversation
+    dummy_registry.save_agent_conversation(agent_id, mock_conversation, [])
+
+    # Verify conversation exists
+    response = await test_app_client.get(f"/v1/agents/{agent_id}/conversation")
+    assert response.status_code == 200
+    data = response.json()
+    result = data.get("result")
+    assert result["total"] == 5
+
+    # Clear the conversation
+    response = await test_app_client.delete(f"/v1/agents/{agent_id}/conversation")
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("status") == 200
+    assert data.get("message") == "Agent conversation cleared successfully"
+    assert data.get("result") == {}
+
+    # Verify conversation is cleared
+    response = await test_app_client.get(f"/v1/agents/{agent_id}/conversation")
+    assert response.status_code == 200
+    data = response.json()
+    result = data.get("result")
+    assert result["total"] == 0
+    assert len(result["messages"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_clear_agent_conversation_not_found(test_app_client, dummy_registry: AgentRegistry):
+    """Test clearing conversation for a non-existent agent."""
+    non_existent_id = "nonexistent"
+    response = await test_app_client.delete(f"/v1/agents/{non_existent_id}/conversation")
+
+    assert response.status_code == 404
+    data = response.json()
+    assert f"Agent with ID {non_existent_id} not found" in data.get("detail", "")

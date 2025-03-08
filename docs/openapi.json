@@ -765,6 +765,77 @@
             }
           }
         }
+      },
+      "delete": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Clear agent conversation",
+        "description": "Clear the conversation history for a specific agent.",
+        "operationId": "clear_agent_conversation_v1_agents__agent_id__conversation_delete",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "ID of the agent to clear conversation for",
+              "examples": [
+                "agent123"
+              ],
+              "title": "Agent Id"
+            },
+            "description": "ID of the agent to clear conversation for"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent conversation cleared successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "Agent conversation cleared successfully",
+                  "result": {}
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Agent with ID agent123 not found"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Error clearing agent conversation"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/v1/agents/{agent_id}/history": {

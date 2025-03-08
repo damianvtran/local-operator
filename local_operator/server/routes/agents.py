@@ -531,6 +531,79 @@ async def get_agent_conversation(
         )
 
 
+@router.delete(
+    "/v1/agents/{agent_id}/conversation",
+    response_model=CRUDResponse,
+    summary="Clear agent conversation",
+    description="Clear the conversation history for a specific agent.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "description": "Agent conversation cleared successfully",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "status": 200,
+                            "message": "Agent conversation cleared successfully",
+                            "result": {},
+                        }
+                    }
+                },
+            },
+            "404": {
+                "description": "Agent not found",
+                "content": {
+                    "application/json": {"example": {"detail": "Agent with ID agent123 not found"}}
+                },
+            },
+            "500": {
+                "description": "Internal server error",
+                "content": {
+                    "application/json": {"example": {"detail": "Error clearing agent conversation"}}
+                },
+            },
+        },
+    },
+)
+async def clear_agent_conversation(
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
+    agent_id: str = Path(
+        ..., description="ID of the agent to clear conversation for", examples=["agent123"]
+    ),
+):
+    """
+    Clear the conversation history for a specific agent.
+
+    Args:
+        agent_registry: The agent registry dependency
+        agent_id: The unique identifier of the agent
+
+    Returns:
+        CRUDResponse: A response indicating success or failure
+
+    Raises:
+        HTTPException: If the agent registry is not initialized or the agent is not found
+    """
+    try:
+        # Get the agent to verify it exists
+        agent_registry.get_agent(agent_id)
+
+        # Clear the conversation by saving an empty list
+        agent_registry.save_agent_conversation(agent_id, [], [])
+
+        return CRUDResponse(
+            status=200,
+            message="Agent conversation cleared successfully",
+            result={},
+        )
+    except KeyError:
+        logger.exception(f"Agent with ID {agent_id} not found")
+        raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+    except Exception as e:
+        logger.exception("Error clearing agent conversation")
+        raise HTTPException(status_code=500, detail=f"Error clearing agent conversation: {str(e)}")
+
+
 @router.get(
     "/v1/agents/{agent_id}/history",
     response_model=CRUDResponse[AgentExecutionHistoryResult],
