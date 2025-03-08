@@ -1279,10 +1279,7 @@ class LocalCodeExecutor:
                 f"<stdout>\n{condensed_output}\n</stdout>\n"
                 f"<stderr>\n{condensed_error_output}\n</stderr>\n"
                 f"<logger>\n{condensed_log_output}\n</logger>\n"
-                "Please review the results and continue according to the plan. "
-                "If you need to run the code again, please do so with the necessary "
-                "changes or improvements.  Please proceed and respond with your next "
-                "json response and make sure to follow the response format.",
+                "Please review the results and and determine what to do next.",
                 should_summarize=True,
             )
         )
@@ -1307,11 +1304,7 @@ class LocalCodeExecutor:
             f"The initial execution failed with an error.\n"
             f"{error_info}\n"
             "Debug the code you submitted and make all necessary corrections "
-            "to fix the error and run successfully.  Pick up from where you left "
-            "off and try to avoid re-running code that has already succeeded.  "
-            "Use the environment details to determine which variables are available "
-            "and correct, which are not.  After fixing the issue please continue with the "
-            "tasks according to the plan."
+            "to fix the error and run successfully."
         )
         self.append_to_history(
             ConversationRecord(

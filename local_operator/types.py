@@ -134,22 +134,14 @@ class ResponseJsonSchema(BaseModel):
     """Schema for JSON responses from the language model.
 
     Attributes:
-        previous_step_success (bool): Whether the previous step was successful
-        previous_step_issue (str): A precise description of the issue with the previous step.
-        previous_goal (str): The goal that was attempted in the previous step
         current_goal (str): The goal being attempted in the current step
-        next_goal (str): The planned goal for the next step
         response (str): Natural language response explaining the actions being taken
         code (str): Python code to be executed to achieve the current goal
         action (str): Action to take next - one of: CONTINUE, DONE, ASK, BYE
         learnings (str): Learnings from the current step
     """
 
-    previous_step_success: bool
-    previous_step_issue: str
-    previous_goal: str
     current_goal: str
-    next_goal: str
     response: str
     code: str
     content: str
