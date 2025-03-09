@@ -6,10 +6,6 @@ from local_operator.types import ActionType, ConversationRole, ResponseJsonSchem
 
 USER_MOCK_RESPONSES = {
     "hello": ResponseJsonSchema(
-        previous_step_success=True,
-        previous_goal="",
-        current_goal="Greet the user",
-        next_goal="",
         response="Hello! I am the test model.",
         code="",
         action=ActionType.DONE,
@@ -17,13 +13,8 @@ USER_MOCK_RESPONSES = {
         content="",
         file_path="",
         replacements=[],
-        previous_step_issue="",
     ),
-    "please proceed according to the plan": ResponseJsonSchema(
-        previous_step_success=True,
-        previous_goal="",
-        current_goal="",
-        next_goal="",
+    "please proceed according to your plan": ResponseJsonSchema(
         response='I will execute a simple Python script to print "Hello World".',
         code='print("Hello World")',
         action=ActionType.CODE,
@@ -31,16 +22,11 @@ USER_MOCK_RESPONSES = {
         content="",
         file_path="",
         replacements=[],
-        previous_step_issue="",
     ),
-    "please come up with a detailed writeup for a plan of actions": (
-        "Sure, I will create a plan to print 'Hello World'."
+    "think aloud about what you will need to do": (
+        "I will need to print 'Hello World' to the console."
     ),
     "hello world": ResponseJsonSchema(
-        previous_step_success=True,
-        previous_goal="Print Hello World",
-        current_goal="Complete task",
-        next_goal="",
         response="I have printed 'Hello World' to the console.",
         code="",
         action=ActionType.DONE,
@@ -48,7 +34,6 @@ USER_MOCK_RESPONSES = {
         content="",
         file_path="",
         replacements=[],
-        previous_step_issue="",
     ),
 }
 
@@ -121,10 +106,6 @@ class ChatMock:
         # Pass through the last message if no match found
         return BaseMessage(
             content=ResponseJsonSchema(
-                previous_step_success=False,
-                previous_goal="",
-                current_goal="",
-                next_goal="",
                 response=f"No mock response for message: {user_message}",
                 code="",
                 action=ActionType.DONE,
@@ -132,7 +113,6 @@ class ChatMock:
                 content="",
                 file_path="",
                 replacements=[],
-                previous_step_issue="",
             ).model_dump_json(),
             type=ConversationRole.ASSISTANT.value,
         )
