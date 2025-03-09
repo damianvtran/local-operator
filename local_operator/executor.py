@@ -963,7 +963,9 @@ class LocalCodeExecutor:
 
         return safety_result
 
-    async def execute_code(self, code: str, max_retries: int = 3) -> CodeExecutionResult:
+    async def execute_code(
+        self, response: ResponseJsonSchema, max_retries: int = 3
+    ) -> CodeExecutionResult:
         """Execute Python code with safety checks and context management.
 
         Args:
@@ -974,14 +976,14 @@ class LocalCodeExecutor:
             CodeExecutionResult: The result of the code execution
         """
         # First check code safety
-        safety_result = await self._check_and_confirm_safety(code)
+        safety_result = await self._check_and_confirm_safety(response.code)
         if safety_result == ConfirmSafetyResult.UNSAFE:
             return CodeExecutionResult(
                 stdout="",
                 stderr="",
                 logging="",
                 message="Code execution canceled by user",
-                code=code,
+                code=response.code,
                 formatted_print="",
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.CANCELLED,
@@ -993,7 +995,7 @@ class LocalCodeExecutor:
                 stderr="",
                 logging="",
                 message="Code execution requires further confirmation from the user",
-                code=code,
+                code=response.code,
                 formatted_print="",
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.CONFIRMATION_REQUIRED,
@@ -1006,12 +1008,12 @@ class LocalCodeExecutor:
                     " prompt\033[0m\n"
                 )
 
-        current_code = code
+        current_response = response
         final_error: Exception | None = None
 
         for attempt in range(max_retries):
             try:
-                return await self._execute_with_output(current_code)
+                return await self._execute_with_output(current_response)
             except Exception as error:
                 final_error = error
                 if attempt == 0:
@@ -1025,9 +1027,9 @@ class LocalCodeExecutor:
 
                 if attempt < max_retries - 1:
                     try:
-                        new_code = await self._get_corrected_code()
-                        if new_code:
-                            current_code = new_code
+                        new_response = await self._get_corrected_code()
+                        if new_response:
+                            current_response = new_response
                         else:
                             break
                     except Exception as retry_error:
@@ -1043,7 +1045,7 @@ class LocalCodeExecutor:
             stderr="",
             logging="",
             message="",
-            code=current_code,
+            code=response.code,
             formatted_print=formatted_print,
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.ERROR,
@@ -1100,11 +1102,11 @@ class LocalCodeExecutor:
                 return ConfirmSafetyResult.CONVERSATION_CONFIRM
         return safety_result
 
-    async def _execute_with_output(self, code: str) -> CodeExecutionResult:
+    async def _execute_with_output(self, response: ResponseJsonSchema) -> CodeExecutionResult:
         """Execute code and capture stdout/stderr output.
 
         Args:
-            code (str): The Python code to execute
+            response (ResponseJsonSchema): The response from the language model
 
         Returns:
             CodeExecutionResult: The result of the code execution
@@ -1147,7 +1149,7 @@ class LocalCodeExecutor:
                 specific_logger.propagate = False
 
         try:
-            await self._run_code(code)
+            await self._run_code(response.code)
             log_output = log_capture.getvalue()
 
             condensed_output, condensed_error_output, condensed_log_output = (
@@ -1161,11 +1163,11 @@ class LocalCodeExecutor:
                 stderr=condensed_error_output,
                 logging=condensed_log_output,
                 message="",
-                code=code,
+                code=response.code,
                 formatted_print=formatted_print,
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.SUCCESS,
-                files=[],
+                files=response.new_files,
             )
         except Exception as e:
             # Add captured log output to error output if any
@@ -1351,7 +1353,7 @@ class LocalCodeExecutor:
             )
         )
 
-    async def _get_corrected_code(self) -> str:
+    async def _get_corrected_code(self) -> ResponseJsonSchema:
         """Get corrected code from the language model.
 
         Returns:
@@ -1372,7 +1374,7 @@ class LocalCodeExecutor:
             )
         )
 
-        return response_json.code
+        return response_json
 
     async def process_response(self, response: ResponseJsonSchema) -> ProcessResponseOutput:
         """Process model response, extracting and executing any code blocks.
@@ -1555,7 +1557,7 @@ class LocalCodeExecutor:
                             verbosity_level=self.verbosity_level,
                         )
 
-                        execution_result = await self.execute_code(code_block)
+                        execution_result = await self.execute_code(response)
 
                         if "code execution cancelled by user" in execution_result.message:
                             return ProcessResponseOutput(
