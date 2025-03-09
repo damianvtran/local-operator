@@ -224,7 +224,6 @@ class JobManager:
 
                 if result:
                     if isinstance(result, dict):
-                        print(f"result: {result}")
                         job.result = JobResult(**result)
                     else:
                         job.result = result
