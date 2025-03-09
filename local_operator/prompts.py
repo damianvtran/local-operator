@@ -648,8 +648,9 @@ user and how to perform the task if there is some work associated with the reque
 
 Here are the request types and how to think about classifying them:
 
-conversation: General chat, questions, discussions that don't require complex analysis or processing
-creative_writing: Writing stories, poems, articles, marketing copy, etc.
+conversation: General chat, questions, discussions that don't require complex analysis or
+processing, role playing, etc.
+creative_writing: Writing stories, poems, articles, marketing copy, presentations, speeches, etc.
 data_science: Data analysis, visualization, machine learning, statistics
 mathematics: Math problems, calculations, proofs
 accounting: Financial calculations, bookkeeping, budgets
