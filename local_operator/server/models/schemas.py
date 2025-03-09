@@ -57,6 +57,8 @@ class ChatRequest(BaseModel):
         stream: Whether to stream the response token by token. Default: False
         context: Optional list of previous messages for context
         options: Optional generation parameters to override defaults
+        attachments: Optional list of file paths (local or remote) to be used in the analysis.
+            These files are expected to be publicly accessible.
     """
 
     hosting: str
@@ -65,6 +67,7 @@ class ChatRequest(BaseModel):
     stream: bool = False
     context: Optional[List[ConversationRecord]] = None
     options: Optional[ChatOptions] = None
+    attachments: Optional[List[str]] = None
 
 
 class ChatStats(BaseModel):
@@ -415,6 +418,8 @@ class AgentChatRequest(BaseModel):
         user_message_id: Optional ID of the user message to assign to the first user message
             in the conversation.  This is used by the UI to prevent duplicate user
             messages after the initial render.
+        attachments: Optional list of file paths (local or remote) to be used in the analysis.
+            These files are expected to be publicly accessible.
     """
 
     hosting: str
@@ -424,6 +429,7 @@ class AgentChatRequest(BaseModel):
     options: Optional[ChatOptions] = None
     persist_conversation: bool = False
     user_message_id: Optional[str] = None
+    attachments: Optional[List[str]] = None
 
 
 class ConfigUpdate(BaseModel):

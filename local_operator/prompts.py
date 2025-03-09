@@ -619,6 +619,33 @@ def get_system_details_str() -> str:
     return system_details_str
 
 
+def apply_attachments_to_prompt(prompt: str, attachments: List[str] | None) -> str:
+    """Add a section to the prompt about using the provided files in the analysis.
+
+    This function takes a prompt and a list of file paths (local or remote), and adds
+    a section to the prompt instructing the model to use these files in its analysis.
+
+    Args:
+        prompt (str): The original user prompt
+        attachments (List[str] | None): A list of file paths (local or remote) to be used
+            in the analysis, or None if no attachments are provided
+
+    Returns:
+        str: The modified prompt with the attachments section added
+    """
+    if not attachments:
+        return prompt
+
+    attachments_section = (
+        "\n\n## Attachments\n\nPlease use the following files to help with my request:\n\n"
+    )
+
+    for i, attachment in enumerate(attachments, 1):
+        attachments_section += f"{i}. {attachment}\n"
+
+    return prompt + attachments_section
+
+
 def create_system_prompt(
     tool_registry: ToolRegistry | None = None, response_format: str = JsonResponseFormatPrompt
 ) -> str:

@@ -15,6 +15,7 @@ from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.jobs import JobManager
+from local_operator.prompts import apply_attachments_to_prompt
 from local_operator.server.dependencies import (
     get_agent_registry,
     get_config_manager,
@@ -120,7 +121,12 @@ async def chat_endpoint(
                 model_instance.temperature = temperature
             model_instance.top_p = request.options.top_p or model_instance.top_p
 
-        response_json = await operator.handle_user_input(request.prompt)
+        # Apply attachments to prompt if provided
+        prompt_with_attachments = apply_attachments_to_prompt(
+            request.prompt, getattr(request, "attachments", None)
+        )
+
+        response_json = await operator.handle_user_input(prompt_with_attachments)
         if response_json is not None:
             response_content = response_json.response
         else:
@@ -231,7 +237,10 @@ async def chat_with_agent(
                 model_instance.temperature = temperature
             model_instance.top_p = request.options.top_p or model_instance.top_p
 
-        response_json = await operator.handle_user_input(request.prompt)
+        # Apply attachments to prompt if provided
+        prompt_with_attachments = apply_attachments_to_prompt(request.prompt, request.attachments)
+
+        response_json = await operator.handle_user_input(prompt_with_attachments)
         response_content = response_json.response if response_json is not None else ""
 
         # Calculate token stats using tiktoken
@@ -336,13 +345,18 @@ async def chat_async_endpoint(
             agent_id=None,
         )
 
+        # Apply attachments to prompt if provided
+        prompt_with_attachments = apply_attachments_to_prompt(
+            request.prompt, getattr(request, "attachments", None)
+        )
+
         # Create and start a process for the job using the utility function
         create_and_start_job_process_with_queue(
             job_id=job.id,
             process_func=run_job_in_process_with_queue,
             args=(
                 job.id,
-                request.prompt,
+                prompt_with_attachments,
                 request.model,
                 request.hosting,
                 credential_manager,
@@ -460,13 +474,16 @@ async def chat_with_agent_async(
             agent_id=agent_id,
         )
 
+        # Apply attachments to prompt if provided
+        prompt_with_attachments = apply_attachments_to_prompt(request.prompt, request.attachments)
+
         # Create and start a process for the job
         create_and_start_job_process_with_queue(
             job_id=job.id,
             process_func=run_agent_job_in_process_with_queue,
             args=(
                 job.id,
-                request.prompt,
+                prompt_with_attachments,
                 request.model,
                 request.hosting,
                 agent_id,
