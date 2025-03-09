@@ -445,10 +445,19 @@ async def test_check_code_safety_unsafe_without_prompt(executor, mock_model_conf
 @pytest.mark.asyncio
 async def test_execute_code_success(executor, mock_model_config):
     mock_model_config.instance.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
-    code = "print('hello')"
+    response = ResponseJsonSchema(
+        code="print('hello')",
+        action=ActionType.CODE,
+        content="",
+        file_path="",
+        learnings="",
+        new_files=[],
+        replacements=[],
+        response="",
+    )
 
     with patch("sys.stdout", new_callable=io.StringIO):
-        execution_result = await executor.execute_code(code)
+        execution_result = await executor.execute_code(response)
         assert "✓ Code Execution Complete" in execution_result.formatted_print
         assert "hello" in execution_result.formatted_print
 
@@ -456,10 +465,19 @@ async def test_execute_code_success(executor, mock_model_config):
 @pytest.mark.asyncio
 async def test_execute_code_no_output(executor, mock_model_config):
     mock_model_config.instance.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
-    code = "x = 1 + 1"  # Code that produces no output
+    response = ResponseJsonSchema(
+        code="x = 1 + 1",
+        action=ActionType.CODE,
+        content="",
+        file_path="",
+        learnings="",
+        new_files=[],
+        replacements=[],
+        response="",
+    )
 
     with patch("sys.stdout", new_callable=io.StringIO):
-        execution_result = await executor.execute_code(code)
+        execution_result = await executor.execute_code(response)
         assert "✓ Code Execution Complete" in execution_result.formatted_print
         assert "[No output]" in execution_result.formatted_print
 
@@ -470,10 +488,19 @@ async def test_execute_code_safety_no_prompt(executor, mock_model_config):
     mock_model_config.instance.ainvoke.return_value.content = (
         "The code is unsafe because it deletes important files\n\n[UNSAFE]"
     )
-    code = "import os; os.remove('file.txt')"  # Potentially dangerous code
+    response = ResponseJsonSchema(
+        code="import os; os.remove('file.txt')",
+        action=ActionType.CODE,
+        content="",
+        file_path="",
+        learnings="",
+        new_files=[],
+        replacements=[],
+        response="",
+    )
 
     with patch("sys.stdout", new_callable=io.StringIO):
-        execution_result = await executor.execute_code(code)
+        execution_result = await executor.execute_code(response)
 
         # Should not cancel execution but add warning to conversation history
         assert "requires further confirmation" in execution_result.message
@@ -489,13 +516,22 @@ async def test_execute_code_safety_with_prompt(executor, mock_model_config):
     mock_model_config.instance.ainvoke.return_value.content = (
         "The code is unsafe because it deletes important files\n\n[UNSAFE]"
     )
-    code = "import os; os.remove('file.txt')"  # Potentially dangerous code
+    response = ResponseJsonSchema(
+        code="import os; os.remove('file.txt')",
+        action=ActionType.CODE,
+        content="",
+        file_path="",
+        learnings="",
+        new_files=[],
+        replacements=[],
+        response="",
+    )
 
     with (
         patch("sys.stdout", new_callable=io.StringIO),
         patch("builtins.input", return_value="n"),
     ):  # User responds "n" to safety prompt
-        execution_result = await executor.execute_code(code)
+        execution_result = await executor.execute_code(response)
 
         # Should cancel execution when user declines
         assert "Code execution canceled by user" in execution_result.message
@@ -509,13 +545,22 @@ async def test_execute_code_safety_with_prompt(executor, mock_model_config):
 async def test_execute_code_safety_with_prompt_approved(executor, mock_model_config):
     # Default can_prompt_user is True
     mock_model_config.instance.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
-    code = "x = 1 + 1"
+    response = ResponseJsonSchema(
+        code="x = 1 + 1",
+        action=ActionType.CODE,
+        content="",
+        file_path="",
+        learnings="",
+        new_files=[],
+        replacements=[],
+        response="",
+    )
 
     with (
         patch("sys.stdout", new_callable=io.StringIO),
         patch("builtins.input", return_value="y"),  # User responds "y" to safety prompt
     ):
-        execution_result = await executor.execute_code(code)
+        execution_result = await executor.execute_code(response)
 
         # Should proceed with execution when user approves
         assert "Code Execution Complete" in execution_result.formatted_print
@@ -527,10 +572,19 @@ async def test_execute_code_safety_with_override(executor, mock_model_config):
     mock_model_config.instance.ainvoke.return_value.content = (
         "The code is unsafe but has security override\n\n[OVERRIDE]"
     )
-    code = "x = 1 + 1"
+    response = ResponseJsonSchema(
+        code="x = 1 + 1",
+        action=ActionType.CODE,
+        content="",
+        file_path="",
+        learnings="",
+        new_files=[],
+        replacements=[],
+        response="",
+    )
 
     with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
-        execution_result = await executor.execute_code(code)
+        execution_result = await executor.execute_code(response)
 
         # Should proceed with execution and log override
         assert "Code Execution Complete" in execution_result.formatted_print
