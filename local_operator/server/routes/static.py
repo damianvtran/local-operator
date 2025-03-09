@@ -21,10 +21,15 @@ ALLOWED_IMAGE_TYPES: List[str] = [
     "image/jpeg",
     "image/png",
     "image/gif",
-    "image/bmp",
     "image/webp",
+    "image/bmp",
     "image/svg+xml",
     "image/tiff",
+    "image/x-icon",
+    "image/heic",
+    "image/heif",
+    "image/avif",
+    "image/pjpeg",
 ]
 
 
