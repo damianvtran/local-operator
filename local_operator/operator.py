@@ -23,15 +23,17 @@ from local_operator.executor import (
     LocalCodeExecutor,
     process_json_response,
 )
-from local_operator.helpers import remove_think_tags
+from local_operator.helpers import clean_plain_text_response, remove_think_tags
 from local_operator.model.configure import ModelConfiguration
 from local_operator.notebook import save_code_history_to_notebook
 from local_operator.prompts import (
     PlanSystemPrompt,
     PlanUserPrompt,
+    ReflectionUserPrompt,
     create_system_prompt,
 )
 from local_operator.types import (
+    ActionType,
     ConversationRecord,
     ConversationRole,
     ProcessResponseStatus,
@@ -251,7 +253,7 @@ class Operator:
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content=(
-                        "Please proceed according to the plan.  Choose appropriate actions "
+                        "Please proceed according to your plan.  Choose appropriate actions "
                         "and follow the JSON schema for your response.  Do not include any "
                         "other text or comments aside from the JSON object."
                     ),
@@ -261,6 +263,79 @@ class Operator:
         )
 
         self.executor.set_current_plan(response_content)
+        self.executor.add_to_code_history(
+            CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message=response_content,
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.SUCCESS,
+            ),
+            None,
+        )
+
+        # Save the conversation history and code execution history to the agent registry
+        # if the persist_conversation flag is set.
+        if self.persist_agent_conversation and self.agent_registry and self.current_agent:
+            self.agent_registry.update_agent_state(
+                self.current_agent.id,
+                self.executor.conversation_history,
+                self.executor.code_history,
+            )
+
+        return response_content
+
+    async def generate_reflection(self) -> str:
+        """Generate a reflection for the agent.
+
+        This method constructs a conversation with the agent to generate a reflection.
+        It starts by creating a system prompt based on the available tools and the
+        predefined reflection system prompt. The method then appends the current
+        """
+        system_prompt = create_system_prompt(self.executor.tool_registry, "")
+
+        messages = [
+            ConversationRecord(
+                role=ConversationRole.SYSTEM,
+                content=system_prompt,
+                is_system_prompt=True,
+            ),
+        ]
+
+        messages.extend(self.executor.conversation_history[1:])
+
+        messages.append(
+            ConversationRecord(
+                role=ConversationRole.USER,
+                content=ReflectionUserPrompt,
+            )
+        )
+
+        response = await self.executor.invoke_model(messages)
+
+        response_content = (
+            response.content if isinstance(response.content, str) else str(response.content)
+        )
+
+        # Remove think tags for reasoning models
+        response_content = remove_think_tags(response_content)
+
+        # Clean the response content
+        response_content = clean_plain_text_response(response_content)
+
+        self.executor.conversation_history.extend(
+            [
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content=response_content,
+                    should_summarize=False,
+                ),
+            ]
+        )
+
         self.executor.add_to_code_history(
             CodeExecutionResult(
                 stdout="",
@@ -306,6 +381,9 @@ class Operator:
         Raises:
             ValueError: If the model is not properly initialized
         """
+
+        self.executor.update_ephemeral_messages()
+
         self.executor.conversation_history.append(
             ConversationRecord(
                 role=ConversationRole.USER,
@@ -332,9 +410,9 @@ class Operator:
 
         response_json: ResponseJsonSchema | None = None
         response: BaseMessage | None = None
+
         self.executor.reset_step_counter()
         self.executor_is_processing = True
-        self.executor.update_ephemeral_messages()
 
         async with spinner_context(
             "Generating plan",
@@ -342,7 +420,7 @@ class Operator:
         ):
             plan = await self.generate_plan()
 
-            if plan:
+            if plan and self.verbosity_level >= VerbosityLevel.VERBOSE:
                 formatted_plan = format_agent_output(plan)
                 print("\n\033[1;36m╭─ Agent Plan ──────────────────────────────────────\033[0m")
                 print(f"\033[1;36m│\033[0m {formatted_plan}")
@@ -355,9 +433,6 @@ class Operator:
         ):
             if self.model_configuration is None:
                 raise ValueError("Model is not initialized")
-
-            # Add environment details, etc.
-            self.executor.update_ephemeral_messages()
 
             async with spinner_context(
                 "Generating response",
@@ -388,9 +463,9 @@ class Operator:
                             should_summarize=True,
                         ),
                         ConversationRecord(
-                            role=ConversationRole.SYSTEM,
+                            role=ConversationRole.USER,
                             content=(
-                                "[SYSTEM] Your attempted response failed JSON schema validation. "
+                                "Your attempted response failed JSON schema validation. "
                                 "Please review the validation errors and generate a valid "
                                 "response:\n\n"
                                 f"{error_details}\n\n"
@@ -406,6 +481,32 @@ class Operator:
                 continue
 
             result = await self.executor.process_response(response_json)
+
+            # Update the "Agent Heads Up Display"
+
+            if (
+                response_json.action != ActionType.DONE
+                and response_json.action != ActionType.ASK
+                and response_json.action != ActionType.BYE
+            ):
+                self.executor.update_ephemeral_messages()
+
+                # Reflect on the results of the last operation
+                async with spinner_context(
+                    "Reflecting on the last step",
+                    verbosity_level=self.verbosity_level,
+                ):
+                    reflection = await self.generate_reflection()
+
+                    if reflection and self.verbosity_level >= VerbosityLevel.VERBOSE:
+                        formatted_reflection = format_agent_output(reflection)
+                        print(
+                            "\n\033[1;36m╭─ Agent Reflection ──────────────────────────────\033[0m"
+                        )
+                        print(f"\033[1;36m│\033[0m {formatted_reflection}")
+                        print(
+                            "\033[1;36m╰──────────────────────────────────────────────────\033[0m\n"
+                        )
 
             # Auto-save on each step if enabled
             if self.auto_save_conversation:

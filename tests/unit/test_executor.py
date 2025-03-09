@@ -601,10 +601,6 @@ def test_get_confirm_safety_result(case):
 @pytest.mark.asyncio
 async def test_process_response(executor, mock_model_config):
     response = ResponseJsonSchema(
-        previous_step_success=True,
-        previous_goal="",
-        current_goal="Print hello world",
-        next_goal="",
         response="Here's some code:",
         code="print('hello world')",
         action=ActionType.CODE,
@@ -612,7 +608,6 @@ async def test_process_response(executor, mock_model_config):
         content="",
         file_path="",
         replacements=[],
-        previous_step_issue="",
     )
     mock_model_config.instance.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
 
@@ -1289,10 +1284,6 @@ async def test_perform_action(
     expected_output: str,
 ) -> None:
     response = ResponseJsonSchema(
-        previous_step_success=True,
-        previous_goal="",
-        current_goal="Test goal",
-        next_goal="",
         response="Test response",
         code=code or "",
         action=action_type,
@@ -1300,7 +1291,6 @@ async def test_perform_action(
         content=content or "",
         file_path=file_path or "",
         replacements=replacements or [],
-        previous_step_issue="",
     )
 
     original_read_file = executor.read_file
@@ -1376,10 +1366,6 @@ async def test_perform_action(
 @pytest.mark.asyncio
 async def test_perform_action_handles_exception(executor: LocalCodeExecutor):
     response = ResponseJsonSchema(
-        previous_step_success=True,
-        previous_goal="",
-        current_goal="Test goal",
-        next_goal="",
         response="Test response",
         code="invalid code",
         action=ActionType.CODE,
@@ -1387,7 +1373,6 @@ async def test_perform_action_handles_exception(executor: LocalCodeExecutor):
         content="",
         file_path="",
         replacements=[],
-        previous_step_issue="",
     )
 
     executor.execute_code = AsyncMock(side_effect=Exception("Execution failed"))
