@@ -60,6 +60,7 @@ class ConversationRecord(BaseModel):
         summarized (bool): Whether this message has been summarized
         is_system_prompt (bool): Whether this message is a system prompt
         timestamp (datetime): When this message was created
+        files (List[str]): The files that were created or modified during the code execution
 
     Methods:
         to_dict(): Convert the record to a dictionary format
@@ -73,6 +74,7 @@ class ConversationRecord(BaseModel):
     summarized: Optional[bool] = False
     is_system_prompt: Optional[bool] = False
     timestamp: Optional[datetime] = None
+    files: Optional[List[str]] = None
 
     def dict(self, *args, **kwargs) -> Dict[str, Any]:
         """Convert the conversation record to a dictionary format compatible with LangChain.
@@ -88,6 +90,7 @@ class ConversationRecord(BaseModel):
             "summarized": str(self.summarized),
             "is_system_prompt": str(self.is_system_prompt),
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "files": self.files,
         }
 
     def to_dict(self) -> Dict[str, Any]:
@@ -104,6 +107,7 @@ class ConversationRecord(BaseModel):
             "summarized": str(self.summarized),
             "is_system_prompt": str(self.is_system_prompt),
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "files": self.files,
         }
 
     @classmethod
@@ -128,6 +132,7 @@ class ConversationRecord(BaseModel):
                 if data.get("timestamp")
                 else None
             ),
+            files=data.get("files", None),
         )
 
 
@@ -187,6 +192,7 @@ class CodeExecutionResult(BaseModel):
         role (ConversationRole): The role of the message sender (user/assistant/system)
         status (ProcessResponseStatus): The status of the code execution
         timestamp (datetime): The timestamp of the code execution
+        files (List[str]): The files that were created or modified during the code execution
     """
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -199,6 +205,7 @@ class CodeExecutionResult(BaseModel):
     role: ConversationRole
     status: ProcessResponseStatus
     timestamp: Optional[datetime] = None
+    files: List[str] = []
 
 
 class AgentExecutorState(BaseModel):

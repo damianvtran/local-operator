@@ -30,6 +30,7 @@ from local_operator.prompts import (
     PlanSystemPrompt,
     PlanUserPrompt,
     ReflectionUserPrompt,
+    apply_attachments_to_prompt,
     create_system_prompt,
 )
 from local_operator.types import (
@@ -362,7 +363,7 @@ class Operator:
         return response_content
 
     async def handle_user_input(
-        self, user_input: str, user_message_id: str | None = None
+        self, user_input: str, user_message_id: str | None = None, attachments: List[str] = []
     ) -> ResponseJsonSchema | None:
         """Process user input and generate agent responses.
 
@@ -384,13 +385,17 @@ class Operator:
 
         self.executor.update_ephemeral_messages()
 
+        user_input_with_attachments = apply_attachments_to_prompt(user_input, attachments)
+
         self.executor.conversation_history.append(
             ConversationRecord(
                 role=ConversationRole.USER,
-                content=user_input,
+                content=user_input_with_attachments,
+                files=attachments,
                 should_summarize=False,
             )
         )
+
         self.executor.add_to_code_history(
             CodeExecutionResult(
                 id=user_message_id if user_message_id else str(uuid.uuid4()),
@@ -400,6 +405,7 @@ class Operator:
                 formatted_print="",
                 code="",
                 message=user_input,
+                files=attachments,
                 role=ConversationRole.USER,
                 status=ProcessResponseStatus.SUCCESS,
             ),

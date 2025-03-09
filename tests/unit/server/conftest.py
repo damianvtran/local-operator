@@ -95,7 +95,10 @@ class DummyOperator:
         self.executor = executor
         self.current_agent = None
 
-    async def handle_user_input(self, prompt: str, user_message_id: str | None = None):
+    async def handle_user_input(
+        self, prompt: str, user_message_id: str | None = None, attachments: List[str] = []
+    ):
+
         dummy_response = ResponseJsonSchema(
             response="dummy operator response",
             code="",
@@ -107,7 +110,7 @@ class DummyOperator:
         )
 
         self.executor.conversation_history.append(
-            ConversationRecord(role=ConversationRole.USER, content=prompt)
+            ConversationRecord(role=ConversationRole.USER, content=prompt, files=attachments)
         )
         self.executor.conversation_history.append(
             ConversationRecord(
@@ -123,6 +126,7 @@ class DummyOperator:
                 formatted_print="",
                 code="",
                 message=prompt,
+                files=attachments,
                 role=ConversationRole.USER,
                 status=ProcessResponseStatus.SUCCESS,
             ),

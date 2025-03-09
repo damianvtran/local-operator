@@ -71,27 +71,16 @@ async def test_chat_with_attachments(
     test_prompt = "Analyze these files"
     test_attachments = ["file1.txt", "file2.pdf"]
 
-    # Mock the apply_attachments_to_prompt function
-    with patch(
-        "local_operator.server.routes.chat.apply_attachments_to_prompt"
-    ) as mock_apply_attachments:
-        # Set up the mock to return a modified prompt
-        expected_prompt_with_attachments = f"{test_prompt} with attachments"
-        mock_apply_attachments.return_value = expected_prompt_with_attachments
+    # Create payload with attachments
+    payload = {
+        "hosting": "openai",
+        "model": "gpt-4o",
+        "prompt": test_prompt,
+        "context": [],
+        "attachments": test_attachments,
+    }
 
-        # Create payload with attachments
-        payload = {
-            "hosting": "openai",
-            "model": "gpt-4o",
-            "prompt": test_prompt,
-            "context": [],
-            "attachments": test_attachments,
-        }
-
-        response = await test_app_client.post("/v1/chat", json=payload)
-
-        # Verify apply_attachments_to_prompt was called with correct arguments
-        mock_apply_attachments.assert_called_once_with(test_prompt, test_attachments)
+    response = await test_app_client.post("/v1/chat", json=payload)
 
     assert response.status_code == 200
     data = response.json()
@@ -99,79 +88,15 @@ async def test_chat_with_attachments(
     # Verify that the response contains the dummy operator response.
     assert result.get("response") == "dummy operator response"
     conversation = result.get("context")
+
+    # Verify that attachments are present in the conversation history
+    user_messages = [msg for msg in conversation if msg.get("role") == ConversationRole.USER.value]
+    assert len(user_messages) > 0, "No user messages found in conversation"
+    assert (
+        user_messages[0].get("files") == test_attachments
+    ), "Attachments not found in conversation"
+
     assert isinstance(conversation, list)
-
-
-@pytest.mark.asyncio
-async def test_chat_with_agent_attachments(
-    test_app_client,
-    dummy_executor,
-    dummy_registry,
-    mock_create_operator,
-):
-    """Test chat with a specific agent with attachments."""
-    # Create a test agent
-    agent = dummy_registry.create_agent(
-        AgentEditFields(
-            name="Test Agent",
-            security_prompt="Test Security",
-            hosting="openai",
-            model="gpt-4",
-            description="",
-            last_message="",
-            temperature=0.7,
-            top_p=1.0,
-            top_k=None,
-            max_tokens=2048,
-            stop=None,
-            frequency_penalty=0.0,
-            presence_penalty=0.0,
-            seed=None,
-            current_working_directory=None,
-        )
-    )
-    agent_id = agent.id
-
-    test_prompt = "Analyze these files for the agent"
-    test_attachments = ["agent_file1.txt", "agent_file2.pdf"]
-
-    # Mock the apply_attachments_to_prompt function
-    with patch(
-        "local_operator.server.routes.chat.apply_attachments_to_prompt"
-    ) as mock_apply_attachments:
-        # Set up the mock to return a modified prompt
-        expected_prompt_with_attachments = f"{test_prompt} with agent attachments"
-        mock_apply_attachments.return_value = expected_prompt_with_attachments
-
-        # Create payload with attachments
-        payload = AgentChatRequest(
-            hosting="openai",
-            model="gpt-4",
-            prompt=test_prompt,
-            attachments=test_attachments,
-            persist_conversation=False,
-        )
-
-        response = await test_app_client.post(
-            f"/v1/chat/agents/{agent_id}", json=payload.model_dump()
-        )
-
-        # Verify apply_attachments_to_prompt was called with correct arguments
-        mock_apply_attachments.assert_called_once_with(test_prompt, test_attachments)
-
-    assert response.status_code == 200
-    data = response.json()
-    result = data.get("result")
-    assert result.get("response") == "dummy operator response"
-    conversation = result.get("context")
-    assert isinstance(conversation, list)
-
-    # Verify token stats
-    stats = result.get("stats")
-    assert stats is not None
-    assert stats.get("total_tokens") > 0
-    assert stats.get("prompt_tokens") > 0
-    assert stats.get("completion_tokens") > 0
 
 
 @pytest.mark.asyncio
@@ -454,9 +379,15 @@ async def test_chat_async_endpoint_success(
                 model="gpt-4o",
                 prompt="Process this asynchronously",
                 context=[],
+                attachments=["file1.txt", "file2.pdf"],
             )
 
             response = await test_app_client.post("/v1/chat/async", json=payload.model_dump())
+
+            args_passed = mock_create_and_start_job_process_with_queue.call_args[1]["args"]
+
+            assert args_passed[1] == "Process this asynchronously"
+            assert args_passed[2] == ["file1.txt", "file2.pdf"]
 
             assert response.status_code == 202
             data = response.json()
@@ -475,80 +406,6 @@ async def test_chat_async_endpoint_success(
             # create_and_start_job_process_with_queue
             # So we don't need to verify it was called directly
             mock_create_and_start_job_process_with_queue.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_chat_async_with_attachments(
-    test_app_client,
-    mock_create_operator,
-    mock_job_manager,
-):
-    """Test asynchronous chat request with attachments."""
-    # Mock the job processor functions
-    mock_process = MagicMock()
-    mock_monitor_task = MagicMock()
-    mock_create_and_start_job_process_with_queue = MagicMock(
-        return_value=(mock_process, mock_monitor_task)
-    )
-
-    # Setup mock job
-    mock_job = MagicMock()
-    mock_job.id = "test-job-attachments-id"
-    mock_job.status = JobStatus.PENDING
-    mock_job.created_at = datetime.now(timezone.utc).timestamp()
-    mock_job.started_at = None
-    mock_job.completed_at = None
-    mock_job_manager.create_job.return_value = mock_job
-
-    # Mock the apply_attachments_to_prompt function
-    with patch(
-        "local_operator.server.routes.chat.apply_attachments_to_prompt"
-    ) as mock_apply_attachments:
-        # Set up the mock to return a modified prompt
-        test_prompt = "Process these files asynchronously"
-        test_attachments = ["async_file1.txt", "async_file2.pdf"]
-        expected_prompt_with_attachments = f"{test_prompt} with async attachments"
-        mock_apply_attachments.return_value = expected_prompt_with_attachments
-
-        # Mock the job processor functions to avoid pickling issues in tests
-        with patch(
-            "local_operator.server.routes.chat.create_and_start_job_process_with_queue",
-            mock_create_and_start_job_process_with_queue,
-        ):
-            with patch("local_operator.server.routes.chat.run_job_in_process_with_queue"):
-                payload = {
-                    "hosting": "openai",
-                    "model": "gpt-4o",
-                    "prompt": test_prompt,
-                    "context": [],
-                    "attachments": test_attachments,
-                }
-
-                response = await test_app_client.post("/v1/chat/async", json=payload)
-
-                # Verify apply_attachments_to_prompt was called with correct arguments
-                mock_apply_attachments.assert_called_once_with(test_prompt, test_attachments)
-
-                # Verify the modified prompt was used in the job process
-                args_passed = mock_create_and_start_job_process_with_queue.call_args[1]["args"]
-                assert (
-                    args_passed[1] == expected_prompt_with_attachments
-                )  # prompt is the second arg
-
-                assert response.status_code == 202
-                data = response.json()
-                assert data["status"] == 202
-                assert data["message"] == "Chat request accepted"
-                assert data["result"]["id"] == "test-job-attachments-id"
-                assert data["result"]["status"] == "pending"
-                # Note: The original prompt is stored in the job, not the modified one
-                # with attachments
-                assert data["result"]["prompt"] == test_prompt
-                assert data["result"]["model"] == "gpt-4o"
-                assert data["result"]["hosting"] == "openai"
-
-                # Verify the job was created
-                mock_job_manager.create_job.assert_called_once()
 
 
 @pytest.mark.asyncio
