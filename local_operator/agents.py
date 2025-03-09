@@ -1,4 +1,5 @@
 import json
+import logging
 import time
 import uuid
 from datetime import datetime, timezone
@@ -533,6 +534,7 @@ class AgentRegistry:
                         conversation_data = AgentConversation.model_validate(raw_data)
                         return conversation_data
                     except Exception as e:
+                        logging.error(f"Failed to load conversation: {str(e)}")
                         raise Exception(f"Failed to load conversation: {str(e)}")
             except Exception:
                 # Return an empty conversation if the file is unreadable.
