@@ -199,21 +199,6 @@ def run_agent_job_in_process_with_queue(
                     persist_conversation=persist_conversation,
                 )
 
-                # Configure model options if provided
-                model_instance = process_operator.executor.model_configuration.instance
-
-                # Handle temperature
-                if hasattr(agent_obj, "temperature") and agent_obj.temperature is not None:
-                    if hasattr(model_instance, "temperature"):
-                        # Use setattr to avoid type checking issues
-                        setattr(model_instance, "temperature", agent_obj.temperature)
-
-                # Handle top_p
-                if hasattr(agent_obj, "top_p") and agent_obj.top_p is not None:
-                    if hasattr(model_instance, "top_p"):
-                        # Use setattr to avoid type checking issues
-                        setattr(model_instance, "top_p", agent_obj.top_p)
-
                 # Process the request
                 response_json = await process_operator.handle_user_input(prompt, user_message_id)
 

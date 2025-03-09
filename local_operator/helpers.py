@@ -7,6 +7,9 @@ that they conform to the expected format and are free from unnecessary tags or
 elements.
 """
 
+import json
+import re
+
 
 def remove_think_tags(response_content: str) -> str:
     """
@@ -27,3 +30,61 @@ def remove_think_tags(response_content: str) -> str:
                 + response_content[end_think_index + len("</think>") :].strip()
             )
     return response_content
+
+
+def clean_plain_text_response(response_content: str) -> str:
+    """
+    Clean plain text responses like reflection and planning by removing code blocks and
+    standalone JSON.
+
+    Args:
+        response_content (str): The original plain text response potentially containing
+                               code blocks or JSON objects.
+
+    Returns:
+        str: The cleaned response with code blocks and standalone JSON removed.
+    """
+    # Check if the entire content is a JSON object
+    if response_content.strip().startswith("{") and response_content.strip().endswith("}"):
+        try:
+            json.loads(response_content.strip())
+            # If it parses as valid JSON, remove it completely
+            return ""
+        except json.JSONDecodeError:
+            # Not valid JSON, keep the content
+            pass
+
+    # Remove code blocks
+    lines = response_content.split("\n")
+    cleaned_lines = []
+    in_code_block = False
+    code_block_start_index = -1
+
+    for i, line in enumerate(lines):
+        if line.strip().startswith("```"):
+            if not in_code_block:
+                in_code_block = True
+                code_block_start_index = i
+            else:
+                in_code_block = False
+                # Add an empty line if there's content before and after the code block
+                if code_block_start_index > 0 and i < len(lines) - 1:
+                    cleaned_lines.append("")
+            continue
+        if not in_code_block:
+            cleaned_lines.append(line.rstrip())
+
+    cleaned_content = "\n".join(cleaned_lines)
+
+    # Remove JSON objects embedded in the text
+    pattern = r'\{(?:[^{}]|"[^"]*")*\}'
+    cleaned_content = re.sub(pattern, "", cleaned_content)
+
+    # Clean up any double spaces and preserve line breaks
+    cleaned_content = re.sub(r" +", " ", cleaned_content)
+
+    # Remove trailing spaces at the end of each line and leading spaces at the beginning
+    # of each line
+    cleaned_content = "\n".join(line.strip() for line in cleaned_content.split("\n"))
+
+    return cleaned_content.strip()

@@ -79,10 +79,6 @@ def test_cli_operator_init(mock_model_config, executor):
 @pytest.mark.asyncio
 async def test_cli_operator_chat(cli_operator, mock_model_config):
     mock_response = ResponseJsonSchema(
-        previous_step_success=True,
-        previous_goal="",
-        current_goal="",
-        next_goal="",
         response="I'm done",
         code="",
         content="",
@@ -90,7 +86,6 @@ async def test_cli_operator_chat(cli_operator, mock_model_config):
         replacements=[],
         action=ActionType.DONE,
         learnings="",
-        previous_step_issue="",
     )
     mock_model_config.instance.ainvoke.return_value.content = mock_response.model_dump_json()
     cli_operator._agent_should_exit = MagicMock(return_value=True)
@@ -110,10 +105,6 @@ def test_agent_is_done(cli_operator):
         {
             "name": "DONE action",
             "response": ResponseJsonSchema(
-                previous_step_success=True,
-                previous_goal="",
-                current_goal="",
-                next_goal="",
                 response="",
                 code="",
                 content="",
@@ -121,17 +112,12 @@ def test_agent_is_done(cli_operator):
                 replacements=[],
                 action=ActionType.DONE,
                 learnings="",
-                previous_step_issue="",
             ),
             "expected": True,
         },
         {
             "name": "Other action",
             "response": ResponseJsonSchema(
-                previous_step_success=True,
-                previous_goal="",
-                current_goal="",
-                next_goal="",
                 response="",
                 code="",
                 content="",
@@ -139,7 +125,6 @@ def test_agent_is_done(cli_operator):
                 replacements=[],
                 action=ActionType.CODE,
                 learnings="",
-                previous_step_issue="",
             ),
             "expected": False,
         },
@@ -165,10 +150,6 @@ def test_agent_requires_user_input(cli_operator):
         {
             "name": "ASK action",
             "response": ResponseJsonSchema(
-                previous_step_success=True,
-                previous_goal="",
-                current_goal="",
-                next_goal="",
                 response="",
                 code="",
                 content="",
@@ -176,17 +157,12 @@ def test_agent_requires_user_input(cli_operator):
                 replacements=[],
                 action=ActionType.ASK,
                 learnings="",
-                previous_step_issue="",
             ),
             "expected": True,
         },
         {
             "name": "Other action",
             "response": ResponseJsonSchema(
-                previous_step_success=True,
-                previous_goal="",
-                current_goal="",
-                next_goal="",
                 response="",
                 code="",
                 content="",
@@ -194,7 +170,6 @@ def test_agent_requires_user_input(cli_operator):
                 replacements=[],
                 action=ActionType.DONE,
                 learnings="",
-                previous_step_issue="",
             ),
             "expected": False,
         },
@@ -212,10 +187,6 @@ def test_agent_should_exit(cli_operator):
         {
             "name": "BYE action",
             "response": ResponseJsonSchema(
-                previous_step_success=True,
-                previous_goal="",
-                current_goal="",
-                next_goal="",
                 response="",
                 code="",
                 content="",
@@ -223,17 +194,12 @@ def test_agent_should_exit(cli_operator):
                 replacements=[],
                 action=ActionType.BYE,
                 learnings="",
-                previous_step_issue="",
             ),
             "expected": True,
         },
         {
             "name": "Other action",
             "response": ResponseJsonSchema(
-                previous_step_success=True,
-                previous_goal="",
-                current_goal="",
-                next_goal="",
                 response="",
                 code="",
                 content="",
@@ -241,7 +207,6 @@ def test_agent_should_exit(cli_operator):
                 replacements=[],
                 action=ActionType.CODE,
                 learnings="",
-                previous_step_issue="",
             ),
             "expected": False,
         },
@@ -274,9 +239,6 @@ async def test_operator_print_hello_world(cli_operator):
     last_message_content = ResponseJsonSchema.model_validate_json(last_message.content)
 
     assert last_message_content is not None
-    assert last_message_content.previous_step_success is True
-    assert last_message_content.previous_goal == "Print Hello World"
-    assert last_message_content.current_goal == "Complete task"
     assert last_message_content.response == "I have printed 'Hello World' to the console."
     assert last_message_content.code == ""
     assert last_message_content.action == ActionType.DONE
