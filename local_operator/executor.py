@@ -1168,7 +1168,7 @@ class LocalCodeExecutor:
                 stdout=condensed_output,
                 stderr=condensed_error_output,
                 logging=condensed_log_output,
-                message="",
+                message=response.response,
                 code=response.code,
                 formatted_print=formatted_print,
                 role=ConversationRole.ASSISTANT,
