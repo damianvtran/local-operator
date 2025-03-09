@@ -6,6 +6,7 @@ from unittest.mock import patch
 import psutil
 
 from local_operator.prompts import (
+    apply_attachments_to_prompt,
     create_system_prompt,
     get_system_details_str,
     get_tools_str,
@@ -265,3 +266,35 @@ def test_get_system_details_str_apple_silicon(monkeypatch):
 
     # Check that the result contains Apple Silicon GPU information
     assert "gpus: Apple Silicon GPU with Metal support" in result
+
+
+def test_apply_attachments_to_prompt():
+    """Test the apply_attachments_to_prompt function adds attachments section to prompt."""
+    # Test case 1: No attachments
+    prompt = "Analyze this data"
+    result = apply_attachments_to_prompt(prompt, None)
+    assert result == prompt
+
+    # Test case 2: Empty attachments list
+    result = apply_attachments_to_prompt(prompt, [])
+    assert result == prompt
+
+    # Test case 3: With attachments
+    attachments = ["file1.txt", "file2.pdf", "https://example.com/data.csv"]
+    result = apply_attachments_to_prompt(prompt, attachments)
+
+    # Verify the result contains the original prompt
+    assert prompt in result
+
+    # Verify the result contains the attachments section header
+    assert "## Attachments" in result
+    assert "Please use the following files" in result
+
+    # Verify each attachment is listed
+    for attachment in attachments:
+        assert attachment in result
+
+    # Verify the numbering format (1. file1.txt, etc.)
+    assert "1. file1.txt" in result
+    assert "2. file2.pdf" in result
+    assert "3. https://example.com/data.csv" in result
