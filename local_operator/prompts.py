@@ -442,8 +442,10 @@ Fields:
   use for any actions that are not WRITE.
 - file_path: Required for READ/WRITE/EDIT: path to file.  Do not use for any actions
   that are not READ/WRITE/EDIT.
-- new_files: List of newly created files from the CODE action.  Don't include files that
-  are not being created in the current step, or not being created by CODE.
+- new_files: List of files that are interacted with in the CODE action.  The purpose of
+  this is to communicate with the user about the files that you are working with.  Only
+  provide this for the CODE action since it is already provided in the file_path field
+  for other actions.
 - replacements: List of replacements to make in the file.
 - action: Required for all actions: CODE | READ | WRITE | EDIT | DONE | ASK | BYE
 

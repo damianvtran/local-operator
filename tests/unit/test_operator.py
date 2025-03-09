@@ -14,7 +14,7 @@ def mock_model_config():
     model_configuration = MagicMock()
     model_configuration.instance = AsyncMock()
     model_configuration.instance.ainvoke = AsyncMock()
-    return model_configuration
+    yield model_configuration
 
 
 @pytest.fixture
@@ -22,7 +22,7 @@ def executor(mock_model_config):
     executor = LocalCodeExecutor(model_configuration=mock_model_config)
     executor.conversation_history = []
     executor.tool_registry = ToolRegistry()
-    return executor
+    yield executor
 
 
 @pytest.fixture
@@ -48,7 +48,7 @@ def cli_operator(mock_model_config, executor):
 
     operator._get_input_with_history = MagicMock(return_value="noop")
 
-    return operator
+    yield operator
 
 
 def test_cli_operator_init(mock_model_config, executor):
@@ -88,16 +88,30 @@ async def test_cli_operator_chat(cli_operator, mock_model_config):
         action=ActionType.DONE,
         learnings="",
     )
+
+    # Patch all required methods at once to reduce nesting
+    mock_classify_request = patch.object(
+        cli_operator, "classify_request", return_value=MagicMock()
+    ).start()
+    mock_generate_plan = patch.object(
+        cli_operator, "generate_plan", return_value=MagicMock()
+    ).start()
+    patch.object(cli_operator, "_agent_should_exit", return_value=True).start()
+    patch("builtins.input", return_value="exit").start()
+
+    # Set up the mock response
     mock_model_config.instance.ainvoke.return_value.content = mock_response.model_dump_json()
-    cli_operator._agent_should_exit = MagicMock(return_value=True)
 
-    with patch("builtins.input", return_value="exit"):
-        await cli_operator.chat()
+    # Execute the test
+    await cli_operator.chat()
 
-        assert (
-            cli_operator.executor.conversation_history[-1].content
-            == mock_response.model_dump_json()
-        )
+    # Assertions
+    assert mock_classify_request.call_count == 1
+    assert mock_generate_plan.call_count == 1
+    assert cli_operator.executor.conversation_history[-1].content == mock_response.model_dump_json()
+
+    # Clean up patches
+    patch.stopall()
 
 
 def test_agent_is_done(cli_operator):

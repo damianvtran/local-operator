@@ -90,11 +90,17 @@ def test_get_tools_str():
             "name": "Default init registry",
             "registry": ToolRegistry(),
             "expected": (
-                "- async browse_single_url(url: str) -> Coroutine[str]: Browse to a URL "
-                "using Playwright to render JavaScript and return the page content.\n"
-                "- list_working_directory(max_depth: int = 3) -> Dict: "
-                "List the files in the current "
-                "directory showing files and their metadata."
+                "- async get_page_html_content(url: str) -> Coroutine[str]: Browse to a URL using "
+                "Playwright to render JavaScript and return the full HTML page content.  Use this "
+                "for any URL that you want to get the full HTML content of for scraping and "
+                "understanding the HTML format of the page.  # noqa: E501\n"
+                "- async get_page_text_content(url: str) -> Coroutine[str]: Browse to a URL using "
+                "Playwright to render JavaScript and extract clean text content.  Use this for any "
+                "URL that you want to read the content for, for research purposes. Extracts text "
+                "from semantic elements like headings, paragraphs, lists etc. and returns "
+                "a cleaned text representation of the page content. # noqa: E501\n"
+                "- list_working_directory(max_depth: int = 3) -> Dict: List the files in the "
+                "current directory showing files and their metadata."
             ),
         },
         {
