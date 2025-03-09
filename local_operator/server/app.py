@@ -25,6 +25,7 @@ from local_operator.server.routes import (
     health,
     jobs,
     models,
+    static,
 )
 
 logger = logging.getLogger("local_operator.server")
@@ -73,6 +74,7 @@ app = FastAPI(
         {"name": "Configuration", "description": "Configuration management endpoints"},
         {"name": "Credentials", "description": "Credential management endpoints"},
         {"name": "Models", "description": "Model management endpoints"},
+        {"name": "Static", "description": "Static file hosting endpoints"},
     ],
 )
 
@@ -118,4 +120,9 @@ app.include_router(
 # /v1/models
 app.include_router(
     models.router,
+)
+
+# /v1/static
+app.include_router(
+    static.router,
 )
