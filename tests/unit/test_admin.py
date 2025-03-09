@@ -145,6 +145,7 @@ def test_create_agent_from_conversation_with_user_messages(
             formatted_print="Hello, world!",
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
+            files=[],
         )
     ]
     executor.conversation_history = conversation_history
@@ -164,6 +165,7 @@ def test_create_agent_from_conversation_with_user_messages(
             formatted_print="Hello, world!",
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
+            files=[],
         )
     ]
 
@@ -214,6 +216,7 @@ def test_save_agent_training_with_agent(
             formatted_print="Hello, world!",
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
+            files=[],
         ),
         CodeExecutionResult(
             id="test_code_execution_id2",
@@ -225,6 +228,7 @@ def test_save_agent_training_with_agent(
             formatted_print="Lorem ipsum dolor sit amet!",
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
+            files=[],
         ),
     ]
     executor.conversation_history = conversation_history

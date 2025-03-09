@@ -19,6 +19,8 @@ from typing import Any, Dict, List, Optional, TypeVar, Union, cast
 
 from pydantic import BaseModel, Field, field_validator
 
+from local_operator.types import ConversationRole
+
 logger = logging.getLogger("local_operator.jobs")
 
 T = TypeVar("T")
@@ -34,11 +36,19 @@ class JobStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class JobContextRecord(BaseModel):
+    """Model representing a record of a job context."""
+
+    role: ConversationRole
+    content: str
+    files: Optional[List[str]] = None
+
+
 class JobResult(BaseModel):
     """Model representing the result of a completed job."""
 
     response: Optional[str] = None
-    context: Optional[List[Dict[str, str]]] = None
+    context: Optional[List[JobContextRecord]] = None
     stats: Optional[Dict[str, int]] = None
     error: Optional[str] = None
 
@@ -214,6 +224,7 @@ class JobManager:
 
                 if result:
                     if isinstance(result, dict):
+                        print(f"result: {result}")
                         job.result = JobResult(**result)
                     else:
                         job.result = result

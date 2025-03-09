@@ -606,6 +606,7 @@ async def test_process_response(executor, mock_model_config):
         action=ActionType.CODE,
         learnings="",
         content="",
+        new_files=[],
         file_path="",
         replacements=[],
     )
@@ -1164,7 +1165,7 @@ def test_get_context_vars_str(
             '"current_goal": "Print hello world", "next_goal": "", '
             '"response": "Here\'s some code:", "code": "print(\'hello world\')", '
             '"action": "CODE", "learnings": "", "plan": "", "content": "", '
-            '"file_path": "", "replacements": []}',
+            '"file_path": "", "replacements": [], "new_files": []}',
             "print('hello world')",
             ActionType.CODE,
         ),
@@ -1174,7 +1175,7 @@ def test_get_context_vars_str(
             '"next_goal": "", "response": "Here\'s some code:", '
             '"code": "print(\'hello world\')", "action": "CODE", '
             '"learnings": "", "plan": "", "content": "", '
-            '"file_path": "", "replacements": []}\n```',
+            '"file_path": "", "replacements": [], "new_files": []}\n```',
             "print('hello world')",
             ActionType.CODE,
         ),
@@ -1184,7 +1185,7 @@ def test_get_context_vars_str(
             '"next_goal": "", "response": "I will write a file", '
             '"code": "", "action": "WRITE", "learnings": "", '
             '"plan": "", "content": "file content", '
-            '"file_path": "output.txt", "replacements": []}\n```',
+            '"file_path": "output.txt", "replacements": [], "new_files": []}\n```',
             "",
             ActionType.WRITE,
         ),
@@ -1194,7 +1195,7 @@ def test_get_context_vars_str(
             '"current_goal": "Print hello world", "next_goal": "", '
             '"response": "Here\'s some code:", "code": "print(\'hello world\')", '
             '"action": "CODE", "learnings": "", "plan": "", "content": "", '
-            '"file_path": "", "replacements": []}\n```',
+            '"file_path": "", "replacements": [], "new_files": []}\n```',
             "print('hello world')",
             ActionType.CODE,
         ),
@@ -1204,7 +1205,7 @@ def test_get_context_vars_str(
             '"next_goal": "", "response": "Here\'s some code:", '
             '"code": "print(\'hello world\')", "action": "CODE", '
             '"learnings": "", "plan": "", "content": "", '
-            '"file_path": "", "replacements": []}',
+            '"file_path": "", "replacements": [], "new_files": []}',
             "print('hello world')",
             ActionType.CODE,
         ),
@@ -1214,7 +1215,7 @@ def test_get_context_vars_str(
             '"next_goal": "", "response": "Here\'s some code:", '
             '"code": "print(\'hello world\')", "action": "CODE", '
             '"learnings": "", "plan": "", "content": "", '
-            '"file_path": "", "replacements": []} Text after',
+            '"file_path": "", "replacements": [], "new_files": []} Text after',
             "print('hello world')",
             ActionType.CODE,
         ),
@@ -1224,7 +1225,7 @@ def test_get_context_vars_str(
             '"next_goal": "", "response": "Here\'s some code:", '
             '"code": "print(\'hello world\')", "action": "CODE", '
             '"learnings": "", "plan": "", "content": "", '
-            '"file_path": "", "replacements": []} Text after',
+            '"file_path": "", "replacements": [], "new_files": []} Text after',
             "print('hello world')",
             ActionType.CODE,
         ),
@@ -1235,7 +1236,7 @@ def test_get_context_vars_str(
             '"response": "Here\'s the result after thinking", '
             '"code": "print(\'thought result\')", "action": "CODE", '
             '"learnings": "", "plan": "", "content": "", '
-            '"file_path": "", "replacements": []}',
+            '"file_path": "", "replacements": [], "new_files": []}',
             "print('thought result')",
             ActionType.CODE,
         ),
@@ -1283,13 +1284,17 @@ async def test_perform_action(
     replacements: list[dict[str, str]] | None,
     expected_output: str,
 ) -> None:
+
+    file_path = file_path or ""
+
     response = ResponseJsonSchema(
         response="Test response",
         code=code or "",
         action=action_type,
         learnings="",
         content=content or "",
-        file_path=file_path or "",
+        file_path=file_path,
+        new_files=[],
         replacements=replacements or [],
     )
 
@@ -1310,6 +1315,7 @@ async def test_perform_action(
                     message="",
                     role=ConversationRole.SYSTEM,
                     status=ProcessResponseStatus.SUCCESS,
+                    files=[file_path],
                 )
             )
         elif action_type == ActionType.WRITE:
@@ -1323,6 +1329,7 @@ async def test_perform_action(
                     message="",
                     role=ConversationRole.SYSTEM,
                     status=ProcessResponseStatus.SUCCESS,
+                    files=[file_path],
                 )
             )
         elif action_type == ActionType.EDIT:
@@ -1336,6 +1343,7 @@ async def test_perform_action(
                     message="",
                     role=ConversationRole.SYSTEM,
                     status=ProcessResponseStatus.SUCCESS,
+                    files=[file_path],
                 )
             )
         else:
@@ -1349,6 +1357,7 @@ async def test_perform_action(
                     message="",
                     role=ConversationRole.SYSTEM,
                     status=ProcessResponseStatus.SUCCESS,
+                    files=[],
                 )
             )
 
@@ -1372,6 +1381,7 @@ async def test_perform_action_handles_exception(executor: LocalCodeExecutor):
         learnings="",
         content="",
         file_path="",
+        new_files=[],
         replacements=[],
     )
 

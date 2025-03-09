@@ -783,6 +783,7 @@ async def test_get_agent_execution_history(test_app_client, dummy_registry: Agen
                 role=ConversationRole.SYSTEM,
                 status=ProcessResponseStatus.SUCCESS,
                 timestamp=datetime.now(timezone.utc),
+                files=[],
             )
         )
 
@@ -845,6 +846,7 @@ async def test_get_agent_execution_history_pagination(
                 role=ConversationRole.SYSTEM,
                 status=ProcessResponseStatus.SUCCESS,
                 timestamp=datetime.now(timezone.utc),
+                files=[],
             )
         )
 
@@ -918,6 +920,7 @@ async def test_get_agent_execution_history_page_out_of_bounds(
                 role=ConversationRole.SYSTEM,
                 status=ProcessResponseStatus.SUCCESS,
                 timestamp=datetime.now(timezone.utc),
+                files=[],
             )
         )
 

@@ -985,6 +985,7 @@ class LocalCodeExecutor:
                 formatted_print="",
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.CANCELLED,
+                files=[],
             )
         elif safety_result == ConfirmSafetyResult.CONVERSATION_CONFIRM:
             return CodeExecutionResult(
@@ -996,6 +997,7 @@ class LocalCodeExecutor:
                 formatted_print="",
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.CONFIRMATION_REQUIRED,
+                files=[],
             )
         elif safety_result == ConfirmSafetyResult.OVERRIDE:
             if self.verbosity_level >= VerbosityLevel.INFO:
@@ -1045,6 +1047,7 @@ class LocalCodeExecutor:
             formatted_print=formatted_print,
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.ERROR,
+            files=[],
         )
 
     async def _check_and_confirm_safety(self, code: str) -> ConfirmSafetyResult:
@@ -1162,6 +1165,7 @@ class LocalCodeExecutor:
                 formatted_print=formatted_print,
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.SUCCESS,
+                files=[],
             )
         except Exception as e:
             # Add captured log output to error output if any
@@ -1459,6 +1463,7 @@ class LocalCodeExecutor:
                     message=response.response,
                     role=ConversationRole.ASSISTANT,
                     status=ProcessResponseStatus.SUCCESS,
+                    files=[],
                 ),
                 response,
             )
@@ -1636,7 +1641,7 @@ class LocalCodeExecutor:
             ValueError: If the file is too large to read
             OSError: If there is an error reading the file
         """
-        expanded_file_path = os.path.expanduser(file_path)
+        expanded_file_path = Path(file_path).expanduser().resolve()
 
         if os.path.getsize(expanded_file_path) > max_file_size_bytes:
             raise ValueError(
@@ -1655,7 +1660,7 @@ class LocalCodeExecutor:
 
         self.append_to_history(
             ConversationRecord(
-                role=ConversationRole.SYSTEM,
+                role=ConversationRole.ASSISTANT,
                 content=(
                     f"Contents of {file_path}:\n"
                     f"\n"
@@ -1676,8 +1681,9 @@ class LocalCodeExecutor:
             formatted_print=f"Successfully read file: {file_path}",
             code="",
             message="",
-            role=ConversationRole.SYSTEM,
+            role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
+            files=[str(expanded_file_path)],
         )
 
     async def write_file(self, file_path: str, content: str) -> CodeExecutionResult:
@@ -1702,14 +1708,14 @@ class LocalCodeExecutor:
 
         cleaned_content = "\n".join(content_lines)
 
-        expanded_file_path = os.path.expanduser(file_path)
+        expanded_file_path = Path(file_path).expanduser().resolve()
 
         with open(expanded_file_path, "w") as f:
             f.write(cleaned_content)
 
         self.append_to_history(
             ConversationRecord(
-                role=ConversationRole.SYSTEM,
+                role=ConversationRole.ASSISTANT,
                 content=f"Successfully wrote to file: {file_path}",
                 should_summarize=True,
             )
@@ -1726,8 +1732,9 @@ class LocalCodeExecutor:
             formatted_print=f"Successfully wrote to file: {file_path}",
             code=equivalent_code,
             message="",
-            role=ConversationRole.SYSTEM,
+            role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
+            files=[str(expanded_file_path)],
         )
 
     async def edit_file(
@@ -1749,7 +1756,7 @@ class LocalCodeExecutor:
             ValueError: If the find string is not found in the file
             OSError: If there is an error reading or writing to the file
         """
-        expanded_file_path = os.path.expanduser(file_path)
+        expanded_file_path = Path(file_path).expanduser().resolve()
 
         original_content = ""
         with open(expanded_file_path, "r") as f:
@@ -1773,7 +1780,7 @@ class LocalCodeExecutor:
 
         self.append_to_history(
             ConversationRecord(
-                role=ConversationRole.SYSTEM,
+                role=ConversationRole.ASSISTANT,
                 content=f"Successfully edited file: {file_path}",
                 should_summarize=True,
             )
@@ -1786,8 +1793,9 @@ class LocalCodeExecutor:
             formatted_print=f"Successfully edited file: {file_path}",
             code=equivalent_code,
             message="",
-            role=ConversationRole.SYSTEM,
+            role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
+            files=[str(expanded_file_path)],
         )
 
     def _limit_conversation_history(self) -> None:

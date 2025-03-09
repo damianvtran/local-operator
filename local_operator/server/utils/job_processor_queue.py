@@ -15,7 +15,7 @@ from typing import Any, Callable, List, Optional, Tuple
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
-from local_operator.jobs import JobContext, JobManager, JobStatus
+from local_operator.jobs import JobContext, JobContextRecord, JobManager, JobStatus
 from local_operator.server.utils.operator import create_operator
 from local_operator.types import ConversationRecord
 
@@ -116,7 +116,11 @@ def run_job_in_process_with_queue(
                 result = {
                     "response": response_json.response if response_json is not None else "",
                     "context": [
-                        {"role": msg.role, "content": msg.content}
+                        JobContextRecord(
+                            role=msg.role,
+                            content=msg.content,
+                            files=msg.files,
+                        )
                         for msg in process_operator.executor.conversation_history
                     ],
                 }
@@ -213,11 +217,11 @@ def run_agent_job_in_process_with_queue(
                 result = {
                     "response": response_json.response if response_json is not None else "",
                     "context": [
-                        {
-                            "role": msg.role,
-                            "content": msg.content,
-                            "files": msg.files,
-                        }
+                        JobContextRecord(
+                            role=msg.role,
+                            content=msg.content,
+                            files=msg.files,
+                        )
                         for msg in process_operator.executor.conversation_history
                     ],
                 }
