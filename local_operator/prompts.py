@@ -223,6 +223,9 @@ BaseSystemPrompt: str = (
 - 💾 When making changes to files, make sure to save them in different versions instead of
   modifying the original. This will reduce the chances of losing original information or
   making dangerous changes.
+- 📚 For deep research tasks, break down into sections, research each thoroughly with
+  multiple sources, and write iteratively. Include detailed citations and references with
+  links, titles, and dates. Build the final output by combining well-researched sections.
 
 ⚠️ Pay close attention to all the core principles, make sure that all are applied on every step
 with no exceptions.
@@ -653,7 +656,7 @@ processing, role playing, etc.
 creative_writing: Writing stories, poems, articles, marketing copy, presentations, speeches, etc.
 data_science: Data analysis, visualization, machine learning, statistics
 mathematics: Math problems, calculations, proofs
-accounting: Financial calculations, bookkeeping, budgets
+accounting: Financial calculations, bookkeeping, budgets, pricing, cost analysis, etc.
 deep_research: In-depth research requiring multiple sources and synthesis
 analysis: Critical thinking, problem solving, strategy
 media: Image, audio, or video processing, editing, manipulation, and generation
