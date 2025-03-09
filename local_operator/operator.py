@@ -483,13 +483,14 @@ class Operator:
             result = await self.executor.process_response(response_json)
 
             # Update the "Agent Heads Up Display"
-            self.executor.update_ephemeral_messages()
 
             if (
                 response_json.action != ActionType.DONE
                 and response_json.action != ActionType.ASK
                 and response_json.action != ActionType.BYE
             ):
+                self.executor.update_ephemeral_messages()
+
                 # Reflect on the results of the last operation
                 async with spinner_context(
                     "Reflecting on the last step",

@@ -7,6 +7,7 @@ that they conform to the expected format and are free from unnecessary tags or
 elements.
 """
 
+import json
 import re
 
 
@@ -46,8 +47,6 @@ def clean_plain_text_response(response_content: str) -> str:
     # Check if the entire content is a JSON object
     if response_content.strip().startswith("{") and response_content.strip().endswith("}"):
         try:
-            import json
-
             json.loads(response_content.strip())
             # If it parses as valid JSON, remove it completely
             return ""
@@ -73,7 +72,7 @@ def clean_plain_text_response(response_content: str) -> str:
                     cleaned_lines.append("")
             continue
         if not in_code_block:
-            cleaned_lines.append(line)
+            cleaned_lines.append(line.rstrip())
 
     cleaned_content = "\n".join(cleaned_lines)
 
@@ -84,7 +83,8 @@ def clean_plain_text_response(response_content: str) -> str:
     # Clean up any double spaces and preserve line breaks
     cleaned_content = re.sub(r" +", " ", cleaned_content)
 
-    # Remove trailing spaces at the end of each line
-    cleaned_content = "\n".join(line.rstrip() for line in cleaned_content.split("\n"))
+    # Remove trailing spaces at the end of each line and leading spaces at the beginning
+    # of each line
+    cleaned_content = "\n".join(line.strip() for line in cleaned_content.split("\n"))
 
     return cleaned_content.strip()

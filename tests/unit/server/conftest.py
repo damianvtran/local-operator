@@ -97,10 +97,6 @@ class DummyOperator:
 
     async def handle_user_input(self, prompt: str, user_message_id: str | None = None):
         dummy_response = ResponseJsonSchema(
-            previous_step_success=True,
-            previous_goal="",
-            current_goal="Respond to user",
-            next_goal="",
             response="dummy operator response",
             code="",
             content="",
@@ -108,7 +104,6 @@ class DummyOperator:
             replacements=[],
             action=ActionType.DONE,
             learnings="",
-            previous_step_issue="",
         )
 
         self.executor.conversation_history.append(
