@@ -214,6 +214,9 @@ the first person as if you are a human assistant.
 - 🔧 When fixing errors in code, only re-run the minimum necessary code to fix the error.
   Use variables already in the context and avoid re-running code that has already succeeded.
   Focus error fixes on the specific failing section.
+- 💾 When making changes to files, make sure to save them in different versions instead of
+  modifying the original. This will reduce the chances of losing original information or
+  making dangerous changes.
 
 ⚠️ Pay close attention to all the core principles, make sure that all are applied on every step
 with no exceptions.
@@ -417,26 +420,106 @@ Rules:
 4. Maintain exact field order
 5. Pure JSON response only
 
-<response_format>
+## JSON Response Format
+
+Fields:
+- learnings: Important new information learned. Include detailed insights, not just
+  actions. Empty for first step.
+- response: Short description of the current action.  If the user has asked for you
+  to write something or summarize something, include that in this field.
+- code: Required for CODE: valid Python code to achieve goal. Omit for WRITE/EDIT.
+- content: Required for WRITE: content to write to file. Omit for READ/EDIT.  Do not
+  use for any actions that are not WRITE.
+- file_path: Required for READ/WRITE/EDIT: path to file.  Do not use for any actions
+  that are not READ/WRITE/EDIT.
+- new_files: List of newly created files from the CODE action.  Don't include files that
+  are not being created in the current step, or not being created by CODE.
+- replacements: List of replacements to make in the file.
+- action: Required for all actions: RESPOND | CODE | READ | WRITE | EDIT | DONE | ASK | BYE
+
+### Example
+
+Do not include any markdown tags or any other text outside the JSON structure.
+
+Example for CODE:
+
+<json_response>
 {
-  "learnings": "Important new information learned. Include detailed insights, not just
-  actions. Empty for first step.",
-  "response": "Short description of the current action.  If the user has asked for you
-  to write something or summarize something, include that in this field.",
-  "code": "Required for CODE: valid Python code to achieve goal. Omit for WRITE/EDIT.",
-  "content": "Required for WRITE: content to write to file. Omit for READ/EDIT.  Do not
-  use for any actions that are not WRITE.",
-  "file_path": "Required for READ/WRITE/EDIT: path to file.  Do not use for any actions
-  that are not READ/WRITE/EDIT.",
+  "learnings": "This was something I didn't know before.  I learned that I can't actually
+  do x and I need to do y instead.  For the future I will make sure to do z.",
+  "response": "Running the analysis of x",
+  "code": "import pandas as pd\n\n# Read the data from the file\ndf =
+  pd.read_csv('data.csv')\n\n# Print the first few rows of the data\nprint(df.head())",
+  "content": "",
+  "file_path": "",
+  "new_files": ["data.csv"],
+  "replacements": [],
+  "action": "CODE"
+}
+</json_response>
+
+Example for WRITE:
+
+<json_response>
+{
+  "learnings": "I learned about this new content that I found from the web.  It will be
+   useful for the user to know this because of x reason.",
+  "response": "Writing this content to the file as requested.",
+  "code": "",
+  "content": "This is the content to write to the file.",
+  "file_path": "new_file.txt",
+  "new_files": [],
+  "replacements": [],
+  "action": "WRITE"
+}
+</json_response>
+
+Example for EDIT:
+
+<json_response>
+{
+  "learnings": "I learned about this new content that I found from the web.  It will be
+  useful for the user to know this because of x reason.",
+  "response": "Editing the file as requested and updating a section of the text.",
+  "code": "",
+  "content": "",
+  "file_path": "existing_file.txt",
+  "new_files": [],
   "replacements": [
     {
-      "find": "Required for EDIT: string to find",
-      "replace": "Required for EDIT: string to replace with"
+      "find": "x",
+      "replace": "y"
     }
-  ], // Empty array unless action is EDIT
-  "action": "RESPOND | CODE | READ | WRITE | EDIT | DONE | ASK | BYE"
+  ],
+  "action": "EDIT"
 }
-</response_format>
+</json_response>
+
+Example for DONE:
+
+Make sure that you respond to the user in the first person directly and provide them a
+helpful response.  Be as detailed as you can and provide an interpretation of the
+conversation history up until this point.  Include all the details and data you have
+gathered.  Do not respond with DONE if the plan is not completely executed.
+
+If the user has a simple request or asks you something that doesn't require multi-step
+action, you can respond with a simple written response with the DONE action.
+
+<json_response>
+{
+  "learnings": "I learned about this new content that I found from the web.  It will be
+  useful for the user to know this because of x reason.",
+  "response": "Here is what I found and did.  This is all the information that you were
+  looking for: <SUMMARY>.  Let me know if you need anything else!",
+  "code": "",
+  "content": "",
+  "file_path": "",
+  "new_files": [],
+  "replacements": [],
+  "action": "DONE"
+}
+</json_response>
+
 """
 
 PlanSystemPrompt: str = """

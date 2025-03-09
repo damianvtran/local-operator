@@ -12,6 +12,7 @@ USER_MOCK_RESPONSES = {
         learnings="",
         content="",
         file_path="",
+        new_files=[],
         replacements=[],
     ),
     "please proceed according to your plan": ResponseJsonSchema(
@@ -21,6 +22,7 @@ USER_MOCK_RESPONSES = {
         learnings="",
         content="",
         file_path="",
+        new_files=[],
         replacements=[],
     ),
     "think aloud about what you will need to do": (
@@ -33,6 +35,7 @@ USER_MOCK_RESPONSES = {
         learnings="",
         content="",
         file_path="",
+        new_files=[],
         replacements=[],
     ),
 }
@@ -112,6 +115,7 @@ class ChatMock:
                 learnings="",
                 content="",
                 file_path="",
+                new_files=[],
                 replacements=[],
             ).model_dump_json(),
             type=ConversationRole.ASSISTANT.value,

@@ -568,6 +568,7 @@ def test_save_and_load_conversation(temp_agents_dir: Path):
             formatted_print="Hello, world!",
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
+            files=[],
         )
     ]
 
@@ -708,6 +709,7 @@ def test_clone_agent(temp_agents_dir: Path):
             formatted_print="Hello, world!",
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
+            files=[],
         )
     ]
 
@@ -970,6 +972,7 @@ def test_update_agent_state_with_context(temp_agents_dir: Path):
             logging="",
             formatted_print="",
             status=ProcessResponseStatus.SUCCESS,
+            files=[],
         )
     ]
     test_context = {"variables": {"x": 1, "y": 2}, "functions": {"add": lambda a, b: a + b}}

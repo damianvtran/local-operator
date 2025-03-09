@@ -274,6 +274,7 @@ class Operator:
                 message=response_content,
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.SUCCESS,
+                files=[],
             ),
             None,
         )
@@ -347,6 +348,7 @@ class Operator:
                 message=response_content,
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.SUCCESS,
+                files=[],
             ),
             None,
         )
