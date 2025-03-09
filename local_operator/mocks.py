@@ -1,43 +1,51 @@
 import asyncio
+import json
 
 from langchain_core.messages import BaseMessage
 
-from local_operator.types import ActionType, ConversationRole, ResponseJsonSchema
+from local_operator.types import ConversationRole
 
 USER_MOCK_RESPONSES = {
-    "hello": ResponseJsonSchema(
-        response="Hello! I am the test model.",
-        code="",
-        action=ActionType.DONE,
-        learnings="",
-        content="",
-        file_path="",
-        new_files=[],
-        replacements=[],
-    ),
-    "please proceed according to your plan": ResponseJsonSchema(
-        response='I will execute a simple Python script to print "Hello World".',
-        code='print("Hello World")',
-        action=ActionType.CODE,
-        learnings="",
-        content="",
-        file_path="",
-        new_files=[],
-        replacements=[],
-    ),
+    "hello": {
+        "response": "Hello! I am the test model.",
+        "code": "",
+        "action": "DONE",
+        "learnings": "",
+        "content": "",
+        "file_path": "",
+        "new_files": [],
+        "replacements": [],
+    },
+    "please proceed according to your plan": {
+        "response": 'I will execute a simple Python script to print "Hello World".',
+        "code": 'print("Hello World")',
+        "action": "CODE",
+        "learnings": "",
+        "content": "",
+        "file_path": "",
+        "new_files": [],
+        "replacements": [],
+    },
+    "print hello world": {
+        "type": "conversation",
+        "planning_required": True,
+        "relative_effort": "low",
+    },
     "think aloud about what you will need to do": (
         "I will need to print 'Hello World' to the console."
     ),
-    "hello world": ResponseJsonSchema(
-        response="I have printed 'Hello World' to the console.",
-        code="",
-        action=ActionType.DONE,
-        learnings="",
-        content="",
-        file_path="",
-        new_files=[],
-        replacements=[],
-    ),
+    "think aloud about what you did and the outcome": ("I printed 'Hello World' to the console."),
+    "hello world": {
+        "response": "I have printed 'Hello World' to the console.",
+        "code": "",
+        "action": "DONE",
+        "learnings": "",
+        "content": "",
+        "file_path": "",
+        "new_files": [],
+        "replacements": [],
+    },
+    "please summarize": "[SUMMARY] this is a summary",
 }
 
 
@@ -77,49 +85,34 @@ class ChatMock:
         if not messages:
             raise ValueError("No messages provided to ChatMock")
 
-        # Only consider the last message coming from the user
+        # Get last user message
         user_message = ""
         for msg in reversed(list(messages)):
             if msg.get("role") == ConversationRole.USER.value:
                 user_message = msg.get("content", "")
                 break
 
+        # Find best matching response
         user_message_lower = user_message.lower()
-
-        # Find closest matching response by partial string match
-        closest_match = None
+        best_match = None
         max_match_length = 0
+
         for key in USER_MOCK_RESPONSES:
             key_lower = key.lower()
             if key_lower in user_message_lower and len(key_lower) > max_match_length:
-                closest_match = key
+                best_match = key
                 max_match_length = len(key_lower)
 
-        if closest_match:
-            response = USER_MOCK_RESPONSES[closest_match]
-            return BaseMessage(
-                content=(
-                    response.model_dump_json()
-                    if isinstance(response, ResponseJsonSchema)
-                    else response
-                ),
-                type=ConversationRole.ASSISTANT.value,
-            )
+        if not best_match:
+            print(f"No mock response for message: {user_message}")
+            raise ValueError(f"No mock response for message: {user_message}")
 
-        # Pass through the last message if no match found
-        return BaseMessage(
-            content=ResponseJsonSchema(
-                response=f"No mock response for message: {user_message}",
-                code="",
-                action=ActionType.DONE,
-                learnings="",
-                content="",
-                file_path="",
-                new_files=[],
-                replacements=[],
-            ).model_dump_json(),
-            type=ConversationRole.ASSISTANT.value,
-        )
+        if isinstance(USER_MOCK_RESPONSES[best_match], dict):
+            response_content = json.dumps(USER_MOCK_RESPONSES[best_match])
+        else:
+            response_content = USER_MOCK_RESPONSES[best_match]
+
+        return BaseMessage(content=response_content, type=ConversationRole.ASSISTANT.value)
 
     def invoke(self, messages):
         """Synchronous version of ainvoke."""
