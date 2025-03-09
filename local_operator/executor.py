@@ -33,7 +33,7 @@ from local_operator.console import (
     print_task_interrupted,
     spinner_context,
 )
-from local_operator.helpers import remove_think_tags
+from local_operator.helpers import clean_json_response
 from local_operator.model.configure import ModelConfiguration, calculate_cost
 from local_operator.prompts import (
     SafetyCheckSystemPrompt,
@@ -153,31 +153,7 @@ def process_json_response(response_str: str) -> ResponseJsonSchema:
         ValidationError: If the JSON response does not match the expected schema.
         ValueError: If no valid JSON object can be extracted from the response.
     """
-    response_content = response_str
-
-    response_content = remove_think_tags(response_content)
-
-    # Check for markdown code block format
-    start_tag = "```json"
-    end_tag = "```"
-
-    start_index = response_content.find(start_tag)
-    if start_index != -1:
-        response_content = response_content[start_index + len(start_tag) :]
-
-        end_index = response_content.find(end_tag)
-        if end_index != -1:
-            response_content = response_content[:end_index]
-    else:
-        # If no code block, try to extract JSON object directly
-        # Look for the first { and the last }
-        first_brace = response_content.find("{")
-        last_brace = response_content.rfind("}")
-
-        if first_brace != -1 and last_brace != -1 and first_brace < last_brace:
-            response_content = response_content[first_brace : last_brace + 1]
-
-    response_content = response_content.strip()
+    response_content = clean_json_response(response_str)
 
     # Validate the JSON response
     response_json = ResponseJsonSchema.model_validate_json(response_content)
