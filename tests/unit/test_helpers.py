@@ -1,6 +1,10 @@
 import pytest
 
-from local_operator.helpers import clean_plain_text_response, remove_think_tags
+from local_operator.helpers import (
+    clean_json_response,
+    clean_plain_text_response,
+    remove_think_tags,
+)
 
 
 @pytest.mark.parametrize(
@@ -62,3 +66,51 @@ def test_clean_plain_text_response(response_content, expected_output):
         expected_output (str): The expected output string after cleaning.
     """
     assert clean_plain_text_response(response_content) == expected_output
+
+
+@pytest.mark.parametrize(
+    "response_content, expected_output",
+    [
+        (
+            '```json\n{"action": "EXECUTE_CODE", "code": "print(\'test\')"}\n```',
+            '{"action": "EXECUTE_CODE", "code": "print(\'test\')"}',
+        ),
+        (
+            '{"action": "EXECUTE_CODE", "code": "print(\'test\')"}',
+            '{"action": "EXECUTE_CODE", "code": "print(\'test\')"}',
+        ),
+        (
+            'Some text before ```json\n{"action": "EXECUTE_CODE"}\n``` and after',
+            '{"action": "EXECUTE_CODE"}',
+        ),
+        (
+            'Text {"action": "EXECUTE_CODE"} more text',
+            '{"action": "EXECUTE_CODE"}',
+        ),
+        (
+            '<think>Thinking...</think>{"action": "EXECUTE_CODE"}',
+            '{"action": "EXECUTE_CODE"}',
+        ),
+        (
+            '```json\n{"nested": {"key": "value"}}\n```',
+            '{"nested": {"key": "value"}}',
+        ),
+        (
+            '{"incomplete": "json"',
+            '{"incomplete": "json"',
+        ),
+        (
+            "No JSON content",
+            "No JSON content",
+        ),
+    ],
+)
+def test_clean_json_response(response_content: str, expected_output: str) -> None:
+    """Test the clean_json_response function with various inputs.
+
+    Args:
+        response_content (str): Input string containing JSON with potential code blocks
+        or think tags
+        expected_output (str): Expected cleaned JSON output
+    """
+    assert clean_json_response(response_content) == expected_output

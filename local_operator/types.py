@@ -38,7 +38,6 @@ class ActionType(str, Enum):
     ASK = "ASK"
     BYE = "BYE"
     READ = "READ"
-    RESPOND = "RESPOND"
 
     def __str__(self) -> str:
         """Return the string representation of the ActionType enum.
@@ -223,3 +222,28 @@ class AgentExecutorState(BaseModel):
 
     conversation: List[ConversationRecord]
     execution_history: List[CodeExecutionResult]
+
+
+class RelativeEffortLevel(str, Enum):
+    """Enum representing the relative effort level of a user request.
+
+    Used to track the relative effort level of a user request.
+    """
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class RequestClassification(BaseModel):
+    """Represents the classification of a user request.
+
+    Attributes:
+        type (str): The type of request
+        planning_required (bool): Whether planning is required for the request
+        relative_effort (str): The relative effort required for the request
+    """
+
+    type: str
+    planning_required: bool
+    relative_effort: RelativeEffortLevel

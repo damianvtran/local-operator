@@ -88,3 +88,43 @@ def clean_plain_text_response(response_content: str) -> str:
     cleaned_content = "\n".join(line.strip() for line in cleaned_content.split("\n"))
 
     return cleaned_content.strip()
+
+
+def clean_json_response(response_content: str) -> str:
+    """
+    Clean JSON responses by removing code blocks and standalone JSON.
+
+    Args:
+        response_content (str): The original JSON response potentially containing
+                               code blocks or standalone JSON objects.
+
+    Returns:
+        str: The cleaned JSON response with code blocks and standalone JSON removed.
+    """
+    response_content = response_content
+
+    response_content = remove_think_tags(response_content)
+
+    # Check for markdown code block format
+    start_tag = "```json"
+    end_tag = "```"
+
+    start_index = response_content.find(start_tag)
+    if start_index != -1:
+        response_content = response_content[start_index + len(start_tag) :]
+
+        end_index = response_content.find(end_tag)
+        if end_index != -1:
+            response_content = response_content[:end_index]
+    else:
+        # If no code block, try to extract JSON object directly
+        # Look for the first { and the last }
+        first_brace = response_content.find("{")
+        last_brace = response_content.rfind("}")
+
+        if first_brace != -1 and last_brace != -1 and first_brace < last_brace:
+            response_content = response_content[first_brace : last_brace + 1]
+
+    response_content = response_content.strip()
+
+    return response_content
