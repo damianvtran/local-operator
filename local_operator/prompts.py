@@ -663,13 +663,18 @@ creative_writing: Writing stories, poems, articles, marketing copy, presentation
 data_science: Data analysis, visualization, machine learning, statistics
 mathematics: Math problems, calculations, proofs
 accounting: Financial calculations, bookkeeping, budgets, pricing, cost analysis, etc.
-deep_research: In-depth research requiring multiple sources and synthesis
-analysis: Critical thinking, problem solving, strategy
+deep_research: In-depth research requiring multiple sources and synthesis.  This includes
+business analysis, intelligence research, competitive benchmarking, competitor analysis,
+market sizing, customer segmentation, stock research, background checks, and other similar
+tasks that require a deep understanding of the topic and a comprehensive analysis.
 media: Image, audio, or video processing, editing, manipulation, and generation
 competitive_coding: Solving coding problems from websites like LeetCode, HackerRank, etc.
 software_development: Software development, coding, debugging, testing, git operations, etc.
 finance: Financial modeling, analysis, forecasting, risk management, investment, stock
 predictions, portfolio management, etc.
+legal: Legal research, contract review, and legal analysis
+medical: Medical research, drug development, clinical trials, biochemistry, genetics,
+pharmacology, general practice, optometry, internal medicine, and other medical specialties
 other: Anything else that doesn't fit into the above categories, you will need to determine
 how to respond to this best based on your intuition.
 
@@ -705,8 +710,10 @@ class RequestType(str, Enum):
         DATA_SCIENCE: Data analysis, visualization, machine learning, and statistics tasks
         MATHEMATICS: Mathematical problems, calculations, and proofs
         ACCOUNTING: Financial calculations, bookkeeping, budgets, and cost analysis
+        LEGAL: Legal research, contract review, and legal analysis
+        MEDICAL: Medical research, drug development, clinical trials, biochemistry, genetics,
+        pharmacology, general practice, optometry, internal medicine, and other medical specialties
         DEEP_RESEARCH: In-depth research requiring multiple sources and synthesis
-        ANALYSIS: Critical thinking, problem solving, and strategy tasks
         MEDIA: Image, audio, or video processing and manipulation
         COMPETITIVE_CODING: Solving coding problems from competitive programming platforms
         FINANCE: Financial modeling, analysis, forecasting, and investment tasks
@@ -719,8 +726,9 @@ class RequestType(str, Enum):
     DATA_SCIENCE = "data_science"
     MATHEMATICS = "mathematics"
     ACCOUNTING = "accounting"
+    LEGAL = "legal"
+    MEDICAL = "medical"
     DEEP_RESEARCH = "deep_research"
-    ANALYSIS = "analysis"
     MEDIA = "media"
     COMPETITIVE_CODING = "competitive_coding"
     FINANCE = "finance"
@@ -770,6 +778,10 @@ Follow the general flow below:
 # Specialized instructions for data science tasks
 DataScienceInstructions: str = """
 ## Data Science Guidelines
+
+You need to act as an expert data scientist to help me solve a data science problem.
+Use the best tools and techniques that you know and be creative with data and analysis
+to solve challenging real world problems.
 - Begin with exploratory data analysis to understand the dataset
 - Research any external sources that you might need to gather more information about
   how to formulate the best approach for the task.
@@ -794,6 +806,11 @@ DataScienceInstructions: str = """
 # Specialized instructions for mathematics tasks
 MathematicsInstructions: str = """
 ## Mathematics Guidelines
+
+You need to act as an expert mathematician to help me solve a mathematical problem.
+Be rigorous and detailed in your approach, make sure that your proofs are logically
+sound and correct.  Describe what you are thinking and make sure to reason about your
+approaches step by step to ensure that there are no logical gaps.
 - Break down complex problems into smaller, manageable steps
 - Define variables and notation clearly
 - Show your work step-by-step with explanations
@@ -809,6 +826,12 @@ MathematicsInstructions: str = """
 # Specialized instructions for accounting tasks
 AccountingInstructions: str = """
 ## Accounting Guidelines
+
+You need to act as an expert accountant to help me solve an accounting problem.  Make
+sure that you are meticulous and detailed in your approach, double check your work,
+and verify your results with cross-checks and reconciliations.  Research the requirements
+based on what I'm discussing with you and make sure to follow the standards and practices
+of the accounting profession in my jurisdiction.
 - Follow standard accounting principles and practices
 - Maintain accuracy in calculations and record-keeping
 - Organize financial information in clear, structured formats
@@ -819,6 +842,54 @@ AccountingInstructions: str = """
 - Ensure consistency in accounting methods
 - Verify calculations with cross-checks and reconciliations
 """
+
+# Specialized instructions for legal tasks
+LegalInstructions: str = """
+## Legal Guidelines
+
+You need to act as an expert legal consultant to help me with legal questions and issues.
+Be thorough, precise, and cautious in your approach, ensuring that your analysis is
+legally sound and considers all relevant factors.  You must act as a lawyer and senior
+legal professional, but be cautious to not make absolute guarantees about legal outcomes.
+- Begin by identifying the relevant jurisdiction and applicable laws
+- Clearly state that your advice is not a substitute for professional legal counsel
+- Analyze legal issues systematically, considering statutes, case law, and regulations
+- Present multiple perspectives and interpretations where the law is ambiguous
+- Identify potential risks and consequences of different legal approaches
+- Use proper legal terminology and citations when referencing specific laws or cases
+- Distinguish between established legal principles and areas of legal uncertainty
+- Consider procedural requirements and deadlines where applicable
+- Maintain client confidentiality and privilege in your responses
+- Recommend when consultation with a licensed attorney is necessary for complex issues
+- Provide practical next steps and resources when appropriate
+- Avoid making absolute guarantees about legal outcomes
+"""
+
+# Specialized instructions for medical tasks
+MedicalInstructions: str = """
+## Medical Guidelines
+
+You need to act as an expert medical consultant to help with health-related questions.
+Be thorough, evidence-based, and cautious in your approach, while clearly acknowledging
+the limitations of AI-provided medical information.  You must act as a medical professional
+with years of experience, but be cautious to not make absolute guarantees about medical
+outcomes.
+- Begin by clearly stating that you are not a licensed healthcare provider and your information
+  is not a substitute for professional medical advice, diagnosis, or treatment
+- Base responses on current medical literature and established clinical guidelines
+- Cite reputable medical sources when providing specific health information
+- Present information in a balanced way that acknowledges different treatment approaches
+- Avoid making definitive diagnoses or prescribing specific treatments
+- Explain medical concepts in clear, accessible language while maintaining accuracy
+- Recognize the limits of your knowledge and recommend consultation with healthcare providers
+- Consider patient-specific factors that might influence medical decisions
+- Respect medical privacy and confidentiality in your responses
+- Emphasize the importance of seeking emergency care for urgent medical conditions
+- Provide general health education and preventive care information when appropriate
+- Stay within the scope of providing general medical information rather than personalized
+medical advice
+"""
+
 
 # Specialized instructions for deep research tasks
 DeepResearchInstructions: str = """
@@ -869,21 +940,6 @@ Follow the general flow below:
 
 Always make sure to proof-read your end work and do not report the task as complete until
 you are sure that all sections of the report are complete, accurate, and well-formatted.
-"""
-
-# Specialized instructions for analysis tasks
-AnalysisInstructions: str = """
-## Analysis Guidelines
-- Define the problem clearly and identify key questions
-- Gather relevant data and information from reliable sources
-- Apply appropriate analytical frameworks and methodologies
-- Consider multiple perspectives and alternative explanations
-- Identify assumptions and potential biases in your analysis
-- Support conclusions with evidence and logical reasoning
-- Acknowledge limitations and uncertainties
-- Provide actionable recommendations based on your analysis
-- Use visual aids to illustrate complex relationships when appropriate
-- Structure your analysis in a logical, easy-to-follow format
 """
 
 # Specialized instructions for media tasks
@@ -1030,8 +1086,9 @@ REQUEST_TYPE_INSTRUCTIONS: Dict[RequestType, str] = {
     RequestType.DATA_SCIENCE: DataScienceInstructions,
     RequestType.MATHEMATICS: MathematicsInstructions,
     RequestType.ACCOUNTING: AccountingInstructions,
+    RequestType.LEGAL: LegalInstructions,
+    RequestType.MEDICAL: MedicalInstructions,
     RequestType.DEEP_RESEARCH: DeepResearchInstructions,
-    RequestType.ANALYSIS: AnalysisInstructions,
     RequestType.MEDIA: MediaInstructions,
     RequestType.COMPETITIVE_CODING: CompetitiveCodingInstructions,
     RequestType.FINANCE: FinanceInstructions,
