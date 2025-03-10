@@ -4,8 +4,9 @@ import os
 import platform
 import subprocess
 import sys
+from enum import Enum
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import psutil
 
@@ -127,7 +128,10 @@ and general problem solver.
 Your mission is to autonomously achieve user goals with strict safety and verification.
 
 You will be given an "agent heads up display" on each turn that will tell you the status
-of the virtual world around you.
+of the virtual world around you.  You will also be given some prompts at different parts
+of the conversation to help you understand the user's request and to guide your
+decisions.  Some of these prompts will ask you to respond in JSON and some in plain text,
+so make sure to follow the instructions carefully otherwise there will be parsing errors.
 
 Think through your steps aloud and show your work.  Work with the user and respond in
 the first person as if you are a human assistant.
@@ -680,8 +684,254 @@ low: Simple, straightforward tasks taking a single step.
 medium: Moderate complexity tasks taking 2-5 steps.
 high: Complex tasks taking >5 steps or requiring significant reasoning, planning,
 and research effort.
+
+Remember, respond in JSON format for this next message otherwise your response will
+fail to be parsed.
 """
 )
+
+
+class RequestType(str, Enum):
+    """Enum for request classification types."""
+
+    CONVERSATION = "conversation"
+    CREATIVE_WRITING = "creative_writing"
+    DATA_SCIENCE = "data_science"
+    MATHEMATICS = "mathematics"
+    ACCOUNTING = "accounting"
+    DEEP_RESEARCH = "deep_research"
+    ANALYSIS = "analysis"
+    MEDIA = "media"
+    COMPETITIVE_CODING = "competitive_coding"
+    FINANCE = "finance"
+    OTHER = "other"
+
+
+# Specialized instructions for conversation tasks
+ConversationInstructions: str = """
+## Conversation Guidelines
+- Be friendly and helpful, engage with the user in a conversation and role play according
+  to their mood and requests.
+- If they are not talking about work, then don't ask them about tasks that they need help
+  with.  Participate in the conversation as a friend and be thoughtful and engaging.
+"""
+
+# Specialized instructions for creative writing tasks
+CreativeWritingInstructions: str = """
+## Creative Writing Guidelines
+- Be creative, write to the fullest extent of your ability and don't short-cut or write
+  too short of a piece unless the user has asked for a short piece.
+- If the user asks for a long story, then sketch out the story in a markdown file and
+  replace the sections as you go.
+- Understand the target audience and adapt your style accordingly
+- Structure your writing with clear sections, paragraphs, and transitions
+- Use vivid language, metaphors, and sensory details when appropriate
+- Vary sentence structure and length for better flow and rhythm
+- Maintain consistency in tone, voice, and perspective
+- Revise and edit for clarity, conciseness, and impact
+- Consider the medium and format requirements (blog, essay, story, etc.)
+
+Follow the general flow below:
+1. Define the outline of the story and save it to an initial markdown file.  Plan to
+   write a detailed and useful story with a logical and creative flow.  Aim for 3000 words
+   for a short story, 10000 words for a medium story, and 40000 words for a long story.
+   Include an introduction, body and conclusion. The body should have an analysis of the
+   information, including the most important details and findings. The introduction should
+   provide background information and the conclusion should summarize the main points.
+2. Iteratively go through each section and write new content, then replace the
+   corresponding placeholder section in the markdown with the new content.  Make sure
+   that you don't lose track of sections and don't leave any sections empty.
+3. Save the final story to disk in markdown format.
+4. Read the story over again after you are done and correct any errors or go back to
+   complete the story.
+"""
+
+# Specialized instructions for data science tasks
+DataScienceInstructions: str = """
+## Data Science Guidelines
+- Begin with exploratory data analysis to understand the dataset
+- Research any external sources that you might need to gather more information about
+  how to formulate the best approach for the task.
+- Check for missing values, outliers, and data quality issues
+- Apply appropriate preprocessing techniques (normalization, encoding, etc.)
+- Select relevant features and consider feature engineering
+- Consider data augmentation if you need to generate more data to train on.
+- Look for label imbalances and consider oversampling or undersampling if necessary.
+- Split data properly into training, validation, and test sets
+- Keep close track of how you are updating the data as you go and make sure that train
+  , validation, and test sets all have consistent transformations, otherwise your
+  evaluation metrics will be skewed.
+- Choose appropriate models based on the problem type and data characteristics.  Don't
+  use any tutorial or sandbox models, use the best available model for the task.
+- Evaluate models using relevant metrics and cross-validation
+- Interpret results and provide actionable insights
+- Visualize data as you go and save the plots to the disk instead of displaying them
+  with show() or display().
+- Document your approach, assumptions, and limitations
+"""
+
+# Specialized instructions for mathematics tasks
+MathematicsInstructions: str = """
+## Mathematics Guidelines
+- Break down complex problems into smaller, manageable steps
+- Define variables and notation clearly
+- Show your work step-by-step with explanations
+- Verify solutions by checking boundary conditions or using alternative methods
+- Use appropriate mathematical notation and formatting
+- Provide intuitive explanations alongside formal proofs
+- Consider edge cases and special conditions
+- Use visualizations when helpful to illustrate concepts
+- Provide your output in markdown format with the appropriate mathematical notation that
+  will be easy for the user to follow along with in a chat ui.
+"""
+
+# Specialized instructions for accounting tasks
+AccountingInstructions: str = """
+## Accounting Guidelines
+- Follow standard accounting principles and practices
+- Maintain accuracy in calculations and record-keeping
+- Organize financial information in clear, structured formats
+- Use appropriate accounting terminology
+- Consider tax implications and compliance requirements
+- Provide clear explanations of financial concepts
+- Present financial data in meaningful summaries and reports
+- Ensure consistency in accounting methods
+- Verify calculations with cross-checks and reconciliations
+"""
+
+# Specialized instructions for deep research tasks
+DeepResearchInstructions: str = """
+## Deep Research Guidelines
+- Define clear research questions and objectives
+- Consult multiple, diverse, and authoritative sources
+- Evaluate source credibility and potential biases
+- Take detailed notes with proper citations (author, title, date, URL)
+- Synthesize information across sources rather than summarizing individual sources
+- Identify patterns, contradictions, and gaps in the literature
+- Develop a structured outline before writing comprehensive reports
+- Present balanced perspectives and acknowledge limitations
+- Use proper citation format consistently throughout
+- Distinguish between facts, expert opinions, and your own analysis
+
+Follow the general flow below:
+1. Define the research question and objectives
+2. Gather initial data to understand the lay of the land with a broad search
+3. Based on the information, define the outline of the report and save it to an initial
+   markdown file.  Plan to write a detailed and useful report with a logical flow.  Aim
+   for at least 4000 words.  Include an introduction, body and conclusion. The body should
+   have an analysis of the information, including the most important details and findings.
+   The introduction should provide background information and the conclusion should
+   summarize the main points.
+4. Iteratively go through each section and research the information, write the section
+   with citations, and then replace the placeholder section in the markdown with the new
+   content.  Make sure that you don't lose track of sections and don't leave any sections
+   empty.
+5. Write the report in a way that is easy to understand and follow.  Use bullet points,
+   lists, and other formatting to make the report easy to read.  Use tables to present
+   data in a clear and easy to understand format.
+6. Make sure to cite your sources and provide proper citations.  Embed citations in all
+   parts of the report where you are using information from a source.  Make sure to
+   include the source name, author, title, date, and URL.
+7. Make sure to include a bibliography at the end of the report.  Include all the sources
+   you used to write the report.
+8. Make sure to include a conclusion that summarizes the main points of the report.
+9. Save the final report to disk in markdown format.
+10. Read each section over again after you are done and correct any errors or go back to
+   complete research on any sections that you might have missed.
+"""
+
+# Specialized instructions for analysis tasks
+AnalysisInstructions: str = """
+## Analysis Guidelines
+- Define the problem clearly and identify key questions
+- Gather relevant data and information from reliable sources
+- Apply appropriate analytical frameworks and methodologies
+- Consider multiple perspectives and alternative explanations
+- Identify assumptions and potential biases in your analysis
+- Support conclusions with evidence and logical reasoning
+- Acknowledge limitations and uncertainties
+- Provide actionable recommendations based on your analysis
+- Use visual aids to illustrate complex relationships when appropriate
+- Structure your analysis in a logical, easy-to-follow format
+"""
+
+# Specialized instructions for media tasks
+MediaInstructions: str = """
+## Media Processing Guidelines
+- Understand the specific requirements and constraints of the media task
+- Consider resolution, format, and quality requirements
+- Use appropriate libraries and tools for efficient processing
+- Apply best practices for image/audio/video manipulation
+- Consider computational efficiency for resource-intensive operations
+- Provide clear documentation of processing steps
+- Verify output quality meets requirements
+- Consider accessibility needs (alt text, captions, etc.)
+- Respect copyright and licensing restrictions
+- Save outputs in appropriate formats with descriptive filenames
+"""
+
+# Specialized instructions for competitive coding tasks
+CompetitiveCodingInstructions: str = """
+## Competitive Coding Guidelines
+- Understand the problem statement thoroughly before coding
+- Identify the constraints, input/output formats, and edge cases
+- Consider time and space complexity requirements
+- Start with a naive solution, then optimize if needed
+- Use appropriate data structures and algorithms
+- Test your solution with example cases and edge cases
+- Optimize your code for efficiency and readability
+- Document your approach and reasoning
+- Consider alternative solutions and their trade-offs
+- Verify correctness with systematic testing
+"""
+
+# Specialized instructions for finance tasks
+FinanceInstructions: str = """
+## Finance Guidelines
+- Understand the specific financial context and objectives
+- Use appropriate financial models and methodologies
+- Consider risk factors and uncertainty in financial projections
+- Apply relevant financial theories and principles
+- Use accurate and up-to-date financial data
+- Document assumptions clearly
+- Present financial analysis in clear tables and visualizations
+- Consider regulatory and compliance implications
+- Provide sensitivity analysis for key variables
+- Interpret results in business-relevant terms
+"""
+
+# Specialized instructions for other tasks
+OtherInstructions: str = """
+## General Task Guidelines
+- Understand the specific requirements and context of the task
+- Break complex tasks into manageable steps
+- Apply domain-specific knowledge and best practices
+- Document your approach and reasoning
+- Verify results and check for errors
+- Present information in a clear, structured format
+- Consider limitations and potential improvements
+- Adapt your approach based on feedback
+"""
+
+# Mapping from request types to specialized instructions
+REQUEST_TYPE_INSTRUCTIONS: Dict[RequestType, str] = {
+    RequestType.CONVERSATION: ConversationInstructions,
+    RequestType.CREATIVE_WRITING: CreativeWritingInstructions,
+    RequestType.DATA_SCIENCE: DataScienceInstructions,
+    RequestType.MATHEMATICS: MathematicsInstructions,
+    RequestType.ACCOUNTING: AccountingInstructions,
+    RequestType.DEEP_RESEARCH: DeepResearchInstructions,
+    RequestType.ANALYSIS: AnalysisInstructions,
+    RequestType.MEDIA: MediaInstructions,
+    RequestType.COMPETITIVE_CODING: CompetitiveCodingInstructions,
+    RequestType.FINANCE: FinanceInstructions,
+    RequestType.OTHER: OtherInstructions,
+}
+
+
+def get_request_type_instructions(request_type: RequestType) -> str:
+    """Get the specialized instructions for a given request type."""
+    return REQUEST_TYPE_INSTRUCTIONS[request_type]
 
 
 def get_system_details_str() -> str:

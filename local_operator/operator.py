@@ -35,8 +35,10 @@ from local_operator.prompts import (
     PlanUserPrompt,
     ReflectionUserPrompt,
     RequestClassificationSystemPrompt,
+    RequestType,
     apply_attachments_to_prompt,
     create_system_prompt,
+    get_request_type_instructions,
 )
 from local_operator.types import (
     ActionType,
@@ -550,8 +552,27 @@ class Operator:
         ):
             classification = await self.classify_request(user_input)
 
-        if self.verbosity_level >= VerbosityLevel.VERBOSE:
-            print("\n")
+        # Add the task instructions as an ephemeral message to help the agent
+        # prioritize the information and the task at hand.
+        task_instructions = """
+This is a {request_type} message, here are some guidelines for how to respond:
+
+# Task Instructions
+
+{task_instructions}
+        """.format(
+            request_type=classification.type,
+            task_instructions=get_request_type_instructions(RequestType(classification.type)),
+        )
+
+        self.executor.conversation_history.append(
+            ConversationRecord(
+                role=ConversationRole.USER,
+                content=task_instructions,
+                is_system_prompt=False,
+                ephemeral=True,
+            )
+        )
 
         if classification.planning_required:
             async with spinner_context(
