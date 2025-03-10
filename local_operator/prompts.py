@@ -811,6 +811,8 @@ DeepResearchInstructions: str = """
 - Develop a structured outline before writing comprehensive reports
 - Present balanced perspectives and acknowledge limitations
 - Use proper citation format consistently throughout
+- Always embed citations in the text when you are using information from a source so
+  that the user can understand what information comes from which source.
 - Distinguish between facts, expert opinions, and your own analysis
 
 Follow the general flow below:
@@ -837,7 +839,15 @@ Follow the general flow below:
 8. Make sure to include a conclusion that summarizes the main points of the report.
 9. Save the final report to disk in markdown format.
 10. Read each section over again after you are done and correct any errors or go back to
-   complete research on any sections that you might have missed.
+   complete research on any sections that you might have missed.  Check for missing
+   citations, incomplete sections, grammatical errors, formatting issues, and other
+   errors or omissions.
+11. If there are parts of the report that don't feel complete or are missing information,
+   then go back and do more research to complete those sections and repeat the steps
+   until you are satisfied with the quality of your report.
+
+Always make sure to proof-read your end work and do not report the task as complete until
+you are sure that all sections of the report are complete, accurate, and well-formatted.
 """
 
 # Specialized instructions for analysis tasks
