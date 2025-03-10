@@ -21,7 +21,7 @@
 
 🔧 **Problem Solving** - Intelligently handles errors and roadblocks by adapting approaches and finding alternative solutions
 
-This project is proudly open source under the MIT license. We believe AI tools should be accessible to everyone, given their transformative impact on productivity. Your contributions and feedback help make this vision a reality!
+This project is proudly open source under the GPL 3.0 license. We believe AI tools should be accessible to everyone, given their transformative impact on productivity. Your contributions and feedback help make this vision a reality!
 
 > "Democratizing AI-powered productivity, one conversation at a time."
 
@@ -302,4 +302,4 @@ The system includes multiple layers of protection:
 
 ## 📝 License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the GPL 3.0 License - see the LICENSE file for details.
