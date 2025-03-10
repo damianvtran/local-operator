@@ -262,7 +262,9 @@ class Operator:
                     role=ConversationRole.SYSTEM,
                     content=(
                         f"... Conversation history before this message has been truncated "
-                        f"to the last {max_conversation_depth} messages."
+                        f"to the last {max_conversation_depth} messages.  Please review the "
+                        "following messages in the sequence and respond with the request "
+                        "type in the required JSON format."
                     ),
                 )
             )
@@ -306,13 +308,13 @@ class Operator:
 
                 if attempt < max_attempts:
                     error_message = (
-                        f"Invalid JSON response on attempt {attempt}. Error: {last_error}. "
+                        f"The response you provided wasn't valid JSON. Error: {last_error}. "
                         "Please provide a valid JSON response matching the "
                         "RequestClassification schema."
                     )
                     messages.append(
                         ConversationRecord(
-                            role=ConversationRole.SYSTEM,
+                            role=ConversationRole.USER,
                             content=error_message,
                         )
                     )

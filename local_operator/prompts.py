@@ -710,9 +710,9 @@ class RequestType(str, Enum):
 # Specialized instructions for conversation tasks
 ConversationInstructions: str = """
 ## Conversation Guidelines
-- Be friendly and helpful, engage with the user in a conversation and role play according
-  to their mood and requests.
-- If they are not talking about work, then don't ask them about tasks that they need help
+- Be friendly and helpful, engage with me in a conversation and role play according
+  to my mood and requests.
+- If I am not talking about work, then don't ask me about tasks that I need help
   with.  Participate in the conversation as a friend and be thoughtful and engaging.
 """
 
