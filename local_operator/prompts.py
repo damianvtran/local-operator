@@ -646,7 +646,7 @@ RequestClassificationSystemPrompt: str = (
 
 For this task, you must analyze the user request and classify it into a JSON format with:
 - type: conversation | creative_writing | data_science | mathematics | accounting |
-deep_research | analysis | media | competitive_coding | finance | other
+deep_research | analysis | media | competitive_coding | software_development |finance | other
 - planning_required: true | false
 - relative_effort: low | medium | high
 
@@ -667,6 +667,7 @@ deep_research: In-depth research requiring multiple sources and synthesis
 analysis: Critical thinking, problem solving, strategy
 media: Image, audio, or video processing, editing, manipulation, and generation
 competitive_coding: Solving coding problems from websites like LeetCode, HackerRank, etc.
+software_development: Software development, coding, debugging, testing, git operations, etc.
 finance: Financial modeling, analysis, forecasting, risk management, investment, stock
 predictions, portfolio management, etc.
 other: Anything else that doesn't fit into the above categories, you will need to determine
@@ -692,7 +693,26 @@ fail to be parsed.
 
 
 class RequestType(str, Enum):
-    """Enum for request classification types."""
+    """Enum for classifying different types of user requests.
+
+    This enum defines the various categories that a user request can be classified into,
+    which helps determine the appropriate response strategy and specialized instructions
+    to use.
+
+    Attributes:
+        CONVERSATION: General chat, questions, and discussions that don't require complex processing
+        CREATIVE_WRITING: Writing tasks like stories, poems, articles, and marketing copy
+        DATA_SCIENCE: Data analysis, visualization, machine learning, and statistics tasks
+        MATHEMATICS: Mathematical problems, calculations, and proofs
+        ACCOUNTING: Financial calculations, bookkeeping, budgets, and cost analysis
+        DEEP_RESEARCH: In-depth research requiring multiple sources and synthesis
+        ANALYSIS: Critical thinking, problem solving, and strategy tasks
+        MEDIA: Image, audio, or video processing and manipulation
+        COMPETITIVE_CODING: Solving coding problems from competitive programming platforms
+        FINANCE: Financial modeling, analysis, forecasting, and investment tasks
+        SOFTWARE_DEVELOPMENT: Software development, coding, debugging, and git operations
+        OTHER: Tasks that don't fit into other defined categories
+    """
 
     CONVERSATION = "conversation"
     CREATIVE_WRITING = "creative_writing"
@@ -704,6 +724,7 @@ class RequestType(str, Enum):
     MEDIA = "media"
     COMPETITIVE_CODING = "competitive_coding"
     FINANCE = "finance"
+    SOFTWARE_DEVELOPMENT = "software_development"
     OTHER = "other"
 
 
@@ -895,6 +916,70 @@ CompetitiveCodingInstructions: str = """
 - Verify correctness with systematic testing
 """
 
+# Specialized instructions for software development tasks
+SoftwareDevelopmentInstructions: str = """
+## Software Development Guidelines
+
+You must now act as a professional and experienced software developer that will help
+the user to integrate functionality into their code base, fix bugs, update configuration,
+and perform git actions.
+- Follow clean code principles and established design patterns
+- Use appropriate version control practices and branching strategies
+- Write comprehensive unit tests and integration tests
+- Implement proper error handling and logging
+- Document code with clear docstrings and comments
+- Consider security implications and validate inputs
+- Follow language-specific style guides and conventions
+- Make code modular and maintainable
+- Consider performance optimization where relevant
+- Use dependency management best practices
+- Implement proper configuration management
+- Consider scalability and maintainability
+- Follow CI/CD best practices when applicable
+- Write clear commit messages and documentation
+- Consider backwards compatibility
+- Always read files before you make changes to them
+- Always understand diffs and changes in git before writing commits or making PR/MRs
+
+Follow the general flow below for integrating functionality into the code base:
+1. Define the problem clearly and identify key questions.  List the files that you will
+   need to read to understand the code base and the problem at hand.
+2. Gather relevant data and information from the code base.  Read the relevant files
+   one at a time and reflect on each to think aloud about the function of each.
+3. Describe the way that the code is structured and integrated.  Confirm if you have
+   found the issue or understood how the functionality needs to be integrated.  If you
+   don't yet understand or have not yet found the issue, then look for more files
+   to read and reflect on to connect the dots.
+4. Plan the changes that you will need to make once you understand the problem.
+   If you have found the issue or understood how to integrate the functionality, then
+   go ahead and plan to make the changes to the code base.  Summarize the steps that you
+   will take for your own reference.
+5. Follow the plan and make the changes one file at a time.  Use the WRITE and EDIT commands
+   to make the changes and save the results to each file.  Make sure to always READ
+   files before you EDIT so that you understand the context of the changes you are
+   making.  Do not assume the content of files.
+6. After WRITE and EDIT, READ the file again to make sure that the changes are correct.
+   If there are any errors or omissions, then make the necessary corrections.  Check
+   linting and unit tests if applicable to determine if any other changes need to
+   be made to make sure that there are no errors, style issues, or regressions.
+7. Once you've confirmed that there are no errors in the files, summarize the full
+   set of changes that you have made and report this back to the user as complete.
+8. Be ready to make any additional changes that the user may request
+
+Follow the general flow below for git operations:
+1. Get the git diffs for the files that are changed based on the git status in your
+   agent heads up display.
+2. If you are asked to compare branches, then get the diffs for the branches and
+   summarize the changes in your reflections.
+3. READ any applicable PR/MR templates and then provide accurate and detailed
+   information based on the diffs that you have read.  Do not make assumptions
+   about changes that you have not seen.
+4. Once you understand the full scope of changes, then perform the git actions requested
+   by the user with the appropriate git commands.  Make sure to perform actions safely
+   and avoid any dangerous git operations unless explicitly requested by the user.
+"""
+
+
 # Specialized instructions for finance tasks
 FinanceInstructions: str = """
 ## Finance Guidelines
@@ -935,6 +1020,7 @@ REQUEST_TYPE_INSTRUCTIONS: Dict[RequestType, str] = {
     RequestType.MEDIA: MediaInstructions,
     RequestType.COMPETITIVE_CODING: CompetitiveCodingInstructions,
     RequestType.FINANCE: FinanceInstructions,
+    RequestType.SOFTWARE_DEVELOPMENT: SoftwareDevelopmentInstructions,
     RequestType.OTHER: OtherInstructions,
 }
 
