@@ -62,6 +62,44 @@ async def test_chat_success(
 
 
 @pytest.mark.asyncio
+async def test_chat_with_attachments(
+    test_app_client,
+    dummy_executor,
+    mock_create_operator,
+):
+    """Test the chat endpoint with attachments."""
+    test_prompt = "Analyze these files"
+    test_attachments = ["file1.txt", "file2.pdf"]
+
+    # Create payload with attachments
+    payload = {
+        "hosting": "openai",
+        "model": "gpt-4o",
+        "prompt": test_prompt,
+        "context": [],
+        "attachments": test_attachments,
+    }
+
+    response = await test_app_client.post("/v1/chat", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    result = data.get("result")
+    # Verify that the response contains the dummy operator response.
+    assert result.get("response") == "dummy operator response"
+    conversation = result.get("context")
+
+    # Verify that attachments are present in the conversation history
+    user_messages = [msg for msg in conversation if msg.get("role") == ConversationRole.USER.value]
+    assert len(user_messages) > 0, "No user messages found in conversation"
+    assert (
+        user_messages[0].get("files") == test_attachments
+    ), "Attachments not found in conversation"
+
+    assert isinstance(conversation, list)
+
+
+@pytest.mark.asyncio
 async def test_chat_sync_with_agent_success(
     test_app_client,
     dummy_executor,
@@ -341,9 +379,15 @@ async def test_chat_async_endpoint_success(
                 model="gpt-4o",
                 prompt="Process this asynchronously",
                 context=[],
+                attachments=["file1.txt", "file2.pdf"],
             )
 
             response = await test_app_client.post("/v1/chat/async", json=payload.model_dump())
+
+            args_passed = mock_create_and_start_job_process_with_queue.call_args[1]["args"]
+
+            assert args_passed[1] == "Process this asynchronously"
+            assert args_passed[2] == ["file1.txt", "file2.pdf"]
 
             assert response.status_code == 202
             data = response.json()

@@ -38,7 +38,6 @@ class ActionType(str, Enum):
     ASK = "ASK"
     BYE = "BYE"
     READ = "READ"
-    RESPOND = "RESPOND"
 
     def __str__(self) -> str:
         """Return the string representation of the ActionType enum.
@@ -60,6 +59,7 @@ class ConversationRecord(BaseModel):
         summarized (bool): Whether this message has been summarized
         is_system_prompt (bool): Whether this message is a system prompt
         timestamp (datetime): When this message was created
+        files (List[str]): The files that were created or modified during the code execution
 
     Methods:
         to_dict(): Convert the record to a dictionary format
@@ -73,6 +73,7 @@ class ConversationRecord(BaseModel):
     summarized: Optional[bool] = False
     is_system_prompt: Optional[bool] = False
     timestamp: Optional[datetime] = None
+    files: Optional[List[str]] = None
 
     def dict(self, *args, **kwargs) -> Dict[str, Any]:
         """Convert the conversation record to a dictionary format compatible with LangChain.
@@ -88,6 +89,7 @@ class ConversationRecord(BaseModel):
             "summarized": str(self.summarized),
             "is_system_prompt": str(self.is_system_prompt),
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "files": self.files,
         }
 
     def to_dict(self) -> Dict[str, Any]:
@@ -104,6 +106,7 @@ class ConversationRecord(BaseModel):
             "summarized": str(self.summarized),
             "is_system_prompt": str(self.is_system_prompt),
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "files": self.files,
         }
 
     @classmethod
@@ -128,6 +131,7 @@ class ConversationRecord(BaseModel):
                 if data.get("timestamp")
                 else None
             ),
+            files=data.get("files", None),
         )
 
 
@@ -139,12 +143,17 @@ class ResponseJsonSchema(BaseModel):
         code (str): Python code to be executed to achieve the current goal
         action (str): Action to take next - one of: CONTINUE, DONE, ASK, BYE
         learnings (str): Learnings from the current step
+        content (str): Content to be written to a file
+        file_path (str): Path to the file to be written to
+        new_files (List[str]): List of new files created or modified
+        replacements (List[Dict[str, str]]): List of replacements to be made in the file
     """
 
     response: str
     code: str
     content: str
     file_path: str
+    new_files: List[str]
     replacements: List[Dict[str, str]]
     action: ActionType
     learnings: str
@@ -187,6 +196,7 @@ class CodeExecutionResult(BaseModel):
         role (ConversationRole): The role of the message sender (user/assistant/system)
         status (ProcessResponseStatus): The status of the code execution
         timestamp (datetime): The timestamp of the code execution
+        files (List[str]): The files that were created or modified during the code execution
     """
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -199,6 +209,7 @@ class CodeExecutionResult(BaseModel):
     role: ConversationRole
     status: ProcessResponseStatus
     timestamp: Optional[datetime] = None
+    files: List[str]
 
 
 class AgentExecutorState(BaseModel):
@@ -211,3 +222,28 @@ class AgentExecutorState(BaseModel):
 
     conversation: List[ConversationRecord]
     execution_history: List[CodeExecutionResult]
+
+
+class RelativeEffortLevel(str, Enum):
+    """Enum representing the relative effort level of a user request.
+
+    Used to track the relative effort level of a user request.
+    """
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class RequestClassification(BaseModel):
+    """Represents the classification of a user request.
+
+    Attributes:
+        type (str): The type of request
+        planning_required (bool): Whether planning is required for the request
+        relative_effort (str): The relative effort required for the request
+    """
+
+    type: str
+    planning_required: bool
+    relative_effort: RelativeEffortLevel

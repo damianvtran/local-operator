@@ -10,7 +10,8 @@ from unittest.mock import patch
 
 import pytest
 
-from local_operator.jobs import Job, JobResult, JobStatus
+from local_operator.jobs import Job, JobContextRecord, JobResult, JobStatus
+from local_operator.types import ConversationRole
 
 
 @pytest.fixture
@@ -29,7 +30,7 @@ def sample_job():
         completed_at=(now - timedelta(minutes=13)).timestamp(),
         result=JobResult(
             response="Test response",
-            context=[{"role": "user", "content": "Test prompt"}],
+            context=[JobContextRecord(role=ConversationRole.USER, content="Test prompt", files=[])],
             stats={"total_tokens": 100, "prompt_tokens": 50, "completion_tokens": 50},
         ),
     )

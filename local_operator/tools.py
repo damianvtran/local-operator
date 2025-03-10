@@ -373,8 +373,8 @@ def list_working_directory(max_depth: int = 3) -> Dict[str, List[Tuple[str, str,
     return directory_index
 
 
-async def browse_single_url(url: str) -> str:
-    """Browse to a URL using Playwright to render JavaScript and return the page content.
+async def get_page_html_content(url: str) -> str:
+    """Browse to a URL using Playwright to render JavaScript and return the full HTML page content.  Use this for any URL that you want to get the full HTML content of for scraping and understanding the HTML format of the page.  # noqa: E501
 
     Args:
         url: The URL to browse to
@@ -391,7 +391,45 @@ async def browse_single_url(url: str) -> str:
             await browser.close()
             return content
     except Exception as e:
-        raise RuntimeError(f"Failed to browse {url}: {str(e)}")
+        raise RuntimeError(f"Failed to get raw page content for {url}: {str(e)}")
+
+
+async def get_page_text_content(url: str) -> str:
+    """Browse to a URL using Playwright to render JavaScript and extract clean text content.  Use this for any URL that you want to read the content for, for research purposes. Extracts text from semantic elements like headings, paragraphs, lists etc. and returns a cleaned text representation of the page content. # noqa: E501
+
+    Args:
+        url: The URL to get the text content of
+
+    Returns:
+        str: The cleaned text content extracted from the page's semantic elements
+
+    Raises:
+        RuntimeError: If page loading or text extraction fails
+    """
+    try:
+        async with pw.async_playwright() as playwright:
+            browser = await playwright.chromium.launch()
+            page = await browser.new_page()
+            await page.goto(url)
+
+            # Extract text from semantic elements
+            text_elements = await page.evaluate(
+                """() => {
+                const selectors = 'h1, h2, h3, h4, h5, h6, p, a, li, td, th, dt, dd,
+                figcaption, label';
+                const elements = document.querySelectorAll(selectors);
+                return Array.from(elements).map(el => el.textContent.trim()).filter(text => text);
+            }"""
+            )
+
+            await browser.close()
+
+            # Clean and join the text elements
+            cleaned_text = "\n".join(text for text in text_elements if text.strip())
+            return cleaned_text
+
+    except Exception as e:
+        raise RuntimeError(f"Failed to extract text content from {url}: {str(e)}")
 
 
 def search_web_tool(
@@ -491,11 +529,13 @@ class ToolRegistry:
         """Initialize the registry with default tools.
 
         Default tools include:
-        - browse_single_url: Browse a URL and get page content
+        - get_raw_page_content: Browse a URL and get page HTML content
+        - get_page_text_content: Browse a URL and get page text content
         - list_working_directory: Index files in current directory
         - search_web: Search the web using SERP API
         """
-        self.add_tool("browse_single_url", browse_single_url)
+        self.add_tool("get_page_html_content", get_page_html_content)
+        self.add_tool("get_page_text_content", get_page_text_content)
         self.add_tool("list_working_directory", list_working_directory)
 
         if self.serp_api_client or self.tavily_client:

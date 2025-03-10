@@ -33,6 +33,7 @@ def test_save_code_history_to_notebook(tmp_path: Path) -> None:
             formatted_print="",
             role=ConversationRole.USER,
             status=ProcessResponseStatus.SUCCESS,
+            files=[],
         ),
         CodeExecutionResult(
             stdout="",
@@ -43,6 +44,7 @@ def test_save_code_history_to_notebook(tmp_path: Path) -> None:
             formatted_print="",
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
+            files=[],
         ),
         CodeExecutionResult(
             stdout="",
@@ -53,6 +55,7 @@ def test_save_code_history_to_notebook(tmp_path: Path) -> None:
             message="I will now print 'Lorem ipsum dolor sit amet!'",
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.ERROR,
+            files=[],
         ),
         CodeExecutionResult(
             stdout="Hello, world!\n",
@@ -63,6 +66,7 @@ def test_save_code_history_to_notebook(tmp_path: Path) -> None:
             message="I will now print 'Hello, world!'",
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
+            files=[],
         ),
         CodeExecutionResult(
             stdout="/path/to/cwd\n",
@@ -73,6 +77,7 @@ def test_save_code_history_to_notebook(tmp_path: Path) -> None:
             message="I will now print the current working directory",
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
+            files=[],
         ),
     ]
 

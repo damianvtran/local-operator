@@ -120,7 +120,10 @@ async def chat_endpoint(
                 model_instance.temperature = temperature
             model_instance.top_p = request.options.top_p or model_instance.top_p
 
-        response_json = await operator.handle_user_input(request.prompt)
+        response_json = await operator.handle_user_input(
+            request.prompt, attachments=request.attachments or []
+        )
+
         if response_json is not None:
             response_content = response_json.response
         else:
@@ -145,7 +148,7 @@ async def chat_endpoint(
             result=ChatResponse(
                 response=response_content,
                 context=[
-                    ConversationRecord(role=msg.role, content=msg.content)
+                    ConversationRecord(role=msg.role, content=msg.content, files=msg.files)
                     for msg in operator.executor.conversation_history
                 ],
                 stats=ChatStats(
@@ -231,7 +234,9 @@ async def chat_with_agent(
                 model_instance.temperature = temperature
             model_instance.top_p = request.options.top_p or model_instance.top_p
 
-        response_json = await operator.handle_user_input(request.prompt)
+        response_json = await operator.handle_user_input(
+            request.prompt, attachments=request.attachments or []
+        )
         response_content = response_json.response if response_json is not None else ""
 
         # Calculate token stats using tiktoken
@@ -343,6 +348,7 @@ async def chat_async_endpoint(
             args=(
                 job.id,
                 request.prompt,
+                request.attachments or [],
                 request.model,
                 request.hosting,
                 credential_manager,
@@ -467,6 +473,7 @@ async def chat_with_agent_async(
             args=(
                 job.id,
                 request.prompt,
+                request.attachments or [],
                 request.model,
                 request.hosting,
                 agent_id,

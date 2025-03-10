@@ -33,7 +33,7 @@ from local_operator.console import (
     print_task_interrupted,
     spinner_context,
 )
-from local_operator.helpers import remove_think_tags
+from local_operator.helpers import clean_json_response
 from local_operator.model.configure import ModelConfiguration, calculate_cost
 from local_operator.prompts import (
     SafetyCheckSystemPrompt,
@@ -153,31 +153,7 @@ def process_json_response(response_str: str) -> ResponseJsonSchema:
         ValidationError: If the JSON response does not match the expected schema.
         ValueError: If no valid JSON object can be extracted from the response.
     """
-    response_content = response_str
-
-    response_content = remove_think_tags(response_content)
-
-    # Check for markdown code block format
-    start_tag = "```json"
-    end_tag = "```"
-
-    start_index = response_content.find(start_tag)
-    if start_index != -1:
-        response_content = response_content[start_index + len(start_tag) :]
-
-        end_index = response_content.find(end_tag)
-        if end_index != -1:
-            response_content = response_content[:end_index]
-    else:
-        # If no code block, try to extract JSON object directly
-        # Look for the first { and the last }
-        first_brace = response_content.find("{")
-        last_brace = response_content.rfind("}")
-
-        if first_brace != -1 and last_brace != -1 and first_brace < last_brace:
-            response_content = response_content[first_brace : last_brace + 1]
-
-    response_content = response_content.strip()
+    response_content = clean_json_response(response_str)
 
     # Validate the JSON response
     response_json = ResponseJsonSchema.model_validate_json(response_content)
@@ -963,7 +939,9 @@ class LocalCodeExecutor:
 
         return safety_result
 
-    async def execute_code(self, code: str, max_retries: int = 3) -> CodeExecutionResult:
+    async def execute_code(
+        self, response: ResponseJsonSchema, max_retries: int = 3
+    ) -> CodeExecutionResult:
         """Execute Python code with safety checks and context management.
 
         Args:
@@ -974,17 +952,18 @@ class LocalCodeExecutor:
             CodeExecutionResult: The result of the code execution
         """
         # First check code safety
-        safety_result = await self._check_and_confirm_safety(code)
+        safety_result = await self._check_and_confirm_safety(response.code)
         if safety_result == ConfirmSafetyResult.UNSAFE:
             return CodeExecutionResult(
                 stdout="",
                 stderr="",
                 logging="",
                 message="Code execution canceled by user",
-                code=code,
+                code=response.code,
                 formatted_print="",
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.CANCELLED,
+                files=[],
             )
         elif safety_result == ConfirmSafetyResult.CONVERSATION_CONFIRM:
             return CodeExecutionResult(
@@ -992,10 +971,11 @@ class LocalCodeExecutor:
                 stderr="",
                 logging="",
                 message="Code execution requires further confirmation from the user",
-                code=code,
+                code=response.code,
                 formatted_print="",
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.CONFIRMATION_REQUIRED,
+                files=[],
             )
         elif safety_result == ConfirmSafetyResult.OVERRIDE:
             if self.verbosity_level >= VerbosityLevel.INFO:
@@ -1004,12 +984,12 @@ class LocalCodeExecutor:
                     " prompt\033[0m\n"
                 )
 
-        current_code = code
+        current_response = response
         final_error: Exception | None = None
 
         for attempt in range(max_retries):
             try:
-                return await self._execute_with_output(current_code)
+                return await self._execute_with_output(current_response)
             except Exception as error:
                 final_error = error
                 if attempt == 0:
@@ -1023,9 +1003,9 @@ class LocalCodeExecutor:
 
                 if attempt < max_retries - 1:
                     try:
-                        new_code = await self._get_corrected_code()
-                        if new_code:
-                            current_code = new_code
+                        new_response = await self._get_corrected_code()
+                        if new_response:
+                            current_response = new_response
                         else:
                             break
                     except Exception as retry_error:
@@ -1041,10 +1021,11 @@ class LocalCodeExecutor:
             stderr="",
             logging="",
             message="",
-            code=current_code,
+            code=response.code,
             formatted_print=formatted_print,
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.ERROR,
+            files=[],
         )
 
     async def _check_and_confirm_safety(self, code: str) -> ConfirmSafetyResult:
@@ -1097,11 +1078,11 @@ class LocalCodeExecutor:
                 return ConfirmSafetyResult.CONVERSATION_CONFIRM
         return safety_result
 
-    async def _execute_with_output(self, code: str) -> CodeExecutionResult:
+    async def _execute_with_output(self, response: ResponseJsonSchema) -> CodeExecutionResult:
         """Execute code and capture stdout/stderr output.
 
         Args:
-            code (str): The Python code to execute
+            response (ResponseJsonSchema): The response from the language model
 
         Returns:
             CodeExecutionResult: The result of the code execution
@@ -1144,7 +1125,7 @@ class LocalCodeExecutor:
                 specific_logger.propagate = False
 
         try:
-            await self._run_code(code)
+            await self._run_code(response.code)
             log_output = log_capture.getvalue()
 
             condensed_output, condensed_error_output, condensed_log_output = (
@@ -1153,15 +1134,22 @@ class LocalCodeExecutor:
             formatted_print = format_success_output(
                 (condensed_output, condensed_error_output, condensed_log_output)
             )
+
+            # Convert new_files to absolute paths
+            expanded_new_files = [
+                str(Path(file).expanduser().resolve()) for file in response.new_files
+            ]
+
             return CodeExecutionResult(
                 stdout=condensed_output,
                 stderr=condensed_error_output,
                 logging=condensed_log_output,
-                message="",
-                code=code,
+                message=response.response,
+                code=response.code,
                 formatted_print=formatted_print,
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.SUCCESS,
+                files=expanded_new_files,
             )
         except Exception as e:
             # Add captured log output to error output if any
@@ -1347,7 +1335,7 @@ class LocalCodeExecutor:
             )
         )
 
-    async def _get_corrected_code(self) -> str:
+    async def _get_corrected_code(self) -> ResponseJsonSchema:
         """Get corrected code from the language model.
 
         Returns:
@@ -1368,7 +1356,7 @@ class LocalCodeExecutor:
             )
         )
 
-        return response_json.code
+        return response_json
 
     async def process_response(self, response: ResponseJsonSchema) -> ProcessResponseOutput:
         """Process model response, extracting and executing any code blocks.
@@ -1459,6 +1447,7 @@ class LocalCodeExecutor:
                     message=response.response,
                     role=ConversationRole.ASSISTANT,
                     status=ProcessResponseStatus.SUCCESS,
+                    files=[],
                 ),
                 response,
             )
@@ -1550,7 +1539,7 @@ class LocalCodeExecutor:
                             verbosity_level=self.verbosity_level,
                         )
 
-                        execution_result = await self.execute_code(code_block)
+                        execution_result = await self.execute_code(response)
 
                         if "code execution cancelled by user" in execution_result.message:
                             return ProcessResponseOutput(
@@ -1636,7 +1625,7 @@ class LocalCodeExecutor:
             ValueError: If the file is too large to read
             OSError: If there is an error reading the file
         """
-        expanded_file_path = os.path.expanduser(file_path)
+        expanded_file_path = Path(file_path).expanduser().resolve()
 
         if os.path.getsize(expanded_file_path) > max_file_size_bytes:
             raise ValueError(
@@ -1655,7 +1644,7 @@ class LocalCodeExecutor:
 
         self.append_to_history(
             ConversationRecord(
-                role=ConversationRole.SYSTEM,
+                role=ConversationRole.ASSISTANT,
                 content=(
                     f"Contents of {file_path}:\n"
                     f"\n"
@@ -1676,8 +1665,9 @@ class LocalCodeExecutor:
             formatted_print=f"Successfully read file: {file_path}",
             code="",
             message="",
-            role=ConversationRole.SYSTEM,
+            role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
+            files=[str(expanded_file_path)],
         )
 
     async def write_file(self, file_path: str, content: str) -> CodeExecutionResult:
@@ -1702,14 +1692,14 @@ class LocalCodeExecutor:
 
         cleaned_content = "\n".join(content_lines)
 
-        expanded_file_path = os.path.expanduser(file_path)
+        expanded_file_path = Path(file_path).expanduser().resolve()
 
         with open(expanded_file_path, "w") as f:
             f.write(cleaned_content)
 
         self.append_to_history(
             ConversationRecord(
-                role=ConversationRole.SYSTEM,
+                role=ConversationRole.ASSISTANT,
                 content=f"Successfully wrote to file: {file_path}",
                 should_summarize=True,
             )
@@ -1726,8 +1716,9 @@ class LocalCodeExecutor:
             formatted_print=f"Successfully wrote to file: {file_path}",
             code=equivalent_code,
             message="",
-            role=ConversationRole.SYSTEM,
+            role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
+            files=[str(expanded_file_path)],
         )
 
     async def edit_file(
@@ -1749,7 +1740,7 @@ class LocalCodeExecutor:
             ValueError: If the find string is not found in the file
             OSError: If there is an error reading or writing to the file
         """
-        expanded_file_path = os.path.expanduser(file_path)
+        expanded_file_path = Path(file_path).expanduser().resolve()
 
         original_content = ""
         with open(expanded_file_path, "r") as f:
@@ -1773,7 +1764,7 @@ class LocalCodeExecutor:
 
         self.append_to_history(
             ConversationRecord(
-                role=ConversationRole.SYSTEM,
+                role=ConversationRole.ASSISTANT,
                 content=f"Successfully edited file: {file_path}",
                 should_summarize=True,
             )
@@ -1786,8 +1777,9 @@ class LocalCodeExecutor:
             formatted_print=f"Successfully edited file: {file_path}",
             code=equivalent_code,
             message="",
-            role=ConversationRole.SYSTEM,
+            role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
+            files=[str(expanded_file_path)],
         )
 
     def _limit_conversation_history(self) -> None:

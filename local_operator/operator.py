@@ -23,20 +23,29 @@ from local_operator.executor import (
     LocalCodeExecutor,
     process_json_response,
 )
-from local_operator.helpers import clean_plain_text_response, remove_think_tags
+from local_operator.helpers import (
+    clean_json_response,
+    clean_plain_text_response,
+    remove_think_tags,
+)
 from local_operator.model.configure import ModelConfiguration
 from local_operator.notebook import save_code_history_to_notebook
 from local_operator.prompts import (
     PlanSystemPrompt,
     PlanUserPrompt,
     ReflectionUserPrompt,
+    RequestClassificationSystemPrompt,
+    RequestType,
+    apply_attachments_to_prompt,
     create_system_prompt,
+    get_request_type_instructions,
 )
 from local_operator.types import (
     ActionType,
     ConversationRecord,
     ConversationRole,
     ProcessResponseStatus,
+    RequestClassification,
     ResponseJsonSchema,
 )
 
@@ -44,6 +53,30 @@ from local_operator.types import (
 class OperatorType(Enum):
     CLI = "cli"
     SERVER = "server"
+
+
+def process_classification_json(response_content: str) -> RequestClassification:
+    """Process and validate a JSON response string from the language model into a
+    RequestClassification.
+
+    Args:
+        response_content (str): Raw response string from the model, which may be wrapped in
+            markdown-style JSON code block delimiters (```json) or provided as a plain JSON object.
+
+    Returns:
+        RequestClassification: Validated classification object containing the model's output.
+            See RequestClassification class for the expected schema.
+
+    Raises:
+        ValidationError: If the JSON response does not match the expected schema.
+        ValueError: If no valid JSON object can be extracted from the response.
+    """
+    response_content = clean_json_response(response_content)
+
+    # Validate the JSON response
+    classification = RequestClassification.model_validate_json(response_content)
+
+    return classification
 
 
 class Operator:
@@ -194,6 +227,104 @@ class Operator:
 
         return response.action == "BYE"
 
+    async def classify_request(
+        self, user_input: str, max_attempts: int = 3, max_conversation_depth: int = 8
+    ) -> RequestClassification:
+        """Classify the user request into a category.
+
+        This method constructs a conversation with the agent to classify the request type.
+        It prompts the agent to analyze the user input and categorize it based on the type
+        of task, whether it requires planning, and the relative effort level.
+
+        Args:
+            user_input: The text input provided by the user
+            max_attempts: Maximum number of attempts to get valid classification, defaults to 3
+            max_conversation_depth: Maximum number of messages to include in the conversation
+                context, defaults to 8
+
+        Returns:
+            RequestClassification: The classification of the user request
+
+        Raises:
+            ValueError: If unable to get valid classification after max attempts
+        """
+        messages = [
+            ConversationRecord(
+                role=ConversationRole.SYSTEM,
+                content=RequestClassificationSystemPrompt,
+                is_system_prompt=True,
+            ),
+        ]
+
+        if len(self.executor.conversation_history) + 1 > max_conversation_depth:
+            messages.append(
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content=(
+                        f"... Conversation history before this message has been truncated "
+                        f"to the last {max_conversation_depth} messages.  Please review the "
+                        "following messages in the sequence and respond with the request "
+                        "type in the required JSON format."
+                    ),
+                )
+            )
+
+            messages.extend(self.executor.conversation_history[-max_conversation_depth:])
+        else:
+            messages.extend(self.executor.conversation_history[1:])
+
+        messages.append(
+            ConversationRecord(
+                role=ConversationRole.USER,
+                content=user_input,
+            ),
+        )
+
+        attempt = 0
+        last_error = None
+
+        while attempt < max_attempts:
+            try:
+                response = await self.executor.invoke_model(messages)
+                response_content = (
+                    response.content if isinstance(response.content, str) else str(response.content)
+                )
+
+                classification = process_classification_json(response_content)
+
+                self.executor.conversation_history.append(
+                    ConversationRecord(
+                        role=ConversationRole.ASSISTANT,
+                        content=f"Classification information for your request: {response_content}",
+                        should_summarize=False,
+                    )
+                )
+
+                return classification
+
+            except ValidationError as e:
+                attempt += 1
+                last_error = str(e)
+
+                if attempt < max_attempts:
+                    error_message = (
+                        f"The response you provided wasn't valid JSON. Error: {last_error}. "
+                        "Please provide a valid JSON response matching the "
+                        "RequestClassification schema."
+                    )
+                    messages.append(
+                        ConversationRecord(
+                            role=ConversationRole.USER,
+                            content=error_message,
+                        )
+                    )
+                    continue
+
+        raise ValueError(
+            f"Failed to get valid classification after {max_attempts} attempts. "
+            f"Last error: {last_error}"
+        )
+
     async def generate_plan(self) -> str:
         """Generate a plan for the agent to follow.
 
@@ -236,10 +367,6 @@ class Operator:
             response.content if isinstance(response.content, str) else str(response.content)
         )
 
-        if "[SKIP_PLANNING]" in response_content:
-            self.executor.set_current_plan("No plan required, proceed with execution.")
-            return ""
-
         # Remove think tags for reasoning models
         response_content = remove_think_tags(response_content)
 
@@ -273,6 +400,7 @@ class Operator:
                 message=response_content,
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.SUCCESS,
+                files=[],
             ),
             None,
         )
@@ -346,6 +474,7 @@ class Operator:
                 message=response_content,
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.SUCCESS,
+                files=[],
             ),
             None,
         )
@@ -361,8 +490,33 @@ class Operator:
 
         return response_content
 
+    def add_task_instructions(self, request_type: RequestType) -> None:
+        """
+        Add the task instructions as an ephemeral message to help the agent
+        prioritize the information and the task at hand.
+        """
+        task_instructions = """
+This is a {request_type} message, here are some guidelines for how to respond:
+
+# Task Instructions
+
+{task_instructions}
+        """.format(
+            request_type=request_type,
+            task_instructions=get_request_type_instructions(request_type),
+        )
+
+        self.executor.conversation_history.append(
+            ConversationRecord(
+                role=ConversationRole.USER,
+                content=task_instructions,
+                is_system_prompt=False,
+                ephemeral=True,
+            )
+        )
+
     async def handle_user_input(
-        self, user_input: str, user_message_id: str | None = None
+        self, user_input: str, user_message_id: str | None = None, attachments: List[str] = []
     ) -> ResponseJsonSchema | None:
         """Process user input and generate agent responses.
 
@@ -384,13 +538,8 @@ class Operator:
 
         self.executor.update_ephemeral_messages()
 
-        self.executor.conversation_history.append(
-            ConversationRecord(
-                role=ConversationRole.USER,
-                content=user_input,
-                should_summarize=False,
-            )
-        )
+        user_input_with_attachments = apply_attachments_to_prompt(user_input, attachments)
+
         self.executor.add_to_code_history(
             CodeExecutionResult(
                 id=user_message_id if user_message_id else str(uuid.uuid4()),
@@ -400,6 +549,7 @@ class Operator:
                 formatted_print="",
                 code="",
                 message=user_input,
+                files=attachments,
                 role=ConversationRole.USER,
                 status=ProcessResponseStatus.SUCCESS,
             ),
@@ -414,17 +564,44 @@ class Operator:
         self.executor.reset_step_counter()
         self.executor_is_processing = True
 
+        # Classify the user's request to determine the type of task at hand and if
+        # planning is required.
         async with spinner_context(
-            "Generating plan",
+            "Interpreting your message",
             verbosity_level=self.verbosity_level,
         ):
-            plan = await self.generate_plan()
+            classification = await self.classify_request(user_input)
 
-            if plan and self.verbosity_level >= VerbosityLevel.VERBOSE:
-                formatted_plan = format_agent_output(plan)
-                print("\n\033[1;36m╭─ Agent Plan ──────────────────────────────────────\033[0m")
-                print(f"\033[1;36m│\033[0m {formatted_plan}")
-                print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
+        # Add the task instructions as an ephemeral message to help the agent
+        # prioritize the information and the task at hand.
+        self.add_task_instructions(RequestType(classification.type))
+
+        # Add the user's request after the task instructions
+        self.executor.conversation_history.append(
+            ConversationRecord(
+                role=ConversationRole.USER,
+                content=user_input_with_attachments,
+                files=attachments,
+                should_summarize=False,
+            )
+        )
+
+        # Perform planning for more complex tasks
+        if classification.planning_required:
+            async with spinner_context(
+                "Coming up with a plan",
+                verbosity_level=self.verbosity_level,
+            ):
+                plan = await self.generate_plan()
+
+                if plan and self.verbosity_level >= VerbosityLevel.VERBOSE:
+                    formatted_plan = format_agent_output(plan)
+                    print("\n\033[1;36m╭─ Agent Plan ──────────────────────────────────────\033[0m")
+                    print(f"\033[1;36m│\033[0m {formatted_plan}")
+                    print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
+
+        if self.verbosity_level >= VerbosityLevel.VERBOSE:
+            print("\n")
 
         while (
             not self._agent_is_done(response_json)
@@ -435,7 +612,7 @@ class Operator:
                 raise ValueError("Model is not initialized")
 
             async with spinner_context(
-                "Generating response",
+                "Formulating a response",
                 verbosity_level=self.verbosity_level,
             ):
                 response = await self.executor.invoke_model(self.executor.conversation_history)
