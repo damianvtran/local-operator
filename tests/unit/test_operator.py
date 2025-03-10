@@ -5,8 +5,14 @@ import pytest
 from local_operator.executor import LocalCodeExecutor
 from local_operator.model.configure import configure_model
 from local_operator.operator import Operator, OperatorType
+from local_operator.prompts import RequestType
 from local_operator.tools import ToolRegistry
-from local_operator.types import ActionType, ResponseJsonSchema
+from local_operator.types import (
+    ActionType,
+    RelativeEffortLevel,
+    RequestClassification,
+    ResponseJsonSchema,
+)
 
 
 @pytest.fixture
@@ -91,7 +97,13 @@ async def test_cli_operator_chat(cli_operator, mock_model_config):
 
     # Patch all required methods at once to reduce nesting
     mock_classify_request = patch.object(
-        cli_operator, "classify_request", return_value=MagicMock()
+        cli_operator,
+        "classify_request",
+        return_value=RequestClassification(
+            type=RequestType.CONVERSATION,
+            planning_required=True,
+            relative_effort=RelativeEffortLevel.MEDIUM,
+        ),
     ).start()
     mock_generate_plan = patch.object(
         cli_operator, "generate_plan", return_value=MagicMock()
