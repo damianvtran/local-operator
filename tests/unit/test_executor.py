@@ -445,10 +445,19 @@ async def test_check_code_safety_unsafe_without_prompt(executor, mock_model_conf
 @pytest.mark.asyncio
 async def test_execute_code_success(executor, mock_model_config):
     mock_model_config.instance.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
-    code = "print('hello')"
+    response = ResponseJsonSchema(
+        code="print('hello')",
+        action=ActionType.CODE,
+        content="",
+        file_path="",
+        learnings="",
+        new_files=[],
+        replacements=[],
+        response="",
+    )
 
     with patch("sys.stdout", new_callable=io.StringIO):
-        execution_result = await executor.execute_code(code)
+        execution_result = await executor.execute_code(response)
         assert "✓ Code Execution Complete" in execution_result.formatted_print
         assert "hello" in execution_result.formatted_print
 
@@ -456,10 +465,19 @@ async def test_execute_code_success(executor, mock_model_config):
 @pytest.mark.asyncio
 async def test_execute_code_no_output(executor, mock_model_config):
     mock_model_config.instance.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
-    code = "x = 1 + 1"  # Code that produces no output
+    response = ResponseJsonSchema(
+        code="x = 1 + 1",
+        action=ActionType.CODE,
+        content="",
+        file_path="",
+        learnings="",
+        new_files=[],
+        replacements=[],
+        response="",
+    )
 
     with patch("sys.stdout", new_callable=io.StringIO):
-        execution_result = await executor.execute_code(code)
+        execution_result = await executor.execute_code(response)
         assert "✓ Code Execution Complete" in execution_result.formatted_print
         assert "[No output]" in execution_result.formatted_print
 
@@ -470,10 +488,19 @@ async def test_execute_code_safety_no_prompt(executor, mock_model_config):
     mock_model_config.instance.ainvoke.return_value.content = (
         "The code is unsafe because it deletes important files\n\n[UNSAFE]"
     )
-    code = "import os; os.remove('file.txt')"  # Potentially dangerous code
+    response = ResponseJsonSchema(
+        code="import os; os.remove('file.txt')",
+        action=ActionType.CODE,
+        content="",
+        file_path="",
+        learnings="",
+        new_files=[],
+        replacements=[],
+        response="",
+    )
 
     with patch("sys.stdout", new_callable=io.StringIO):
-        execution_result = await executor.execute_code(code)
+        execution_result = await executor.execute_code(response)
 
         # Should not cancel execution but add warning to conversation history
         assert "requires further confirmation" in execution_result.message
@@ -489,13 +516,22 @@ async def test_execute_code_safety_with_prompt(executor, mock_model_config):
     mock_model_config.instance.ainvoke.return_value.content = (
         "The code is unsafe because it deletes important files\n\n[UNSAFE]"
     )
-    code = "import os; os.remove('file.txt')"  # Potentially dangerous code
+    response = ResponseJsonSchema(
+        code="import os; os.remove('file.txt')",
+        action=ActionType.CODE,
+        content="",
+        file_path="",
+        learnings="",
+        new_files=[],
+        replacements=[],
+        response="",
+    )
 
     with (
         patch("sys.stdout", new_callable=io.StringIO),
         patch("builtins.input", return_value="n"),
     ):  # User responds "n" to safety prompt
-        execution_result = await executor.execute_code(code)
+        execution_result = await executor.execute_code(response)
 
         # Should cancel execution when user declines
         assert "Code execution canceled by user" in execution_result.message
@@ -509,13 +545,22 @@ async def test_execute_code_safety_with_prompt(executor, mock_model_config):
 async def test_execute_code_safety_with_prompt_approved(executor, mock_model_config):
     # Default can_prompt_user is True
     mock_model_config.instance.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
-    code = "x = 1 + 1"
+    response = ResponseJsonSchema(
+        code="x = 1 + 1",
+        action=ActionType.CODE,
+        content="",
+        file_path="",
+        learnings="",
+        new_files=[],
+        replacements=[],
+        response="",
+    )
 
     with (
         patch("sys.stdout", new_callable=io.StringIO),
         patch("builtins.input", return_value="y"),  # User responds "y" to safety prompt
     ):
-        execution_result = await executor.execute_code(code)
+        execution_result = await executor.execute_code(response)
 
         # Should proceed with execution when user approves
         assert "Code Execution Complete" in execution_result.formatted_print
@@ -527,10 +572,19 @@ async def test_execute_code_safety_with_override(executor, mock_model_config):
     mock_model_config.instance.ainvoke.return_value.content = (
         "The code is unsafe but has security override\n\n[OVERRIDE]"
     )
-    code = "x = 1 + 1"
+    response = ResponseJsonSchema(
+        code="x = 1 + 1",
+        action=ActionType.CODE,
+        content="",
+        file_path="",
+        learnings="",
+        new_files=[],
+        replacements=[],
+        response="",
+    )
 
     with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
-        execution_result = await executor.execute_code(code)
+        execution_result = await executor.execute_code(response)
 
         # Should proceed with execution and log override
         assert "Code Execution Complete" in execution_result.formatted_print
@@ -606,6 +660,7 @@ async def test_process_response(executor, mock_model_config):
         action=ActionType.CODE,
         learnings="",
         content="",
+        new_files=[],
         file_path="",
         replacements=[],
     )
@@ -1164,7 +1219,7 @@ def test_get_context_vars_str(
             '"current_goal": "Print hello world", "next_goal": "", '
             '"response": "Here\'s some code:", "code": "print(\'hello world\')", '
             '"action": "CODE", "learnings": "", "plan": "", "content": "", '
-            '"file_path": "", "replacements": []}',
+            '"file_path": "", "replacements": [], "new_files": []}',
             "print('hello world')",
             ActionType.CODE,
         ),
@@ -1174,7 +1229,7 @@ def test_get_context_vars_str(
             '"next_goal": "", "response": "Here\'s some code:", '
             '"code": "print(\'hello world\')", "action": "CODE", '
             '"learnings": "", "plan": "", "content": "", '
-            '"file_path": "", "replacements": []}\n```',
+            '"file_path": "", "replacements": [], "new_files": []}\n```',
             "print('hello world')",
             ActionType.CODE,
         ),
@@ -1184,7 +1239,7 @@ def test_get_context_vars_str(
             '"next_goal": "", "response": "I will write a file", '
             '"code": "", "action": "WRITE", "learnings": "", '
             '"plan": "", "content": "file content", '
-            '"file_path": "output.txt", "replacements": []}\n```',
+            '"file_path": "output.txt", "replacements": [], "new_files": []}\n```',
             "",
             ActionType.WRITE,
         ),
@@ -1194,7 +1249,7 @@ def test_get_context_vars_str(
             '"current_goal": "Print hello world", "next_goal": "", '
             '"response": "Here\'s some code:", "code": "print(\'hello world\')", '
             '"action": "CODE", "learnings": "", "plan": "", "content": "", '
-            '"file_path": "", "replacements": []}\n```',
+            '"file_path": "", "replacements": [], "new_files": []}\n```',
             "print('hello world')",
             ActionType.CODE,
         ),
@@ -1204,7 +1259,7 @@ def test_get_context_vars_str(
             '"next_goal": "", "response": "Here\'s some code:", '
             '"code": "print(\'hello world\')", "action": "CODE", '
             '"learnings": "", "plan": "", "content": "", '
-            '"file_path": "", "replacements": []}',
+            '"file_path": "", "replacements": [], "new_files": []}',
             "print('hello world')",
             ActionType.CODE,
         ),
@@ -1214,7 +1269,7 @@ def test_get_context_vars_str(
             '"next_goal": "", "response": "Here\'s some code:", '
             '"code": "print(\'hello world\')", "action": "CODE", '
             '"learnings": "", "plan": "", "content": "", '
-            '"file_path": "", "replacements": []} Text after',
+            '"file_path": "", "replacements": [], "new_files": []} Text after',
             "print('hello world')",
             ActionType.CODE,
         ),
@@ -1224,7 +1279,7 @@ def test_get_context_vars_str(
             '"next_goal": "", "response": "Here\'s some code:", '
             '"code": "print(\'hello world\')", "action": "CODE", '
             '"learnings": "", "plan": "", "content": "", '
-            '"file_path": "", "replacements": []} Text after',
+            '"file_path": "", "replacements": [], "new_files": []} Text after',
             "print('hello world')",
             ActionType.CODE,
         ),
@@ -1235,7 +1290,7 @@ def test_get_context_vars_str(
             '"response": "Here\'s the result after thinking", '
             '"code": "print(\'thought result\')", "action": "CODE", '
             '"learnings": "", "plan": "", "content": "", '
-            '"file_path": "", "replacements": []}',
+            '"file_path": "", "replacements": [], "new_files": []}',
             "print('thought result')",
             ActionType.CODE,
         ),
@@ -1283,13 +1338,17 @@ async def test_perform_action(
     replacements: list[dict[str, str]] | None,
     expected_output: str,
 ) -> None:
+
+    file_path = file_path or ""
+
     response = ResponseJsonSchema(
         response="Test response",
         code=code or "",
         action=action_type,
         learnings="",
         content=content or "",
-        file_path=file_path or "",
+        file_path=file_path,
+        new_files=[],
         replacements=replacements or [],
     )
 
@@ -1310,6 +1369,7 @@ async def test_perform_action(
                     message="",
                     role=ConversationRole.SYSTEM,
                     status=ProcessResponseStatus.SUCCESS,
+                    files=[file_path],
                 )
             )
         elif action_type == ActionType.WRITE:
@@ -1323,6 +1383,7 @@ async def test_perform_action(
                     message="",
                     role=ConversationRole.SYSTEM,
                     status=ProcessResponseStatus.SUCCESS,
+                    files=[file_path],
                 )
             )
         elif action_type == ActionType.EDIT:
@@ -1336,6 +1397,7 @@ async def test_perform_action(
                     message="",
                     role=ConversationRole.SYSTEM,
                     status=ProcessResponseStatus.SUCCESS,
+                    files=[file_path],
                 )
             )
         else:
@@ -1349,6 +1411,7 @@ async def test_perform_action(
                     message="",
                     role=ConversationRole.SYSTEM,
                     status=ProcessResponseStatus.SUCCESS,
+                    files=[],
                 )
             )
 
@@ -1372,6 +1435,7 @@ async def test_perform_action_handles_exception(executor: LocalCodeExecutor):
         learnings="",
         content="",
         file_path="",
+        new_files=[],
         replacements=[],
     )
 

@@ -10,12 +10,12 @@ import asyncio
 import logging
 import multiprocessing
 from multiprocessing import Process, Queue
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
-from local_operator.jobs import JobContext, JobManager, JobStatus
+from local_operator.jobs import JobContext, JobContextRecord, JobManager, JobStatus
 from local_operator.server.utils.operator import create_operator
 from local_operator.types import ConversationRecord
 
@@ -25,6 +25,7 @@ logger = logging.getLogger("local_operator.server.utils.job_processor_queue")
 def run_job_in_process_with_queue(
     job_id: str,
     prompt: str,
+    attachments: List[str],
     model: str,
     hosting: str,
     credential_manager: CredentialManager,
@@ -107,13 +108,19 @@ def run_job_in_process_with_queue(
                             setattr(model_instance, "top_p", options["top_p"])
 
                 # Process the request
-                response_json = await process_operator.handle_user_input(prompt)
+                response_json = await process_operator.handle_user_input(
+                    prompt, attachments=attachments
+                )
 
                 # Create result with response and context
                 result = {
                     "response": response_json.response if response_json is not None else "",
                     "context": [
-                        {"role": msg.role, "content": msg.content}
+                        JobContextRecord(
+                            role=msg.role,
+                            content=msg.content,
+                            files=msg.files,
+                        )
                         for msg in process_operator.executor.conversation_history
                     ],
                 }
@@ -134,6 +141,7 @@ def run_job_in_process_with_queue(
 def run_agent_job_in_process_with_queue(
     job_id: str,
     prompt: str,
+    attachments: List[str],
     model: str,
     hosting: str,
     agent_id: str,
@@ -155,6 +163,7 @@ def run_agent_job_in_process_with_queue(
     Args:
         job_id: The ID of the job to run
         prompt: The user prompt to process
+        attachments: The attachments to process
         model: The model to use
         hosting: The hosting provider
         agent_id: The ID of the agent to use
@@ -200,13 +209,19 @@ def run_agent_job_in_process_with_queue(
                 )
 
                 # Process the request
-                response_json = await process_operator.handle_user_input(prompt, user_message_id)
+                response_json = await process_operator.handle_user_input(
+                    prompt, user_message_id, attachments
+                )
 
                 # Create result with response and context
                 result = {
                     "response": response_json.response if response_json is not None else "",
                     "context": [
-                        {"role": msg.role, "content": msg.content}
+                        JobContextRecord(
+                            role=msg.role,
+                            content=msg.content,
+                            files=msg.files,
+                        )
                         for msg in process_operator.executor.conversation_history
                     ],
                 }

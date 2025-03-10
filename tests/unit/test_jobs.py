@@ -6,7 +6,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from local_operator.jobs import Job, JobContext, JobManager, JobResult, JobStatus
+from local_operator.jobs import (
+    Job,
+    JobContext,
+    JobContextRecord,
+    JobManager,
+    JobResult,
+    JobStatus,
+)
+from local_operator.types import ConversationRole
 
 
 @pytest.fixture
@@ -23,7 +31,7 @@ def sample_job():
 def sample_job_result():
     return JobResult(
         response="Test response",
-        context=[{"role": "user", "content": "Test prompt"}],
+        context=[JobContextRecord(role=ConversationRole.USER, content="Test prompt", files=[])],
         stats={"total_tokens": 100},
     )
 
