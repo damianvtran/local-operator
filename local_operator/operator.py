@@ -295,7 +295,7 @@ class Operator:
                 self.executor.conversation_history.append(
                     ConversationRecord(
                         role=ConversationRole.ASSISTANT,
-                        content=response_content,
+                        content=f"Classification information for your request: {response_content}",
                         should_summarize=False,
                     )
                 )
@@ -540,15 +540,6 @@ This is a {request_type} message, here are some guidelines for how to respond:
 
         user_input_with_attachments = apply_attachments_to_prompt(user_input, attachments)
 
-        self.executor.conversation_history.append(
-            ConversationRecord(
-                role=ConversationRole.USER,
-                content=user_input_with_attachments,
-                files=attachments,
-                should_summarize=False,
-            )
-        )
-
         self.executor.add_to_code_history(
             CodeExecutionResult(
                 id=user_message_id if user_message_id else str(uuid.uuid4()),
@@ -584,6 +575,16 @@ This is a {request_type} message, here are some guidelines for how to respond:
         # Add the task instructions as an ephemeral message to help the agent
         # prioritize the information and the task at hand.
         self.add_task_instructions(RequestType(classification.type))
+
+        # Add the user's request after the task instructions
+        self.executor.conversation_history.append(
+            ConversationRecord(
+                role=ConversationRole.USER,
+                content=user_input_with_attachments,
+                files=attachments,
+                should_summarize=False,
+            )
+        )
 
         # Perform planning for more complex tasks
         if classification.planning_required:
