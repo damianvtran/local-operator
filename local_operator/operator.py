@@ -488,6 +488,31 @@ class Operator:
 
         return response_content
 
+    def add_task_instructions(self, request_type: RequestType) -> None:
+        """
+        Add the task instructions as an ephemeral message to help the agent
+        prioritize the information and the task at hand.
+        """
+        task_instructions = """
+This is a {request_type} message, here are some guidelines for how to respond:
+
+# Task Instructions
+
+{task_instructions}
+        """.format(
+            request_type=request_type,
+            task_instructions=get_request_type_instructions(request_type),
+        )
+
+        self.executor.conversation_history.append(
+            ConversationRecord(
+                role=ConversationRole.USER,
+                content=task_instructions,
+                is_system_prompt=False,
+                ephemeral=True,
+            )
+        )
+
     async def handle_user_input(
         self, user_input: str, user_message_id: str | None = None, attachments: List[str] = []
     ) -> ResponseJsonSchema | None:
@@ -546,6 +571,8 @@ class Operator:
         self.executor.reset_step_counter()
         self.executor_is_processing = True
 
+        # Classify the user's request to determine the type of task at hand and if
+        # planning is required.
         async with spinner_context(
             "Interpreting your message",
             verbosity_level=self.verbosity_level,
@@ -554,26 +581,9 @@ class Operator:
 
         # Add the task instructions as an ephemeral message to help the agent
         # prioritize the information and the task at hand.
-        task_instructions = """
-This is a {request_type} message, here are some guidelines for how to respond:
+        self.add_task_instructions(RequestType(classification.type))
 
-# Task Instructions
-
-{task_instructions}
-        """.format(
-            request_type=classification.type,
-            task_instructions=get_request_type_instructions(RequestType(classification.type)),
-        )
-
-        self.executor.conversation_history.append(
-            ConversationRecord(
-                role=ConversationRole.USER,
-                content=task_instructions,
-                is_system_prompt=False,
-                ephemeral=True,
-            )
-        )
-
+        # Perform planning for more complex tasks
         if classification.planning_required:
             async with spinner_context(
                 "Coming up with a plan",
