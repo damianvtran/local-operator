@@ -397,6 +397,8 @@ with the guidelines or if they are not relevant to the task at hand.
   meaningfully better improvement over the last with new techniques and approaches.
 - Use await for async functions.  Never call `asyncio.run()`, as this is already handled
   for you in the runtime and the code executor.
+- Never use `asyncio` in your code, it will not work because of the way that your code
+  is being executed.
 - You cannot "see" plots and figures, do not attempt to rely them in your own analysis.
   Create them for the user's benefit to help them understand your thinking, but always
   run parallel analysis with dataframes and other data objects printed to the console.
@@ -407,7 +409,6 @@ with the guidelines or if they are not relevant to the task at hand.
   and techniques that you know to complete the task and leverage the full extent of
   your knowledge and intelligence.
 
-Response Format:
 {response_format}
 """
 )
@@ -415,8 +416,9 @@ Response Format:
 JsonResponseFormatPrompt: str = """
 ## Interacting with the system
 
-To generate code, modify files, and do other real world activities, you must create
-single responses EXCLUSIVELY with ONE valid JSON object following this schema and field order.
+To generate code, modify files, and do other real world activities, with an action,
+you must create a single response EXCLUSIVELY with ONE valid JSON object following this
+schema and field order.
 
 All content (explanations, analysis, code) must be inside the JSON structure.
 
@@ -453,11 +455,11 @@ Fields:
 - replacements: List of replacements to make in the file.
 - action: Required for all actions: CODE | READ | WRITE | EDIT | DONE | ASK | BYE
 
-### Example
+### Examples
 
 Do not include any markdown tags or any other text outside the JSON structure.
 
-Example for CODE:
+#### Example for CODE:
 
 {
   "learnings": "This was something I didn't know before.  I learned that I can't actually
@@ -472,7 +474,7 @@ Example for CODE:
   "action": "CODE"
 }
 
-Example for WRITE:
+#### Example for WRITE:
 
 {
   "learnings": "I learned about this new content that I found from the web.  It will be
@@ -486,7 +488,7 @@ Example for WRITE:
   "action": "WRITE"
 }
 
-Example for EDIT:
+#### Example for EDIT:
 
 {
   "learnings": "I learned about this new content that I found from the web.  It will be
@@ -505,13 +507,13 @@ Example for EDIT:
   "action": "EDIT"
 }
 
-Example for DONE:
+#### Example for DONE:
 
 {
   "learnings": "I learned about this new content that I found from the web.  It will be
   useful for the user to know this because of x reason.",
   "response": "Here is what I found and did.  This is all the information that you were
-  looking for: <FULL_SUMMARY>.  Let me know if you need anything else!",
+  looking for: [FULL_SUMMARY_HERE].  Let me know if you need anything else!",
   "code": "",
   "content": "",
   "file_path": "",
@@ -524,16 +526,19 @@ If the user has a simple request or asks you something that doesn't require mult
 action, you can respond with a simple written response with the DONE action.
 
 Make sure that you respond to the user in the first person directly and provide them a
-helpful response.  Be as detailed as you can and provide an interpretation of the
+helpful response.  Use the "response" field only, do NOT use the "content" field.
+Be as detailed as you can and provide an interpretation of the
 conversation history up until this point.  Include all the details and data you have
-gathered.  Do not respond with DONE if the plan is not completely executed.
+gathered.  Do not respond with DONE if the plan is not completely executed.  Make sure
+that you interpret the information in the conversation history fully and don't assume
+that the user should go back to previous responses to get your summary.
 
 When responding with DONE, you are ending the task and will not have the opportunity to
 run more steps until the user asks you to do so.  Make sure that your response in the DONE
 action has all the required information, details and summary and don't assume that some
 other command will bring your summary for you.
 
-Example for ASK:
+#### Example for ASK:
 
 {
   "learnings": "The user asked me to do something but I need more information from them
@@ -571,9 +576,12 @@ How do you think that went?  Think aloud about what you did and the outcome.
 Summarize the results of the last operation and reflect on what you did and the outcome.
 Include the summary of what happened.  Then, consider what you might do differently next
 time or what you need to change.  What else do you need to know, what relevant questions
-come up for you based on the last step?  Think about what you will do next.  If you
-are done, then be ready to analyze your data and respond with a detailed response
-field to the user.
+come up for you based on the last step?  Think about what you will do next.
+
+If you are done, then be ready to analyze your data and respond with a detailed response
+field to the user.  Make sure that you summarize in your own words clearly and accurately
+if needed, and provide information from the conversation history in your final response.
+Don't assume that the user will go back to previous responses to get your summary.
 
 This is just a question to help you think.  Typing will help you think through next
 steps and perform better.  Respond in natural language, not JSON or code.  Stop before
@@ -693,7 +701,9 @@ console_command: Command line operations, shell scripting, system administration
 personal_assistance: Desktop assistance, file management, application management,
 note taking, scheduling, calendar, trip planning, and other personal assistance tasks
 other: Anything else that doesn't fit into the above categories, you will need to
-determine how to respond to this best based on your intuition.
+determine how to respond to this best based on your intuition.  If you're not sure
+what the category is, then it's best to respond with other and then you can think
+through the solution in following steps.
 
 Planning is required for:
 - Multi-step tasks
@@ -929,6 +939,9 @@ DeepResearchInstructions: str = """
 - Use proper citation format consistently throughout
 - Always embed citations in the text when you are using information from a source so
   that the user can understand what information comes from which source.
+- Embed the citations with markdown links to the source and the source titles and URLs.
+  Don't use numbered citations as these are easy to lose track of and end up in the wrong
+  order in the bibliography.
 - Distinguish between facts, expert opinions, and your own analysis
 
 Follow the general flow below:
@@ -1136,8 +1149,9 @@ Procedure:
    go ahead and write the report.  If you need more information, then write down your
    new questions and then continue to search for more information, building a knowledge
    base of information that you can read and reflect on for your response to the user.
-4. Once you have found the information that you need, then write the report in the JSON
-   response to the user.  Don't write the report to disk unless the user has requested
+4. Once you have found the information that you need, then write the report in your
+   response to the user in a nice readable format with your summary and interpretation
+   of the information.  Don't write the report to disk unless the user has requested
    it.
 """
 
