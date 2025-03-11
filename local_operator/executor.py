@@ -1135,9 +1135,9 @@ class LocalCodeExecutor:
                 (condensed_output, condensed_error_output, condensed_log_output)
             )
 
-            # Convert new_files to absolute paths
-            expanded_new_files = [
-                str(Path(file).expanduser().resolve()) for file in response.new_files
+            # Convert mentioned_files to absolute paths
+            expanded_mentioned_files = [
+                str(Path(file).expanduser().resolve()) for file in response.mentioned_files
             ]
 
             return CodeExecutionResult(
@@ -1149,7 +1149,7 @@ class LocalCodeExecutor:
                 formatted_print=formatted_print,
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.SUCCESS,
-                files=expanded_new_files,
+                files=expanded_mentioned_files,
             )
         except Exception as e:
             # Add captured log output to error output if any

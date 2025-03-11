@@ -414,18 +414,23 @@ async def get_page_text_content(url: str) -> str:
 
             # Extract text from semantic elements
             text_elements = await page.evaluate(
-                """() => {
-                const selectors = 'h1, h2, h3, h4, h5, h6, p, a, li, td, th, dt, dd,
-                figcaption, label';
-                const elements = document.querySelectorAll(selectors);
-                return Array.from(elements).map(el => el.textContent.trim()).filter(text => text);
-            }"""
+                """
+                () => {
+                    const selectors = 'h1, h2, h3, h4, h5, h6, p, li, td, th, figcaption';
+                    const elements = document.querySelectorAll(selectors);
+                    return Array.from(elements)
+                        .map(el => el.textContent)
+                        .filter(text => text && text.trim())
+                        .map(text => text.trim())
+                        .map(text => text.replace(/\\s+/g, ' '));
+                }
+            """  # noqa: E501
             )
 
             await browser.close()
 
             # Clean and join the text elements
-            cleaned_text = "\n".join(text for text in text_elements if text.strip())
+            cleaned_text = "\n".join(text_elements)
             return cleaned_text
 
     except Exception as e:

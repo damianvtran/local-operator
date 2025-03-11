@@ -104,7 +104,7 @@ class DummyOperator:
             code="",
             content="",
             file_path="",
-            new_files=[],
+            mentioned_files=[],
             replacements=[],
             action=ActionType.DONE,
             learnings="",
