@@ -187,3 +187,74 @@ def test_list_models_no_api_key(mock_list_models, client, mock_credential_manage
         # There should be at least one OpenRouter model (the default one)
         openrouter_models = [m for m in models if m.get("provider") == "openrouter"]
         assert len(openrouter_models) == 0
+
+
+def test_list_models_with_sort_and_direction(client, mock_credential_manager):
+    """Test the list_models endpoint with sort and direction parameters."""
+    # Test sorting by id in descending order (default)
+    response = client.get("/v1/models?sort=id&direction=descending")
+    assert response.status_code == 200
+    data = response.json()
+    models = data["result"]["models"]
+    # Check that models are sorted by id in descending order
+    for i in range(1, len(models)):
+        assert models[i - 1]["id"] >= models[i]["id"]
+
+    # Test sorting by id in ascending order
+    response = client.get("/v1/models?sort=id&direction=ascending")
+    assert response.status_code == 200
+    data = response.json()
+    models = data["result"]["models"]
+    # Check that models are sorted by id in ascending order
+    for i in range(1, len(models)):
+        assert models[i - 1]["id"] <= models[i]["id"]
+
+    # Test sorting by provider in descending order
+    response = client.get("/v1/models?sort=provider&direction=descending")
+    assert response.status_code == 200
+    data = response.json()
+    models = data["result"]["models"]
+    # Check that models are sorted by provider in descending order
+    for i in range(1, len(models)):
+        assert models[i - 1]["provider"] >= models[i]["provider"]
+
+    # Test sorting by provider in ascending order
+    response = client.get("/v1/models?sort=provider&direction=ascending")
+    assert response.status_code == 200
+    data = response.json()
+    models = data["result"]["models"]
+    # Check that models are sorted by provider in ascending order
+    for i in range(1, len(models)):
+        assert models[i - 1]["provider"] <= models[i]["provider"]
+
+    # Test sorting by name in descending order
+    response = client.get("/v1/models?sort=name&direction=descending")
+    assert response.status_code == 200
+    data = response.json()
+    models = data["result"]["models"]
+    # Check that models are sorted by name in descending order
+    # Note: None values are sorted first when direction is descending
+    for i in range(1, len(models)):
+        if models[i - 1]["name"] is None and models[i]["name"] is None:
+            continue
+        if models[i - 1]["name"] is None:
+            assert False, "None values should be sorted first when direction is descending"
+        if models[i]["name"] is None:
+            continue
+        assert models[i - 1]["name"] >= models[i]["name"]
+
+    # Test sorting by name in ascending order
+    response = client.get("/v1/models?sort=name&direction=ascending")
+    assert response.status_code == 200
+    data = response.json()
+    models = data["result"]["models"]
+    # Check that models are sorted by name in ascending order
+    # Note: None values are sorted first when direction is ascending
+    for i in range(1, len(models)):
+        if models[i - 1]["name"] is None and models[i]["name"] is None:
+            continue
+        if models[i]["name"] is None:
+            assert False, "None values should be sorted first when direction is ascending"
+        if models[i - 1]["name"] is None:
+            continue
+        assert models[i - 1]["name"] <= models[i]["name"]

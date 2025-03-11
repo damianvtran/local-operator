@@ -374,7 +374,8 @@ def list_working_directory(max_depth: int = 3) -> Dict[str, List[Tuple[str, str,
 
 
 async def get_page_html_content(url: str) -> str:
-    """Browse to a URL using Playwright to render JavaScript and return the full HTML page content.
+    """Browse to a URL using Playwright to render JavaScript and return the full HTML page content.  Use this for any URL that you want to get the full HTML content of for scraping and understanding the HTML format of the page.
+
     Uses stealth mode and waits for network idle to avoid bot detection.
 
     Args:
@@ -385,7 +386,7 @@ async def get_page_html_content(url: str) -> str:
 
     Raises:
         RuntimeError: If page loading fails or bot detection is triggered
-    """
+    """  # noqa: E501
     try:
         async with pw.async_playwright() as playwright:
             browser = await playwright.chromium.launch(
@@ -419,7 +420,8 @@ async def get_page_html_content(url: str) -> str:
 
 
 async def get_page_text_content(url: str) -> str:
-    """Browse to a URL using Playwright to render JavaScript and extract clean text content.
+    """Browse to a URL using Playwright to render JavaScript and extract clean text content.  Use this for any URL that you want to read the content for, for research purposes. Extracts text from semantic elements like headings, paragraphs, lists etc. and returns a cleaned text representation of the page content.
+
     Uses stealth mode and waits for network idle to avoid bot detection.
     Extracts text from semantic elements and returns cleaned content.
 
@@ -431,7 +433,7 @@ async def get_page_text_content(url: str) -> str:
 
     Raises:
         RuntimeError: If page loading or text extraction fails
-    """
+    """  # noqa: E501
     try:
         async with pw.async_playwright() as playwright:
             browser = await playwright.chromium.launch(
