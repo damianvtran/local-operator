@@ -145,7 +145,7 @@ class ResponseJsonSchema(BaseModel):
         learnings (str): Learnings from the current step
         content (str): Content to be written to a file
         file_path (str): Path to the file to be written to
-        new_files (List[str]): List of new files created or modified
+        mentioned_files (List[str]): List of files mentioned in the response
         replacements (List[Dict[str, str]]): List of replacements to be made in the file
     """
 
@@ -153,7 +153,7 @@ class ResponseJsonSchema(BaseModel):
     code: str
     content: str
     file_path: str
-    new_files: List[str]
+    mentioned_files: List[str]
     replacements: List[Dict[str, str]]
     action: ActionType
     learnings: str
