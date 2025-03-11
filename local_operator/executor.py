@@ -944,7 +944,7 @@ class LocalCodeExecutor:
         return safety_result
 
     async def execute_code(
-        self, response: ResponseJsonSchema, max_retries: int = 3
+        self, response: ResponseJsonSchema, max_retries: int = 1
     ) -> CodeExecutionResult:
         """Execute Python code with safety checks and context management.
 
@@ -1022,9 +1022,9 @@ class LocalCodeExecutor:
 
         return CodeExecutionResult(
             stdout="",
-            stderr="",
+            stderr=str(final_error),
             logging="",
-            message="",
+            message=current_response.response,
             code=response.code,
             formatted_print=formatted_print,
             role=ConversationRole.ASSISTANT,
