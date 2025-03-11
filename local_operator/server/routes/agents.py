@@ -590,6 +590,7 @@ async def clear_agent_conversation(
 
         # Clear the conversation by saving an empty list
         agent_registry.save_agent_conversation(agent_id, [], [])
+        agent_registry.save_agent_context(agent_id, {})
 
         return CRUDResponse(
             status=200,

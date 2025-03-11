@@ -490,7 +490,7 @@ class Operator:
 
         return response_content
 
-    def add_task_instructions(self, request_type: RequestType) -> None:
+    def add_task_instructions(self, request_classification: RequestClassification) -> None:
         """
         Add the task instructions as an ephemeral message to help the agent
         prioritize the information and the task at hand.
@@ -502,8 +502,10 @@ This is a {request_type} message, here are some guidelines for how to respond:
 
 {task_instructions}
         """.format(
-            request_type=request_type,
-            task_instructions=get_request_type_instructions(request_type),
+            request_type=request_classification.type,
+            task_instructions=get_request_type_instructions(
+                RequestType(request_classification.type)
+            ),
         )
 
         self.executor.conversation_history.append(
@@ -511,7 +513,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
                 role=ConversationRole.USER,
                 content=task_instructions,
                 is_system_prompt=False,
-                ephemeral=True,
+                ephemeral=request_classification.type == RequestType.CONVERSATION,
             )
         )
 
@@ -574,7 +576,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
 
         # Add the task instructions as an ephemeral message to help the agent
         # prioritize the information and the task at hand.
-        self.add_task_instructions(RequestType(classification.type))
+        self.add_task_instructions(classification)
 
         # Add the user's request after the task instructions
         self.executor.conversation_history.append(
