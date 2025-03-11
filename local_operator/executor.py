@@ -789,7 +789,9 @@ class LocalCodeExecutor:
             try:
                 model_name = self.get_model_name()
 
-                if "claude" in model_name or "anthropic" in model_name:
+                if self.model_configuration.hosting == "anthropic" and (
+                    "claude" in model_name or "anthropic" in model_name
+                ):
                     # Anthropic models expect a single message, so combine the conversation history
                     combined_message = ""
                     for msg in messages:
