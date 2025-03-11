@@ -3,7 +3,11 @@ from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
 
-from local_operator.tools import _get_git_ignored_files, list_working_directory
+from local_operator.tools import (
+    _get_git_ignored_files,
+    get_page_text_content,
+    list_working_directory,
+)
 
 
 @pytest.fixture
@@ -180,3 +184,50 @@ def test_list_working_directory_max_depth():
         assert len(index["level1/level2"]) == 1
         assert index["level1/level2"][0][0] == "level2.txt"
         assert "level1/level2/level3" not in index
+
+
+@pytest.mark.asyncio
+async def test_get_page_text_content(tmp_path):
+    """Test extracting text content from a local HTML file using Playwright.
+
+    This test creates a temporary HTML file with predetermined semantic elements,
+    navigates to it using the real Playwright implementation, and verifies that the
+    extracted text matches the expected content.
+
+    Args:
+        tmp_path: A temporary directory provided by pytest for file operations.
+
+    Raises:
+        AssertionError: If the extracted text does not match the expected result.
+    """
+    # Create a temporary HTML file with fake content.
+    html_content = (
+        "<html>"
+        "<head><title>Test Page</title></head>"
+        "<body>"
+        "<h1>Test Heading</h1>"
+        "<p>Test paragraph content</p>"
+        "<ul>"
+        "<li>List item 1</li>"
+        "<li>List item 2</li>"
+        "</ul>"
+        "</body>"
+        "</html>"
+    )
+    html_file = tmp_path / "test.html"
+    html_file.write_text(html_content)
+
+    # Convert the file path to a file URI.
+    file_uri = html_file.as_uri()
+
+    # Extract text content using the real Playwright.
+    result = await get_page_text_content(file_uri)
+    expected_result = "\n".join(
+        [
+            "Test Heading",
+            "Test paragraph content",
+            "List item 1",
+            "List item 2",
+        ]
+    )
+    assert result == expected_result
