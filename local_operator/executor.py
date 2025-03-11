@@ -810,7 +810,9 @@ class LocalCodeExecutor:
                         [ConversationRecord(role=ConversationRole.USER, content=combined_message)]
                     )
                 else:
-                    if "o1" in model_name or "o3" in model_name:
+                    if self.model_configuration.hosting == "openai" and (
+                        "o1" in model_name or "o3" in model_name
+                    ):
                         # OpenAI reasoning models (o1 and o3) expect a combined prompt
                         # for chain-of-thought reasoning.
                         combined_message = ""
