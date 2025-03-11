@@ -511,7 +511,7 @@ Example for DONE:
   "learnings": "I learned about this new content that I found from the web.  It will be
   useful for the user to know this because of x reason.",
   "response": "Here is what I found and did.  This is all the information that you were
-  looking for: <SUMMARY>.  Let me know if you need anything else!",
+  looking for: <FULL_SUMMARY>.  Let me know if you need anything else!",
   "code": "",
   "content": "",
   "file_path": "",
@@ -520,14 +520,32 @@ Example for DONE:
   "action": "DONE"
 }
 
+If the user has a simple request or asks you something that doesn't require multi-step
+action, you can respond with a simple written response with the DONE action.
+
 Make sure that you respond to the user in the first person directly and provide them a
 helpful response.  Be as detailed as you can and provide an interpretation of the
 conversation history up until this point.  Include all the details and data you have
 gathered.  Do not respond with DONE if the plan is not completely executed.
 
-If the user has a simple request or asks you something that doesn't require multi-step
-action, you can respond with a simple written response with the DONE action.
+When responding with DONE, you are ending the task and will not have the opportunity to
+run more steps until the user asks you to do so.  Make sure that your response in the DONE
+action has all the required information, details and summary and don't assume that some
+other command will bring your summary for you.
 
+Example for ASK:
+
+{
+  "learnings": "The user asked me to do something but I need more information from them
+  to be able to give an accurate response.",
+  "response": "What are your preferences for budget, dates, and activities?",
+  "code": "",
+  "content": "",
+  "file_path": "",
+  "mentioned_files": [],
+  "replacements": [],
+  "action": "ASK"
+}
 """
 
 PlanSystemPrompt: str = """
