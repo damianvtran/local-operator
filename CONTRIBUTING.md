@@ -69,44 +69,83 @@ Refer to the [dependency graph](docs/dependencies.md) for a visual representatio
    pip install -e .[dev]
    ```
 
-## Code Style & Quality
+## Development Workflow with Makefile
 
-We enforce consistent code style and quality checks:
-
-- **Formatting**: Uses black and isort
-
-  ```bash
-  black .
-  isort .
-  ```
-
-- **Linting**: Uses flake8
-
-  ```bash
-  flake8
-  ```
-
-- **Type Checking**: Uses pyright
-
-  ```bash
-  pyright
-  ```
-
-- **Dependency Scanning**: Uses pip-audit
-
-  ```bash
-  pip-audit
-  ```
-
-Always run these tools before submitting a pull request.  They will also be run in the CI pipeline on any branches with the `dev-` prefix and on PRs merged to `main`.
-
-## Testing
-
-We use pytest for testing with async support:
+We provide a Makefile to simplify common development tasks. You can see all available commands by running:
 
 ```bash
-pytest
+make help
 ```
+
+### Common Commands
+
+- **Start the Server**:
+
+  ```bash
+  make server
+  ```
+
+- **Start the Server with Hot Reload** (for development):
+
+  ```bash
+  make dev-server
+  ```
+
+- **Start the CLI**:
+
+  ```bash
+  make cli
+  ```
+
+- **Generate OpenAPI Specification**:
+
+  ```bash
+  make openapi
+  ```
+
+- **Run Tests**:
+
+  ```bash
+  make test
+  ```
+
+- **Generate Test Coverage Report**:
+
+  ```bash
+  make coverage
+  ```
+
+### Code Quality Commands
+
+- **Format Code** (black and isort):
+
+  ```bash
+  make format
+  ```
+
+- **Run Linting** (flake8):
+
+  ```bash
+  make lint
+  ```
+
+- **Run Type Checking** (pyright):
+
+  ```bash
+  make type-check
+  ```
+
+- **Run Security Audit** (pip-audit):
+
+  ```bash
+  make security
+  ```
+
+Always run these quality checks before submitting a pull request. They will also be run in the CI pipeline on any branches with the `dev-` prefix and on PRs merged to `main`.
+
+## Testing Guidelines
+
+We use pytest for testing with async support:
 
 - Keep tests in the tests/ directory
 - Aim for 80%+ test coverage for new features
