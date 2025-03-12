@@ -51,7 +51,6 @@ Homepage = "https://github.com/damianvtran/local-operator"
 
 [project.scripts]
 local-operator = "local_operator.cli:main"
-generate-openapi = "local_operator.server.generate_openapi:main"
 
 [tool.black]
 line-length = 100
