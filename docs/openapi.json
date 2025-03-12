@@ -1689,7 +1689,7 @@
           "Models"
         ],
         "summary": "List all available models",
-        "description": "Returns a list of all available models from all providers, including OpenRouter models if API key is configured. Optionally filter by provider.",
+        "description": "Returns a list of all available models from all providers, including OpenRouter models if API key is configured. Optionally filter by provider and sort by field.",
         "operationId": "list_models_v1_models_get",
         "parameters": [
           {
@@ -1706,6 +1706,40 @@
                 }
               ],
               "title": "Provider"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": "id",
+              "title": "Sort"
+            }
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": "ascending",
+              "title": "Direction"
             }
           }
         ],
@@ -1771,6 +1805,44 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/static/images": {
+      "get": {
+        "tags": [
+          "Static"
+        ],
+        "summary": "Serve image file",
+        "description": "Serves an image file from disk by path. Only image file types are allowed.",
+        "operationId": "get_image_v1_static_images_get",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Path to the image file on disk",
+              "title": "Path"
+            },
+            "description": "Path to the image file on disk"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
           },
           "422": {
             "description": "Validation Error",
@@ -2019,6 +2091,20 @@
               }
             ],
             "title": "User Message Id"
+          },
+          "attachments": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attachments"
           }
         },
         "type": "object",
@@ -2028,7 +2114,7 @@
           "prompt"
         ],
         "title": "AgentChatRequest",
-        "description": "Request body for chat generation endpoint.\n\nAttributes:\n    hosting: Name of the hosting service to use for generation\n    model: Name of the model to use for generation\n    prompt: The prompt to generate a response for\n    stream: Whether to stream the response token by token. Default: False\n    options: Optional generation parameters to override defaults\n    persist_conversation: Whether to persist the conversation history by\n    continuously updating the agent's conversation history with each new message.\n    Default: False\n    user_message_id: Optional ID of the user message to assign to the first user message\n        in the conversation.  This is used by the UI to prevent duplicate user\n        messages after the initial render."
+        "description": "Request body for chat generation endpoint.\n\nAttributes:\n    hosting: Name of the hosting service to use for generation\n    model: Name of the model to use for generation\n    prompt: The prompt to generate a response for\n    stream: Whether to stream the response token by token. Default: False\n    options: Optional generation parameters to override defaults\n    persist_conversation: Whether to persist the conversation history by\n    continuously updating the agent's conversation history with each new message.\n    Default: False\n    user_message_id: Optional ID of the user message to assign to the first user message\n        in the conversation.  This is used by the UI to prevent duplicate user\n        messages after the initial render.\n    attachments: Optional list of file paths (local or remote) to be used in the analysis.\n        These files are expected to be publicly accessible."
       },
       "AgentCreate": {
         "properties": {
@@ -3051,6 +3137,20 @@
                 "type": "null"
               }
             ]
+          },
+          "attachments": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attachments"
           }
         },
         "type": "object",
@@ -3060,7 +3160,7 @@
           "prompt"
         ],
         "title": "ChatRequest",
-        "description": "Request body for chat generation endpoint.\n\nAttributes:\n    hosting: Name of the hosting service to use for generation\n    model: Name of the model to use for generation\n    prompt: The prompt to generate a response for\n    stream: Whether to stream the response token by token. Default: False\n    context: Optional list of previous messages for context\n    options: Optional generation parameters to override defaults"
+        "description": "Request body for chat generation endpoint.\n\nAttributes:\n    hosting: Name of the hosting service to use for generation\n    model: Name of the model to use for generation\n    prompt: The prompt to generate a response for\n    stream: Whether to stream the response token by token. Default: False\n    context: Optional list of previous messages for context\n    options: Optional generation parameters to override defaults\n    attachments: Optional list of file paths (local or remote) to be used in the analysis.\n        These files are expected to be publicly accessible."
       },
       "ChatResponse": {
         "properties": {
@@ -3159,6 +3259,13 @@
               }
             ],
             "title": "Timestamp"
+          },
+          "files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Files"
           }
         },
         "type": "object",
@@ -3170,10 +3277,11 @@
           "code",
           "formatted_print",
           "role",
-          "status"
+          "status",
+          "files"
         ],
         "title": "CodeExecutionResult",
-        "description": "Represents the result of a code execution.\n\nAttributes:\n    id (str): The unique identifier for the code execution\n    stdout (str): The standard output from the code execution.\n    stderr (str): The standard error from the code execution.\n    logging (str): Any logging output generated during the code execution.\n    message (str): The message to display to the user about the code execution.\n    code (str): The code that was executed.\n    formatted_print (str): The formatted print output from the code execution.\n    role (ConversationRole): The role of the message sender (user/assistant/system)\n    status (ProcessResponseStatus): The status of the code execution\n    timestamp (datetime): The timestamp of the code execution"
+        "description": "Represents the result of a code execution.\n\nAttributes:\n    id (str): The unique identifier for the code execution\n    stdout (str): The standard output from the code execution.\n    stderr (str): The standard error from the code execution.\n    logging (str): Any logging output generated during the code execution.\n    message (str): The message to display to the user about the code execution.\n    code (str): The code that was executed.\n    formatted_print (str): The formatted print output from the code execution.\n    role (ConversationRole): The role of the message sender (user/assistant/system)\n    status (ProcessResponseStatus): The status of the code execution\n    timestamp (datetime): The timestamp of the code execution\n    files (List[str]): The files that were created or modified during the code execution"
       },
       "ConfigResponse": {
         "properties": {
@@ -3352,6 +3460,20 @@
               }
             ],
             "title": "Timestamp"
+          },
+          "files": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Files"
           }
         },
         "type": "object",
@@ -3360,7 +3482,7 @@
           "role"
         ],
         "title": "ConversationRecord",
-        "description": "A record of a conversation with an AI model.\n\nAttributes:\n    role (ConversationRole): The role of the sender of the message\n    content (str): The content of the message\n    should_summarize (bool): Whether this message should be summarized\n    ephemeral (bool): Whether this message is temporary/ephemeral\n    summarized (bool): Whether this message has been summarized\n    is_system_prompt (bool): Whether this message is a system prompt\n    timestamp (datetime): When this message was created\n\nMethods:\n    to_dict(): Convert the record to a dictionary format\n    from_dict(data): Create a ConversationRecord from a dictionary"
+        "description": "A record of a conversation with an AI model.\n\nAttributes:\n    role (ConversationRole): The role of the sender of the message\n    content (str): The content of the message\n    should_summarize (bool): Whether this message should be summarized\n    ephemeral (bool): Whether this message is temporary/ephemeral\n    summarized (bool): Whether this message has been summarized\n    is_system_prompt (bool): Whether this message is a system prompt\n    timestamp (datetime): When this message was created\n    files (List[str]): The files that were created or modified during the code execution\n\nMethods:\n    to_dict(): Convert the record to a dictionary format\n    from_dict(data): Create a ConversationRecord from a dictionary"
       },
       "ConversationRole": {
         "type": "string",
@@ -3429,6 +3551,38 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
+      "JobContextRecord": {
+        "properties": {
+          "role": {
+            "$ref": "#/components/schemas/ConversationRole"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content"
+          },
+          "files": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Files"
+          }
+        },
+        "type": "object",
+        "required": [
+          "role",
+          "content"
+        ],
+        "title": "JobContextRecord",
+        "description": "Model representing a record of a job context."
+      },
       "JobResult": {
         "properties": {
           "response": {
@@ -3446,10 +3600,7 @@
             "anyOf": [
               {
                 "items": {
-                  "additionalProperties": {
-                    "type": "string"
-                  },
-                  "type": "object"
+                  "$ref": "#/components/schemas/JobContextRecord"
                 },
                 "type": "array"
               },
@@ -3982,6 +4133,10 @@
     {
       "name": "Models",
       "description": "Model management endpoints"
+    },
+    {
+      "name": "Static",
+      "description": "Static file hosting endpoints"
     }
   ]
 }
