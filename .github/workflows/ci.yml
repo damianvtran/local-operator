@@ -68,6 +68,7 @@ jobs:
           pip install -r requirements.txt
           pip install pytest pytest-asyncio coverage
           pip install -e .
+          playwright install
 
       - name: Run tests with coverage
         run: |

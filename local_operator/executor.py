@@ -789,7 +789,9 @@ class LocalCodeExecutor:
             try:
                 model_name = self.get_model_name()
 
-                if "claude" in model_name or "anthropic" in model_name:
+                if self.model_configuration.hosting == "anthropic" and (
+                    "claude" in model_name or "anthropic" in model_name
+                ):
                     # Anthropic models expect a single message, so combine the conversation history
                     combined_message = ""
                     for msg in messages:
@@ -808,7 +810,9 @@ class LocalCodeExecutor:
                         [ConversationRecord(role=ConversationRole.USER, content=combined_message)]
                     )
                 else:
-                    if "o1" in model_name or "o3" in model_name:
+                    if self.model_configuration.hosting == "openai" and (
+                        "o1" in model_name or "o3" in model_name
+                    ):
                         # OpenAI reasoning models (o1 and o3) expect a combined prompt
                         # for chain-of-thought reasoning.
                         combined_message = ""
@@ -940,7 +944,7 @@ class LocalCodeExecutor:
         return safety_result
 
     async def execute_code(
-        self, response: ResponseJsonSchema, max_retries: int = 3
+        self, response: ResponseJsonSchema, max_retries: int = 1
     ) -> CodeExecutionResult:
         """Execute Python code with safety checks and context management.
 
@@ -1018,9 +1022,9 @@ class LocalCodeExecutor:
 
         return CodeExecutionResult(
             stdout="",
-            stderr="",
+            stderr=str(final_error),
             logging="",
-            message="",
+            message=current_response.response,
             code=response.code,
             formatted_print=formatted_print,
             role=ConversationRole.ASSISTANT,
@@ -1135,9 +1139,9 @@ class LocalCodeExecutor:
                 (condensed_output, condensed_error_output, condensed_log_output)
             )
 
-            # Convert new_files to absolute paths
-            expanded_new_files = [
-                str(Path(file).expanduser().resolve()) for file in response.new_files
+            # Convert mentioned_files to absolute paths
+            expanded_mentioned_files = [
+                str(Path(file).expanduser().resolve()) for file in response.mentioned_files
             ]
 
             return CodeExecutionResult(
@@ -1149,7 +1153,7 @@ class LocalCodeExecutor:
                 formatted_print=formatted_print,
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.SUCCESS,
-                files=expanded_new_files,
+                files=expanded_mentioned_files,
             )
         except Exception as e:
             # Add captured log output to error output if any

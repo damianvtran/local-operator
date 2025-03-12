@@ -5,7 +5,7 @@ This module contains the FastAPI route handlers for model-related endpoints.
 """
 
 import logging
-from typing import List, Optional
+from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -28,6 +28,7 @@ from local_operator.server.models.schemas import (
     CRUDResponse,
     ModelEntry,
     ModelInfo,
+    ModelListQueryParams,
     ModelListResponse,
     ProviderListResponse,
 )
@@ -168,7 +169,7 @@ async def list_providers():
     summary="List all available models",
     description=(
         "Returns a list of all available models from all providers, including OpenRouter "
-        "models if API key is configured. Optionally filter by provider."
+        "models if API key is configured. Optionally filter by provider and sort by field."
     ),
     responses={
         200: {
@@ -226,17 +227,17 @@ async def list_providers():
 )
 async def list_models(
     credential_manager: CredentialManager = Depends(get_credential_manager),
-    provider: Optional[str] = None,
+    query_params: ModelListQueryParams = Depends(),
 ):
     """
     List all available models from all providers.
 
     This endpoint returns models from the registry and also includes OpenRouter models
-    if the API key is configured. Results can be filtered by provider.
+    if the API key is configured. Results can be filtered by provider and sorted by field.
 
     Args:
         credential_manager: Dependency for managing credentials
-        provider: Optional provider name to filter results
+        query_params: Query parameters for filtering and sorting models
 
     Returns:
         CRUDResponse: A response containing the list of models.
@@ -248,11 +249,15 @@ async def list_models(
         models: List[ModelEntry] = []
         providers_to_check: List[ProviderDetail] = []
 
-        if provider:
-            if provider not in [p.id for p in SupportedHostingProviders]:
-                raise HTTPException(status_code=404, detail=f"Provider not found: {provider}")
+        if query_params.provider:
+            if query_params.provider not in [p.id for p in SupportedHostingProviders]:
+                raise HTTPException(
+                    status_code=404, detail=f"Provider not found: {query_params.provider}"
+                )
 
-            providers_to_check = [p for p in SupportedHostingProviders if p.id == provider]
+            providers_to_check = [
+                p for p in SupportedHostingProviders if p.id == query_params.provider
+            ]
         else:
             providers_to_check = SupportedHostingProviders
 
@@ -380,6 +385,25 @@ async def list_models(
                     except Exception:
                         # Continue without OpenRouter models
                         pass
+
+        # Sort the models based on the sort parameter and direction
+        if query_params.sort == "id":
+            # Sort by id
+            models.sort(
+                key=lambda model: model.id, reverse=(query_params.direction == "descending")
+            )
+        elif query_params.sort == "provider":
+            # Sort by provider
+            models.sort(
+                key=lambda model: model.provider, reverse=(query_params.direction == "descending")
+            )
+        elif query_params.sort == "name":
+            # Sort by name, handling None values
+            models.sort(
+                key=lambda model: (model.name is None, model.name or ""),
+                reverse=(query_params.direction == "descending"),
+            )
+        # Add more sort options as needed for other fields
 
         return CRUDResponse(
             status=200,

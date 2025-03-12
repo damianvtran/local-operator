@@ -374,28 +374,56 @@ def list_working_directory(max_depth: int = 3) -> Dict[str, List[Tuple[str, str,
 
 
 async def get_page_html_content(url: str) -> str:
-    """Browse to a URL using Playwright to render JavaScript and return the full HTML page content.  Use this for any URL that you want to get the full HTML content of for scraping and understanding the HTML format of the page.  # noqa: E501
+    """Browse to a URL using Playwright to render JavaScript and return the full HTML page content.  Use this for any URL that you want to get the full HTML content of for scraping and understanding the HTML format of the page.
+
+    Uses stealth mode and waits for network idle to avoid bot detection.
 
     Args:
         url: The URL to browse to
 
     Returns:
         str: The rendered page content
-    """
+
+    Raises:
+        RuntimeError: If page loading fails or bot detection is triggered
+    """  # noqa: E501
     try:
         async with pw.async_playwright() as playwright:
-            browser = await playwright.chromium.launch()
-            page = await browser.new_page()
-            await page.goto(url)
+            browser = await playwright.chromium.launch(
+                headless=True,
+            )
+            context = await browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            )
+            page = await context.new_page()
+
+            # Add stealth mode
+            await page.add_init_script(
+                """
+                Object.defineProperty(navigator, 'webdriver', {get: () => false});
+                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+                window.chrome = { runtime: {} };
+            """
+            )
+
+            await page.goto(url, wait_until="networkidle")
+            await page.wait_for_timeout(2000)  # Wait additional time for dynamic content
+
             content = await page.content()
             await browser.close()
             return content
+
     except Exception as e:
         raise RuntimeError(f"Failed to get raw page content for {url}: {str(e)}")
 
 
 async def get_page_text_content(url: str) -> str:
-    """Browse to a URL using Playwright to render JavaScript and extract clean text content.  Use this for any URL that you want to read the content for, for research purposes. Extracts text from semantic elements like headings, paragraphs, lists etc. and returns a cleaned text representation of the page content. # noqa: E501
+    """Browse to a URL using Playwright to render JavaScript and extract clean text content.  Use this for any URL that you want to read the content for, for research purposes. Extracts text from semantic elements like headings, paragraphs, lists etc. and returns a cleaned text representation of the page content.
+
+    Uses stealth mode and waits for network idle to avoid bot detection.
+    Extracts text from semantic elements and returns cleaned content.
 
     Args:
         url: The URL to get the text content of
@@ -405,27 +433,50 @@ async def get_page_text_content(url: str) -> str:
 
     Raises:
         RuntimeError: If page loading or text extraction fails
-    """
+    """  # noqa: E501
     try:
         async with pw.async_playwright() as playwright:
-            browser = await playwright.chromium.launch()
-            page = await browser.new_page()
-            await page.goto(url)
+            browser = await playwright.chromium.launch(
+                headless=True,
+            )
+            context = await browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            )
+            page = await context.new_page()
+
+            # Add stealth mode
+            await page.add_init_script(
+                """
+                Object.defineProperty(navigator, 'webdriver', {get: () => false});
+                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+                window.chrome = { runtime: {} };
+            """
+            )
+
+            await page.goto(url, wait_until="networkidle")
+            await page.wait_for_timeout(2000)  # Wait additional time for dynamic content
 
             # Extract text from semantic elements
             text_elements = await page.evaluate(
-                """() => {
-                const selectors = 'h1, h2, h3, h4, h5, h6, p, a, li, td, th, dt, dd,
-                figcaption, label';
-                const elements = document.querySelectorAll(selectors);
-                return Array.from(elements).map(el => el.textContent.trim()).filter(text => text);
-            }"""
+                """
+                () => {
+                    const selectors = 'h1, h2, h3, h4, h5, h6, p, li, td, th, figcaption';
+                    const elements = document.querySelectorAll(selectors);
+                    return Array.from(elements)
+                        .map(el => el.textContent)
+                        .filter(text => text && text.trim())
+                        .map(text => text.trim())
+                        .map(text => text.replace(/\\s+/g, ' '));
+                }
+            """
             )
 
             await browser.close()
 
             # Clean and join the text elements
-            cleaned_text = "\n".join(text for text in text_elements if text.strip())
+            cleaned_text = "\n".join(text_elements)
             return cleaned_text
 
     except Exception as e:
