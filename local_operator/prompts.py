@@ -664,7 +664,7 @@ RequestClassificationSystemPrompt: str = (
 
 For this task, you must analyze the user request and classify it into a JSON format with:
 - type: conversation | creative_writing | data_science | mathematics | accounting |
-deep_research | analysis | media | competitive_coding | software_development | finance |
+deep_research | media | competitive_coding | software_development | finance |
 news_report | console_command | other
 - planning_required: true | false
 - relative_effort: low | medium | high
