@@ -1,6 +1,6 @@
 # Local Operator Makefile
 
-.PHONY: server dev-server cli openapi test coverage format lint type-check security clean help setup-python
+.PHONY: server cli openapi test coverage format lint type-check security clean help setup-python
 
 # Default target
 .DEFAULT_GOAL := help
@@ -17,10 +17,7 @@ COVERAGE_DIR := htmlcov
 OPENAPI_OUTPUT := docs/openapi.json
 
 # Server commands
-server: ## Start the server
-	local-operator serve
-
-dev-server: ## Start the server with hot reload
+server: ## Start the server with hot reload
 	local-operator serve --reload
 
 # CLI command

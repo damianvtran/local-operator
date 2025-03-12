@@ -93,16 +93,10 @@ make help
   make setup-python
   ```
 
-- **Start the Server**:
+- **Start the Server with Hot Reload**:
 
   ```bash
   make server
-  ```
-
-- **Start the Server with Hot Reload** (for development):
-
-  ```bash
-  make dev-server
   ```
 
 - **Start the CLI**:
