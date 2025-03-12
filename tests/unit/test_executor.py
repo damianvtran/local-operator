@@ -451,7 +451,7 @@ async def test_execute_code_success(executor, mock_model_config):
         content="",
         file_path="",
         learnings="",
-        new_files=[],
+        mentioned_files=[],
         replacements=[],
         response="",
     )
@@ -471,7 +471,7 @@ async def test_execute_code_no_output(executor, mock_model_config):
         content="",
         file_path="",
         learnings="",
-        new_files=[],
+        mentioned_files=[],
         replacements=[],
         response="",
     )
@@ -494,7 +494,7 @@ async def test_execute_code_safety_no_prompt(executor, mock_model_config):
         content="",
         file_path="",
         learnings="",
-        new_files=[],
+        mentioned_files=[],
         replacements=[],
         response="",
     )
@@ -522,7 +522,7 @@ async def test_execute_code_safety_with_prompt(executor, mock_model_config):
         content="",
         file_path="",
         learnings="",
-        new_files=[],
+        mentioned_files=[],
         replacements=[],
         response="",
     )
@@ -551,7 +551,7 @@ async def test_execute_code_safety_with_prompt_approved(executor, mock_model_con
         content="",
         file_path="",
         learnings="",
-        new_files=[],
+        mentioned_files=[],
         replacements=[],
         response="",
     )
@@ -578,7 +578,7 @@ async def test_execute_code_safety_with_override(executor, mock_model_config):
         content="",
         file_path="",
         learnings="",
-        new_files=[],
+        mentioned_files=[],
         replacements=[],
         response="",
     )
@@ -660,7 +660,7 @@ async def test_process_response(executor, mock_model_config):
         action=ActionType.CODE,
         learnings="",
         content="",
-        new_files=[],
+        mentioned_files=[],
         file_path="",
         replacements=[],
     )
@@ -1219,7 +1219,7 @@ def test_get_context_vars_str(
             '"current_goal": "Print hello world", "next_goal": "", '
             '"response": "Here\'s some code:", "code": "print(\'hello world\')", '
             '"action": "CODE", "learnings": "", "plan": "", "content": "", '
-            '"file_path": "", "replacements": [], "new_files": []}',
+            '"file_path": "", "replacements": [], "mentioned_files": []}',
             "print('hello world')",
             ActionType.CODE,
         ),
@@ -1229,7 +1229,7 @@ def test_get_context_vars_str(
             '"next_goal": "", "response": "Here\'s some code:", '
             '"code": "print(\'hello world\')", "action": "CODE", '
             '"learnings": "", "plan": "", "content": "", '
-            '"file_path": "", "replacements": [], "new_files": []}\n```',
+            '"file_path": "", "replacements": [], "mentioned_files": []}\n```',
             "print('hello world')",
             ActionType.CODE,
         ),
@@ -1239,7 +1239,7 @@ def test_get_context_vars_str(
             '"next_goal": "", "response": "I will write a file", '
             '"code": "", "action": "WRITE", "learnings": "", '
             '"plan": "", "content": "file content", '
-            '"file_path": "output.txt", "replacements": [], "new_files": []}\n```',
+            '"file_path": "output.txt", "replacements": [], "mentioned_files": []}\n```',
             "",
             ActionType.WRITE,
         ),
@@ -1249,7 +1249,7 @@ def test_get_context_vars_str(
             '"current_goal": "Print hello world", "next_goal": "", '
             '"response": "Here\'s some code:", "code": "print(\'hello world\')", '
             '"action": "CODE", "learnings": "", "plan": "", "content": "", '
-            '"file_path": "", "replacements": [], "new_files": []}\n```',
+            '"file_path": "", "replacements": [], "mentioned_files": []}\n```',
             "print('hello world')",
             ActionType.CODE,
         ),
@@ -1259,7 +1259,7 @@ def test_get_context_vars_str(
             '"next_goal": "", "response": "Here\'s some code:", '
             '"code": "print(\'hello world\')", "action": "CODE", '
             '"learnings": "", "plan": "", "content": "", '
-            '"file_path": "", "replacements": [], "new_files": []}',
+            '"file_path": "", "replacements": [], "mentioned_files": []}',
             "print('hello world')",
             ActionType.CODE,
         ),
@@ -1269,7 +1269,7 @@ def test_get_context_vars_str(
             '"next_goal": "", "response": "Here\'s some code:", '
             '"code": "print(\'hello world\')", "action": "CODE", '
             '"learnings": "", "plan": "", "content": "", '
-            '"file_path": "", "replacements": [], "new_files": []} Text after',
+            '"file_path": "", "replacements": [], "mentioned_files": []} Text after',
             "print('hello world')",
             ActionType.CODE,
         ),
@@ -1279,7 +1279,7 @@ def test_get_context_vars_str(
             '"next_goal": "", "response": "Here\'s some code:", '
             '"code": "print(\'hello world\')", "action": "CODE", '
             '"learnings": "", "plan": "", "content": "", '
-            '"file_path": "", "replacements": [], "new_files": []} Text after',
+            '"file_path": "", "replacements": [], "mentioned_files": []} Text after',
             "print('hello world')",
             ActionType.CODE,
         ),
@@ -1290,7 +1290,7 @@ def test_get_context_vars_str(
             '"response": "Here\'s the result after thinking", '
             '"code": "print(\'thought result\')", "action": "CODE", '
             '"learnings": "", "plan": "", "content": "", '
-            '"file_path": "", "replacements": [], "new_files": []}',
+            '"file_path": "", "replacements": [], "mentioned_files": []}',
             "print('thought result')",
             ActionType.CODE,
         ),
@@ -1348,7 +1348,7 @@ async def test_perform_action(
         learnings="",
         content=content or "",
         file_path=file_path,
-        new_files=[],
+        mentioned_files=[],
         replacements=replacements or [],
     )
 
@@ -1435,7 +1435,7 @@ async def test_perform_action_handles_exception(executor: LocalCodeExecutor):
         learnings="",
         content="",
         file_path="",
-        new_files=[],
+        mentioned_files=[],
         replacements=[],
     )
 

@@ -13,7 +13,7 @@ USER_MOCK_RESPONSES = {
         "learnings": "",
         "content": "",
         "file_path": "",
-        "new_files": [],
+        "mentioned_files": [],
         "replacements": [],
     },
     "please proceed according to your plan": {
@@ -23,7 +23,7 @@ USER_MOCK_RESPONSES = {
         "learnings": "",
         "content": "",
         "file_path": "",
-        "new_files": [],
+        "mentioned_files": [],
         "replacements": [],
     },
     "print hello world": {
@@ -42,7 +42,7 @@ USER_MOCK_RESPONSES = {
         "learnings": "",
         "content": "",
         "file_path": "",
-        "new_files": [],
+        "mentioned_files": [],
         "replacements": [],
     },
     "please summarize": "[SUMMARY] this is a summary",

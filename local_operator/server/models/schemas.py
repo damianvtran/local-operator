@@ -651,6 +651,12 @@ class ModelListQueryParams(BaseModel):
 
     Attributes:
         provider: Optional provider to filter models by
+        sort: Optional field to sort models by (default: 'id')
+        direction: Optional sort direction ('ascending' or 'descending', default: 'ascending')
     """
 
     provider: Optional[str] = Field(None, description="Provider to filter models by")
+    sort: Optional[str] = Field("id", description="Field to sort models by")
+    direction: Optional[str] = Field(
+        "ascending", description="Sort direction ('ascending' or 'descending')"
+    )
