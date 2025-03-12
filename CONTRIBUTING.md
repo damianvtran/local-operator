@@ -8,6 +8,7 @@ Thank you for your interest in contributing to Local Operator! We welcome all co
 .
 ├── CONTRIBUTING.md              # Contribution guidelines
 ├── LICENSE                      # Project license
+├── Makefile                     # Makefile for common development tasks
 ├── docs                         # Documentation files and resources
 ├── local_operator
 │   ├── admin.py                 # Tools for managing agents and conversations
@@ -29,6 +30,8 @@ Thank you for your interest in contributing to Local Operator! We welcome all co
 │   ├── server.py                # HTTP API server implementation
 │   ├── tools.py                 # Utility functions and tool registry
 │   └── types.py                 # Type definitions and enums
+├── scripts                      # Utility scripts for development
+│   └── install_pyenv.sh         # Script to install pyenv and Python 3.12
 ├── setup.py                     # Package installation configuration
 ├── static                       # Static assets and resources
 └── tests                        # Test suite directory
@@ -44,7 +47,7 @@ Refer to the [dependency graph](docs/dependencies.md) for a visual representatio
 
 ### Prerequisites
 
-- Python 3.12+
+- Python 3.12+ (will be installed via pyenv if not available)
 - Dependencies in requirements.txt
 
 ### Development Setup
@@ -56,57 +59,123 @@ Refer to the [dependency graph](docs/dependencies.md) for a visual representatio
    git clone https://github.com/your-username/local-operator.git
    ```
 
-3. Set up a virtual environment (recommended):
+3. You can set up your Python environment in one of two ways:
+
+   **Option 1:** Use the provided install command (recommended):
 
    ```bash
-   python -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+   make install
    ```
 
-4. Install dependencies:
+   This will:
+   - Install pyenv if not already installed
+   - Install Python 3.12 via pyenv if not already installed
+   - Make Python 3.12 available as `python3.12` in your PATH
+   - Create a virtual environment using Python 3.12
+   - Install all project dependencies
+
+   **Option 2:** Step-by-step setup:
 
    ```bash
+   # First, set up Python environment (installs pyenv and Python 3.12)
+   make setup-python
+   
+   # Then, manually create a virtual environment and install dependencies
+   # (python3.12 should now be available in your PATH)
+   python3.12 -m venv .venv
+   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
    pip install -e .[dev]
    ```
 
-## Code Style & Quality
+## Development Workflow with Makefile
 
-We enforce consistent code style and quality checks:
-
-- **Formatting**: Uses black and isort
-
-  ```bash
-  black .
-  isort .
-  ```
-
-- **Linting**: Uses flake8
-
-  ```bash
-  flake8
-  ```
-
-- **Type Checking**: Uses pyright
-
-  ```bash
-  pyright
-  ```
-
-- **Dependency Scanning**: Uses pip-audit
-
-  ```bash
-  pip-audit
-  ```
-
-Always run these tools before submitting a pull request.  They will also be run in the CI pipeline on any branches with the `dev-` prefix and on PRs merged to `main`.
-
-## Testing
-
-We use pytest for testing with async support:
+We provide a Makefile to simplify common development tasks. You can see all available commands by running:
 
 ```bash
-pytest
+make help
 ```
+
+### Common Commands
+
+- **Install Project** (sets up Python environment and installs dependencies):
+
+  ```bash
+  make install
+  ```
+
+- **Setup Python Environment** (installs pyenv and Python 3.12 if needed):
+
+  ```bash
+  make setup-python
+  ```
+
+- **Start the Server**:
+
+  ```bash
+  make server
+  ```
+
+- **Start the Server with Hot Reload** (for development):
+
+  ```bash
+  make dev-server
+  ```
+
+- **Start the CLI**:
+
+  ```bash
+  make cli
+  ```
+
+- **Generate OpenAPI Specification**:
+
+  ```bash
+  make openapi
+  ```
+
+- **Run Tests**:
+
+  ```bash
+  make test
+  ```
+
+- **Generate Test Coverage Report**:
+
+  ```bash
+  make coverage
+  ```
+
+### Code Quality Commands
+
+- **Format Code** (black and isort):
+
+  ```bash
+  make format
+  ```
+
+- **Run Linting** (flake8):
+
+  ```bash
+  make lint
+  ```
+
+- **Run Type Checking** (pyright):
+
+  ```bash
+  make type-check
+  ```
+
+- **Run Security Audit** (pip-audit):
+
+  ```bash
+  make security
+  ```
+
+Always run these quality checks before submitting a pull request. They will also be run in the CI pipeline on any branches with the `dev-` prefix and on PRs merged to `main`.
+
+## Testing Guidelines
+
+We use pytest for testing with async support:
 
 - Keep tests in the tests/ directory
 - Aim for 80%+ test coverage for new features
