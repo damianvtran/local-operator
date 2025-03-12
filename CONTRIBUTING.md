@@ -8,6 +8,7 @@ Thank you for your interest in contributing to Local Operator! We welcome all co
 .
 ├── CONTRIBUTING.md              # Contribution guidelines
 ├── LICENSE                      # Project license
+├── Makefile                     # Makefile for common development tasks
 ├── docs                         # Documentation files and resources
 ├── local_operator
 │   ├── admin.py                 # Tools for managing agents and conversations
@@ -29,6 +30,8 @@ Thank you for your interest in contributing to Local Operator! We welcome all co
 │   ├── server.py                # HTTP API server implementation
 │   ├── tools.py                 # Utility functions and tool registry
 │   └── types.py                 # Type definitions and enums
+├── scripts                      # Utility scripts for development
+│   └── install_pyenv.sh         # Script to install pyenv and Python 3.12
 ├── setup.py                     # Package installation configuration
 ├── static                       # Static assets and resources
 └── tests                        # Test suite directory
@@ -56,16 +59,21 @@ Refer to the [dependency graph](docs/dependencies.md) for a visual representatio
    git clone https://github.com/your-username/local-operator.git
    ```
 
-3. Set up a virtual environment (recommended):
+3. You can set up your Python environment in one of two ways:
+
+   **Option 1:** Use the provided setup script (recommended):
+
+   ```bash
+   make setup-python
+   ```
+
+   This will install pyenv, Python 3.12 (if not already installed), create a virtual environment, and install dependencies.
+
+   **Option 2:** Manual setup:
 
    ```bash
    python -m venv .venv
    source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   ```
-
-4. Install dependencies:
-
-   ```bash
    pip install -e .[dev]
    ```
 
@@ -78,6 +86,12 @@ make help
 ```
 
 ### Common Commands
+
+- **Setup Python Environment** (installs pyenv and Python 3.12 if needed):
+
+  ```bash
+  make setup-python
+  ```
 
 - **Start the Server**:
 
