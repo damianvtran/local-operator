@@ -440,7 +440,8 @@ Rules:
 
 Fields:
 - learnings: Important new information learned. Include detailed insights, not just
-  actions. Empty for first step.
+  actions. This is like a diary or notepad for you to keep track of important things,
+  it will last longer than the conversation history which gets truncated.  Empty for first step.
 - response: Short description of the current action.  If the user has asked for you
   to write something or summarize something, include that in this field.
 - code: Required for CODE: valid Python code to achieve goal. Omit for WRITE/EDIT.
@@ -473,6 +474,11 @@ Do not include any markdown tags or any other text outside the JSON structure.
   "replacements": [],
   "action": "CODE"
 }
+
+CODE usage guidelines:
+- Make sure that you include the code in the "code" field or you will run into parsing errors.
+- Always include all files that you are working with in the "mentioned_files" field
+  otherwise the user will not be able to get to them easily.
 
 #### Example for WRITE:
 
@@ -507,6 +513,12 @@ Do not include any markdown tags or any other text outside the JSON structure.
   "action": "EDIT"
 }
 
+EDIT usage guidelines:
+- After you edit the file, you will be shown the contents of the edited file with line
+  numbers and lengths.  Please review and determine if your edit worked as expected.
+- Make sure that you include the replacements in the "replacements" field or you will run
+  into parsing errors.
+
 #### Example for DONE:
 
 {
@@ -522,21 +534,20 @@ Do not include any markdown tags or any other text outside the JSON structure.
   "action": "DONE"
 }
 
-If the user has a simple request or asks you something that doesn't require multi-step
-action, you can respond with a simple written response with the DONE action.
-
-Make sure that you respond to the user in the first person directly and provide them a
-helpful response.  Use the "response" field only, do NOT use the "content" field.
-Be as detailed as you can and provide an interpretation of the
-conversation history up until this point.  Include all the details and data you have
-gathered.  Do not respond with DONE if the plan is not completely executed.  Make sure
-that you interpret the information in the conversation history fully and don't assume
-that the user should go back to previous responses to get your summary.
-
-When responding with DONE, you are ending the task and will not have the opportunity to
-run more steps until the user asks you to do so.  Make sure that your response in the DONE
-action has all the required information, details and summary and don't assume that some
-other command will bring your summary for you.
+DONE usage guidelines:
+- If the user has a simple request or asks you something that doesn't require multi-step
+  action, you can respond with a simple written response with the DONE action.
+- Make sure that you respond to the user in the first person directly and provide them a
+  helpful response.  Use the "response" field only, do NOT use the "content" field.
+- Be as detailed as you can and provide an interpretation of the
+  conversation history up until this point.  Include all the details and data you have
+  gathered.  Do not respond with DONE if the plan is not completely executed.  Make sure
+  that you interpret the information in the conversation history fully and don't assume
+  that the user should go back to previous responses to get your summary.
+-  When responding with DONE, you are ending the task and will not have the opportunity to
+   run more steps until the user asks you to do so.  Make sure that your response in the
+   DONE action has all the required information, details and summary and don't assume that
+   some other command will bring your summary for you.
 
 #### Example for ASK:
 

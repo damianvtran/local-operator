@@ -1648,9 +1648,9 @@ class LocalCodeExecutor:
 
         self.append_to_history(
             ConversationRecord(
-                role=ConversationRole.ASSISTANT,
+                role=ConversationRole.USER,
                 content=(
-                    f"Contents of {file_path}:\n"
+                    f"Here are the contents of {file_path} with line numbers and lengths:\n"
                     f"\n"
                     f"Line | Length | Content\n"
                     f"----------------------\n"
@@ -1703,8 +1703,8 @@ class LocalCodeExecutor:
 
         self.append_to_history(
             ConversationRecord(
-                role=ConversationRole.ASSISTANT,
-                content=f"Successfully wrote to file: {file_path}",
+                role=ConversationRole.USER,
+                content=f"The content that you requested has been written to {file_path}.",
                 should_summarize=True,
             )
         )
@@ -1746,21 +1746,21 @@ class LocalCodeExecutor:
         """
         expanded_file_path = Path(file_path).expanduser().resolve()
 
-        original_content = ""
+        file_content = ""
         with open(expanded_file_path, "r") as f:
-            original_content = f.read()
+            file_content = f.read()
 
         for replacement in replacements:
             find = replacement["find"]
             replace = replacement["replace"]
 
-            if find not in original_content:
+            if find not in file_content:
                 raise ValueError(f"Find string '{find}' not found in file {file_path}")
 
-            original_content = original_content.replace(find, replace, 1)
+            file_content = file_content.replace(find, replace, 1)
 
         with open(expanded_file_path, "w") as f:
-            f.write(original_content)
+            f.write(file_content)
 
         equivalent_code = FILE_EDIT_EQUIVALENT_TEMPLATE.format(
             file_path=file_path, replacements=json.dumps(replacements)
@@ -1768,8 +1768,17 @@ class LocalCodeExecutor:
 
         self.append_to_history(
             ConversationRecord(
-                role=ConversationRole.ASSISTANT,
-                content=f"Successfully edited file: {file_path}",
+                role=ConversationRole.USER,
+                content=(
+                    f"Your edits have been applied to the file: {file_path}\n\n"
+                    "Here are the contents of the edited file with line numbers and "
+                    "lengths, please review and determine if your edit worked as expected:\n\n"
+                    "Line | Length | Content\n"
+                    "----------------------\n"
+                    "BEGIN\n"
+                    f"{annotate_code(file_content)}\n"
+                    "END"
+                ),
                 should_summarize=True,
             )
         )
@@ -2097,7 +2106,8 @@ re-writing code.
 - directory_tree: this is a tree of the current working directory.  You can use this
   to see what files and directories are available to you right here.
 - execution_context_variables: this is a list of variables that are available for use
-  in the current execution context.  You can use them in this step or future steps.
+  in the current execution context.  You can use them in this step or future steps in
+  the python code that you write to complete tasks.
 
 {environment_details}
 
