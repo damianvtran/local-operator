@@ -1,3 +1,4 @@
+import logging
 import os
 import readline
 import signal
@@ -31,6 +32,7 @@ from local_operator.helpers import (
 from local_operator.model.configure import ModelConfiguration
 from local_operator.notebook import save_code_history_to_notebook
 from local_operator.prompts import (
+    JsonResponseFormatPrompt,
     PlanSystemPrompt,
     PlanUserPrompt,
     ReflectionUserPrompt,
@@ -459,7 +461,7 @@ class Operator:
                 ConversationRecord(
                     role=ConversationRole.ASSISTANT,
                     content=response_content,
-                    should_summarize=False,
+                    should_summarize=True,
                 ),
             ]
         )
@@ -626,6 +628,8 @@ This is a {request_type} message, here are some guidelines for how to respond:
             try:
                 response_json = process_json_response(response_content)
             except ValidationError as e:
+                logging.error(f"JSON validation error: {e}")
+
                 error_details = "\n".join(
                     f"Error {i+1}:\n"
                     f"  Location: {' -> '.join(str(loc) for loc in err['loc'])}\n"
@@ -648,10 +652,8 @@ This is a {request_type} message, here are some guidelines for how to respond:
                                 "Please review the validation errors and generate a valid "
                                 "response:\n\n"
                                 f"{error_details}\n\n"
-                                "Your response must exactly match the expected JSON schema "
-                                "structure. Please reformat your response to continue with "
-                                "the task.  Do not include any other text or comments aside "
-                                "from the JSON object."
+                                "Your response must exactly match the expected JSON format: "
+                                f"{JsonResponseFormatPrompt}"
                             ),
                             should_summarize=True,
                         ),
