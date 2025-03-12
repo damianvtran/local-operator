@@ -452,7 +452,8 @@ Fields:
 - mentioned_files: List of files that are interacted with in the CODE action.  The purpose
   of this is to communicate with the user about the files that you are working with.  Only
   provide this for the CODE action since it is already provided in the file_path field
-  for other actions.
+  for other actions.  Include data files, images, plots, documents, and any files that
+  are being created, used, edited, or otherwise interacted with in the CODE action.
 - replacements: List of replacements to make in the file.
 - action: Required for all actions: CODE | READ | WRITE | EDIT | DONE | ASK | BYE
 
@@ -844,7 +845,8 @@ to solve challenging real world problems.
 - Evaluate models using relevant metrics and cross-validation
 - Interpret results and provide actionable insights
 - Visualize data as you go and save the plots to the disk instead of displaying them
-  with show() or display().
+  with show() or display().  Make sure that you include the plots in the "mentioned_files"
+  field so that the user can see them in the chat ui.
 - Document your approach, assumptions, and limitations
 """
 
