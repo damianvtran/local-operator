@@ -47,7 +47,7 @@ Refer to the [dependency graph](docs/dependencies.md) for a visual representatio
 
 ### Prerequisites
 
-- Python 3.12+
+- Python 3.12+ (will be installed via pyenv if not available)
 - Dependencies in requirements.txt
 
 ### Development Setup
@@ -61,18 +61,28 @@ Refer to the [dependency graph](docs/dependencies.md) for a visual representatio
 
 3. You can set up your Python environment in one of two ways:
 
-   **Option 1:** Use the provided setup script (recommended):
+   **Option 1:** Use the provided install command (recommended):
 
    ```bash
-   make setup-python
+   make install
    ```
 
-   This will install pyenv, Python 3.12 (if not already installed), create a virtual environment, and install dependencies.
+   This will:
+   - Install pyenv if not already installed
+   - Install Python 3.12 via pyenv if not already installed
+   - Make Python 3.12 available as `python3.12` in your PATH
+   - Create a virtual environment using Python 3.12
+   - Install all project dependencies
 
-   **Option 2:** Manual setup:
+   **Option 2:** Step-by-step setup:
 
    ```bash
-   python -m venv .venv
+   # First, set up Python environment (installs pyenv and Python 3.12)
+   make setup-python
+   
+   # Then, manually create a virtual environment and install dependencies
+   # (python3.12 should now be available in your PATH)
+   python3.12 -m venv .venv
    source .venv/bin/activate  # On Windows: .venv\Scripts\activate
    pip install -e .[dev]
    ```
@@ -87,16 +97,28 @@ make help
 
 ### Common Commands
 
+- **Install Project** (sets up Python environment and installs dependencies):
+
+  ```bash
+  make install
+  ```
+
 - **Setup Python Environment** (installs pyenv and Python 3.12 if needed):
 
   ```bash
   make setup-python
   ```
 
-- **Start the Server with Hot Reload**:
+- **Start the Server**:
 
   ```bash
   make server
+  ```
+
+- **Start the Server with Hot Reload** (for development):
+
+  ```bash
+  make dev-server
   ```
 
 - **Start the CLI**:
