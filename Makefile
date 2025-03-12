@@ -1,9 +1,14 @@
 # Local Operator Makefile
 
-.PHONY: server dev-server cli openapi test coverage format lint type-check security clean help
+.PHONY: server dev-server cli openapi test coverage format lint type-check security clean help setup-python
 
 # Default target
 .DEFAULT_GOAL := help
+
+# Setup commands
+setup-python: ## Install pyenv and Python 3.12 if not already installed
+	@echo "Setting up Python environment..."
+	@./scripts/install_pyenv.sh
 
 # Variables
 PYTHON := python
