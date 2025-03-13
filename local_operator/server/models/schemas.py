@@ -256,9 +256,10 @@ class AgentCreate(BaseModel):
         description="Random number seed for deterministic generation.",
     )
     current_working_directory: str | None = Field(
-        ".",
+        "~/local-operator-home",
         description="The current working directory for the agent.  Updated whenever the "
-        "agent changes its working directory through code execution.  Defaults to '.'",
+        "agent changes its working directory through code execution.  Defaults to "
+        "'~/local-operator-home'.",
     )
 
 
