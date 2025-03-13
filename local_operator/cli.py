@@ -525,6 +525,11 @@ def main() -> int:
 
         config_dir = Path.home() / ".local-operator"
         agents_dir = config_dir / "agents"
+        agent_home_dir = Path.home() / "local-operator-home"
+
+        # Create the agent home directory if it doesn't exist
+        if not agent_home_dir.exists():
+            agent_home_dir.mkdir(parents=True, exist_ok=True)
 
         if args.subcommand == "credential":
             if args.credential_command == "update":
