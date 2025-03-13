@@ -147,7 +147,7 @@ def list_working_directory(max_depth: int = 3) -> Dict[str, List[Tuple[str, str,
             file_path = os.path.join(root, file)
             try:
                 size = os.stat(file_path).st_size
-            except (FileNotFoundError, PermissionError):
+            except Exception:
                 # Skip files that can't be accessed
                 continue
 
