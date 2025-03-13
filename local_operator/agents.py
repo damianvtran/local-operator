@@ -246,7 +246,8 @@ class AgentRegistry:
             frequency_penalty=agent_edit_metadata.frequency_penalty,
             presence_penalty=agent_edit_metadata.presence_penalty,
             seed=agent_edit_metadata.seed,
-            current_working_directory=agent_edit_metadata.current_working_directory or ".",
+            current_working_directory=agent_edit_metadata.current_working_directory
+            or "~/local-operator-home",
         )
 
         return self.save_agent(agent_metadata)
