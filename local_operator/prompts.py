@@ -676,8 +676,8 @@ RequestClassificationSystemPrompt: str = (
 
 For this task, you must analyze the user request and classify it into a JSON format with:
 - type: conversation | creative_writing | data_science | mathematics | accounting |
-deep_research | media | competitive_coding | software_development | finance |
-news_report | console_command | other
+  quick_search | deep_research | media | competitive_coding | software_development |
+  finance | news_report | console_command | other
 - planning_required: true | false
 - relative_effort: low | medium | high
 
@@ -694,7 +694,11 @@ creative_writing: Writing stories, poems, articles, marketing copy, presentation
 data_science: Data analysis, visualization, machine learning, statistics
 mathematics: Math problems, calculations, proofs
 accounting: Financial calculations, bookkeeping, budgets, pricing, cost analysis, etc.
-deep_research: In-depth research requiring multiple sources and synthesis.  This includes
+quick_search: Quick search for information on a specific topic.  Use this for simple
+requests for information that don't require a deep understanding of the topic.  These
+are generally questions like "what is the weather in Tokyo?", "what is the capital
+of Canada?", "who was Albert Einstein?".
+deep_research: In-depth research requiring extensive sources and synthesis.  This includes
 business analysis, intelligence research, competitive benchmarking, competitor analysis,
 market sizing, customer segmentation, stock research, background checks, and other similar
 tasks that require a deep understanding of the topic and a comprehensive analysis.
@@ -752,6 +756,8 @@ class RequestType(str, Enum):
         LEGAL: Legal research, contract review, and legal analysis
         MEDICAL: Medical research, drug development, clinical trials, biochemistry, genetics,
         pharmacology, general practice, optometry, internal medicine, and other medical specialties
+        QUICK_SEARCH: Quick search for information on a specific topic.  Use this for simple
+        requests for information that don't require a deep understanding of the topic.
         DEEP_RESEARCH: In-depth research requiring multiple sources and synthesis
         MEDIA: Image, audio, or video processing and manipulation
         COMPETITIVE_CODING: Solving coding problems from competitive programming platforms
@@ -771,6 +777,7 @@ class RequestType(str, Enum):
     ACCOUNTING = "accounting"
     LEGAL = "legal"
     MEDICAL = "medical"
+    QUICK_SEARCH = "quick_search"
     DEEP_RESEARCH = "deep_research"
     MEDIA = "media"
     COMPETITIVE_CODING = "competitive_coding"
@@ -937,6 +944,39 @@ outcomes.
 medical advice
 """
 
+# Specialized instructions for quick search tasks
+QuickSearchInstructions: str = """
+## Quick Search Guidelines
+
+You need to do a lookup to help me answer a question.  Use the tools available
+to you and provide the most relevant information to me.  If you can't find the
+information, then say so.  If you can find the information, then provide it to me
+with a good summary and links to the sources.  Don't save the information to a file,
+just provide the information in markdown format in the response field.
+
+You might have to consider different sources and media types to try to find the
+information.  If the information is on the web, you'll need to use the web search
+tool.  If the information is on the disk then you can search the files in the current
+working directory or find an appropriate directory.
+
+- Identify the core information needed to answer the question
+- Provide direct, concise answers to specific questions
+- Cite sources when providing factual information (with brief source attribution)
+- Organize information logically with clear headings and structure when appropriate
+- Use bullet points or numbered lists for clarity when presenting multiple facts
+- Distinguish between verified facts and general knowledge
+- Acknowledge when information might be incomplete or uncertain
+- Look at alternative points of view and perspectives, make sure to include them for
+  the user to consider.  Offer a balanced perspective when the topic has multiple
+  viewpoints.
+- Provide brief definitions for technical terms when necessary
+- Include relevant dates, numbers, or statistics when they add value
+- Summarize complex topics in an accessible way without oversimplification
+- Recommend further resources only when they would provide significant additional value
+- Put together diagrams and charts to help illustrate the information, such as tables
+  and Mermaid diagrams.
+"""
+
 
 # Specialized instructions for deep research tasks
 DeepResearchInstructions: str = """
@@ -955,27 +995,37 @@ DeepResearchInstructions: str = """
 - Embed the citations with markdown links to the source and the source titles and URLs.
   Don't use numbered citations as these are easy to lose track of and end up in the wrong
   order in the bibliography.
+- ALWAYS embed citations in the text as you are writing, do not write text without
+  citations as you will lose track of your citations and end up with a report that is
+  not properly cited.
 - Distinguish between facts, expert opinions, and your own analysis
+- Do not leave the report unfinished, always continue to research and write until you
+  are satisfied that the report is complete and accurate.  Don't leave any placeholders
+  or sections that are not written.
 
 Follow the general flow below:
 1. Define the research question and objectives
 2. Gather initial data to understand the lay of the land with a broad search
 3. Based on the information, define the outline of the report and save it to an initial
    markdown file.  Plan to write a detailed and useful report with a logical flow.  Aim
-   for at least 4000 words.  Include an introduction, body and conclusion. The body should
-   have an analysis of the information, including the most important details and findings.
-   The introduction should provide background information and the conclusion should
-   summarize the main points.
+   for at least 4000 words.  The 4000 words number is just a guideline, don't just
+   fill with content that doesn't matter.  The idea is that the article should be a long
+   and fulsome report that is useful and informative to the user.  Include an
+   introduction, body and conclusion.  The body should have an analysis of the
+   information, including the most important details and findings.  The introduction
+   should provide background information and the conclusion should summarize the main
+   points.
 4. Iteratively go through each section and research the information, write the section
    with citations, and then replace the placeholder section in the markdown with the new
    content.  Make sure that you don't lose track of sections and don't leave any sections
-   empty.
+   empty.  Embed your citations with links in markdown format.
 5. Write the report in a way that is easy to understand and follow.  Use bullet points,
    lists, and other formatting to make the report easy to read.  Use tables to present
    data in a clear and easy to understand format.
 6. Make sure to cite your sources and provide proper citations.  Embed citations in all
-   parts of the report where you are using information from a source.  Make sure to
-   include the source name, author, title, date, and URL.
+   parts of the report where you are using information from a source so that the user
+   can click on them to follow the source right where the fact is written in the text.
+   Make sure to include the source name, author, title, date, and URL.
 7. Make sure to include a bibliography at the end of the report.  Include all the sources
    you used to write the report.
 8. Make sure to include a conclusion that summarizes the main points of the report.
@@ -1253,6 +1303,7 @@ REQUEST_TYPE_INSTRUCTIONS: Dict[RequestType, str] = {
     RequestType.ACCOUNTING: AccountingInstructions,
     RequestType.LEGAL: LegalInstructions,
     RequestType.MEDICAL: MedicalInstructions,
+    RequestType.QUICK_SEARCH: QuickSearchInstructions,
     RequestType.DEEP_RESEARCH: DeepResearchInstructions,
     RequestType.MEDIA: MediaInstructions,
     RequestType.COMPETITIVE_CODING: CompetitiveCodingInstructions,
