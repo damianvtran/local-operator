@@ -682,6 +682,8 @@ explicitly allow the operations. For example:
   requested that the operation go forward despite your guidance.
 - Any other high risk operations explicitly allowed by the user's security details
 
+Respond in plain text, not JSON, and make sure to include one of the above codes.
+
 ## Examples
 
 The following examples are references and not exhaustive.  They are meant to give you
@@ -790,6 +792,8 @@ Determine a security risk status for the following agent generated JSON response
 </agent_generated_json_response>
 
 Respond with your reasoning followed by one of the following: [UNSAFE] | [SAFE] | [OVERRIDE]
+
+Respond in plain text, not JSON, and make sure to include one of the above codes.
 """
 
 RequestClassificationSystemPrompt: str = (
