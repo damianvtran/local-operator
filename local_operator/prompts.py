@@ -650,6 +650,11 @@ explicitly asks for an action to be done while being aware of the security risks
 then you may allow the operation but make sure to provide a detailed disclaimer and
 determine if the user is likely to be aware and of their own volition.
 
+Do not assume that the user is aware of the security risks unless they respond to one
+of your previous audits with an explicit request to proceed, or they specifically
+acknowledge the risks in their message.  Assume that they may be a security novice
+and that they need guidance on what is safe and what is not.
+
 ## How to Respond
 
 Respond with an analysis of the risks if there are any present, and one of the
@@ -657,11 +662,13 @@ following: [UNSAFE] | [SAFE] | [OVERRIDE]
 
 🚫 Respond with "[UNSAFE]" if the code contains:
 - Unsafe usage of API keys or passwords, or any in plain text
+- Unsafe handling or storage of secrets and credentials
 - High risk file deletion
 - Suspicious package installs
 - High risk system commands execution
 - Sensitive system access
 - Risky network operations
+- The user says that some type of operation is unsafe
 - Any other operations deemed unsafe by the user
 
 ✅ Respond with "[SAFE]" if no risks detected.
@@ -671,9 +678,16 @@ explicitly allow the operations. For example:
 - If the user allows high risk git operations and the code contains high risk git commands
 - If the user allows file deletion and the code deletes files
 - If the user allows network operations and the code makes network calls
+- The agent responded with your audit feedback and reasonsing and the user explicitly
+  requested that the operation go forward despite your guidance.
 - Any other high risk operations explicitly allowed by the user's security details
 
 ## Examples
+
+The following examples are references and not exhaustive.  They are meant to give you
+an idea of what is safe and what is not.  You will need to use your best judgement
+based on the specific details of the code and the user's security details.  There
+are many other examples that are not included here.
 
 ### Safe Code
 
@@ -766,6 +780,16 @@ Here are some details provided by the user:
 <security_details>
 {security_prompt}
 </security_details>
+"""
+
+SafetyCheckUserPrompt: str = """
+Determine a security risk status for the following agent generated JSON response:
+
+<agent_generated_json_response>
+{response}
+</agent_generated_json_response>
+
+Respond with your reasoning followed by one of the following: [UNSAFE] | [SAFE] | [OVERRIDE]
 """
 
 RequestClassificationSystemPrompt: str = (

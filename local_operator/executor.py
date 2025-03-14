@@ -38,6 +38,7 @@ from local_operator.model.configure import ModelConfiguration, calculate_cost
 from local_operator.prompts import (
     SafetyCheckConversationPrompt,
     SafetyCheckSystemPrompt,
+    SafetyCheckUserPrompt,
     create_system_prompt,
 )
 from local_operator.tools import ToolRegistry, list_working_directory
@@ -900,10 +901,10 @@ class LocalCodeExecutor:
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content=(
-                        "Determine a status for the following response:\n\n"
-                        "<agent_generated_response>\n"
+                        "Determine a status for the following agent generated JSON response:\n\n"
+                        "<agent_generated_json_response>\n"
                         f"{response.model_dump_json()}\n"
-                        "</agent_generated_response>"
+                        "</agent_generated_json_response>"
                     ),
                 ),
             ]
@@ -921,12 +922,15 @@ class LocalCodeExecutor:
         # if the user has previously indicated an override or a safe decision otherwise
         # the agent will be unable to continue.
 
-        safety_prompt = SafetyCheckConversationPrompt.format(
-            code=response.code, security_prompt=agent_security_prompt
-        )
+        safety_check_conversation = [
+            ConversationRecord(
+                role=ConversationRole.SYSTEM,
+                content=SafetyCheckConversationPrompt,
+            ),
+        ]
 
-        if len(self.conversation_history) > conversation_length:
-            last_messages = [
+        if len(self.conversation_history) + 1 > conversation_length:
+            safety_check_conversation.append(
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content=(
@@ -934,32 +938,31 @@ class LocalCodeExecutor:
                         " messages in the conversation, which follow."
                     ),
                 )
-            ]
+            )
 
-            last_messages.extend(self.conversation_history[-conversation_length:])
+            safety_check_conversation.extend(self.conversation_history[-conversation_length:])
         else:
-            last_messages = self.conversation_history
+            safety_check_conversation.extend(self.conversation_history[1:])
 
-        safety_check_conversation = [
+        safety_check_conversation.append(
             ConversationRecord(
-                role=ConversationRole.SYSTEM,
-                content=safety_prompt,
-            ),
-        ]
-
-        safety_check_conversation.extend(last_messages)
-
-        security_response = await self.invoke_model(safety_check_conversation)
-        response_content = (
-            security_response.content
-            if isinstance(security_response.content, str)
-            else str(security_response.content)
+                role=ConversationRole.USER,
+                content=SafetyCheckUserPrompt.format(response=response.model_dump_json()),
+            )
         )
-        self.conversation_history.pop()
+
+        try:
+            security_response = await self.invoke_model(safety_check_conversation)
+            response_content = (
+                security_response.content
+                if isinstance(security_response.content, str)
+                else str(security_response.content)
+            )
+        except Exception as e:
+            print(f"Error invoking security check model: {e}")
+            return ConfirmSafetyResult.UNSAFE
 
         safety_result = get_confirm_safety_result(response_content)
-
-        print(f"Safety result: {safety_result}")
 
         if safety_result == ConfirmSafetyResult.UNSAFE:
             analysis = response_content.replace("[UNSAFE]", "").strip()
@@ -967,11 +970,11 @@ class LocalCodeExecutor:
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content=(
-                        f"The code is unsafe. Here is an analysis of the code risk by an"
-                        " independent security auditor:\n\n"
+                        f"The code is unsafe. Here is an analysis of the code risk by"
+                        " the security auditor AI agent:\n\n"
                         f"{analysis}\n\n"
                         "Please acknowledge and re-summarize the security risk in the next"
-                        " message and use the ASK action to ask me what to do next."
+                        " message back to me and use the ASK action to ask me what to do next."
                     ),
                 )
             )
@@ -1035,7 +1038,7 @@ class LocalCodeExecutor:
                     stderr="",
                     logging="",
                     message=safety_summary_content,
-                    code=response.code,
+                    code="",
                     formatted_print="",
                     role=ConversationRole.ASSISTANT,
                     status=ProcessResponseStatus.CONFIRMATION_REQUIRED,
