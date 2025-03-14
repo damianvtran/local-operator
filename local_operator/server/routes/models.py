@@ -345,7 +345,8 @@ async def list_models(
                 reverse=(query_params.direction == "descending"),
             )
         elif query_params.sort == ModelListQuerySort.RECOMMENDED:
-            # Sort by recommended
+            # Sort by recommended (primary) and id (secondary)
+            models.sort(key=lambda model: model.id)  # First sort by id ascending
             models.sort(
                 key=lambda model: model.info.recommended,
                 reverse=(query_params.direction == "descending"),
