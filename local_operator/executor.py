@@ -36,8 +36,8 @@ from local_operator.console import (
 from local_operator.helpers import clean_json_response
 from local_operator.model.configure import ModelConfiguration, calculate_cost
 from local_operator.prompts import (
+    SafetyCheckConversationPrompt,
     SafetyCheckSystemPrompt,
-    SafetyCheckUserPrompt,
     create_system_prompt,
 )
 from local_operator.tools import ToolRegistry, list_working_directory
@@ -874,20 +874,22 @@ class LocalCodeExecutor:
         else:
             raise Exception("Failed to invoke model")
 
-    async def check_code_safety(self, code: str) -> ConfirmSafetyResult:
+    async def check_response_safety(
+        self, response: ResponseJsonSchema, conversation_length: int = 8, prompt_user: bool = True
+    ) -> ConfirmSafetyResult:
         """Analyze code for potentially dangerous operations using the language model.
 
         Args:
-            code (str): The Python code to analyze
+            response (ResponseJsonSchema): The response from the language model
 
         Returns:
             ConfirmSafetyResult: Result of the safety check
         """
-        response: BaseMessage
+        security_response: BaseMessage
 
         agent_security_prompt = self.agent.security_prompt if self.agent else ""
 
-        if self.can_prompt_user:
+        if prompt_user:
             safety_prompt = SafetyCheckSystemPrompt.format(security_prompt=agent_security_prompt)
 
             safety_history = [
@@ -898,77 +900,148 @@ class LocalCodeExecutor:
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content=(
-                        "Determine a status for the following code:\n\n"
-                        f"<agent_generated_code>\n{code}\n</agent_generated_code>"
+                        "Determine a status for the following response:\n\n"
+                        "<agent_generated_response>\n"
+                        f"{response.model_dump_json()}\n"
+                        "</agent_generated_response>"
                     ),
                 ),
             ]
 
-            response = await self.invoke_model(safety_history)
+            security_response = await self.invoke_model(safety_history)
 
             response_content = (
-                response.content if isinstance(response.content, str) else str(response.content)
+                security_response.content
+                if isinstance(security_response.content, str)
+                else str(security_response.content)
             )
             return get_confirm_safety_result(response_content)
 
         # If we can't prompt the user, we need to use the conversation history to determine
-        # if the user has previously indicated a decision.
-        safety_prompt = SafetyCheckUserPrompt.format(
-            code=code, security_prompt=agent_security_prompt
+        # if the user has previously indicated an override or a safe decision otherwise
+        # the agent will be unable to continue.
+
+        safety_prompt = SafetyCheckConversationPrompt.format(
+            code=response.code, security_prompt=agent_security_prompt
         )
 
-        self.append_to_history(
+        if len(self.conversation_history) > conversation_length:
+            last_messages = [
+                ConversationRecord(
+                    role=ConversationRole.USER,
+                    content=(
+                        "Conversation truncated due to length, only showing the last few"
+                        " messages in the conversation, which follow."
+                    ),
+                )
+            ]
+
+            last_messages.extend(self.conversation_history[-conversation_length:])
+        else:
+            last_messages = self.conversation_history
+
+        safety_check_conversation = [
             ConversationRecord(
-                role=ConversationRole.USER,
+                role=ConversationRole.SYSTEM,
                 content=safety_prompt,
-            )
-        )
-        response = await self.invoke_model(self.conversation_history)
+            ),
+        ]
+
+        safety_check_conversation.extend(last_messages)
+
+        security_response = await self.invoke_model(safety_check_conversation)
         response_content = (
-            response.content if isinstance(response.content, str) else str(response.content)
+            security_response.content
+            if isinstance(security_response.content, str)
+            else str(security_response.content)
         )
         self.conversation_history.pop()
 
         safety_result = get_confirm_safety_result(response_content)
 
+        print(f"Safety result: {safety_result}")
+
         if safety_result == ConfirmSafetyResult.UNSAFE:
             analysis = response_content.replace("[UNSAFE]", "").strip()
             self.append_to_history(
                 ConversationRecord(
-                    role=ConversationRole.ASSISTANT,
-                    content=f"The code is unsafe. Here is an analysis of the code risk: {analysis}",
+                    role=ConversationRole.USER,
+                    content=(
+                        f"The code is unsafe. Here is an analysis of the code risk by an"
+                        " independent security auditor:\n\n"
+                        f"{analysis}\n\n"
+                        "Please acknowledge and re-summarize the security risk in the next"
+                        " message and use the ASK action to ask me what to do next."
+                    ),
                 )
             )
             return ConfirmSafetyResult.UNSAFE
 
         return safety_result
 
-    async def execute_code(
-        self, response: ResponseJsonSchema, max_retries: int = 1
-    ) -> CodeExecutionResult:
-        """Execute Python code with safety checks and context management.
+    async def handle_safety_result(
+        self, safety_result: ConfirmSafetyResult, response: ResponseJsonSchema
+    ) -> CodeExecutionResult | None:
+        """Process the safety check result and return appropriate CodeExecutionResult.
+
+        This method handles different safety check outcomes by creating appropriate
+        CodeExecutionResult objects based on the safety result.
 
         Args:
-            code (str): The Python code to execute
-            max_retries (int): Maximum number of retry attempts
+            safety_result: The result of the safety check (UNSAFE, CONVERSATION_CONFIRM, OVERRIDE)
+            response: The response object containing code and other execution details
 
         Returns:
-            CodeExecutionResult: The result of the code execution
+            CodeExecutionResult: Result object with appropriate status and message based
+            on safety check
+            None: If safety_result is SAFE or OVERRIDE (allowing execution to continue)
+
+        Note:
+            - Returns a CANCELLED result if code is deemed unsafe
+            - Returns a CONFIRMATION_REQUIRED result if user confirmation is needed
+            - For OVERRIDE, displays a warning but returns None to allow execution to continue
         """
-        # First check code safety
-        safety_result = await self._check_and_confirm_safety(response.code)
         if safety_result == ConfirmSafetyResult.UNSAFE:
-            return CodeExecutionResult(
-                stdout="",
-                stderr="",
-                logging="",
-                message="Code execution canceled by user",
-                code=response.code,
-                formatted_print="",
-                role=ConversationRole.ASSISTANT,
-                status=ProcessResponseStatus.CANCELLED,
-                files=[],
-            )
+            if self.can_prompt_user:
+                return CodeExecutionResult(
+                    stdout="",
+                    stderr="",
+                    logging="",
+                    message="Code execution canceled by user",
+                    code=response.code,
+                    formatted_print="",
+                    role=ConversationRole.ASSISTANT,
+                    status=ProcessResponseStatus.CANCELLED,
+                    files=[],
+                )
+            else:
+                # The agent must read the security advisory and request confirmation
+                # from the user to continue.
+                safety_summary = await self.invoke_model(self.conversation_history)
+                safety_summary_content = (
+                    safety_summary.content
+                    if isinstance(safety_summary.content, str)
+                    else str(safety_summary.content)
+                )
+                self.append_to_history(
+                    ConversationRecord(
+                        role=ConversationRole.ASSISTANT,
+                        content=safety_summary_content,
+                    )
+                )
+
+                return CodeExecutionResult(
+                    stdout="",
+                    stderr="",
+                    logging="",
+                    message=safety_summary_content,
+                    code=response.code,
+                    formatted_print="",
+                    role=ConversationRole.ASSISTANT,
+                    status=ProcessResponseStatus.CONFIRMATION_REQUIRED,
+                    files=[],
+                )
+
         elif safety_result == ConfirmSafetyResult.CONVERSATION_CONFIRM:
             return CodeExecutionResult(
                 stdout="",
@@ -987,6 +1060,19 @@ class LocalCodeExecutor:
                     "\n\033[1;33m⚠️  Warning: Code safety override applied based on user's security"
                     " prompt\033[0m\n"
                 )
+
+    async def execute_code(
+        self, response: ResponseJsonSchema, max_retries: int = 1
+    ) -> CodeExecutionResult:
+        """Execute Python code with safety checks and context management.
+
+        Args:
+            code (str): The Python code to execute
+            max_retries (int): Maximum number of retry attempts
+
+        Returns:
+            CodeExecutionResult: The result of the code execution
+        """
 
         current_response = response
         final_error: Exception | None = None
@@ -1032,55 +1118,50 @@ class LocalCodeExecutor:
             files=[],
         )
 
-    async def _check_and_confirm_safety(self, code: str) -> ConfirmSafetyResult:
+    async def check_and_confirm_safety(self, response: ResponseJsonSchema) -> ConfirmSafetyResult:
         """Check code safety and get user confirmation if needed.
 
         Args:
-            code (str): The Python code to check
+            response (ResponseJsonSchema): The response from the language model
 
         Returns:
             ConfirmSafetyResult: Result of the safety check
         """
-        safety_result = await self.check_code_safety(code)
+        safety_result = await self.check_response_safety(response, prompt_user=self.can_prompt_user)
 
-        if safety_result == ConfirmSafetyResult.UNSAFE:
-            if self.can_prompt_user:
-                confirm = input(
-                    "\n\033[1;33m⚠️  Warning: Potentially dangerous operation detected."
-                    " Proceed? (y/n): \033[0m"
-                )
-                if confirm.lower() == "y":
-                    return ConfirmSafetyResult.SAFE
+        if safety_result == ConfirmSafetyResult.UNSAFE and self.can_prompt_user:
+            return self.prompt_for_safety()
 
-                msg = (
-                    "I've identified that this is a dangerous operation. "
-                    "Let's stop the current task, I will provide further instructions shortly. "
-                    "Please await further instructions and use action DONE."
-                )
-                self.append_to_history(
-                    ConversationRecord(
-                        role=ConversationRole.USER,
-                        content=msg,
-                    )
-                )
-                return ConfirmSafetyResult.UNSAFE
-            else:
-                # If we can't prompt the user, we need to add our question to the conversation
-                # history and end the task, waiting for the user's next input to determine
-                # whether to execute or not.  On the next iteration, check_code_safety will
-                # return a different value based on the user's response.
-                msg = (
-                    "I've identified that this is a potentially dangerous operation. "
-                    "Do you want me to proceed, find another way, or stop this task?"
-                )
-                self.append_to_history(
-                    ConversationRecord(
-                        role=ConversationRole.ASSISTANT,
-                        content=msg,
-                    )
-                )
-                return ConfirmSafetyResult.CONVERSATION_CONFIRM
         return safety_result
+
+    def prompt_for_safety(self) -> ConfirmSafetyResult:
+        """Prompt the user for safety confirmation.
+
+        Args:
+            response (ResponseJsonSchema): The response from the language model
+
+        Returns:
+            ConfirmSafetyResult: Result of the safety check
+        """
+        confirm = input(
+            "\n\033[1;33m⚠️  Warning: Potentially dangerous operation detected."
+            " Proceed? (y/n): \033[0m"
+        )
+        if confirm.lower() == "y":
+            return ConfirmSafetyResult.SAFE
+
+        msg = (
+            "I've identified that this is a dangerous operation. "
+            "Let's stop the current task, I will provide further instructions shortly. "
+            "Please await further instructions and use action DONE."
+        )
+        self.append_to_history(
+            ConversationRecord(
+                role=ConversationRole.USER,
+                content=msg,
+            )
+        )
+        return ConfirmSafetyResult.UNSAFE
 
     async def _execute_with_output(self, response: ResponseJsonSchema) -> CodeExecutionResult:
         """Execute code and capture stdout/stderr output.
@@ -1487,7 +1568,13 @@ class LocalCodeExecutor:
                             verbosity_level=self.verbosity_level,
                         )
 
-                        execution_result = await self.write_file(file_path, content)
+                        # First check code safety
+                        safety_result = await self.check_and_confirm_safety(response)
+                        execution_result = await self.handle_safety_result(safety_result, response)
+
+                        if not execution_result:
+                            execution_result = await self.write_file(file_path, content)
+
                         print_execution_section(
                             ExecutionSection.RESULT,
                             content=execution_result.formatted_print,
@@ -1509,7 +1596,12 @@ class LocalCodeExecutor:
                             verbosity_level=self.verbosity_level,
                         )
 
-                        execution_result = await self.edit_file(file_path, replacements)
+                        # First check code safety
+                        safety_result = await self.check_and_confirm_safety(response)
+                        execution_result = await self.handle_safety_result(safety_result, response)
+
+                        if not execution_result:
+                            execution_result = await self.edit_file(file_path, replacements)
 
                         print_execution_section(
                             ExecutionSection.RESULT,
@@ -1529,7 +1621,13 @@ class LocalCodeExecutor:
                             action=response.action,
                             verbosity_level=self.verbosity_level,
                         )
-                        execution_result = await self.read_file(file_path)
+
+                        # First check code safety
+                        safety_result = await self.check_and_confirm_safety(response)
+                        execution_result = await self.handle_safety_result(safety_result, response)
+
+                        if not execution_result:
+                            execution_result = await self.read_file(file_path)
                     else:
                         raise ValueError("File path is required for READ action")
 
@@ -1543,7 +1641,12 @@ class LocalCodeExecutor:
                             verbosity_level=self.verbosity_level,
                         )
 
-                        execution_result = await self.execute_code(response)
+                        # First check code safety
+                        safety_result = await self.check_and_confirm_safety(response)
+                        execution_result = await self.handle_safety_result(safety_result, response)
+
+                        if not execution_result:
+                            execution_result = await self.execute_code(response)
 
                         if "code execution cancelled by user" in execution_result.message:
                             return ProcessResponseOutput(
