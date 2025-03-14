@@ -11,6 +11,12 @@
   <p><i>Real-time code execution on your device through natural conversation</i></p>
 </div>
 
+<picture>
+  <img src="./static/preview-example-ui.png" alt="Local Operator UI Dashboard Example">
+</picture>
+
+<p align="center"><i>Local Operator server powering an open source UI.  The frontend is optional and available <a href="https://github.com/damianvtran/local-operator-ui">here</a></i></p>
+
 **<span style="color: #38C96A">Local Operator</span>** empowers you to run Python code safely on your own machine through an intuitive chat interface. The AI agent:
 
 🎯 **Plans & Executes** - Breaks down complex goals into manageable steps and executes them with precision.
