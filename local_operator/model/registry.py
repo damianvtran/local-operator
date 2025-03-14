@@ -118,8 +118,8 @@ The supported providers are:
 
 RecommendedOpenRouterModelIds = [
     "google/gemini-2.0-flash-001",
-    "anthropic/claude-3-7-sonnet",
-    "anthropic/claude-3-5-sonnet",
+    "anthropic/claude-3.7-sonnet",
+    "anthropic/claude-3.5-sonnet",
     "openai/chatgpt-4o-latest",
     "openai/gpt-4o-2024-11-20",
     "openai/gpt-4o",
