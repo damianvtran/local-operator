@@ -13,6 +13,7 @@ from local_operator.clients.openrouter import OpenRouterClient
 from local_operator.credentials import CredentialManager
 from local_operator.model.registry import (
     ProviderDetail,
+    RecommendedOpenRouterModelIds,
     SupportedHostingProviders,
     anthropic_models,
     deepseek_models,
@@ -29,6 +30,7 @@ from local_operator.server.models.schemas import (
     ModelEntry,
     ModelInfo,
     ModelListQueryParams,
+    ModelListQuerySort,
     ModelListResponse,
     ProviderListResponse,
 )
@@ -87,71 +89,7 @@ async def list_providers():
     """
     try:
         # Define provider details
-        provider_details = [
-            ProviderDetail(
-                id="openai",
-                name="OpenAI",
-                description="OpenAI's API provides access to GPT-4o and other models",
-                url="https://platform.openai.com/",
-                requiredCredentials=["OPENAI_API_KEY"],
-            ),
-            ProviderDetail(
-                id="anthropic",
-                name="Anthropic",
-                description="Anthropic's Claude models for AI assistants",
-                url="https://www.anthropic.com/",
-                requiredCredentials=["ANTHROPIC_API_KEY"],
-            ),
-            ProviderDetail(
-                id="google",
-                name="Google",
-                description="Google's Gemini models for multimodal AI capabilities",
-                url="https://ai.google.dev/",
-                requiredCredentials=["GOOGLE_AI_STUDIO_API_KEY"],
-            ),
-            ProviderDetail(
-                id="mistral",
-                name="Mistral AI",
-                description="Mistral AI's open and proprietary language models",
-                url="https://mistral.ai/",
-                requiredCredentials=["MISTRAL_API_KEY"],
-            ),
-            ProviderDetail(
-                id="ollama",
-                name="Ollama",
-                description="Run open-source large language models locally",
-                url="https://ollama.ai/",
-                requiredCredentials=[],
-            ),
-            ProviderDetail(
-                id="openrouter",
-                name="OpenRouter",
-                description="Access to multiple AI models through a unified API",
-                url="https://openrouter.ai/",
-                requiredCredentials=["OPENROUTER_API_KEY"],
-            ),
-            ProviderDetail(
-                id="deepseek",
-                name="DeepSeek",
-                description="DeepSeek's language models for various AI applications",
-                url="https://deepseek.ai/",
-                requiredCredentials=["DEEPSEEK_API_KEY"],
-            ),
-            ProviderDetail(
-                id="kimi",
-                name="Kimi",
-                description="Moonshot AI's Kimi models for Chinese and English language tasks",
-                url="https://moonshot.cn/",
-                requiredCredentials=["KIMI_API_KEY"],
-            ),
-            ProviderDetail(
-                id="alibaba",
-                name="Alibaba Cloud",
-                description="Alibaba's Qwen models for natural language processing",
-                url="https://www.alibabacloud.com/",
-                requiredCredentials=["ALIBABA_CLOUD_API_KEY"],
-            ),
-        ]
+        provider_details = SupportedHostingProviders
 
         return CRUDResponse(
             status=200,
@@ -193,6 +131,7 @@ async def list_providers():
                                         "supports_prompt_cache": False,
                                         "description": "Most powerful Claude model for "
                                         "highly complex tasks",
+                                        "recommended": False,
                                     },
                                 },
                                 {
@@ -207,6 +146,7 @@ async def list_providers():
                                         "supports_images": None,
                                         "supports_prompt_cache": False,
                                         "description": "OpenAI's most advanced multimodal model",
+                                        "recommended": True,
                                     },
                                 },
                             ]
@@ -367,6 +307,7 @@ async def list_models(
                                 supports_prompt_cache=False,
                                 cache_writes_price=None,
                                 cache_reads_price=None,
+                                recommended=model.id in RecommendedOpenRouterModelIds,
                                 description=(
                                     model.description
                                     if hasattr(model, "description") and model.description
@@ -387,23 +328,28 @@ async def list_models(
                         pass
 
         # Sort the models based on the sort parameter and direction
-        if query_params.sort == "id":
+        if query_params.sort == ModelListQuerySort.ID:
             # Sort by id
             models.sort(
                 key=lambda model: model.id, reverse=(query_params.direction == "descending")
             )
-        elif query_params.sort == "provider":
+        elif query_params.sort == ModelListQuerySort.PROVIDER:
             # Sort by provider
             models.sort(
                 key=lambda model: model.provider, reverse=(query_params.direction == "descending")
             )
-        elif query_params.sort == "name":
+        elif query_params.sort == ModelListQuerySort.NAME:
             # Sort by name, handling None values
             models.sort(
                 key=lambda model: (model.name is None, model.name or ""),
                 reverse=(query_params.direction == "descending"),
             )
-        # Add more sort options as needed for other fields
+        elif query_params.sort == ModelListQuerySort.RECOMMENDED:
+            # Sort by recommended
+            models.sort(
+                key=lambda model: model.info.recommended,
+                reverse=(query_params.direction == "descending"),
+            )
 
         return CRUDResponse(
             status=200,

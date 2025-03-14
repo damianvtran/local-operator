@@ -6,6 +6,7 @@ in the Local Operator API.
 """
 
 from datetime import datetime
+from enum import Enum
 from typing import Any, Dict, Generic, List, Optional, TypeVar
 
 from pydantic import BaseModel, Field
@@ -647,6 +648,15 @@ class ProviderListResponse(BaseModel):
         }
 
 
+class ModelListQuerySort(str, Enum):
+    """Sorting options for model listings."""
+
+    ID = "id"
+    NAME = "name"
+    PROVIDER = "provider"
+    RECOMMENDED = "recommended"
+
+
 class ModelListQueryParams(BaseModel):
     """Query parameters for listing models.
 
@@ -657,7 +667,9 @@ class ModelListQueryParams(BaseModel):
     """
 
     provider: Optional[str] = Field(None, description="Provider to filter models by")
-    sort: Optional[str] = Field("id", description="Field to sort models by")
+    sort: Optional[ModelListQuerySort] = Field(
+        ModelListQuerySort.RECOMMENDED, description="Field to sort models by"
+    )
     direction: Optional[str] = Field(
         "ascending", description="Sort direction ('ascending' or 'descending')"
     )
