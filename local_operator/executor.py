@@ -33,7 +33,11 @@ from local_operator.console import (
     print_task_interrupted,
     spinner_context,
 )
-from local_operator.helpers import clean_json_response
+from local_operator.helpers import (
+    clean_json_response,
+    clean_plain_text_response,
+    remove_think_tags,
+)
 from local_operator.model.configure import ModelConfiguration, calculate_cost
 from local_operator.prompts import (
     SafetyCheckConversationPrompt,
@@ -970,11 +974,12 @@ class LocalCodeExecutor:
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content=(
-                        f"The code is unsafe. Here is an analysis of the code risk by"
+                        f"Your action was denied by the AI security auditor because it "
+                        "was deemed unsafe. Here is an analysis of the code risk by"
                         " the security auditor AI agent:\n\n"
                         f"{analysis}\n\n"
                         "Please acknowledge and re-summarize the security risk in the next"
-                        " message back to me and use the ASK action to ask me what to do next."
+                        " message back to me in plain text, not JSON format."
                     ),
                 )
             )
@@ -1026,6 +1031,10 @@ class LocalCodeExecutor:
                     if isinstance(safety_summary.content, str)
                     else str(safety_summary.content)
                 )
+
+                safety_summary_content = remove_think_tags(safety_summary_content)
+                safety_summary_content = clean_plain_text_response(safety_summary_content)
+
                 self.append_to_history(
                     ConversationRecord(
                         role=ConversationRole.ASSISTANT,
@@ -1038,7 +1047,7 @@ class LocalCodeExecutor:
                     stderr="",
                     logging="",
                     message=safety_summary_content,
-                    code="",
+                    code=response.code,
                     formatted_print="",
                     role=ConversationRole.ASSISTANT,
                     status=ProcessResponseStatus.CONFIRMATION_REQUIRED,
@@ -2268,7 +2277,7 @@ Follow it closely and accurately and make sure that you are making progress towa
         """
         new_code_record = execution_result
 
-        if response:
+        if response and not new_code_record.message:
             new_code_record.message = response.response
 
         if not new_code_record.timestamp:
