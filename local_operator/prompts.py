@@ -1294,7 +1294,7 @@ git actions.
   changes to the code base after making edits without the user's permission).
 - Do NOT write descriptions that you can store in memory or in variables to the disk
   for git operations, as this will change the diffs and then you will accidentally
-  commit changes to the code base without the user's permission. 
+  commit changes to the code base without the user's permission.
 - Make sure that you only commit intended changes to the code base and be diligent with
   your git operations for git related tasks.
 
