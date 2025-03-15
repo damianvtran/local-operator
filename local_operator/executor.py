@@ -978,8 +978,10 @@ class LocalCodeExecutor:
                         "was deemed unsafe. Here is an analysis of the code risk by"
                         " the security auditor AI agent:\n\n"
                         f"{analysis}\n\n"
-                        "Please acknowledge and re-summarize the security risk in the next"
-                        " message back to me in plain text, not JSON format."
+                        "Please re-summarize the security risk in natural language and"
+                        " not JSON format.  Don't acknowledge this message directly but"
+                        " instead pretend that you are responding as the AI security"
+                        " auditor directly to the user's request."
                     ),
                 )
             )
