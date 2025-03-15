@@ -2138,16 +2138,39 @@ Current time: {current_time}
         """Get the current git repository status.
 
         Returns:
-            str: Git status output or a message indicating no git repository
+            str: Git status output, a message indicating no git repository, or that git
+            is not installed
         """
         try:
-            return (
-                subprocess.check_output(["git", "status"], stderr=subprocess.DEVNULL)
-                .decode()
-                .strip()
-            ) or "Clean working directory"
+            # Check if git is available on the system
+            if sys.platform == "win32":
+                # On Windows, use where command
+                try:
+                    path = subprocess.check_output(["where", "git"], stderr=subprocess.DEVNULL)
+                    if not path:
+                        return "Git is not available on this system"
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    return "Git is not available on this system"
+            else:
+                # On Unix-like systems, use which command
+                try:
+                    path = subprocess.check_output(["which", "git"], stderr=subprocess.DEVNULL)
+                    if not path:
+                        return "Git is not available on this system"
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    return "Git is not available on this system"
+
+            # If git exists, check repository status
+            try:
+                return (
+                    subprocess.check_output(["git", "status"], stderr=subprocess.DEVNULL)
+                    .decode()
+                    .strip()
+                ) or "Clean working directory"
+            except subprocess.CalledProcessError:
+                return "Not a git repository"
         except (subprocess.CalledProcessError, FileNotFoundError):
-            return "Not a git repository"
+            return "Git is not available on this system"
 
     def reset_learnings(self) -> None:
         """Reset the learnings list."""
