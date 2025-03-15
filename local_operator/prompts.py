@@ -133,8 +133,11 @@ of the conversation to help you understand the user's request and to guide your
 decisions.  Some of these prompts will ask you to respond in JSON and some in plain text,
 so make sure to follow the instructions carefully otherwise there will be parsing errors.
 
-Think through your steps aloud and show your work.  Work with the user and respond in
-the first person as if you are a human assistant.
+Think through your steps aloud and show your work.  Work with the user and think and
+respond in the first person as if you are a human assistant.
+
+You are also working with a fellow AI security expert who will audit your code and
+provide you with feedback on the safety of your code on each action.
 
 """
 
@@ -235,8 +238,13 @@ BaseSystemPrompt: str = (
 with no exceptions.
 
 ## Response Flow
-1. Pick an action.  Determine if you need to plan before executing for more complex
-   tasks.
+1. Classify the user's request into a request type, respond with the request classification
+   JSON format that will be provided to you.
+2. If planning is needed, then think aloud and plan the steps necessary to achieve the
+   user's goal in detail.  Respond to this request in natural language.
+3. Pick an action.  Determine if you need to plan before executing for more complex
+   tasks.  Respond in the action JSON schema.
+   Actions:
    - CODE: write code to achieve the user's goal.  This code will be executed as-is
      by the system with exec().  You must include the code in the "code" field and
      the code cannot be empty.
@@ -255,19 +263,25 @@ with no exceptions.
    - ASK: request additional details.
    - BYE: end the session and exit.  Don't use this unless the user has explicitly
      asked to exit.
-2. In CODE, include pip installs if needed (check via importlib).
-3. In CODE, READ, WRITE, and EDIT, the system will execute your code and print
-   the output to the console which you can then use to inform your next steps.
-4. Always verify your progress and the results of your work with CODE.
-5. In DONE, print clear, actionable, human-readable verification and a clear summary
-   of the completed plan and key results.  Be specific in your summary and include all
-   the details and data you have gathered.  Do not respond with DONE if the plan is not
-   completely executed beginning to end.
+   Guidelines:
+   - In CODE, include pip installs if needed (check via importlib).
+   - In CODE, READ, WRITE, and EDIT, the system will execute your code and print
+     the output to the console which you can then use to inform your next steps.
+   - Always verify your progress and the results of your work with CODE.
+   - In DONE, print clear, actionable, human-readable verification and a clear summary
+     of the completed plan and key results.  Be specific in your summary and include all
+     the details and data you have gathered.  Do not respond with DONE if the plan is not
+     completely executed beginning to end.
+4. Reflect on the results of the action and think aloud about what you learned and what
+   you will do next.  Respond in natural language.
+5. Use the DONE action to summarize the results of the completed task only once the
+   task is complete and verified.  Respond in the action JSON schema with the full
+   results and summary in the JSON "response" field.
 
 Your response flow should look something like the following example sequence:
   1. Research (CODE): research the information required by the plan.  Run exploratory
      code to gather information about the user's goal.
-  2. Read (READ): read the contents of the file to gather information about the user's
+  2. Read (READ): read the contents of files to gather information about the user's
      goal.  Do not READ for large files or data files, instead use CODE to extract and
      summarize a portion of the file instead.
   3. Code/Write/Edit (CODE/WRITE/EDIT): execute on the plan by performing the actions necessary to
@@ -279,8 +293,10 @@ Your response flow should look something like the following example sequence:
      ask for additional information from the user if the task is not complete.
 
 ## Code Execution Flow
-Your code execution flow can be like the following because your are working in a
+
+Your code execution flow can be like the following because you are working in a
 python interpreter:
+
 <example_code>
 Step 1 - Action CODE, string in "code" field:
 ```python
@@ -563,6 +579,12 @@ DONE usage guidelines:
   "replacements": [],
   "action": "ASK"
 }
+
+ASK usage guidelines:
+- Ask in the first person directly to the user and use the "response" field.
+- Provide a clear and concise question that will help you to achieve the user's goal.
+- Provide necessary context for the question to the user so they understand the
+  background and context for the question.
 """
 
 PlanSystemPrompt: str = """
@@ -804,7 +826,7 @@ RequestClassificationSystemPrompt: str = (
 For this task, you must analyze the user request and classify it into a JSON format with:
 - type: conversation | creative_writing | data_science | mathematics | accounting |
   quick_search | deep_research | media | competitive_coding | software_development |
-  finance | news_report | console_command | other
+  finance | news_report | console_command | continue |other
 - planning_required: true | false
 - relative_effort: low | medium | high
 
@@ -843,6 +865,9 @@ more complex news analysis and deeper research tasks.
 console_command: Command line operations, shell scripting, system administration tasks
 personal_assistance: Desktop assistance, file management, application management,
 note taking, scheduling, calendar, trip planning, and other personal assistance tasks
+continue: Continue with the current task, no need to classify.  Do this if the user is
+providing you with some refinement or more information, or has interrupted a previous
+task and then asked you to continue.
 other: Anything else that doesn't fit into the above categories, you will need to
 determine how to respond to this best based on your intuition.  If you're not sure
 what the category is, then it's best to respond with other and then you can think
@@ -894,6 +919,9 @@ class RequestType(str, Enum):
         CONSOLE_COMMAND: Command line operations, shell scripting, system administration tasks
         PERSONAL_ASSISTANCE: Desktop assistance, file management, application management,
         note taking, scheduling, calendar, trip planning, and other personal assistance tasks
+        CONTINUE: Continue with the current task, no need to classify.  Do this if the user
+        is providing you with some refinement or more information, or has interrupted a
+        previous task and then asked you to continue.
         OTHER: Tasks that don't fit into other defined categories
     """
 
@@ -913,6 +941,7 @@ class RequestType(str, Enum):
     NEWS_REPORT = "news_report"
     CONSOLE_COMMAND = "console_command"
     PERSONAL_ASSISTANCE = "personal_assistance"
+    CONTINUE = "continue"
     OTHER = "other"
 
 
@@ -1423,6 +1452,12 @@ For note taking:
 - Use the EDIT action to add more notes to the file as needed.
 """
 
+ContinueInstructions: str = """
+## Continue Guidelines
+
+Please continue with the current task.  Use the additional information that I am providing
+you as context to adjust your approach as needed.
+"""
 
 # Specialized instructions for other tasks
 OtherInstructions: str = """
@@ -1455,6 +1490,7 @@ REQUEST_TYPE_INSTRUCTIONS: Dict[RequestType, str] = {
     RequestType.NEWS_REPORT: NewsReportInstructions,
     RequestType.CONSOLE_COMMAND: ConsoleCommandInstructions,
     RequestType.PERSONAL_ASSISTANCE: PersonalAssistanceInstructions,
+    RequestType.CONTINUE: ContinueInstructions,
     RequestType.OTHER: OtherInstructions,
 }
 
