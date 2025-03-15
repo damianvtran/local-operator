@@ -879,6 +879,7 @@ Planning is required for:
 - Complex analysis or research
 - Tasks with dependencies
 - Tasks that benefit from upfront organization
+- User requests that materially change the scope or trajectory of the task
 
 Relative effort levels:
 low: Simple, straightforward tasks taking a single step.

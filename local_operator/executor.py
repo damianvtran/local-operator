@@ -385,6 +385,8 @@ class LocalCodeExecutor:
         code_history (List[CodeExecutionResult]): A list of code execution results.
         persist_conversation (bool): Whether to persist the conversation history and code
             execution history to the agent registry on each step.
+        instruction_details (str | None): A set of instructions for the agent based on
+            the classification of the user's request.
     """
 
     context: Dict[str, Any]
@@ -403,6 +405,7 @@ class LocalCodeExecutor:
     current_plan: str | None
     code_history: List[CodeExecutionResult]
     persist_conversation: bool
+    instruction_details: str | None
 
     def __init__(
         self,
@@ -456,6 +459,7 @@ class LocalCodeExecutor:
         self.verbosity_level = verbosity_level
         self.agent_registry = agent_registry
         self.persist_conversation = persist_conversation
+        self.instruction_details = None
 
         # Load agent context if agent and agent_registry are provided
         if self.agent and self.agent_registry:
@@ -2204,12 +2208,18 @@ Current time: {current_time}
         # Add current plan details to the latest message
         current_plan_details = self.get_current_plan_details()
 
+        # Add instruction details to the latest message
+        instruction_details = self.get_instruction_details()
+
         # "Heads up display" for the agent
         hud_message = f"""
 # Agent Heads Up Display
 
 This is your "heads up display" to help you understand the current state of the
-conversation and the environment.
+conversation and the environment.  It is a message that is ephemeral and moves up
+closer to the top of the conversation history to give you the most relevant information
+at each point in time as you complete each task.  It will update and move forward after
+each action.
 
 Use this information to help you complete the user's request.
 
@@ -2236,6 +2246,11 @@ This is a notepad of things that you have learned from previous conversations.
 This is the current and original plan that you made based on the user's request.
 Follow it closely and accurately and make sure that you are making progress towards it.
 {current_plan_details}
+
+## Instruction Details
+This is a set of guidelines about how to best complete the current task or respond to
+the user's request.  You should take them into account as you work on the current task.
+{instruction_details}
         """
 
         self.append_to_history(
@@ -2265,6 +2280,27 @@ Follow it closely and accurately and make sure that you are making progress towa
         <current_plan>
         {self.current_plan}
         </current_plan>
+        """
+        return template
+
+    def set_instruction_details(self, instruction_details: str) -> None:
+        """Set the instruction details for the agent.
+
+        Args:
+            instruction_details (str): The instruction details for the agent
+        """
+        self.instruction_details = instruction_details
+
+    def get_instruction_details(self) -> str:
+        """Get the instruction details for the agent.
+
+        Returns:
+            str: Formatted string containing instruction details
+        """
+        template = f"""
+        <instruction_details>
+        {self.instruction_details}
+        </instruction_details>
         """
         return template
 
