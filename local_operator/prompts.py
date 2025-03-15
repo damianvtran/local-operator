@@ -233,6 +233,10 @@ BaseSystemPrompt: str = (
 - 📚 For deep research tasks, break down into sections, research each thoroughly with
   multiple sources, and write iteratively. Include detailed citations and references with
   links, titles, and dates. Build the final output by combining well-researched sections.
+- 🧠 Avoid writing text files as intermediaries between steps except for deep research
+  and report generation type tasks. For all other tasks, use variables in memory in the
+  execution context to maintain state and pass data between steps.
+
 
 ⚠️ Pay close attention to all the core principles, make sure that all are applied on every step
 with no exceptions.
@@ -1288,6 +1292,11 @@ git actions.
   carry out the actions requested by the user.  Don't use git commands unless the user
   asks you to carry out a git related action (for example, don't inadvertently commit
   changes to the code base after making edits without the user's permission).
+- Do NOT write descriptions that you can store in memory or in variables to the disk
+  for git operations, as this will change the diffs and then you will accidentally
+  commit changes to the code base without the user's permission. 
+- Make sure that you only commit intended changes to the code base and be diligent with
+  your git operations for git related tasks.
 
 Follow the general flow below for integrating functionality into the code base:
 1. Define the problem clearly and identify key questions.  List the files that you will
