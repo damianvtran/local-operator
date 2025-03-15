@@ -31,6 +31,7 @@ dependencies = [
     "requests",
     "psutil",
     "dill",
+    "pyreadline3",
     # Constraints
     "certifi>=2024.7.4",
     "configobj>=5.0.9",

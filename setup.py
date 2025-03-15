@@ -25,6 +25,7 @@ setup(
         "requests>=2.32.3",
         "psutil>=6.1.1",
         "dill>=0.3.9",
+        "pyreadline3>=3.5.4",
     ],
     python_requires=">=3.12",
     extras_require={
