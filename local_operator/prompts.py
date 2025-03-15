@@ -618,9 +618,9 @@ if needed, and provide information from the conversation history in your final r
 Don't assume that the user will go back to previous responses to get your summary.
 
 This is just a question to help you think.  Typing will help you think through next
-steps and perform better.  Respond in natural language, not JSON or code.  Stop before
-generating the JSON action for the next step.  Do not include any code here or markdown
-code formatting, you will do that after you reflect.
+steps and perform better.  Respond ONLY in natural language, not JSON or code.  Stop
+before generating the JSON action for the next step, you will be asked to do that on
+the next step.  Do not include any code here or markdown code formatting.
 """
 
 SafetyCheckSystemPrompt: str = """
