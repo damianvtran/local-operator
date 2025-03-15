@@ -48,6 +48,7 @@ class DummyExecutor:
                 id="test-model",
                 name="test-model",
                 description="Mock model",
+                recommended=True,
             ),
             api_key=None,
         )
