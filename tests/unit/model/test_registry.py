@@ -12,6 +12,7 @@ def test_model_info_price_must_be_non_negative() -> None:
             description="Mock model",
             input_price=-1,
             output_price=1,
+            recommended=True,
         )
     with pytest.raises(ValueError, match="Price must be non-negative."):
         ModelInfo(
@@ -20,6 +21,7 @@ def test_model_info_price_must_be_non_negative() -> None:
             description="Mock model",
             input_price=1,
             output_price=-1,
+            recommended=True,
         )
     # Should not raise an error
     ModelInfo(
@@ -28,6 +30,7 @@ def test_model_info_price_must_be_non_negative() -> None:
         description="Mock model",
         input_price=0,
         output_price=0,
+        recommended=True,
     )
     ModelInfo(
         id="test-model",
@@ -35,6 +38,7 @@ def test_model_info_price_must_be_non_negative() -> None:
         description="Mock model",
         input_price=1,
         output_price=1,
+        recommended=False,
     )
 
 
@@ -51,7 +55,7 @@ def test_get_model_info() -> None:
 
     # Test OpenAI
     model_info = get_model_info("openai", "gpt-4o")
-    assert model_info.max_tokens == 32768
+    assert model_info.max_tokens == 16384
 
     # Test OpenRouter
     model_info = get_model_info("openrouter", "any")
