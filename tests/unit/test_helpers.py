@@ -55,6 +55,10 @@ def test_remove_think_tags(response_content, expected_output):
         ('main content {"json": "value" }', "main content"),
         ('main content {"json": "value" } following text', "main content following text"),
         ('{"simple_key": "value"}', ""),
+        (
+            'Multiline\n\nInput\n\nI will respond with a message explaining my action. {"response":"Example response","code":"","content":"","file_path":"","mentioned_files":[],"replacements":[],"action":"DONE","learnings":"Example learnings"}',  # noqa: E501
+            "Multiline\n\nInput\n\nI will respond with a message explaining my action.",
+        ),
     ],
 )
 def test_clean_plain_text_response(response_content, expected_output):

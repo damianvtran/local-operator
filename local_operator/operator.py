@@ -297,10 +297,16 @@ class Operator:
                 self.executor.conversation_history.append(
                     ConversationRecord(
                         role=ConversationRole.ASSISTANT,
-                        content=f"Classification information for your request: {response_content}",
+                        content=(
+                            f"Here is the classification for your request: {response_content}"
+                        ),
                         should_summarize=False,
+                        ephemeral=True,
                     )
                 )
+
+                if classification.type != RequestType.CONTINUE:
+                    self.executor.set_instruction_details(response_content)
 
                 return classification
 
@@ -322,12 +328,14 @@ class Operator:
                     )
                     continue
 
+        self.executor.set_instruction_details("")
+
         raise ValueError(
             f"Failed to get valid classification after {max_attempts} attempts. "
             f"Last error: {last_error}"
         )
 
-    async def generate_plan(self) -> str:
+    async def generate_plan(self, current_task_classification: RequestClassification) -> str:
         """Generate a plan for the agent to follow.
 
         This method constructs a conversation with the agent to generate a plan. It
@@ -344,6 +352,10 @@ class Operator:
         Returns:
             str: The generated plan or an empty string if planning is skipped.
         """
+        # Clear any existing plans from the previous invocation
+        if current_task_classification.type != RequestType.CONTINUE:
+            self.executor.set_current_plan("")
+
         system_prompt = create_system_prompt(self.executor.tool_registry, PlanSystemPrompt)
 
         messages = [
@@ -596,13 +608,15 @@ This is a {request_type} message, here are some guidelines for how to respond:
                 "Coming up with a plan",
                 verbosity_level=self.verbosity_level,
             ):
-                plan = await self.generate_plan()
+                plan = await self.generate_plan(classification)
 
                 if plan and self.verbosity_level >= VerbosityLevel.VERBOSE:
                     formatted_plan = format_agent_output(plan)
                     print("\n\033[1;36m╭─ Agent Plan ──────────────────────────────────────\033[0m")
                     print(f"\033[1;36m│\033[0m {formatted_plan}")
                     print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
+        elif classification.type != RequestType.CONTINUE:
+            self.executor.set_current_plan("")
 
         if self.verbosity_level >= VerbosityLevel.VERBOSE:
             print("\n")

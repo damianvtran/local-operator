@@ -351,6 +351,7 @@ def test_calculate_cost() -> None:
         description="Mock model",
         input_price=1,
         output_price=2,
+        recommended=True,
     )
     input_tokens = 1000
     output_tokens = 2000
