@@ -1,6 +1,6 @@
 import logging
 import os
-import readline
+import platform
 import signal
 import uuid
 from enum import Enum
@@ -50,6 +50,14 @@ from local_operator.types import (
     RequestClassification,
     ResponseJsonSchema,
 )
+
+# Use pyreadline3 on Windows, standard readline on other OS
+if platform.system() == "Windows":
+    from pyreadline3 import Readline
+
+    readline = Readline()
+else:
+    import readline
 
 
 class OperatorType(Enum):
