@@ -1851,16 +1851,20 @@ def test_get_environment_details(executor, monkeypatch, tmp_path):
 
     # Mock git status
     def mock_check_output(*args, **kwargs):
+        if args[0][0] == "which" or args[0][0] == "where":
+            return b"/usr/bin/git"
         if args[0][0] == "git" and args[0][1] == "status":
             return b"On branch main\nnothing to commit, working tree clean\n"
         raise subprocess.CalledProcessError(1, args[0])
 
-    monkeypatch.setattr("local_operator.executor.subprocess.check_output", mock_check_output)
+    monkeypatch.setattr("subprocess.check_output", mock_check_output)
 
     # Mock current working directory and datetime
-    monkeypatch.setattr("local_operator.executor.os.getcwd", lambda: str(tmp_path))
+    monkeypatch.setattr("os.getcwd", lambda: str(tmp_path))
     fixed_datetime = datetime(2024, 1, 1, 12, 0, 0)
-    monkeypatch.setattr("local_operator.executor.datetime", MagicMock(now=lambda: fixed_datetime))
+    mock_datetime = MagicMock()
+    mock_datetime.now.return_value = fixed_datetime
+    monkeypatch.setattr("local_operator.executor.datetime", mock_datetime)
 
     # Mock context variables
     executor.context = {"test_var": "test_value"}
@@ -1883,14 +1887,17 @@ def test_get_environment_details(executor, monkeypatch, tmp_path):
     assert "📎 other.bin (other, 750B)" in env_details
 
 
-def test_get_environment_details_no_git(executor, monkeypatch, tmp_path):
+def test_get_environment_details_not_git_repo(executor, monkeypatch, tmp_path):
     """Test get_environment_details when not in a git repository."""
     # Mock directory indexing with empty directory
     monkeypatch.setattr("local_operator.executor.list_working_directory", lambda: {})
 
     # Mock git branch check to fail
     def mock_check_output(*args, **kwargs):
-        raise subprocess.CalledProcessError(128, "git")
+        if args[0][0] == "which" or args[0][0] == "where":
+            return b"/usr/bin/git"
+        if args[0][0] == "git" and args[0][1] == "status":
+            raise subprocess.CalledProcessError(128, "git")
 
     monkeypatch.setattr("subprocess.check_output", mock_check_output)
 
@@ -1900,6 +1907,28 @@ def test_get_environment_details_no_git(executor, monkeypatch, tmp_path):
     env_details = executor.get_environment_details()
 
     assert "Not a git repository" in env_details
+
+
+def test_get_environment_details_no_git(executor, monkeypatch, tmp_path):
+    """Test get_environment_details when git is not installed."""
+    # Mock directory indexing with empty directory
+    monkeypatch.setattr("local_operator.executor.list_working_directory", lambda: {})
+
+    # Mock git branch check to fail
+    def mock_check_output(*args, **kwargs):
+        if args[0][0] == "which" or args[0][0] == "where":
+            return b""
+        if args[0][0] == "git" and args[0][1] == "status":
+            raise subprocess.CalledProcessError(128, "git")
+
+    monkeypatch.setattr("subprocess.check_output", mock_check_output)
+
+    # Mock current working directory
+    monkeypatch.setattr("os.getcwd", lambda: str(tmp_path))
+
+    env_details = executor.get_environment_details()
+
+    assert "Git is not available on this system" in env_details
 
 
 def test_get_environment_details_large_directory(executor, monkeypatch):
