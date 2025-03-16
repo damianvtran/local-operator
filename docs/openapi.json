@@ -3,7 +3,7 @@
   "info": {
     "title": "Local Operator API",
     "description": "REST API interface for Local Operator agent",
-    "version": "0.3.8"
+    "version": "0.4.2"
   },
   "paths": {
     "/health": {
@@ -16,11 +16,28 @@
         "operationId": "health_check_health_get",
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Successful response with version information",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CRUDResponse_str_"
+                  "$ref": "#/components/schemas/CRUDResponse_HealthCheckResponse_"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "ok",
+                  "result": {
+                    "version": "0.1.0"
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Internal server error"
                 }
               }
             }
@@ -1469,6 +1486,12 @@
               }
             }
           },
+          "204": {
+            "description": "System prompt file does not exist",
+            "content": {
+              "application/json": {}
+            }
+          },
           "404": {
             "description": "System prompt file not found",
             "content": {
@@ -1715,13 +1738,13 @@
             "schema": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "$ref": "#/components/schemas/ModelListQuerySort"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "default": "id",
+              "default": "recommended",
               "title": "Sort"
             }
           },
@@ -1766,7 +1789,8 @@
                           "context_window": 200000,
                           "supports_images": true,
                           "supports_prompt_cache": false,
-                          "description": "Most powerful Claude model for highly complex tasks"
+                          "description": "Most powerful Claude model for highly complex tasks",
+                          "recommended": false
                         }
                       },
                       {
@@ -1777,7 +1801,8 @@
                           "input_price": 5.0,
                           "output_price": 15.0,
                           "supports_prompt_cache": false,
-                          "description": "OpenAI's most advanced multimodal model"
+                          "description": "OpenAI's most advanced multimodal model",
+                          "recommended": true
                         }
                       }
                     ]
@@ -2280,8 +2305,8 @@
               }
             ],
             "title": "Current Working Directory",
-            "description": "The current working directory for the agent.  Updated whenever the agent changes its working directory through code execution.  Defaults to '.'",
-            "default": "."
+            "description": "The current working directory for the agent.  Updated whenever the agent changes its working directory through code execution.  Defaults to '~/local-operator-home'.",
+            "default": "~/local-operator-home"
           }
         },
         "type": "object",
@@ -2852,6 +2877,34 @@
         ],
         "title": "CRUDResponse[CredentialListResult]"
       },
+      "CRUDResponse_HealthCheckResponse_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HealthCheckResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[HealthCheckResponse]"
+      },
       "CRUDResponse_JobResultSchema_": {
         "properties": {
           "status": {
@@ -2963,35 +3016,6 @@
           "message"
         ],
         "title": "CRUDResponse[SystemPromptResponse]"
-      },
-      "CRUDResponse_str_": {
-        "properties": {
-          "status": {
-            "type": "integer",
-            "title": "Status"
-          },
-          "message": {
-            "type": "string",
-            "title": "Message"
-          },
-          "result": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Result"
-          }
-        },
-        "type": "object",
-        "required": [
-          "status",
-          "message"
-        ],
-        "title": "CRUDResponse[str]"
       },
       "ChatOptions": {
         "properties": {
@@ -3551,6 +3575,21 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
+      "HealthCheckResponse": {
+        "properties": {
+          "version": {
+            "type": "string",
+            "title": "Version",
+            "description": "Version of the Local Operator"
+          }
+        },
+        "type": "object",
+        "required": [
+          "version"
+        ],
+        "title": "HealthCheckResponse",
+        "description": "Response for health check endpoint.\n\nAttributes:\n    version: Version of the Local Operator"
+      },
       "JobContextRecord": {
         "properties": {
           "role": {
@@ -3880,6 +3919,12 @@
             "type": "string",
             "title": "Name",
             "description": "Display name for the model"
+          },
+          "recommended": {
+            "type": "boolean",
+            "title": "Recommended",
+            "description": "Whether the model is recommended for use in Local Operator. This is determined based on community usage and feedback.",
+            "default": false
           }
         },
         "type": "object",
@@ -3889,7 +3934,18 @@
           "name"
         ],
         "title": "ModelInfo",
-        "description": "Represents the pricing information for a given model.\n\nAttributes:\n    input_price (float): Cost per million input tokens.\n    output_price (float): Cost per million output tokens.\n    max_tokens (Optional[int]): Maximum number of tokens supported by the model.\n    context_window (Optional[int]): Context window size of the model.\n    supports_images (Optional[bool]): Whether the model supports images.\n    supports_prompt_cache (bool): Whether the model supports prompt caching.\n    cache_writes_price (Optional[float]): Cost per million tokens for cache writes.\n    cache_reads_price (Optional[float]): Cost per million tokens for cache reads.\n    description (Optional[str]): Description of the model."
+        "description": "Represents the pricing information for a given model.\n\nAttributes:\n    input_price (float): Cost per million input tokens.\n    output_price (float): Cost per million output tokens.\n    max_tokens (Optional[int]): Maximum number of tokens supported by the model.\n    context_window (Optional[int]): Context window size of the model.\n    supports_images (Optional[bool]): Whether the model supports images.\n    supports_prompt_cache (bool): Whether the model supports prompt caching.\n    cache_writes_price (Optional[float]): Cost per million tokens for cache writes.\n    cache_reads_price (Optional[float]): Cost per million tokens for cache reads.\n    description (Optional[str]): Description of the model.\n    recommended (Optional[bool]): Whether the model is recommended for use in Local\n    Operator.  This is determined based on community usage and feedback."
+      },
+      "ModelListQuerySort": {
+        "type": "string",
+        "enum": [
+          "id",
+          "name",
+          "provider",
+          "recommended"
+        ],
+        "title": "ModelListQuerySort",
+        "description": "Sorting options for model listings."
       },
       "ModelListResponse": {
         "properties": {
@@ -3981,6 +4037,12 @@
             "type": "array",
             "title": "Requiredcredentials",
             "description": "List of required credential keys"
+          },
+          "recommended": {
+            "type": "boolean",
+            "title": "Recommended",
+            "description": "Whether the provider is recommended for use in Local Operator",
+            "default": false
           }
         },
         "type": "object",

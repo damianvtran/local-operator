@@ -673,3 +673,13 @@ class ModelListQueryParams(BaseModel):
     direction: Optional[str] = Field(
         "ascending", description="Sort direction ('ascending' or 'descending')"
     )
+
+
+class HealthCheckResponse(BaseModel):
+    """Response for health check endpoint.
+
+    Attributes:
+        version: Version of the Local Operator
+    """
+
+    version: str = Field(..., description="Version of the Local Operator")
