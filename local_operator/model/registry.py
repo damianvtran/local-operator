@@ -276,7 +276,10 @@ anthropic_models: Dict[str, ModelInfo] = {
         output_price=15.0,
         cache_writes_price=3.75,
         cache_reads_price=3.0,
-        description="Anthropic's latest and most powerful model for coding and agentic tasks",
+        description=(
+            "Anthropic's latest and most powerful model for coding and agentic "
+            "tasks.  Latest version."
+        ),
         recommended=True,
     ),
     "claude-3-7-sonnet-20250219": ModelInfo(
@@ -290,7 +293,10 @@ anthropic_models: Dict[str, ModelInfo] = {
         output_price=15.0,
         cache_writes_price=3.75,
         cache_reads_price=3.0,
-        description="Anthropic's latest and most powerful model for coding and agentic tasks",
+        description=(
+            "Anthropic's latest and most powerful model for coding and agentic "
+            "tasks.  Snapshot from February 2025."
+        ),
         recommended=True,
     ),
     "claude-3-5-sonnet-20241022": ModelInfo(
@@ -931,6 +937,18 @@ qwen_models: Dict[str, ModelInfo] = {
 }
 
 mistral_models: Dict[str, ModelInfo] = {
+    "mistral-large-latest": ModelInfo(
+        id="mistral-large-latest",
+        name="Mistral Large Latest",
+        max_tokens=131_000,
+        context_window=131_000,
+        supports_images=False,
+        supports_prompt_cache=False,
+        input_price=2.0,
+        output_price=6.0,
+        description="Mistral's most powerful model.  Latest version.",
+        recommended=False,
+    ),
     "mistral-large-2411": ModelInfo(
         id="mistral-large-2411",
         name="Mistral Large 2411",
@@ -940,7 +958,7 @@ mistral_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=2.0,
         output_price=6.0,
-        description="Mistral's most powerful model",
+        description="Mistral's most powerful model.  Snapshot from November 2024.",
         recommended=False,
     ),
     "pixtral-large-2411": ModelInfo(
@@ -1041,20 +1059,6 @@ mistral_models: Dict[str, ModelInfo] = {
     ),
 }
 
-mistral_models["mistral-large-latest"] = mistral_models["mistral-large-2411"]
-
-litellm_model_info_sane_defaults: ModelInfo = ModelInfo(
-    id="litellm_model_info_sane_defaults",
-    name="LiteLLM Model Info Sane Defaults",
-    max_tokens=-1,
-    context_window=128_000,
-    supports_images=True,
-    supports_prompt_cache=False,
-    input_price=0,
-    output_price=0,
-    description="LiteLLM proxy for accessing various AI models",
-    recommended=False,
-)
 
 YUAN_TO_USD = 0.14
 
