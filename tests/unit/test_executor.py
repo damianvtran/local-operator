@@ -1371,7 +1371,7 @@ async def test_perform_action_handles_exception(executor: LocalCodeExecutor):
 
     with patch("sys.stdout", new_callable=io.StringIO):
         result = await executor.perform_action(response)
-        assert "Error: Execution failed" in executor.conversation_history[-1].content
+        assert "error encountered" in executor.conversation_history[-1].content
         assert result is not None
         assert result.status == ProcessResponseStatus.SUCCESS
 
