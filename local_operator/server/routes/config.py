@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, cast
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
@@ -207,6 +207,10 @@ async def update_config(
                     }
                 },
             },
+            "204": {
+                "description": "System prompt file does not exist",
+                "content": {"application/json": {}},
+            },
             "404": {
                 "description": "System prompt file not found",
                 "content": {
@@ -222,13 +226,7 @@ async def get_system_prompt():
     """
     try:
         if not SYSTEM_PROMPT_FILE.exists():
-            response = CRUDResponse(
-                status=204,
-                message="System prompt retrieved, system prompt is empty",
-                result=SystemPromptResponse(content="", last_modified=""),
-            )
-
-            return JSONResponse(status_code=204, content=jsonable_encoder(response))
+            return Response(status_code=204)
 
         content = SYSTEM_PROMPT_FILE.read_text(encoding="utf-8")
         last_modified = datetime.fromtimestamp(SYSTEM_PROMPT_FILE.stat().st_mtime).isoformat()
