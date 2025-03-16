@@ -644,8 +644,6 @@ google_models: Dict[str, ModelInfo] = {
     ),
 }
 
-google_models["gemini-2.0-flash"] = google_models["gemini-2.0-flash-001"]
-
 deepseek_models: Dict[str, ModelInfo] = {
     "deepseek-chat": ModelInfo(
         id="deepseek-chat",

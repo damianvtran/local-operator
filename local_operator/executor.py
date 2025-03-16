@@ -774,11 +774,9 @@ class LocalCodeExecutor:
     ) -> BaseMessage:
         """Invoke the language model with a list of messages.
 
-        This method handles invoking different types of language models with appropriate formatting:
-        - For Anthropic models: Combines messages into a single string with role prefixes
-        - For OpenAI reasoning models (o1/o3): Combines messages for chain-of-thought reasoning
-        - For Google Gemini models: Converts system messages to human messages
-        - For other models: Passes messages directly
+        Ensure that only the first message is a system message.  All other messages are
+        user messages.  Most providers do not support system messages in the middle of the
+        conversation.
 
         Args:
             messages: List of message dictionaries containing 'role' and 'content' keys
@@ -796,66 +794,7 @@ class LocalCodeExecutor:
 
         while attempt < max_attempts:
             try:
-                model_name = self.get_model_name()
-
-                if self.model_configuration.hosting == "anthropic" and (
-                    "claude" in model_name or "anthropic" in model_name
-                ):
-                    # Anthropic models expect a single message, so combine the conversation history
-                    combined_message = ""
-                    for msg in messages:
-                        role_prefix = (
-                            "Human: "
-                            if msg.role == ConversationRole.USER
-                            else (
-                                "Assistant: "
-                                if msg.role == ConversationRole.ASSISTANT
-                                else "System: "
-                            )
-                        )
-                        combined_message += f"{role_prefix}{msg.content}\n\n"
-                    combined_message = combined_message.strip()
-                    response = await self._convert_and_invoke(
-                        [ConversationRecord(role=ConversationRole.USER, content=combined_message)]
-                    )
-                else:
-                    if self.model_configuration.hosting == "openai" and (
-                        "o1" in model_name or "o3" in model_name
-                    ):
-                        # OpenAI reasoning models (o1 and o3) expect a combined prompt
-                        # for chain-of-thought reasoning.
-                        combined_message = ""
-                        for msg in messages:
-                            role_prefix = (
-                                "User: "
-                                if msg.role == ConversationRole.USER
-                                else (
-                                    "Assistant: "
-                                    if msg.role == ConversationRole.ASSISTANT
-                                    else "System: "
-                                )
-                            )
-                            combined_message += f"{role_prefix}{msg.content}\n\n"
-                        combined_message = combined_message.strip()
-                        response = await self._convert_and_invoke(
-                            [
-                                ConversationRecord(
-                                    role=ConversationRole.USER, content=combined_message
-                                )
-                            ]
-                        )
-                    elif "gemini" in model_name or "mistral" in model_name:
-                        # Convert system messages to human messages for Google Gemini
-                        # or Mistral models.
-                        for msg in messages[1:]:
-                            if msg.role == ConversationRole.SYSTEM:
-                                msg.role = ConversationRole.USER
-                        response = await self._convert_and_invoke(messages)
-                    else:
-                        response = await self._convert_and_invoke(messages)
-
-                return response
-
+                return await self._convert_and_invoke(messages)
             except Exception as e:
                 last_error = e
                 attempt += 1
@@ -1686,8 +1625,12 @@ class LocalCodeExecutor:
 
                 self.append_to_history(
                     ConversationRecord(
-                        role=ConversationRole.SYSTEM,
-                        content=f"Error: {str(e)}",
+                        role=ConversationRole.USER,
+                        content=(
+                            f"There was an error encountered while trying to execute your action:"
+                            f"\n\n{str(e)}"
+                            "\n\nPlease adjust your response to fix the issue."
+                        ),
                         should_summarize=True,
                     )
                 )
@@ -1923,7 +1866,7 @@ class LocalCodeExecutor:
             self.conversation_history = [
                 self.conversation_history[0],
                 ConversationRecord(
-                    role=ConversationRole.SYSTEM,
+                    role=ConversationRole.USER,
                     content="[Some conversation history has been truncated for brevity]",
                     should_summarize=False,
                 ),
@@ -1973,26 +1916,6 @@ class LocalCodeExecutor:
 
         response = await self.invoke_model(summary_history)
         return response.content if isinstance(response.content, str) else str(response.content)
-
-    def get_conversation_working_directory(self) -> Path | None:
-        """Get the working directory from the conversation history.
-
-        Searches through the conversation history in reverse order to find the most recent
-        system message containing a working directory specification. This is used to maintain
-        context about which directory the conversation is operating in.
-
-        Returns:
-            Path | None: The working directory path extracted from the most recent system
-                        message that specifies it, or None if no working directory is found
-                        in any system message.
-        """
-        for msg in reversed(self.conversation_history):
-            if msg.role == ConversationRole.SYSTEM:
-                content = msg.content
-                lower_content = content.lower()
-                if lower_content.startswith("current working directory:"):
-                    return Path(lower_content.split("current working directory:", 1)[1].strip())
-        return None
 
     def set_tool_registry(self, tool_registry: ToolRegistry) -> None:
         """Set the tool registry for the current conversation."""
@@ -2278,7 +2201,7 @@ the user's request.  You should take them into account as you work on the curren
 
         self.append_to_history(
             ConversationRecord(
-                role=ConversationRole.SYSTEM,
+                role=ConversationRole.USER,
                 content=hud_message,
                 should_summarize=False,
                 ephemeral=True,
