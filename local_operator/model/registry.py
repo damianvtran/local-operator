@@ -265,9 +265,9 @@ the absence of specific model details.
 """
 
 anthropic_models: Dict[str, ModelInfo] = {
-    "claude-3-7-sonnet-20250219": ModelInfo(
-        id="claude-3-7-sonnet-20250219",
-        name="Claude 3.7 Sonnet",
+    "claude-3-7-sonnet-latest": ModelInfo(
+        id="claude-3-7-sonnet-latest",
+        name="Claude 3.7 Sonnet (Latest)",
         max_tokens=8192,
         context_window=200_000,
         supports_images=True,
@@ -276,7 +276,27 @@ anthropic_models: Dict[str, ModelInfo] = {
         output_price=15.0,
         cache_writes_price=3.75,
         cache_reads_price=3.0,
-        description="Anthropic's latest and most powerful model for coding and agentic tasks",
+        description=(
+            "Anthropic's latest and most powerful model for coding and agentic "
+            "tasks.  Latest version."
+        ),
+        recommended=True,
+    ),
+    "claude-3-7-sonnet-20250219": ModelInfo(
+        id="claude-3-7-sonnet-20250219",
+        name="Claude 3.7 Sonnet (2025-02-19)",
+        max_tokens=8192,
+        context_window=200_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=3.0,
+        output_price=15.0,
+        cache_writes_price=3.75,
+        cache_reads_price=3.0,
+        description=(
+            "Anthropic's latest and most powerful model for coding and agentic "
+            "tasks.  Snapshot from February 2025."
+        ),
         recommended=True,
     ),
     "claude-3-5-sonnet-20241022": ModelInfo(
@@ -295,7 +315,7 @@ anthropic_models: Dict[str, ModelInfo] = {
     ),
     "claude-3-5-haiku-20241022": ModelInfo(
         id="claude-3-5-haiku-20241022",
-        name="Claude 3.5 Haiku",
+        name="Claude 3.5 Haiku (2024-10-22)",
         max_tokens=8192,
         context_window=200_000,
         supports_images=False,
@@ -309,7 +329,7 @@ anthropic_models: Dict[str, ModelInfo] = {
     ),
     "claude-3-opus-20240229": ModelInfo(
         id="claude-3-opus-20240229",
-        name="Claude 3 Opus",
+        name="Claude 3 Opus (2024-02-29)",
         max_tokens=4096,
         context_window=200_000,
         supports_images=True,
@@ -323,7 +343,7 @@ anthropic_models: Dict[str, ModelInfo] = {
     ),
     "claude-3-haiku-20240307": ModelInfo(
         id="claude-3-haiku-20240307",
-        name="Claude 3 Haiku",
+        name="Claude 3 Haiku (2024-03-07)",
         max_tokens=4096,
         context_window=200_000,
         supports_images=True,
@@ -336,11 +356,6 @@ anthropic_models: Dict[str, ModelInfo] = {
         recommended=False,
     ),
 }
-
-anthropic_models["claude-3-7-sonnet-latest"] = anthropic_models["claude-3-7-sonnet-20250219"]
-anthropic_models["claude-3-5-sonnet-latest"] = anthropic_models["claude-3-5-sonnet-20241022"]
-anthropic_models["claude-3-opus-latest"] = anthropic_models["claude-3-opus-20240229"]
-anthropic_models["claude-3-haiku-latest"] = anthropic_models["claude-3-haiku-20240307"]
 
 # TODO: Add fetch for token, context window, image support
 ollama_default_model_info: ModelInfo = ModelInfo(
@@ -443,7 +458,7 @@ openai_models: Dict[str, ModelInfo] = {
         output_price=10.0,
         description="Optimized GPT-4 model with improved performance and reliability",
         id="gpt-4o",
-        name="GPT-4 Optimized",
+        name="GPT-4o",
         recommended=True,
     ),
     "gpt-4o-mini": ModelInfo(
@@ -455,7 +470,7 @@ openai_models: Dict[str, ModelInfo] = {
         output_price=0.6,
         description="Smaller optimized GPT-4 model with good balance of performance and cost",
         id="gpt-4o-mini",
-        name="GPT-4 Optimized Mini",
+        name="GPT-4o Mini",
         recommended=False,
     ),
     "o3-mini": ModelInfo(
@@ -467,8 +482,8 @@ openai_models: Dict[str, ModelInfo] = {
         output_price=4.4,
         description="Reasoning model with advanced capabilities on math, science, and coding.",
         id="o3-mini",
-        name="O3 Mini",
-        recommended=False,
+        name="o3 Mini",
+        recommended=True,
     ),
     "o3-mini-high": ModelInfo(
         max_tokens=100000,
@@ -480,7 +495,7 @@ openai_models: Dict[str, ModelInfo] = {
         description="Reasoning model with advanced capabilities on math, science, and "
         "coding pre-set to highest reasoning effort.",
         id="o3-mini-high",
-        name="O3 Mini High",
+        name="o3 Mini High",
         recommended=False,
     ),
     "o1-preview": ModelInfo(
@@ -492,7 +507,7 @@ openai_models: Dict[str, ModelInfo] = {
         output_price=60.0,
         description="Preview version of O1 model with multimodal capabilities",
         id="o1-preview",
-        name="O1 Preview",
+        name="o1 Preview",
         recommended=False,
     ),
     "o1": ModelInfo(
@@ -521,7 +536,7 @@ openai_models: Dict[str, ModelInfo] = {
         name="o1 Mini",
         recommended=False,
     ),
-    "gpt-4.5-turbo": ModelInfo(
+    "gpt-4.5": ModelInfo(
         max_tokens=16000,
         context_window=128000,
         supports_images=False,
@@ -529,8 +544,8 @@ openai_models: Dict[str, ModelInfo] = {
         input_price=75.0,
         output_price=150.0,
         description="Latest GPT series model, great for creative and complex tasks",
-        id="gpt-4.5-turbo",
-        name="GPT-4.5 Turbo",
+        id="gpt-4.5",
+        name="GPT 4.5",
         recommended=False,
     ),
 }
@@ -634,8 +649,6 @@ google_models: Dict[str, ModelInfo] = {
         recommended=False,
     ),
 }
-
-google_models["gemini-2.0-flash"] = google_models["gemini-2.0-flash-001"]
 
 deepseek_models: Dict[str, ModelInfo] = {
     "deepseek-chat": ModelInfo(
@@ -924,6 +937,18 @@ qwen_models: Dict[str, ModelInfo] = {
 }
 
 mistral_models: Dict[str, ModelInfo] = {
+    "mistral-large-latest": ModelInfo(
+        id="mistral-large-latest",
+        name="Mistral Large Latest",
+        max_tokens=131_000,
+        context_window=131_000,
+        supports_images=False,
+        supports_prompt_cache=False,
+        input_price=2.0,
+        output_price=6.0,
+        description="Mistral's most powerful model.  Latest version.",
+        recommended=False,
+    ),
     "mistral-large-2411": ModelInfo(
         id="mistral-large-2411",
         name="Mistral Large 2411",
@@ -933,7 +958,7 @@ mistral_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=2.0,
         output_price=6.0,
-        description="Mistral's most powerful model",
+        description="Mistral's most powerful model.  Snapshot from November 2024.",
         recommended=False,
     ),
     "pixtral-large-2411": ModelInfo(
@@ -1034,20 +1059,6 @@ mistral_models: Dict[str, ModelInfo] = {
     ),
 }
 
-mistral_models["mistral-large-latest"] = mistral_models["mistral-large-2411"]
-
-litellm_model_info_sane_defaults: ModelInfo = ModelInfo(
-    id="litellm_model_info_sane_defaults",
-    name="LiteLLM Model Info Sane Defaults",
-    max_tokens=-1,
-    context_window=128_000,
-    supports_images=True,
-    supports_prompt_cache=False,
-    input_price=0,
-    output_price=0,
-    description="LiteLLM proxy for accessing various AI models",
-    recommended=False,
-)
 
 YUAN_TO_USD = 0.14
 

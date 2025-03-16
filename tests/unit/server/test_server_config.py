@@ -175,12 +175,7 @@ async def test_get_system_prompt_not_found(test_app_client):
         response = await test_app_client.get("/v1/config/system-prompt")
 
     assert response.status_code == 204
-    data = response.json()
-    assert data.get("status") == 204
-    assert data.get("message") == "System prompt retrieved, system prompt is empty"
-    result = data.get("result")
-    assert result.get("content") == ""
-    assert result.get("last_modified") == ""
+    assert not response.content  # No content for 204 response
 
 
 @pytest.mark.asyncio

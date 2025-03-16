@@ -269,9 +269,9 @@ class Operator:
         if len(self.executor.conversation_history) + 1 > max_conversation_depth:
             messages.append(
                 ConversationRecord(
-                    role=ConversationRole.SYSTEM,
+                    role=ConversationRole.USER,
                     content=(
-                        f"... Conversation history before this message has been truncated "
+                        f"... The conversation history before this message has been truncated "
                         f"to the last {max_conversation_depth} messages.  Please review the "
                         "following messages in the sequence and respond with the request "
                         "type in the required JSON format."
