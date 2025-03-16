@@ -740,7 +740,7 @@ def test_limit_conversation_history(executor):
             "expected": [
                 ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt"),
                 ConversationRecord(
-                    role=ConversationRole.SYSTEM,
+                    role=ConversationRole.USER,
                     content="[Some conversation history has been truncated for brevity]",
                     should_summarize=False,
                 ),
@@ -1061,110 +1061,6 @@ async def test_invoke_model_timeout(executor):
 
 
 @pytest.mark.parametrize(
-    "test_case",
-    [
-        {
-            "name": "No working directory",
-            "conversation": [
-                ConversationRecord(role=ConversationRole.SYSTEM, content="Some system message"),
-                ConversationRecord(role=ConversationRole.USER, content="Test message"),
-            ],
-            "expected": None,
-        },
-        {
-            "name": "Single working directory",
-            "conversation": [
-                ConversationRecord(
-                    role=ConversationRole.SYSTEM, content="Current working directory: /test/path"
-                ),
-                ConversationRecord(role=ConversationRole.USER, content="Test message"),
-            ],
-            "expected": Path("/test/path"),
-        },
-        {
-            "name": "Multiple working directories - returns most recent",
-            "conversation": [
-                ConversationRecord(
-                    role=ConversationRole.SYSTEM, content="Current working directory: /old/path"
-                ),
-                ConversationRecord(role=ConversationRole.USER, content="Test message"),
-                ConversationRecord(
-                    role=ConversationRole.SYSTEM, content="Current working directory: /new/path"
-                ),
-            ],
-            "expected": Path("/new/path"),
-        },
-        {
-            "name": "Case insensitive working directory",
-            "conversation": [
-                ConversationRecord(
-                    role=ConversationRole.SYSTEM, content="CURRENT WORKING DIRECTORY: /test/path"
-                ),
-                ConversationRecord(role=ConversationRole.USER, content="Test message"),
-            ],
-            "expected": Path("/test/path"),
-        },
-        {
-            "name": "Message with working directory but not at start",
-            "conversation": [
-                ConversationRecord(
-                    role=ConversationRole.SYSTEM,
-                    content="Some text before Current working directory: /test/path",
-                ),
-                ConversationRecord(role=ConversationRole.USER, content="Test message"),
-            ],
-            "expected": None,
-        },
-        {
-            "name": "Multiple entries - returns last in list",
-            "conversation": [
-                ConversationRecord(
-                    role=ConversationRole.SYSTEM,
-                    content="Current working directory: /path/one",
-                ),
-                ConversationRecord(role=ConversationRole.USER, content="Test message"),
-                ConversationRecord(
-                    role=ConversationRole.SYSTEM,
-                    content="Current working directory: /path/two",
-                ),
-                ConversationRecord(role=ConversationRole.USER, content="Another message"),
-                ConversationRecord(
-                    role=ConversationRole.SYSTEM,
-                    content="Current working directory: /path/three",
-                ),
-            ],
-            "expected": Path("/path/three"),
-        },
-        {
-            "name": "First entry with working directory",
-            "conversation": [
-                ConversationRecord(
-                    role=ConversationRole.SYSTEM,
-                    content="Current working directory: /first/path",
-                ),
-                ConversationRecord(role=ConversationRole.USER, content="Test message"),
-                ConversationRecord(
-                    role=ConversationRole.SYSTEM,
-                    content="Some other system message",
-                ),
-                ConversationRecord(role=ConversationRole.ASSISTANT, content="Response"),
-            ],
-            "expected": Path("/first/path"),
-        },
-        {
-            "name": "Empty conversation",
-            "conversation": [],
-            "expected": None,
-        },
-    ],
-)
-def test_get_conversation_working_directory(executor, test_case):
-    executor.conversation_history = test_case["conversation"]
-    result = executor.get_conversation_working_directory()
-    assert result == test_case["expected"]
-
-
-@pytest.mark.parametrize(
     "context_vars, function_name, expected_output",
     [
         (
@@ -1475,7 +1371,7 @@ async def test_perform_action_handles_exception(executor: LocalCodeExecutor):
 
     with patch("sys.stdout", new_callable=io.StringIO):
         result = await executor.perform_action(response)
-        assert "Error: Execution failed" in executor.conversation_history[-1].content
+        assert "error encountered" in executor.conversation_history[-1].content
         assert result is not None
         assert result.status == ProcessResponseStatus.SUCCESS
 

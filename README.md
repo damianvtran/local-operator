@@ -7,7 +7,7 @@
 
 <h1 align="center">Local Operator: AI Agent Assistants On Your Device</h1>
 <div align="center">
-  <h2>🤖 Your Personal Assistant that Gets Things Done with Python</h2>
+  <h2>🤖 Personal AI Assistants that Turn Ideas into Action</h2>
   <p><i>Real-time code execution on your device through natural conversation</i></p>
 </div>
 
