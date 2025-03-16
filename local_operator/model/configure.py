@@ -353,9 +353,13 @@ def configure_model(
         model_kwargs = {
             "api_key": api_key,
             "temperature": model_temperature,
-            "top_p": top_p,
             "model": model_name,
         }
+
+        # top_p not supported for o1 and o3 models
+        if not model_name.startswith(("o1", "o3")):
+            model_kwargs["top_p"] = top_p
+
         if max_tokens is not None:
             model_kwargs["max_tokens"] = max_tokens
         if frequency_penalty is not None:
