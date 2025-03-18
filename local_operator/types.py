@@ -48,6 +48,30 @@ class ActionType(str, Enum):
         return self.value
 
 
+class ExecutionType(str, Enum):
+    """Enum representing the different types of execution in a conversation workflow.
+
+    Used to track the execution phase within the agent's thought process:
+    - PLAN: Initial planning phase where the agent outlines its approach
+    - ACTION: Execution of specific actions like running code or accessing resources
+    - REFLECTION: Analysis and evaluation of previous actions and their results
+    - RESPONSE: Final response generation based on the execution results
+    - SECURITY_CHECK: Security check phase where the agent checks the safety of the code
+    - CLASSIFICATION: Classification phase where the agent classifies the user's request
+    - SYSTEM: An automatic static response from the system, such as an action cancellation.
+    """
+
+    PLAN = "plan"
+    ACTION = "action"
+    REFLECTION = "reflection"
+    RESPONSE = "response"
+    SECURITY_CHECK = "security_check"
+    CLASSIFICATION = "classification"
+    SYSTEM = "system"
+    USER_INPUT = "user_input"
+    NONE = "none"
+
+
 class ConversationRecord(BaseModel):
     """A record of a conversation with an AI model.
 
@@ -167,6 +191,7 @@ class ProcessResponseStatus(str, Enum):
     ERROR = "error"
     INTERRUPTED = "interrupted"
     CONFIRMATION_REQUIRED = "confirmation_required"
+    NONE = "none"
 
 
 class ProcessResponseOutput:
@@ -200,16 +225,18 @@ class CodeExecutionResult(BaseModel):
     """
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    stdout: str
-    stderr: str
-    logging: str
-    message: str
-    code: str
-    formatted_print: str
-    role: ConversationRole
-    status: ProcessResponseStatus
+    stdout: str = Field(default="")
+    stderr: str = Field(default="")
+    logging: str = Field(default="")
+    message: str = Field(default="")
+    code: str = Field(default="")
+    formatted_print: str = Field(default="")
+    role: ConversationRole = Field(default=ConversationRole.ASSISTANT)
+    status: ProcessResponseStatus = Field(default=ProcessResponseStatus.NONE)
     timestamp: Optional[datetime] = None
-    files: List[str]
+    files: List[str] = Field(default_factory=list)
+    action: Optional[ActionType] = None
+    execution_type: ExecutionType = Field(default=ExecutionType.NONE)
 
 
 class AgentExecutorState(BaseModel):
