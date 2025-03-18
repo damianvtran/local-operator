@@ -90,8 +90,8 @@ class ConversationRecord(BaseModel):
         from_dict(data): Create a ConversationRecord from a dictionary
     """
 
-    content: str
-    role: ConversationRole
+    content: str = Field(default="")
+    role: ConversationRole = Field(default=ConversationRole.ASSISTANT)
     should_summarize: Optional[bool] = True
     ephemeral: Optional[bool] = False
     summarized: Optional[bool] = False
@@ -174,13 +174,13 @@ class ResponseJsonSchema(BaseModel):
     """
 
     response: str
-    code: str
-    content: str
-    file_path: str
-    mentioned_files: List[str]
-    replacements: List[Dict[str, str]]
+    code: str = Field(default="")
+    content: str = Field(default="")
+    file_path: str = Field(default="")
+    mentioned_files: List[str] = Field(default_factory=list)
+    replacements: List[Dict[str, str]] = Field(default_factory=list)
     action: ActionType
-    learnings: str
+    learnings: str = Field(default="")
 
 
 class ProcessResponseStatus(str, Enum):
@@ -272,5 +272,5 @@ class RequestClassification(BaseModel):
     """
 
     type: str
-    planning_required: bool
-    relative_effort: RelativeEffortLevel
+    planning_required: bool = Field(default=False)
+    relative_effort: RelativeEffortLevel = Field(default=RelativeEffortLevel.LOW)
