@@ -931,7 +931,8 @@
                         "status": "success",
                         "timestamp": "2024-01-01T12:00:00Z",
                         "execution_type": "action",
-                        "action": "CODE"
+                        "action": "CODE",
+                        "task_classification": "data_science"
                       }
                     ],
                     "first_execution_datetime": "2024-01-01T12:00:00Z",
@@ -3328,11 +3329,16 @@
           "execution_type": {
             "$ref": "#/components/schemas/ExecutionType",
             "default": "none"
+          },
+          "task_classification": {
+            "type": "string",
+            "title": "Task Classification",
+            "default": ""
           }
         },
         "type": "object",
         "title": "CodeExecutionResult",
-        "description": "Represents the result of a code execution.\n\nAttributes:\n    id (str): The unique identifier for the code execution\n    stdout (str): The standard output from the code execution.\n    stderr (str): The standard error from the code execution.\n    logging (str): Any logging output generated during the code execution.\n    message (str): The message to display to the user about the code execution.\n    code (str): The code that was executed.\n    formatted_print (str): The formatted print output from the code execution.\n    role (ConversationRole): The role of the message sender (user/assistant/system)\n    status (ProcessResponseStatus): The status of the code execution\n    timestamp (datetime): The timestamp of the code execution\n    files (List[str]): The files that were created or modified during the code execution"
+        "description": "Represents the result of a code execution.\n\nAttributes:\n    id (str): The unique identifier for the code execution\n    stdout (str): The standard output from the code execution.\n    stderr (str): The standard error from the code execution.\n    logging (str): Any logging output generated during the code execution.\n    message (str): The message to display to the user about the code execution.\n    code (str): The code that was executed.\n    formatted_print (str): The formatted print output from the code execution.\n    role (ConversationRole): The role of the message sender (user/assistant/system)\n    status (ProcessResponseStatus): The status of the code execution\n    timestamp (datetime): The timestamp of the code execution\n    files (List[str]): The files that were created or modified during the code execution\n    action (ActionType): The action that was taken during the code execution\n    execution_type (ExecutionType): The type of execution that was performed\n    task_classification (str): The classification of the task that was performed"
       },
       "ConfigResponse": {
         "properties": {
