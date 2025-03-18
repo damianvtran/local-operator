@@ -632,6 +632,8 @@ async def clear_agent_conversation(
                                     "role": "system",
                                     "status": "success",
                                     "timestamp": "2024-01-01T12:00:00Z",
+                                    "execution_type": "action",
+                                    "action": "CODE",
                                 }
                             ],
                             "first_execution_datetime": "2024-01-01T12:00:00Z",

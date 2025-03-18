@@ -46,6 +46,7 @@ from local_operator.types import (
     ActionType,
     ConversationRecord,
     ConversationRole,
+    ExecutionType,
     ProcessResponseStatus,
     RequestClassification,
     ResponseJsonSchema,
@@ -423,6 +424,7 @@ class Operator:
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.SUCCESS,
                 files=[],
+                execution_type=ExecutionType.PLAN,
             ),
             None,
         )
@@ -497,6 +499,7 @@ class Operator:
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.SUCCESS,
                 files=[],
+                execution_type=ExecutionType.REFLECTION,
             ),
             None,
         )
@@ -576,6 +579,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
                 files=attachments,
                 role=ConversationRole.USER,
                 status=ProcessResponseStatus.SUCCESS,
+                execution_type=ExecutionType.USER_INPUT,
             ),
             None,
         )

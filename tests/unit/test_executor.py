@@ -25,6 +25,7 @@ from local_operator.types import (
     ActionType,
     ConversationRecord,
     ConversationRole,
+    ExecutionType,
     ProcessResponseStatus,
     ResponseJsonSchema,
 )
@@ -1298,6 +1299,8 @@ async def test_perform_action(
                     role=ConversationRole.SYSTEM,
                     status=ProcessResponseStatus.SUCCESS,
                     files=[file_path],
+                    execution_type=ExecutionType.ACTION,
+                    action=action_type,
                 )
             )
         elif action_type == ActionType.WRITE:
@@ -1312,6 +1315,8 @@ async def test_perform_action(
                     role=ConversationRole.SYSTEM,
                     status=ProcessResponseStatus.SUCCESS,
                     files=[file_path],
+                    execution_type=ExecutionType.ACTION,
+                    action=action_type,
                 )
             )
         elif action_type == ActionType.EDIT:
@@ -1326,6 +1331,8 @@ async def test_perform_action(
                     role=ConversationRole.SYSTEM,
                     status=ProcessResponseStatus.SUCCESS,
                     files=[file_path],
+                    execution_type=ExecutionType.ACTION,
+                    action=action_type,
                 )
             )
         else:
@@ -1340,6 +1347,8 @@ async def test_perform_action(
                     role=ConversationRole.SYSTEM,
                     status=ProcessResponseStatus.SUCCESS,
                     files=[],
+                    execution_type=ExecutionType.ACTION,
+                    action=action_type,
                 )
             )
 

@@ -51,6 +51,7 @@ from local_operator.types import (
     CodeExecutionResult,
     ConversationRecord,
     ConversationRole,
+    ExecutionType,
     ProcessResponseOutput,
     ProcessResponseStatus,
     ResponseJsonSchema,
@@ -966,6 +967,7 @@ class LocalCodeExecutor:
                     role=ConversationRole.ASSISTANT,
                     status=ProcessResponseStatus.CANCELLED,
                     files=[],
+                    execution_type=ExecutionType.SYSTEM,
                 )
             else:
                 # The agent must read the security advisory and request confirmation
@@ -997,6 +999,7 @@ class LocalCodeExecutor:
                     role=ConversationRole.ASSISTANT,
                     status=ProcessResponseStatus.CONFIRMATION_REQUIRED,
                     files=[],
+                    execution_type=ExecutionType.SECURITY_CHECK,
                 )
 
         elif safety_result == ConfirmSafetyResult.CONVERSATION_CONFIRM:
@@ -1010,6 +1013,7 @@ class LocalCodeExecutor:
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.CONFIRMATION_REQUIRED,
                 files=[],
+                execution_type=ExecutionType.SECURITY_CHECK,
             )
         elif safety_result == ConfirmSafetyResult.OVERRIDE:
             if self.verbosity_level >= VerbosityLevel.INFO:
@@ -1073,6 +1077,8 @@ class LocalCodeExecutor:
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.ERROR,
             files=[],
+            execution_type=ExecutionType.ACTION,
+            action=ActionType.CODE,
         )
 
     async def check_and_confirm_safety(self, response: ResponseJsonSchema) -> ConfirmSafetyResult:
@@ -1192,6 +1198,8 @@ class LocalCodeExecutor:
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.SUCCESS,
                 files=expanded_mentioned_files,
+                execution_type=ExecutionType.ACTION,
+                action=ActionType.CODE,
             )
         except Exception as e:
             # Add captured log output to error output if any
@@ -1490,6 +1498,8 @@ class LocalCodeExecutor:
                     role=ConversationRole.ASSISTANT,
                     status=ProcessResponseStatus.SUCCESS,
                     files=[],
+                    execution_type=ExecutionType.ACTION,
+                    action=response.action,
                 ),
                 response,
             )
@@ -1736,6 +1746,8 @@ class LocalCodeExecutor:
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
             files=[str(expanded_file_path)],
+            execution_type=ExecutionType.ACTION,
+            action=ActionType.READ,
         )
 
     async def write_file(self, file_path: str, content: str) -> CodeExecutionResult:
@@ -1787,6 +1799,8 @@ class LocalCodeExecutor:
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
             files=[str(expanded_file_path)],
+            execution_type=ExecutionType.ACTION,
+            action=ActionType.WRITE,
         )
 
     async def edit_file(
@@ -1857,6 +1871,8 @@ class LocalCodeExecutor:
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
             files=[str(expanded_file_path)],
+            execution_type=ExecutionType.ACTION,
+            action=ActionType.EDIT,
         )
 
     def _limit_conversation_history(self) -> None:
