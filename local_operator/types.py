@@ -222,6 +222,8 @@ class CodeExecutionResult(BaseModel):
         status (ProcessResponseStatus): The status of the code execution
         timestamp (datetime): The timestamp of the code execution
         files (List[str]): The files that were created or modified during the code execution
+        action (ActionType): The action that was taken during the code execution
+        execution_type (ExecutionType): The type of execution that was performed
     """
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
