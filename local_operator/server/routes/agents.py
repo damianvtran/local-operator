@@ -634,6 +634,7 @@ async def clear_agent_conversation(
                                     "timestamp": "2024-01-01T12:00:00Z",
                                     "execution_type": "action",
                                     "action": "CODE",
+                                    "task_classification": "data_science",
                                 }
                             ],
                             "first_execution_datetime": "2024-01-01T12:00:00Z",

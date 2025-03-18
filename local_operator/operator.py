@@ -427,6 +427,7 @@ class Operator:
                 execution_type=ExecutionType.PLAN,
             ),
             None,
+            current_task_classification,
         )
 
         # Save the conversation history and code execution history to the agent registry
@@ -440,7 +441,7 @@ class Operator:
 
         return response_content
 
-    async def generate_reflection(self) -> str:
+    async def generate_reflection(self, current_task_classification: RequestClassification) -> str:
         """Generate a reflection for the agent.
 
         This method constructs a conversation with the agent to generate a reflection.
@@ -502,6 +503,7 @@ class Operator:
                 execution_type=ExecutionType.REFLECTION,
             ),
             None,
+            current_task_classification,
         )
 
         # Save the conversation history and code execution history to the agent registry
@@ -581,6 +583,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
                 status=ProcessResponseStatus.SUCCESS,
                 execution_type=ExecutionType.USER_INPUT,
             ),
+            None,
             None,
         )
 
@@ -687,7 +690,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
                 )
                 continue
 
-            result = await self.executor.process_response(response_json)
+            result = await self.executor.process_response(response_json, classification)
 
             # Update the "Agent Heads Up Display"
 
@@ -703,7 +706,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
                     "Reflecting on the last step",
                     verbosity_level=self.verbosity_level,
                 ):
-                    reflection = await self.generate_reflection()
+                    reflection = await self.generate_reflection(classification)
 
                     if reflection and self.verbosity_level >= VerbosityLevel.VERBOSE:
                         formatted_reflection = format_agent_output(reflection)

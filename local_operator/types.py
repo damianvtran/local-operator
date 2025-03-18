@@ -224,6 +224,7 @@ class CodeExecutionResult(BaseModel):
         files (List[str]): The files that were created or modified during the code execution
         action (ActionType): The action that was taken during the code execution
         execution_type (ExecutionType): The type of execution that was performed
+        task_classification (str): The classification of the task that was performed
     """
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -239,6 +240,7 @@ class CodeExecutionResult(BaseModel):
     files: List[str] = Field(default_factory=list)
     action: Optional[ActionType] = None
     execution_type: ExecutionType = Field(default=ExecutionType.NONE)
+    task_classification: str = Field(default="")
 
 
 class AgentExecutorState(BaseModel):
