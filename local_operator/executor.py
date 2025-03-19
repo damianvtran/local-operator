@@ -10,7 +10,10 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from traceback import format_exception
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+from multiprocessing import Queue
+
+from local_operator.jobs import JobManager
 
 from langchain_community.callbacks.manager import get_openai_callback
 from langchain_core.messages import BaseMessage
@@ -424,6 +427,8 @@ class LocalCodeExecutor:
         learnings: List[str] = [],
         current_plan: str | None = None,
         instruction_details: str | None = None,
+        job_manager: Optional["JobManager"] = None,
+        job_id: Optional[str] = None,
     ):
         """Initialize the LocalCodeExecutor with a language model.
 
@@ -451,6 +456,8 @@ class LocalCodeExecutor:
             current_plan (str | None): The current plan for the agent.
             instruction_details (str | None): A set of instructions for the agent based on
                 the classification of the user's request.
+            job_manager (JobManager | None): The job manager for the current conversation.
+            job_id (str | None): The job ID for the current conversation.
         """
         self.context = {}
         self.model_configuration = model_configuration
@@ -469,6 +476,8 @@ class LocalCodeExecutor:
         self.agent_registry = agent_registry
         self.persist_conversation = persist_conversation
         self.instruction_details = instruction_details
+        self.job_manager = job_manager
+        self.job_id = job_id
 
         # Load agent context if agent and agent_registry are provided
         if self.agent and self.agent_registry:
@@ -1574,6 +1583,22 @@ class LocalCodeExecutor:
                 message="Action completed",
             )
 
+        await self.update_job_execution_state(
+            CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code=response.code,
+                message=response.response,
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.IN_PROGRESS,
+                files=[],
+                execution_type=ExecutionType.ACTION,
+                action=response.action,
+            )
+        )
+
         print_execution_section(
             ExecutionSection.HEADER,
             step=self.step_counter,
@@ -2368,3 +2393,26 @@ the user's request.  You should take them into account as you work on the curren
             new_code_record.task_classification = classification.type
 
         self.code_history.append(new_code_record)
+
+    # Add status_queue as an instance variable
+    status_queue: Optional[Queue] = None  # type: ignore
+
+    async def update_job_execution_state(self, new_code_record: CodeExecutionResult) -> None:
+        """Update the job execution state.
+
+        Args:
+            new_code_record (CodeExecutionResult): The new code execution result to
+            update the job execution state with.
+        """
+        # Update job execution state if job manager and job ID are provided
+        if self.job_manager and self.job_id:
+            try:
+                # First, try to update directly in the current process
+                await self.job_manager.update_job_execution_state(self.job_id, new_code_record)
+
+                # If we're in a multiprocessing context with a status queue
+                if self.status_queue:
+                    # Send execution state update through the queue to the parent process
+                    self.status_queue.put(("execution_update", self.job_id, new_code_record))
+            except Exception as e:
+                print(f"Failed to update job execution state: {e}")

@@ -31,6 +31,7 @@ def run_job_in_process_with_queue(
     credential_manager: CredentialManager,
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
+    job_manager: JobManager,
     context: Optional[list[ConversationRecord]] = None,
     options: Optional[dict[str, object]] = None,
     status_queue: Optional[Queue] = None,  # type: ignore
@@ -66,7 +67,7 @@ def run_job_in_process_with_queue(
             with job_context:
                 # Send status update to the parent process
                 if status_queue:
-                    status_queue.put((job_id, JobStatus.PROCESSING, None))
+                    status_queue.put(("status_update", job_id, JobStatus.PROCESSING, None))
 
                 # Create a new operator for this process
                 process_operator = create_operator(
@@ -75,7 +76,13 @@ def run_job_in_process_with_queue(
                     credential_manager=credential_manager,
                     config_manager=config_manager,
                     agent_registry=agent_registry,
+                    job_manager=job_manager,
+                    job_id=job_id,
                 )
+
+                # Set the status queue on the executor for execution state updates
+                if status_queue and hasattr(process_operator, "executor"):
+                    process_operator.executor.status_queue = status_queue
 
                 # Initialize conversation history
                 if context:
@@ -127,11 +134,11 @@ def run_job_in_process_with_queue(
 
                 # Send completed status update to the parent process
                 if status_queue:
-                    status_queue.put((job_id, JobStatus.COMPLETED, result))
+                    status_queue.put(("status_update", job_id, JobStatus.COMPLETED, result))
         except Exception as e:
             logger.exception(f"Job {job_id} failed: {str(e)}")
             if status_queue:
-                status_queue.put((job_id, JobStatus.FAILED, {"error": str(e)}))
+                status_queue.put(("status_update", job_id, JobStatus.FAILED, {"error": str(e)}))
 
     # Run the async function in the new event loop
     loop.run_until_complete(process_chat_job_in_context())
@@ -148,6 +155,7 @@ def run_agent_job_in_process_with_queue(
     credential_manager: CredentialManager,
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
+    job_manager: JobManager,
     persist_conversation: bool = False,
     user_message_id: Optional[str] = None,
     status_queue: Optional[Queue] = None,  # type: ignore
@@ -185,7 +193,7 @@ def run_agent_job_in_process_with_queue(
             with job_context:
                 # Send status update to the parent process
                 if status_queue:
-                    status_queue.put((job_id, JobStatus.PROCESSING, None))
+                    status_queue.put(("status_update", job_id, JobStatus.PROCESSING, None))
 
                 # Retrieve the agent
                 agent_obj = agent_registry.get_agent(agent_id)
@@ -206,7 +214,13 @@ def run_agent_job_in_process_with_queue(
                     agent_registry=agent_registry,
                     current_agent=agent_obj,
                     persist_conversation=persist_conversation,
+                    job_manager=job_manager,
+                    job_id=job_id,
                 )
+
+                # Set the status queue on the executor for execution state updates
+                if status_queue and hasattr(process_operator, "executor"):
+                    process_operator.executor.status_queue = status_queue
 
                 # Process the request
                 _, final_response = await process_operator.handle_user_input(
@@ -228,11 +242,11 @@ def run_agent_job_in_process_with_queue(
 
                 # Send completed status update to the parent process
                 if status_queue:
-                    status_queue.put((job_id, JobStatus.COMPLETED, result))
+                    status_queue.put(("status_update", job_id, JobStatus.COMPLETED, result))
         except Exception as e:
             logger.exception(f"Job {job_id} failed: {str(e)}")
             if status_queue:
-                status_queue.put((job_id, JobStatus.FAILED, {"error": str(e)}))
+                status_queue.put(("status_update", job_id, JobStatus.FAILED, {"error": str(e)}))
 
     # Run the async function in the new event loop
     loop.run_until_complete(process_chat_job_in_context())
@@ -277,8 +291,30 @@ def create_and_start_job_process_with_queue(
         try:
             while process.is_alive() or not status_queue.empty():
                 if not status_queue.empty():
-                    received_job_id, status, result = status_queue.get()
-                    await job_manager.update_job_status(received_job_id, status, result)
+                    message = status_queue.get()
+
+                    # Handle different message types
+                    if isinstance(message, tuple):
+                        # Check message format based on first element
+                        if len(message) >= 3 and isinstance(message[0], str):
+                            msg_type = message[0]
+
+                            if msg_type == "status_update" and len(message) == 4:
+                                # Status update message: (type, job_id, status, result)
+                                _, received_job_id, status, result = message
+                                await job_manager.update_job_status(received_job_id, status, result)
+                            elif msg_type == "execution_update" and len(message) == 3:
+                                # Execution state update: (type, job_id, execution_state)
+                                _, received_job_id, execution_state = message
+                                await job_manager.update_job_execution_state(
+                                    received_job_id, execution_state
+                                )
+                        elif len(message) == 3:
+                            # Legacy format: (job_id, status, result)
+                            received_job_id, status, result = message
+                            await job_manager.update_job_status(received_job_id, status, result)
+                        else:
+                            logger.warning(f"Received message with unexpected format: {message}")
                 await asyncio.sleep(0.01)
         except asyncio.CancelledError:
             # Task was cancelled, clean up
