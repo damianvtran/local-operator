@@ -46,7 +46,7 @@ USER_MOCK_RESPONSES = {
         "replacements": [],
     },
     "please summarize": "[SUMMARY] this is a summary",
-    "please provide a response to me": "I have printed 'Hello World' to the console.",
+    "Final Response Guidelines": "I have printed 'Hello World' to the console.",
 }
 
 
