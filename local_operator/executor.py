@@ -1460,7 +1460,8 @@ class LocalCodeExecutor:
             self.append_to_history(
                 ConversationRecord(
                     role=ConversationRole.ASSISTANT,
-                    content=f"I'll now respond to you with the {response.action} action.",
+                    content=f"Final action: {response.model_dump_json()}.  I will now "
+                    "respond to you with the final response.",
                     should_summarize=True,
                 )
             )
