@@ -1449,13 +1449,21 @@ class LocalCodeExecutor:
         ):
             print_agent_response(self.step_counter, formatted_response, self.verbosity_level)
 
-        self.append_to_history(
-            ConversationRecord(
-                role=ConversationRole.ASSISTANT,
-                content=response.model_dump_json(),
-                should_summarize=True,
+            self.append_to_history(
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content=response.model_dump_json(),
+                    should_summarize=True,
+                )
             )
-        )
+        else:
+            self.append_to_history(
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content=f"I'll now respond to you with the {response.action} action.",
+                    should_summarize=True,
+                )
+            )
 
         result = await self.perform_action(response, classification)
 
