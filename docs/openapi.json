@@ -3,7 +3,7 @@
   "info": {
     "title": "Local Operator API",
     "description": "REST API interface for Local Operator agent",
-    "version": "0.4.2"
+    "version": "0.4.7"
   },
   "paths": {
     "/health": {
@@ -929,7 +929,10 @@
                         "formatted_print": "Hello, world!",
                         "role": "system",
                         "status": "success",
-                        "timestamp": "2024-01-01T12:00:00Z"
+                        "timestamp": "2024-01-01T12:00:00Z",
+                        "execution_type": "action",
+                        "action": "CODE",
+                        "task_classification": "data_science"
                       }
                     ],
                     "first_execution_datetime": "2024-01-01T12:00:00Z",
@@ -1885,6 +1888,20 @@
   },
   "components": {
     "schemas": {
+      "ActionType": {
+        "type": "string",
+        "enum": [
+          "CODE",
+          "WRITE",
+          "EDIT",
+          "DONE",
+          "ASK",
+          "BYE",
+          "READ"
+        ],
+        "title": "ActionType",
+        "description": "Enum representing the different types of actions that can be taken in a conversation.\n\nUsed to track the type of action being taken in a conversation."
+      },
       "Agent": {
         "properties": {
           "id": {
@@ -3244,33 +3261,41 @@
           },
           "stdout": {
             "type": "string",
-            "title": "Stdout"
+            "title": "Stdout",
+            "default": ""
           },
           "stderr": {
             "type": "string",
-            "title": "Stderr"
+            "title": "Stderr",
+            "default": ""
           },
           "logging": {
             "type": "string",
-            "title": "Logging"
+            "title": "Logging",
+            "default": ""
           },
           "message": {
             "type": "string",
-            "title": "Message"
+            "title": "Message",
+            "default": ""
           },
           "code": {
             "type": "string",
-            "title": "Code"
+            "title": "Code",
+            "default": ""
           },
           "formatted_print": {
             "type": "string",
-            "title": "Formatted Print"
+            "title": "Formatted Print",
+            "default": ""
           },
           "role": {
-            "$ref": "#/components/schemas/ConversationRole"
+            "$ref": "#/components/schemas/ConversationRole",
+            "default": "assistant"
           },
           "status": {
-            "$ref": "#/components/schemas/ProcessResponseStatus"
+            "$ref": "#/components/schemas/ProcessResponseStatus",
+            "default": "none"
           },
           "timestamp": {
             "anyOf": [
@@ -3290,22 +3315,30 @@
             },
             "type": "array",
             "title": "Files"
+          },
+          "action": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ActionType"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "execution_type": {
+            "$ref": "#/components/schemas/ExecutionType",
+            "default": "none"
+          },
+          "task_classification": {
+            "type": "string",
+            "title": "Task Classification",
+            "default": ""
           }
         },
         "type": "object",
-        "required": [
-          "stdout",
-          "stderr",
-          "logging",
-          "message",
-          "code",
-          "formatted_print",
-          "role",
-          "status",
-          "files"
-        ],
         "title": "CodeExecutionResult",
-        "description": "Represents the result of a code execution.\n\nAttributes:\n    id (str): The unique identifier for the code execution\n    stdout (str): The standard output from the code execution.\n    stderr (str): The standard error from the code execution.\n    logging (str): Any logging output generated during the code execution.\n    message (str): The message to display to the user about the code execution.\n    code (str): The code that was executed.\n    formatted_print (str): The formatted print output from the code execution.\n    role (ConversationRole): The role of the message sender (user/assistant/system)\n    status (ProcessResponseStatus): The status of the code execution\n    timestamp (datetime): The timestamp of the code execution\n    files (List[str]): The files that were created or modified during the code execution"
+        "description": "Represents the result of a code execution.\n\nAttributes:\n    id (str): The unique identifier for the code execution\n    stdout (str): The standard output from the code execution.\n    stderr (str): The standard error from the code execution.\n    logging (str): Any logging output generated during the code execution.\n    message (str): The message to display to the user about the code execution.\n    code (str): The code that was executed.\n    formatted_print (str): The formatted print output from the code execution.\n    role (ConversationRole): The role of the message sender (user/assistant/system)\n    status (ProcessResponseStatus): The status of the code execution\n    timestamp (datetime): The timestamp of the code execution\n    files (List[str]): The files that were created or modified during the code execution\n    action (ActionType): The action that was taken during the code execution\n    execution_type (ExecutionType): The type of execution that was performed\n    task_classification (str): The classification of the task that was performed"
       },
       "ConfigResponse": {
         "properties": {
@@ -3420,10 +3453,12 @@
         "properties": {
           "content": {
             "type": "string",
-            "title": "Content"
+            "title": "Content",
+            "default": ""
           },
           "role": {
-            "$ref": "#/components/schemas/ConversationRole"
+            "$ref": "#/components/schemas/ConversationRole",
+            "default": "assistant"
           },
           "should_summarize": {
             "anyOf": [
@@ -3501,10 +3536,6 @@
           }
         },
         "type": "object",
-        "required": [
-          "content",
-          "role"
-        ],
         "title": "ConversationRecord",
         "description": "A record of a conversation with an AI model.\n\nAttributes:\n    role (ConversationRole): The role of the sender of the message\n    content (str): The content of the message\n    should_summarize (bool): Whether this message should be summarized\n    ephemeral (bool): Whether this message is temporary/ephemeral\n    summarized (bool): Whether this message has been summarized\n    is_system_prompt (bool): Whether this message is a system prompt\n    timestamp (datetime): When this message was created\n    files (List[str]): The files that were created or modified during the code execution\n\nMethods:\n    to_dict(): Convert the record to a dictionary format\n    from_dict(data): Create a ConversationRecord from a dictionary"
       },
@@ -3561,6 +3592,22 @@
         ],
         "title": "CredentialUpdate",
         "description": "Data for updating a credential.\n\nAttributes:\n    key: The credential key to update\n    value: The new value for the credential"
+      },
+      "ExecutionType": {
+        "type": "string",
+        "enum": [
+          "plan",
+          "action",
+          "reflection",
+          "response",
+          "security_check",
+          "classification",
+          "system",
+          "user_input",
+          "none"
+        ],
+        "title": "ExecutionType",
+        "description": "Enum representing the different types of execution in a conversation workflow.\n\nUsed to track the execution phase within the agent's thought process:\n- PLAN: Initial planning phase where the agent outlines its approach\n- ACTION: Execution of specific actions like running code or accessing resources\n- REFLECTION: Analysis and evaluation of previous actions and their results\n- RESPONSE: Final response generation based on the execution results\n- SECURITY_CHECK: Security check phase where the agent checks the safety of the code\n- CLASSIFICATION: Classification phase where the agent classifies the user's request\n- SYSTEM: An automatic static response from the system, such as an action cancellation."
       },
       "HTTPValidationError": {
         "properties": {
@@ -4003,7 +4050,8 @@
           "cancelled",
           "error",
           "interrupted",
-          "confirmation_required"
+          "confirmation_required",
+          "none"
         ],
         "title": "ProcessResponseStatus",
         "description": "Status codes for process_response results."

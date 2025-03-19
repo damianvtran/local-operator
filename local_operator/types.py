@@ -48,6 +48,30 @@ class ActionType(str, Enum):
         return self.value
 
 
+class ExecutionType(str, Enum):
+    """Enum representing the different types of execution in a conversation workflow.
+
+    Used to track the execution phase within the agent's thought process:
+    - PLAN: Initial planning phase where the agent outlines its approach
+    - ACTION: Execution of specific actions like running code or accessing resources
+    - REFLECTION: Analysis and evaluation of previous actions and their results
+    - RESPONSE: Final response generation based on the execution results
+    - SECURITY_CHECK: Security check phase where the agent checks the safety of the code
+    - CLASSIFICATION: Classification phase where the agent classifies the user's request
+    - SYSTEM: An automatic static response from the system, such as an action cancellation.
+    """
+
+    PLAN = "plan"
+    ACTION = "action"
+    REFLECTION = "reflection"
+    RESPONSE = "response"
+    SECURITY_CHECK = "security_check"
+    CLASSIFICATION = "classification"
+    SYSTEM = "system"
+    USER_INPUT = "user_input"
+    NONE = "none"
+
+
 class ConversationRecord(BaseModel):
     """A record of a conversation with an AI model.
 
@@ -66,8 +90,8 @@ class ConversationRecord(BaseModel):
         from_dict(data): Create a ConversationRecord from a dictionary
     """
 
-    content: str
-    role: ConversationRole
+    content: str = Field(default="")
+    role: ConversationRole = Field(default=ConversationRole.ASSISTANT)
     should_summarize: Optional[bool] = True
     ephemeral: Optional[bool] = False
     summarized: Optional[bool] = False
@@ -150,13 +174,13 @@ class ResponseJsonSchema(BaseModel):
     """
 
     response: str
-    code: str
-    content: str
-    file_path: str
-    mentioned_files: List[str]
-    replacements: List[Dict[str, str]]
+    code: str = Field(default="")
+    content: str = Field(default="")
+    file_path: str = Field(default="")
+    mentioned_files: List[str] = Field(default_factory=list)
+    replacements: List[Dict[str, str]] = Field(default_factory=list)
     action: ActionType
-    learnings: str
+    learnings: str = Field(default="")
 
 
 class ProcessResponseStatus(str, Enum):
@@ -167,6 +191,7 @@ class ProcessResponseStatus(str, Enum):
     ERROR = "error"
     INTERRUPTED = "interrupted"
     CONFIRMATION_REQUIRED = "confirmation_required"
+    NONE = "none"
 
 
 class ProcessResponseOutput:
@@ -197,19 +222,25 @@ class CodeExecutionResult(BaseModel):
         status (ProcessResponseStatus): The status of the code execution
         timestamp (datetime): The timestamp of the code execution
         files (List[str]): The files that were created or modified during the code execution
+        action (ActionType): The action that was taken during the code execution
+        execution_type (ExecutionType): The type of execution that was performed
+        task_classification (str): The classification of the task that was performed
     """
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    stdout: str
-    stderr: str
-    logging: str
-    message: str
-    code: str
-    formatted_print: str
-    role: ConversationRole
-    status: ProcessResponseStatus
+    stdout: str = Field(default="")
+    stderr: str = Field(default="")
+    logging: str = Field(default="")
+    message: str = Field(default="")
+    code: str = Field(default="")
+    formatted_print: str = Field(default="")
+    role: ConversationRole = Field(default=ConversationRole.ASSISTANT)
+    status: ProcessResponseStatus = Field(default=ProcessResponseStatus.NONE)
     timestamp: Optional[datetime] = None
-    files: List[str]
+    files: List[str] = Field(default_factory=list)
+    action: Optional[ActionType] = None
+    execution_type: ExecutionType = Field(default=ExecutionType.NONE)
+    task_classification: str = Field(default="")
 
 
 class AgentExecutorState(BaseModel):
@@ -245,5 +276,5 @@ class RequestClassification(BaseModel):
     """
 
     type: str
-    planning_required: bool
-    relative_effort: RelativeEffortLevel
+    planning_required: bool = Field(default=False)
+    relative_effort: RelativeEffortLevel = Field(default=RelativeEffortLevel.LOW)

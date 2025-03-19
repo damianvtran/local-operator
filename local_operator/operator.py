@@ -15,6 +15,7 @@ from local_operator.config import ConfigManager
 from local_operator.console import (
     VerbosityLevel,
     format_agent_output,
+    print_agent_response,
     print_cli_banner,
     spinner_context,
 )
@@ -32,6 +33,7 @@ from local_operator.helpers import (
 from local_operator.model.configure import ModelConfiguration
 from local_operator.notebook import save_code_history_to_notebook
 from local_operator.prompts import (
+    FinalResponseInstructions,
     JsonResponseFormatPrompt,
     PlanSystemPrompt,
     PlanUserPrompt,
@@ -46,6 +48,7 @@ from local_operator.types import (
     ActionType,
     ConversationRecord,
     ConversationRole,
+    ExecutionType,
     ProcessResponseStatus,
     RequestClassification,
     ResponseJsonSchema,
@@ -423,8 +426,10 @@ class Operator:
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.SUCCESS,
                 files=[],
+                execution_type=ExecutionType.PLAN,
             ),
             None,
+            current_task_classification,
         )
 
         # Save the conversation history and code execution history to the agent registry
@@ -438,7 +443,7 @@ class Operator:
 
         return response_content
 
-    async def generate_reflection(self) -> str:
+    async def generate_reflection(self, current_task_classification: RequestClassification) -> str:
         """Generate a reflection for the agent.
 
         This method constructs a conversation with the agent to generate a reflection.
@@ -497,12 +502,94 @@ class Operator:
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.SUCCESS,
                 files=[],
+                execution_type=ExecutionType.REFLECTION,
             ),
             None,
+            current_task_classification,
         )
 
         # Save the conversation history and code execution history to the agent registry
         # if the persist_conversation flag is set.
+        if self.persist_agent_conversation and self.agent_registry and self.current_agent:
+            self.agent_registry.update_agent_state(
+                self.current_agent.id,
+                self.executor.conversation_history,
+                self.executor.code_history,
+            )
+
+        return response_content
+
+    async def generate_response(
+        self, result: ResponseJsonSchema, current_task_classification: RequestClassification
+    ) -> str:
+        """Generate a final response for the user based on the conversation history.
+
+        This method constructs a conversation with the agent to generate a well-structured
+        final response. It adds an ephemeral message with guidelines on how to summarize
+        and format the response appropriately for the user.
+
+        Args:
+            current_task_classification: Classification of the current request/task
+
+        Returns:
+            str: The generated response content
+
+        Raises:
+            Exception: If there's an error during model invocation
+        """
+        # Create a copy of the conversation history
+        messages = list(self.executor.conversation_history)
+
+        messages.append(
+            ConversationRecord(
+                role=ConversationRole.USER,
+                content=FinalResponseInstructions,
+                ephemeral=True,
+            )
+        )
+
+        # Invoke the model to generate the response
+        response = await self.executor.invoke_model(messages)
+
+        response_content = (
+            response.content if isinstance(response.content, str) else str(response.content)
+        )
+
+        # Clean up the response
+        response_content = remove_think_tags(response_content)
+
+        # Add the response to conversation history
+        self.executor.conversation_history.extend(
+            [
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content=response_content,
+                    should_summarize=True,
+                ),
+            ]
+        )
+
+        # Add to code history
+        self.executor.add_to_code_history(
+            CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message=response_content,
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.SUCCESS,
+                files=[],
+                execution_type=ExecutionType.RESPONSE,
+                action=result.action,
+                task_classification=current_task_classification.type,
+            ),
+            None,
+            current_task_classification,
+        )
+
+        # Persist conversation if enabled
         if self.persist_agent_conversation and self.agent_registry and self.current_agent:
             self.agent_registry.update_agent_state(
                 self.current_agent.id,
@@ -541,7 +628,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
 
     async def handle_user_input(
         self, user_input: str, user_message_id: str | None = None, attachments: List[str] = []
-    ) -> ResponseJsonSchema | None:
+    ) -> tuple[ResponseJsonSchema | None, str]:
         """Process user input and generate agent responses.
 
         This method handles the core interaction loop between the user and agent:
@@ -556,8 +643,9 @@ This is a {request_type} message, here are some guidelines for how to respond:
         Args:
             user_input: The text input provided by the user
 
-        Raises:
-            ValueError: If the model is not properly initialized
+        Returns:
+            tuple[ResponseJsonSchema | None, str]: The processed response from
+                the language model, and the final response from the agent
         """
 
         self.executor.update_ephemeral_messages()
@@ -576,7 +664,9 @@ This is a {request_type} message, here are some guidelines for how to respond:
                 files=attachments,
                 role=ConversationRole.USER,
                 status=ProcessResponseStatus.SUCCESS,
+                execution_type=ExecutionType.USER_INPUT,
             ),
+            None,
             None,
         )
 
@@ -584,6 +674,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
 
         response_json: ResponseJsonSchema | None = None
         response: BaseMessage | None = None
+        final_response: str = ""
 
         self.executor.reset_step_counter()
         self.executor_is_processing = True
@@ -683,7 +774,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
                 )
                 continue
 
-            result = await self.executor.process_response(response_json)
+            result = await self.executor.process_response(response_json, classification)
 
             # Update the "Agent Heads Up Display"
 
@@ -699,7 +790,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
                     "Reflecting on the last step",
                     verbosity_level=self.verbosity_level,
                 ):
-                    reflection = await self.generate_reflection()
+                    reflection = await self.generate_reflection(classification)
 
                     if reflection and self.verbosity_level >= VerbosityLevel.VERBOSE:
                         formatted_reflection = format_agent_output(reflection)
@@ -710,6 +801,13 @@ This is a {request_type} message, here are some guidelines for how to respond:
                         print(
                             "\033[1;36m╰──────────────────────────────────────────────────\033[0m\n"
                         )
+
+            else:
+                final_response = await self.generate_response(response_json, classification)
+
+                print_agent_response(
+                    self.executor.step_counter, final_response, self.verbosity_level
+                )
 
             # Auto-save on each step if enabled
             if self.auto_save_conversation:
@@ -738,7 +836,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
         if os.environ.get("LOCAL_OPERATOR_DEBUG") == "true":
             self.print_conversation_history()
 
-        return response_json
+        return response_json, final_response
 
     def print_conversation_history(self) -> None:
         """Print the conversation history for debugging."""
@@ -755,7 +853,9 @@ This is a {request_type} message, here are some guidelines for how to respond:
                 print(f"\033[1;35m│   {line}\033[0m")
         print("\033[1;35m╰──────────────────────────────────────────────────\033[0m\n")
 
-    async def execute_single_command(self, command: str) -> ResponseJsonSchema | None:
+    async def execute_single_command(
+        self, command: str
+    ) -> tuple[ResponseJsonSchema | None, str | None]:
         """Execute a single command in non-interactive mode.
 
         This method is used for one-off command execution rather than interactive chat.
@@ -766,8 +866,8 @@ This is a {request_type} message, here are some guidelines for how to respond:
             command (str): The command/instruction to execute
 
         Returns:
-            ResponseJsonSchema | None: The processed response from the language model,
-                or None if no valid response was generated
+            tuple[ResponseJsonSchema | None, str]: The processed response from
+                the language model, and the final response from the agent
         """
         try:
             self.executor.initialize_conversation_history()
@@ -775,8 +875,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
             # Conversation history already initialized
             pass
 
-        result = await self.handle_user_input(command)
-        return result
+        return await self.handle_user_input(command)
 
     async def chat(self) -> None:
         """Run the interactive chat interface with code execution capabilities.
@@ -821,7 +920,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
             if user_input.lower() == "exit" or user_input.lower() == "quit":
                 break
 
-            response_json = await self.handle_user_input(user_input)
+            response_json, final_response = await self.handle_user_input(user_input)
 
             # Check if the last line of the response contains "[BYE]" to exit
             if self._agent_should_exit(response_json):
@@ -833,9 +932,8 @@ This is a {request_type} message, here are some guidelines for how to respond:
                 and self._agent_requires_user_input(response_json)
                 and self.verbosity_level >= VerbosityLevel.QUIET
             ):
-                response_content = response_json.response
                 print("\n\033[1;36m╭─ Agent Question Requires Input ────────────────\033[0m")
-                print(f"\033[1;36m│\033[0m {response_content}")
+                print(f"\033[1;36m│\033[0m {final_response}")
                 print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
 
     def handle_autosave(
