@@ -14,6 +14,7 @@ from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel
 from local_operator.credentials import CredentialManager
 from local_operator.executor import LocalCodeExecutor
+from local_operator.jobs import JobManager
 from local_operator.model.configure import configure_model
 from local_operator.operator import Operator, OperatorType
 from local_operator.tools import ToolRegistry
@@ -70,6 +71,8 @@ def create_operator(
     agent_registry: AgentRegistry,
     current_agent=None,
     persist_conversation: bool = False,
+    job_manager: Optional[JobManager] = None,
+    job_id: Optional[str] = None,
 ) -> Operator:
     """Create a LocalCodeExecutor for a single chat request using the provided managers
     and the hosting/model provided in the request.
@@ -84,6 +87,8 @@ def create_operator(
         persist_conversation: Whether to persist the conversation history by
             continuously updating the agent's conversation history with each new message.
             Default: False
+        job_manager: The job manager for the current conversation.
+        job_id: The job ID for the current conversation.
     Returns:
         Operator: The configured operator instance
 
@@ -162,6 +167,8 @@ def create_operator(
         learnings=agent_conversation_data.learnings,
         current_plan=agent_conversation_data.current_plan,
         instruction_details=agent_conversation_data.instruction_details,
+        job_manager=job_manager,
+        job_id=job_id,
     )
 
     operator = Operator(

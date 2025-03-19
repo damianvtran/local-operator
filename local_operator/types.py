@@ -195,6 +195,7 @@ class ProcessResponseStatus(str, Enum):
     ERROR = "error"
     INTERRUPTED = "interrupted"
     CONFIRMATION_REQUIRED = "confirmation_required"
+    IN_PROGRESS = "in_progress"
     NONE = "none"
 
 

@@ -39,6 +39,22 @@ logger = logging.getLogger("local_operator.server.routes.jobs")
                                     "context": [{"role": "user", "content": "Test prompt"}],
                                     "stats": {"total_tokens": 100},
                                 },
+                                "current_execution": {
+                                    "id": "execution-123456",
+                                    "stdout": "Hello, world!",
+                                    "stderr": "",
+                                    "logging": "",
+                                    "message": "Code executed successfully",
+                                    "code": "print('Hello, world!')",
+                                    "formatted_print": "Hello, world!",
+                                    "role": "assistant",
+                                    "status": "success",
+                                    "timestamp": "2023-01-01T12:00:05Z",
+                                    "files": [],
+                                    "action": "CODE",
+                                    "execution_type": "action",
+                                    "task_classification": "software_development",
+                                },
                             },
                         }
                     }

@@ -296,6 +296,21 @@ class Operator:
         attempt = 0
         last_error = None
 
+        await self.executor.update_job_execution_state(
+            CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message="",
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.IN_PROGRESS,
+                files=[],
+                execution_type=ExecutionType.CLASSIFICATION,
+            )
+        )
+
         while attempt < max_attempts:
             try:
                 response = await self.executor.invoke_model(messages)
@@ -387,6 +402,21 @@ class Operator:
             )
         )
 
+        await self.executor.update_job_execution_state(
+            CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message="",
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.IN_PROGRESS,
+                files=[],
+                execution_type=ExecutionType.PLAN,
+            )
+        )
+
         response = await self.executor.invoke_model(messages)
 
         response_content = (
@@ -471,6 +501,21 @@ class Operator:
             )
         )
 
+        await self.executor.update_job_execution_state(
+            CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message="",
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.IN_PROGRESS,
+                files=[],
+                execution_type=ExecutionType.REFLECTION,
+            )
+        )
+
         response = await self.executor.invoke_model(messages)
 
         response_content = (
@@ -547,6 +592,21 @@ class Operator:
                 role=ConversationRole.USER,
                 content=FinalResponseInstructions,
                 ephemeral=True,
+            )
+        )
+
+        await self.executor.update_job_execution_state(
+            CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message="",
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.IN_PROGRESS,
+                files=[],
+                execution_type=ExecutionType.RESPONSE,
             )
         )
 
@@ -730,6 +790,21 @@ This is a {request_type} message, here are some guidelines for how to respond:
         ):
             if self.model_configuration is None:
                 raise ValueError("Model is not initialized")
+
+            await self.executor.update_job_execution_state(
+                CodeExecutionResult(
+                    stdout="",
+                    stderr="",
+                    logging="",
+                    formatted_print="",
+                    code="",
+                    message="",
+                    role=ConversationRole.ASSISTANT,
+                    status=ProcessResponseStatus.IN_PROGRESS,
+                    files=[],
+                    execution_type=ExecutionType.ACTION,
+                )
+            )
 
             async with spinner_context(
                 "Formulating a response",

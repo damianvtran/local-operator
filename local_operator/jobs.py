@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional, TypeVar, Union, cast
 
 from pydantic import BaseModel, Field, field_validator
 
-from local_operator.types import ConversationRole
+from local_operator.types import CodeExecutionResult, ConversationRole
 
 logger = logging.getLogger("local_operator.jobs")
 
@@ -67,6 +67,7 @@ class Job(BaseModel):
     prompt: str
     model: str
     hosting: str
+    current_execution: Optional[CodeExecutionResult] = None
 
     model_config = {
         "arbitrary_types_allowed": True,
@@ -254,6 +255,34 @@ class JobManager:
 
         return job
 
+    async def update_job_execution_state(
+        self,
+        job_id: str,
+        execution_state: CodeExecutionResult,
+    ) -> Job:
+        """
+        Update the current execution state of a job.
+
+        Args:
+            job_id: The ID of the job to update
+            execution_state: The current execution state
+
+        Returns:
+            The updated Job object
+
+        Raises:
+            KeyError: If the job with the specified ID is not found
+        """
+        try:
+            job = await self.get_job(job_id)
+        except KeyError:
+            raise
+
+        async with self._lock:
+            job.current_execution = execution_state
+
+        return job
+
     def register_process(self, job_id: str, process: Process) -> None:
         """
         Register a multiprocessing Process with a job.
@@ -393,7 +422,7 @@ class JobManager:
         Returns:
             Dictionary with job summary information
         """
-        return {
+        summary = {
             "id": job.id,
             "agent_id": job.agent_id,
             "status": job.status.value,
@@ -413,3 +442,8 @@ class JobManager:
             "model": job.model,
             "hosting": job.hosting,
         }
+
+        if job.current_execution:
+            summary["current_execution"] = job.current_execution.model_dump()
+
+        return summary
