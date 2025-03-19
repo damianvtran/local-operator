@@ -10,7 +10,7 @@ import asyncio
 import logging
 import multiprocessing
 from multiprocessing import Process, Queue
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Callable, List, Optional
 
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
@@ -258,7 +258,7 @@ def create_and_start_job_process_with_queue(
     process_func: Callable[..., None],
     args: tuple[object, ...],
     job_manager: JobManager,
-) -> Tuple[Process, asyncio.Task[Any]]:
+) -> Process:
     """
     Create and start a process for a job, and set up a queue monitor to update the job status.
 
@@ -272,7 +272,7 @@ def create_and_start_job_process_with_queue(
         job_manager: The job manager for tracking the process
 
     Returns:
-        A tuple containing the created Process object and the monitor task
+        The created Process object
     """
     # Create a queue for status updates
     status_queue = multiprocessing.Queue()
@@ -326,6 +326,8 @@ def create_and_start_job_process_with_queue(
     monitor_task = asyncio.create_task(monitor_status_queue())
 
     # Register the task with the job manager
+    # Create a separate task for registration to avoid pickling issues
     asyncio.create_task(job_manager.register_task(job_id, monitor_task))
 
-    return process, monitor_task
+    # Return only the process to avoid pickling the asyncio.Task
+    return process
