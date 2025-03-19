@@ -108,6 +108,9 @@ async def test_cli_operator_chat(cli_operator, mock_model_config):
     mock_generate_plan = patch.object(
         cli_operator, "generate_plan", return_value=MagicMock()
     ).start()
+    mock_generate_response = patch.object(
+        cli_operator, "generate_response", return_value="I'm done"
+    ).start()
     patch.object(cli_operator, "_agent_should_exit", return_value=True).start()
     patch("builtins.input", return_value="exit").start()
 
@@ -120,6 +123,7 @@ async def test_cli_operator_chat(cli_operator, mock_model_config):
     # Assertions
     assert mock_classify_request.call_count == 1
     assert mock_generate_plan.call_count == 1
+    assert mock_generate_response.call_count == 1
     assert cli_operator.executor.conversation_history[-1].content == mock_response.model_dump_json()
 
     # Clean up patches
@@ -264,14 +268,11 @@ async def test_operator_print_hello_world(cli_operator):
     cli_operator.model_configuration = mock_model_config
 
     # Execute command and get response
-    await cli_operator.handle_user_input("print hello world")
+    _, final_response = await cli_operator.handle_user_input("print hello world")
 
     # Verify conversation history was updated
     assert len(cli_operator.executor.conversation_history) > 0
-    last_message = cli_operator.executor.conversation_history[-1]
-    last_message_content = ResponseJsonSchema.model_validate_json(last_message.content)
+    last_conversation_message = cli_operator.executor.conversation_history[-1]
 
-    assert last_message_content is not None
-    assert last_message_content.response == "I have printed 'Hello World' to the console."
-    assert last_message_content.code == ""
-    assert last_message_content.action == ActionType.DONE
+    assert last_conversation_message.content == final_response
+    assert final_response == "I have printed 'Hello World' to the console."

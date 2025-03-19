@@ -278,9 +278,9 @@ with no exceptions.
      completely executed beginning to end.
 4. Reflect on the results of the action and think aloud about what you learned and what
    you will do next.  Respond in natural language.
-5. Use the DONE action to summarize the results of the completed task only once the
-   task is complete and verified.  Respond in the action JSON schema with the full
-   results and summary in the JSON "response" field.
+5. Use the DONE action to end the loop.
+6. Provide a final response to the user that summarizes the work done and results
+   achieved.
 
 Your response flow should look something like the following example sequence:
   1. Research (CODE): research the information required by the plan.  Run exploratory
@@ -545,8 +545,7 @@ EDIT usage guidelines:
 {
   "learnings": "I learned about this new content that I found from the web.  It will be
   useful for the user to know this because of x reason.",
-  "response": "Here is what I found and did.  This is all the information that you were
-  looking for: [FULL_SUMMARY_HERE].  Let me know if you need anything else!",
+  "response": "Marking the task as complete.",
   "code": "",
   "content": "",
   "file_path": "",
@@ -558,17 +557,10 @@ EDIT usage guidelines:
 DONE usage guidelines:
 - If the user has a simple request or asks you something that doesn't require multi-step
   action, you can respond with a simple written response with the DONE action.
-- Make sure that you respond to the user in the first person directly and provide them a
-  helpful response.  Use the "response" field only, do NOT use the "content" field.
-- Be as detailed as you can and provide an interpretation of the
-  conversation history up until this point.  Include all the details and data you have
-  gathered.  Do not respond with DONE if the plan is not completely executed.  Make sure
-  that you interpret the information in the conversation history fully and don't assume
-  that the user should go back to previous responses to get your summary.
+- Use the "response" field only, do NOT use the "content" field.
 -  When responding with DONE, you are ending the task and will not have the opportunity to
-   run more steps until the user asks you to do so.  Make sure that your response in the
-   DONE action has all the required information, details and summary and don't assume that
-   some other command will bring your summary for you.
+   run more steps until the user asks you to do so.  Make sure that the task is complete before
+   using this action.
 
 #### Example for ASK:
 
@@ -1518,6 +1510,29 @@ REQUEST_TYPE_INSTRUCTIONS: Dict[RequestType, str] = {
     RequestType.CONTINUE: ContinueInstructions,
     RequestType.OTHER: OtherInstructions,
 }
+
+FinalResponseInstructions: str = """
+Please provide a response to me.
+
+Make sure that you respond in the first person directly to the user.  Use a friendly,
+natural, and conversational tone.  Respond in natural language, don't use the
+JSON action schema for this response.
+
+If you did work for my latest request, then summarize the work done and results
+achieved.
+
+If you didn't do work for my latest request, then just respond in the natural
+flow of conversation.
+
+# Response Guidelines for Tasks
+- Summarize the key findings, actions taken, and results in markdown format
+- Use clear, concise language appropriate for the task type
+- Use tables, lists, and other formatting to make complex data easier to understand
+- Format your response with proper headings and structure
+- Include any important activities, file changes, or other details
+- Highlight any limitations or areas for future work
+- End with a conclusion that directly addresses the original request
+"""
 
 
 def get_request_type_instructions(request_type: RequestType) -> str:
