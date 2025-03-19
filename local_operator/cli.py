@@ -650,6 +650,9 @@ def main() -> int:
                 version="",
                 conversation=[],
                 execution_history=[],
+                learnings=[],
+                current_plan=None,
+                instruction_details=None,
             )
 
         model_info_client: Optional[OpenRouterClient] = None
@@ -695,6 +698,9 @@ def main() -> int:
             agent=agent,
             agent_registry=agent_registry,
             persist_conversation=training_mode,
+            learnings=agent_conversation_data.learnings,
+            current_plan=agent_conversation_data.current_plan,
+            instruction_details=agent_conversation_data.instruction_details,
         )
 
         operator = Operator(

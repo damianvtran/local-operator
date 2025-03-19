@@ -98,6 +98,7 @@ class ConversationRecord(BaseModel):
     is_system_prompt: Optional[bool] = False
     timestamp: Optional[datetime] = None
     files: Optional[List[str]] = None
+    should_cache: Optional[bool] = False
 
     def dict(self, *args, **kwargs) -> Dict[str, Any]:
         """Convert the conversation record to a dictionary format compatible with LangChain.
@@ -114,6 +115,7 @@ class ConversationRecord(BaseModel):
             "is_system_prompt": str(self.is_system_prompt),
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
             "files": self.files,
+            "should_cache": self.should_cache,
         }
 
     def to_dict(self) -> Dict[str, Any]:
@@ -131,6 +133,7 @@ class ConversationRecord(BaseModel):
             "is_system_prompt": str(self.is_system_prompt),
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
             "files": self.files,
+            "should_cache": self.should_cache,
         }
 
     @classmethod
@@ -156,6 +159,7 @@ class ConversationRecord(BaseModel):
                 else None
             ),
             files=data.get("files", None),
+            should_cache=data.get("should_cache", "true").lower() == "true",
         )
 
 

@@ -645,6 +645,7 @@ class LocalCodeExecutor:
                 role=ConversationRole.SYSTEM,
                 content=system_prompt,
                 is_system_prompt=True,
+                should_cache=True,
             )
         ]
 
@@ -746,7 +747,30 @@ class LocalCodeExecutor:
         Raises:
             Exception: If there is an error during model invocation.
         """
-        messages_list = [msg.dict() for msg in messages]
+        messages_list = []
+
+        # Only Anthropic requires manual cache control
+        should_manual_cache_control = (
+            "anthropic" in self.get_model_name()
+            or self.model_configuration.hosting == "anthropic"
+        )
+
+        for record in messages:
+            msg = {
+                "role": record.role,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": record.content,
+                    }
+                ],
+            }
+            if should_manual_cache_control and record.should_cache and not record.summarized:
+                msg["content"][0]["cache_control"] = {
+                    "type": "ephemeral",
+                }
+            messages_list.append(msg)
+
         model_instance = self.model_configuration.instance
 
         new_tokens_prompt = 0
@@ -853,6 +877,8 @@ class LocalCodeExecutor:
                 ConversationRecord(
                     role=ConversationRole.SYSTEM,
                     content=safety_prompt,
+                    should_cache=True,
+                    is_system_prompt=True,
                 ),
                 ConversationRecord(
                     role=ConversationRole.USER,
@@ -882,6 +908,8 @@ class LocalCodeExecutor:
             ConversationRecord(
                 role=ConversationRole.SYSTEM,
                 content=SafetyCheckConversationPrompt,
+                should_cache=True,
+                is_system_prompt=True,
             ),
         ]
 
@@ -1327,6 +1355,7 @@ class LocalCodeExecutor:
                 f"<logger>\n{condensed_log_output}\n</logger>\n"
                 "Please review the results and and determine what to do next.",
                 should_summarize=True,
+                should_cache=True,
             )
         )
 
@@ -1760,6 +1789,7 @@ class LocalCodeExecutor:
                     f"END"
                 ),
                 should_summarize=True,
+                should_cache=True,
             )
         )
 
@@ -1885,6 +1915,7 @@ class LocalCodeExecutor:
                     "END"
                 ),
                 should_summarize=True,
+                should_cache=True,
             )
         )
 
@@ -1953,7 +1984,12 @@ class LocalCodeExecutor:
         )
 
         summary_history = [
-            ConversationRecord(role=ConversationRole.SYSTEM, content=summary_prompt),
+            ConversationRecord(
+                role=ConversationRole.SYSTEM,
+                content=summary_prompt,
+                is_system_prompt=True,
+                should_cache=True,
+            ),
             ConversationRecord(role=ConversationRole.USER, content=step_info),
         ]
 
