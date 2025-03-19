@@ -557,7 +557,6 @@ class Operator:
 
         # Clean up the response
         response_content = remove_think_tags(response_content)
-        response_content = clean_plain_text_response(response_content)
 
         # Add the response to conversation history
         self.executor.conversation_history.extend(

@@ -1513,7 +1513,7 @@ REQUEST_TYPE_INSTRUCTIONS: Dict[RequestType, str] = {
 }
 
 FinalResponseInstructions: str = """
-Please provide your final response to me.
+## Final Response Guidelines
 
 Make sure that you respond in the first person directly to the user.  Use a friendly,
 natural, and conversational tone.  Respond in natural language, don't use the
@@ -1525,8 +1525,12 @@ For DONE actions:
 - If you didn't do work for my latest request, then just respond in the natural
   flow of conversation.
 
-# Response Guidelines for DONE
+### Response Guidelines for DONE
 - Summarize the key findings, actions taken, and results in markdown format
+- Include all of the details from the console outputs of the previous actions
+  that you took.  Do not make up information or make assumptions about what the
+  user has seen from previous steps.  Make sure to report and summarize all the
+  information in complete detail.
 - Use clear, concise language appropriate for the task type
 - Use tables, lists, and other formatting to make complex data easier to understand
 - Format your response with proper headings and structure
@@ -1539,7 +1543,10 @@ For ASK actions:
 - Provide necessary context for the question to the user so they understand the
   background and context for the question.
 
-Provide the final response now.
+Please provide the final response now.  Do NOT acknowledge this message in your
+response, and instead respond directly back to me based on the messages before this
+one.  Role-play and respond to me directly with all the required information and
+response formatting according to the guidelines above.
 """
 
 
