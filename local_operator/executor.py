@@ -821,7 +821,7 @@ class LocalCodeExecutor:
         return response
 
     async def invoke_model(
-        self, messages: List[ConversationRecord], max_attempts: int = 5
+        self, messages: List[ConversationRecord], max_attempts: int = 3
     ) -> BaseMessage:
         """Invoke the language model with a list of messages.
 
@@ -847,7 +847,6 @@ class LocalCodeExecutor:
             try:
                 return await self._convert_and_invoke(messages)
             except Exception as e:
-                print(f"Error on attempt {attempt + 1} of {max_attempts}: {e}")
                 last_error = e
                 attempt += 1
                 if attempt < max_attempts:

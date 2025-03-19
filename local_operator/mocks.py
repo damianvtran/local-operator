@@ -90,7 +90,7 @@ class ChatMock:
         user_message = ""
         for msg in reversed(list(messages)):
             if msg.get("role") == ConversationRole.USER.value:
-                user_message = msg.get("content", "")
+                user_message = msg.get("content", [])[0].get("text", "") or ""
                 break
 
         # Find best matching response

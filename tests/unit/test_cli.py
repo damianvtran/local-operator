@@ -56,6 +56,8 @@ def mock_agent_registry(mock_agent):
         version="",
         conversation=[],
         execution_history=[],
+        current_plan="",
+        instruction_details="",
     )
     return registry
 
