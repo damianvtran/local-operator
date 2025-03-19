@@ -1527,10 +1527,11 @@ For DONE actions:
 
 ### Response Guidelines for DONE
 - Summarize the key findings, actions taken, and results in markdown format
-- Include all of the details from the console outputs of the previous actions
-  that you took.  Do not make up information or make assumptions about what the
-  user has seen from previous steps.  Make sure to report and summarize all the
-  information in complete detail.
+- Include all of the details interpreted from the console outputs of the previous
+  actions that you took.  Do not make up information or make assumptions about what
+  the user has seen from previous steps.  Make sure to report and summarize all the
+  information in complete detail in a way that makes sense for a broad range of
+  users.
 - Use clear, concise language appropriate for the task type
 - Use tables, lists, and other formatting to make complex data easier to understand
 - Format your response with proper headings and structure
@@ -1546,7 +1547,9 @@ For ASK actions:
 Please provide the final response now.  Do NOT acknowledge this message in your
 response, and instead respond directly back to me based on the messages before this
 one.  Role-play and respond to me directly with all the required information and
-response formatting according to the guidelines above.
+response formatting according to the guidelines above.  Make sure that you respond
+in plain text or markdown formatting, do not use the JSON action schema for this
+response.
 """
 
 
