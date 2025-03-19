@@ -421,6 +421,9 @@ class LocalCodeExecutor:
         verbosity_level: VerbosityLevel = VerbosityLevel.VERBOSE,
         agent_registry: AgentRegistry | None = None,
         persist_conversation: bool = False,
+        learnings: List[str] = [],
+        current_plan: str | None = None,
+        instruction_details: str | None = None,
     ):
         """Initialize the LocalCodeExecutor with a language model.
 
@@ -444,6 +447,10 @@ class LocalCodeExecutor:
             agent_registry (AgentRegistry | None): The agent registry for the current conversation.
             persist_conversation (bool): Whether to persist the conversation history and code
                 execution history to the agent registry on each step.
+            learnings (List[str]): A list of learnings from the current conversation.
+            current_plan (str | None): The current plan for the agent.
+            instruction_details (str | None): A set of instructions for the agent based on
+                the classification of the user's request.
         """
         self.context = {}
         self.model_configuration = model_configuration
@@ -454,14 +461,14 @@ class LocalCodeExecutor:
         self.token_metrics = ExecutorTokenMetrics()
         self.agent = agent
         self.interrupted = False
-        self.learnings = []
-        self.current_plan = None
+        self.learnings = learnings
+        self.current_plan = current_plan
         self.max_learnings_history = max_learnings_history
         self.code_history = []
         self.verbosity_level = verbosity_level
         self.agent_registry = agent_registry
         self.persist_conversation = persist_conversation
-        self.instruction_details = None
+        self.instruction_details = instruction_details
 
         # Load agent context if agent and agent_registry are provided
         if self.agent and self.agent_registry:

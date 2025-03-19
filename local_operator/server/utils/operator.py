@@ -124,6 +124,9 @@ def create_operator(
             version="",
             conversation=[],
             execution_history=[],
+            learnings=[],
+            current_plan=None,
+            instruction_details=None,
         )
 
     model_info_client: Optional[OpenRouterClient] = None
@@ -156,6 +159,9 @@ def create_operator(
         verbosity_level=VerbosityLevel.QUIET,
         agent_registry=agent_registry,
         persist_conversation=persist_conversation,
+        learnings=agent_conversation_data.learnings,
+        current_plan=agent_conversation_data.current_plan,
+        instruction_details=agent_conversation_data.instruction_details,
     )
 
     operator = Operator(
