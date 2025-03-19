@@ -918,7 +918,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
             if user_input.lower() == "exit" or user_input.lower() == "quit":
                 break
 
-            response_json, _ = await self.handle_user_input(user_input)
+            response_json, final_response = await self.handle_user_input(user_input)
 
             # Check if the last line of the response contains "[BYE]" to exit
             if self._agent_should_exit(response_json):
@@ -930,9 +930,8 @@ This is a {request_type} message, here are some guidelines for how to respond:
                 and self._agent_requires_user_input(response_json)
                 and self.verbosity_level >= VerbosityLevel.QUIET
             ):
-                response_content = response_json.response
                 print("\n\033[1;36m╭─ Agent Question Requires Input ────────────────\033[0m")
-                print(f"\033[1;36m│\033[0m {response_content}")
+                print(f"\033[1;36m│\033[0m {final_response}")
                 print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
 
     def handle_autosave(

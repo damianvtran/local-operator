@@ -124,7 +124,10 @@ async def test_cli_operator_chat(cli_operator, mock_model_config):
     assert mock_classify_request.call_count == 1
     assert mock_generate_plan.call_count == 1
     assert mock_generate_response.call_count == 1
-    assert cli_operator.executor.conversation_history[-1].content == mock_response.model_dump_json()
+    assert (
+        cli_operator.executor.conversation_history[-1].content
+        == "I'll now respond to you with the DONE action."
+    )
 
     # Clean up patches
     patch.stopall()
