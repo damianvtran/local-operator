@@ -519,7 +519,9 @@ class Operator:
 
         return response_content
 
-    async def generate_response(self, current_task_classification: RequestClassification) -> str:
+    async def generate_response(
+        self, result: ResponseJsonSchema, current_task_classification: RequestClassification
+    ) -> str:
         """Generate a final response for the user based on the conversation history.
 
         This method constructs a conversation with the agent to generate a well-structured
@@ -581,6 +583,7 @@ class Operator:
                 status=ProcessResponseStatus.SUCCESS,
                 files=[],
                 execution_type=ExecutionType.RESPONSE,
+                action=result.action,
                 task_classification=current_task_classification.type,
             ),
             None,
@@ -801,7 +804,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
                         )
 
             else:
-                final_response = await self.generate_response(classification)
+                final_response = await self.generate_response(response_json, classification)
 
                 print_agent_response(
                     self.executor.step_counter, final_response, self.verbosity_level
