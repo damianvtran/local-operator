@@ -746,8 +746,6 @@ def test_limit_conversation_history(executor):
                     content="[Some conversation history has been truncated for brevity]",
                     should_summarize=False,
                 ),
-                ConversationRecord(role=ConversationRole.ASSISTANT, content="msg2"),
-                ConversationRecord(role=ConversationRole.USER, content="msg3"),
                 ConversationRecord(role=ConversationRole.ASSISTANT, content="msg4"),
             ],
         },
@@ -1667,23 +1665,37 @@ def test_initialize_conversation_history(executor, initial_history, expected_his
                     role=ConversationRole.SYSTEM,
                     content="SYSTEM_PROMPT",
                     is_system_prompt=True,
+                    should_cache=True,
                 ),
             ],
         ),
         (
             [],
             [
-                ConversationRecord(role=ConversationRole.USER, content="User message 1"),
-                ConversationRecord(role=ConversationRole.ASSISTANT, content="Assistant message 1"),
+                ConversationRecord(
+                    role=ConversationRole.USER, content="User message 1", should_cache=False
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="Assistant message 1",
+                    should_cache=False,
+                ),
             ],
             [
                 ConversationRecord(
                     role=ConversationRole.SYSTEM,
                     content="SYSTEM_PROMPT",
                     is_system_prompt=True,
+                    should_cache=True,
                 ),
-                ConversationRecord(role=ConversationRole.USER, content="User message 1"),
-                ConversationRecord(role=ConversationRole.ASSISTANT, content="Assistant message 1"),
+                ConversationRecord(
+                    role=ConversationRole.USER, content="User message 1", should_cache=False
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="Assistant message 1",
+                    should_cache=False,
+                ),
             ],
         ),
         (
@@ -1693,26 +1705,37 @@ def test_initialize_conversation_history(executor, initial_history, expected_his
                     role=ConversationRole.SYSTEM,
                     content="Old system prompt",
                     is_system_prompt=True,
+                    should_cache=True,
                 ),
-                ConversationRecord(role=ConversationRole.USER, content="User message 1"),
+                ConversationRecord(
+                    role=ConversationRole.USER, content="User message 1", should_cache=False
+                ),
             ],
             [
                 ConversationRecord(
                     role=ConversationRole.SYSTEM,
                     content="SYSTEM_PROMPT",
                     is_system_prompt=True,
+                    should_cache=True,
                 ),
-                ConversationRecord(role=ConversationRole.USER, content="User message 1"),
+                ConversationRecord(
+                    role=ConversationRole.USER, content="User message 1", should_cache=False
+                ),
             ],
         ),
         (
-            [ConversationRecord(role=ConversationRole.USER, content="Existing user message")],
+            [
+                ConversationRecord(
+                    role=ConversationRole.USER, content="Existing user message", should_cache=False
+                )
+            ],
             [],
             [
                 ConversationRecord(
                     role=ConversationRole.SYSTEM,
                     content="SYSTEM_PROMPT",
                     is_system_prompt=True,
+                    should_cache=True,
                 ),
             ],
         ),
@@ -2046,12 +2069,11 @@ def test_append_to_history_limits_history_length(executor):
         executor.append_to_history(record)
 
     # Verify only the most recent messages are kept
-    assert len(executor.conversation_history) == 5
+    assert len(executor.conversation_history) == 4
     assert executor.conversation_history[0].content == "System prompt"
     assert (
         executor.conversation_history[1].content
         == "[Some conversation history has been truncated for brevity]"
     )
-    assert executor.conversation_history[2].content == "Message 3"
-    assert executor.conversation_history[3].content == "Message 4"
-    assert executor.conversation_history[4].content == "Message 5"
+    assert executor.conversation_history[2].content == "Message 4"
+    assert executor.conversation_history[3].content == "Message 5"
