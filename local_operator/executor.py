@@ -765,11 +765,20 @@ class LocalCodeExecutor:
                     }
                 ],
             }
-            if should_manual_cache_control and record.should_cache and not record.summarized:
-                msg["content"][0]["cache_control"] = {
-                    "type": "ephemeral",
-                }
             messages_list.append(msg)
+
+        if should_manual_cache_control:
+            cache_count = 0
+            for idx, msg in reversed(list(enumerate(messages_list))):
+                if messages[idx].should_cache:
+                    msg["content"][0]["cache_control"] = {
+                        "type": "ephemeral",
+                    }
+                    cache_count += 1
+
+                    # Only 4 cache checkpoints allowed
+                    if cache_count >= 4:
+                        break
 
         model_instance = self.model_configuration.instance
 
@@ -803,7 +812,7 @@ class LocalCodeExecutor:
         return response
 
     async def invoke_model(
-        self, messages: List[ConversationRecord], max_attempts: int = 3
+        self, messages: List[ConversationRecord], max_attempts: int = 5
     ) -> BaseMessage:
         """Invoke the language model with a list of messages.
 
@@ -829,6 +838,7 @@ class LocalCodeExecutor:
             try:
                 return await self._convert_and_invoke(messages)
             except Exception as e:
+                print(f"Error on attempt {attempt + 1} of {max_attempts}: {e}")
                 last_error = e
                 attempt += 1
                 if attempt < max_attempts:
@@ -847,7 +857,6 @@ class LocalCodeExecutor:
                         # Regular exponential backoff for other errors
                         delay = base_delay * (2 ** (attempt - 1))
                         await asyncio.sleep(delay)
-                continue
 
         # If we've exhausted all attempts, raise the last error
         if last_error:
@@ -1935,6 +1944,11 @@ class LocalCodeExecutor:
 
     def _limit_conversation_history(self) -> None:
         """Limit the conversation history to the maximum number of messages."""
+
+        # Limit in chunks of half the max conversation history to reduce
+        # cache breaking
+        chunk_size = self.max_conversation_history // 2
+
         if len(self.conversation_history) - 1 > self.max_conversation_history:
             # Keep the first message (system prompt) and the most recent messages
             self.conversation_history = [
@@ -1944,7 +1958,7 @@ class LocalCodeExecutor:
                     content="[Some conversation history has been truncated for brevity]",
                     should_summarize=False,
                 ),
-            ] + self.conversation_history[-self.max_conversation_history :]
+            ] + self.conversation_history[-chunk_size:]
 
     async def _summarize_conversation_step(self, msg: ConversationRecord) -> str:
         """
