@@ -720,9 +720,9 @@ def main() -> int:
 
         # Start the async chat interface or execute single command
         if single_execution_mode:
-            message = asyncio.run(operator.execute_single_command(args.command))
-            if message:
-                print(message.response)
+            _, final_response = asyncio.run(operator.execute_single_command(args.command))
+            if final_response:
+                print(final_response)
             return 0
         else:
             asyncio.run(operator.chat())

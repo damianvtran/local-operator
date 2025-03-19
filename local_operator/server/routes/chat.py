@@ -120,7 +120,7 @@ async def chat_endpoint(
                 model_instance.temperature = temperature
             model_instance.top_p = request.options.top_p or model_instance.top_p
 
-        response_json = await operator.handle_user_input(
+        response_json, final_response = await operator.handle_user_input(
             request.prompt, attachments=request.attachments or []
         )
 
@@ -146,7 +146,7 @@ async def chat_endpoint(
             status=200,
             message="Chat request processed successfully",
             result=ChatResponse(
-                response=response_content,
+                response=final_response or "",
                 context=[
                     ConversationRecord(role=msg.role, content=msg.content, files=msg.files)
                     for msg in operator.executor.conversation_history
@@ -234,7 +234,7 @@ async def chat_with_agent(
                 model_instance.temperature = temperature
             model_instance.top_p = request.options.top_p or model_instance.top_p
 
-        response_json = await operator.handle_user_input(
+        response_json, final_response = await operator.handle_user_input(
             request.prompt, attachments=request.attachments or []
         )
         response_content = response_json.response if response_json is not None else ""
@@ -256,7 +256,7 @@ async def chat_with_agent(
             status=200,
             message="Chat request processed successfully",
             result=ChatResponse(
-                response=response_content,
+                response=final_response or "",
                 context=[
                     ConversationRecord(role=msg.role, content=msg.content)
                     for msg in operator.executor.conversation_history

@@ -25,7 +25,9 @@ from local_operator.types import (
     ActionType,
     ConversationRecord,
     ConversationRole,
+    ExecutionType,
     ProcessResponseStatus,
+    RequestClassification,
     ResponseJsonSchema,
 )
 
@@ -699,7 +701,7 @@ async def test_process_response(executor, mock_model_config):
     mock_model_config.instance.ainvoke.return_value.content = "The code is safe\n\n[SAFE]"
 
     with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
-        await executor.process_response(response)
+        await executor.process_response(response, RequestClassification(type="data_science"))
         output = mock_stdout.getvalue()
         assert "Executing Code" in output
         assert "hello world" in output
@@ -1298,6 +1300,8 @@ async def test_perform_action(
                     role=ConversationRole.SYSTEM,
                     status=ProcessResponseStatus.SUCCESS,
                     files=[file_path],
+                    execution_type=ExecutionType.ACTION,
+                    action=action_type,
                 )
             )
         elif action_type == ActionType.WRITE:
@@ -1312,6 +1316,8 @@ async def test_perform_action(
                     role=ConversationRole.SYSTEM,
                     status=ProcessResponseStatus.SUCCESS,
                     files=[file_path],
+                    execution_type=ExecutionType.ACTION,
+                    action=action_type,
                 )
             )
         elif action_type == ActionType.EDIT:
@@ -1326,6 +1332,8 @@ async def test_perform_action(
                     role=ConversationRole.SYSTEM,
                     status=ProcessResponseStatus.SUCCESS,
                     files=[file_path],
+                    execution_type=ExecutionType.ACTION,
+                    action=action_type,
                 )
             )
         else:
@@ -1340,10 +1348,12 @@ async def test_perform_action(
                     role=ConversationRole.SYSTEM,
                     status=ProcessResponseStatus.SUCCESS,
                     files=[],
+                    execution_type=ExecutionType.ACTION,
+                    action=action_type,
                 )
             )
 
-        result = await executor.perform_action(response)
+        result = await executor.perform_action(response, RequestClassification(type="data_science"))
         assert result is not None
         assert result.status == ProcessResponseStatus.SUCCESS
         assert expected_output in mock_stdout.getvalue()
@@ -1370,7 +1380,7 @@ async def test_perform_action_handles_exception(executor: LocalCodeExecutor):
     executor.execute_code = AsyncMock(side_effect=Exception("Execution failed"))
 
     with patch("sys.stdout", new_callable=io.StringIO):
-        result = await executor.perform_action(response)
+        result = await executor.perform_action(response, RequestClassification(type="data_science"))
         assert "error encountered" in executor.conversation_history[-1].content
         assert result is not None
         assert result.status == ProcessResponseStatus.SUCCESS

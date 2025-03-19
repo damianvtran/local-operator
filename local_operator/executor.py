@@ -51,8 +51,10 @@ from local_operator.types import (
     CodeExecutionResult,
     ConversationRecord,
     ConversationRole,
+    ExecutionType,
     ProcessResponseOutput,
     ProcessResponseStatus,
+    RequestClassification,
     ResponseJsonSchema,
 )
 
@@ -966,6 +968,7 @@ class LocalCodeExecutor:
                     role=ConversationRole.ASSISTANT,
                     status=ProcessResponseStatus.CANCELLED,
                     files=[],
+                    execution_type=ExecutionType.SYSTEM,
                 )
             else:
                 # The agent must read the security advisory and request confirmation
@@ -997,6 +1000,7 @@ class LocalCodeExecutor:
                     role=ConversationRole.ASSISTANT,
                     status=ProcessResponseStatus.CONFIRMATION_REQUIRED,
                     files=[],
+                    execution_type=ExecutionType.SECURITY_CHECK,
                 )
 
         elif safety_result == ConfirmSafetyResult.CONVERSATION_CONFIRM:
@@ -1010,6 +1014,7 @@ class LocalCodeExecutor:
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.CONFIRMATION_REQUIRED,
                 files=[],
+                execution_type=ExecutionType.SECURITY_CHECK,
             )
         elif safety_result == ConfirmSafetyResult.OVERRIDE:
             if self.verbosity_level >= VerbosityLevel.INFO:
@@ -1073,6 +1078,8 @@ class LocalCodeExecutor:
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.ERROR,
             files=[],
+            execution_type=ExecutionType.ACTION,
+            action=ActionType.CODE,
         )
 
     async def check_and_confirm_safety(self, response: ResponseJsonSchema) -> ConfirmSafetyResult:
@@ -1192,6 +1199,8 @@ class LocalCodeExecutor:
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.SUCCESS,
                 files=expanded_mentioned_files,
+                execution_type=ExecutionType.ACTION,
+                action=ActionType.CODE,
             )
         except Exception as e:
             # Add captured log output to error output if any
@@ -1400,7 +1409,9 @@ class LocalCodeExecutor:
 
         return response_json
 
-    async def process_response(self, response: ResponseJsonSchema) -> ProcessResponseOutput:
+    async def process_response(
+        self, response: ResponseJsonSchema, classification: RequestClassification
+    ) -> ProcessResponseOutput:
         """Process model response, extracting and executing any code blocks.
 
         Args:
@@ -1431,17 +1442,31 @@ class LocalCodeExecutor:
         # Phase 2: Display agent response
         formatted_response = format_agent_output(plain_text_response)
 
-        print_agent_response(self.step_counter, formatted_response, self.verbosity_level)
+        if (
+            response.action != ActionType.DONE
+            and response.action != ActionType.ASK
+            and response.action != ActionType.BYE
+        ):
+            print_agent_response(self.step_counter, formatted_response, self.verbosity_level)
 
-        self.append_to_history(
-            ConversationRecord(
-                role=ConversationRole.ASSISTANT,
-                content=response.model_dump_json(),
-                should_summarize=True,
+            self.append_to_history(
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content=response.model_dump_json(),
+                    should_summarize=True,
+                )
             )
-        )
+        else:
+            self.append_to_history(
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content=f"Final action: {response.model_dump_json()}.  I will now "
+                    "respond to you with the final response.",
+                    should_summarize=True,
+                )
+            )
 
-        result = await self.perform_action(response)
+        result = await self.perform_action(response, classification)
 
         current_working_directory = os.getcwd()
 
@@ -1456,7 +1481,9 @@ class LocalCodeExecutor:
 
         return result
 
-    async def perform_action(self, response: ResponseJsonSchema) -> ProcessResponseOutput:
+    async def perform_action(
+        self, response: ResponseJsonSchema, classification: RequestClassification
+    ) -> ProcessResponseOutput:
         """
         Perform an action based on the provided ResponseJsonSchema.
 
@@ -1490,8 +1517,11 @@ class LocalCodeExecutor:
                     role=ConversationRole.ASSISTANT,
                     status=ProcessResponseStatus.SUCCESS,
                     files=[],
+                    execution_type=ExecutionType.ACTION,
+                    action=response.action,
                 ),
                 response,
+                classification,
             )
 
             return ProcessResponseOutput(
@@ -1636,7 +1666,7 @@ class LocalCodeExecutor:
                 )
 
         if execution_result:
-            self.add_to_code_history(execution_result, response)
+            self.add_to_code_history(execution_result, response, classification)
 
         token_metrics = self.get_token_metrics()
 
@@ -1736,6 +1766,8 @@ class LocalCodeExecutor:
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
             files=[str(expanded_file_path)],
+            execution_type=ExecutionType.ACTION,
+            action=ActionType.READ,
         )
 
     async def write_file(self, file_path: str, content: str) -> CodeExecutionResult:
@@ -1787,6 +1819,8 @@ class LocalCodeExecutor:
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
             files=[str(expanded_file_path)],
+            execution_type=ExecutionType.ACTION,
+            action=ActionType.WRITE,
         )
 
     async def edit_file(
@@ -1857,6 +1891,8 @@ class LocalCodeExecutor:
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
             files=[str(expanded_file_path)],
+            execution_type=ExecutionType.ACTION,
+            action=ActionType.EDIT,
         )
 
     def _limit_conversation_history(self) -> None:
@@ -2251,13 +2287,17 @@ the user's request.  You should take them into account as you work on the curren
         return template
 
     def add_to_code_history(
-        self, execution_result: CodeExecutionResult, response: ResponseJsonSchema | None
+        self,
+        execution_result: CodeExecutionResult,
+        response: ResponseJsonSchema | None,
+        classification: RequestClassification | None,
     ) -> None:
         """Add a code execution result to the code history.
 
         Args:
             execution_result (CodeExecutionResult): The execution result to add
             response (ResponseJsonSchema | None): The response from the model
+            classification (RequestClassification | None): The classification of the task
         """
         new_code_record = execution_result
 
@@ -2266,5 +2306,8 @@ the user's request.  You should take them into account as you work on the curren
 
         if not new_code_record.timestamp:
             new_code_record.timestamp = datetime.now()
+
+        if classification and not new_code_record.task_classification:
+            new_code_record.task_classification = classification.type
 
         self.code_history.append(new_code_record)

@@ -109,11 +109,11 @@ def run_job_in_process(
                             setattr(model_instance, "top_p", options["top_p"])
 
                 # Process the request
-                response_json = await process_operator.handle_user_input(prompt)
+                _, final_response = await process_operator.handle_user_input(prompt)
 
                 # Create result with response and context
                 result = JobResult(
-                    response=response_json.response if response_json is not None else "",
+                    response=final_response or "",
                     context=[
                         JobContextRecord(
                             role=msg.role,
@@ -217,11 +217,13 @@ def run_agent_job_in_process(
                         setattr(model_instance, "top_p", agent_obj.top_p)
 
                 # Process the request
-                response_json = await process_operator.handle_user_input(prompt, user_message_id)
+                _, final_response = await process_operator.handle_user_input(
+                    prompt, user_message_id
+                )
 
                 # Create result with response and context
                 result = JobResult(
-                    response=response_json.response if response_json is not None else "",
+                    response=final_response or "",
                     context=[
                         JobContextRecord(
                             role=msg.role,

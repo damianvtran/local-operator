@@ -108,13 +108,13 @@ def run_job_in_process_with_queue(
                             setattr(model_instance, "top_p", options["top_p"])
 
                 # Process the request
-                response_json = await process_operator.handle_user_input(
+                _, final_response = await process_operator.handle_user_input(
                     prompt, attachments=attachments
                 )
 
                 # Create result with response and context
                 result = {
-                    "response": response_json.response if response_json is not None else "",
+                    "response": final_response or "",
                     "context": [
                         JobContextRecord(
                             role=msg.role,
@@ -209,13 +209,13 @@ def run_agent_job_in_process_with_queue(
                 )
 
                 # Process the request
-                response_json = await process_operator.handle_user_input(
+                _, final_response = await process_operator.handle_user_input(
                     prompt, user_message_id, attachments
                 )
 
                 # Create result with response and context
                 result = {
-                    "response": response_json.response if response_json is not None else "",
+                    "response": final_response or "",
                     "context": [
                         JobContextRecord(
                             role=msg.role,
