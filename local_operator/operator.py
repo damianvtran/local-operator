@@ -374,6 +374,7 @@ class Operator:
                 role=ConversationRole.SYSTEM,
                 content=system_prompt,
                 is_system_prompt=True,
+                should_cache=True,
             ),
         ]
 
@@ -457,6 +458,7 @@ class Operator:
                 role=ConversationRole.SYSTEM,
                 content=system_prompt,
                 is_system_prompt=True,
+                should_cache=True,
             ),
         ]
 
@@ -623,6 +625,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
                 content=task_instructions,
                 is_system_prompt=False,
                 ephemeral=request_classification.type == RequestType.CONVERSATION,
+                should_cache=True,
             )
         )
 
