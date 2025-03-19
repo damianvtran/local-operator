@@ -1442,7 +1442,12 @@ class LocalCodeExecutor:
         # Phase 2: Display agent response
         formatted_response = format_agent_output(plain_text_response)
 
-        print_agent_response(self.step_counter, formatted_response, self.verbosity_level)
+        if (
+            response.action != ActionType.DONE
+            and response.action != ActionType.ASK
+            and response.action != ActionType.BYE
+        ):
+            print_agent_response(self.step_counter, formatted_response, self.verbosity_level)
 
         self.append_to_history(
             ConversationRecord(

@@ -135,7 +135,7 @@ class DummyOperator:
             None,
         )
 
-        return dummy_response
+        return dummy_response, "dummy operator response"
 
 
 # Fixture for overriding the executor dependency for successful chat requests.
