@@ -1513,7 +1513,7 @@ REQUEST_TYPE_INSTRUCTIONS: Dict[RequestType, str] = {
 }
 
 FinalResponseInstructions: str = """
-Please provide a response to me.
+Please provide your final response to me.
 
 Make sure that you respond in the first person directly to the user.  Use a friendly,
 natural, and conversational tone.  Respond in natural language, don't use the
@@ -1538,6 +1538,8 @@ For ASK actions:
 - Provide a clear, concise question that will help you to achieve the user's goal.
 - Provide necessary context for the question to the user so they understand the
   background and context for the question.
+
+Provide the final response now.
 """
 
 
