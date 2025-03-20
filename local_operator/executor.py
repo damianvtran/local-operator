@@ -8,12 +8,10 @@ import subprocess
 import sys
 from datetime import datetime
 from enum import Enum
+from multiprocessing import Queue
 from pathlib import Path
 from traceback import format_exception
 from typing import Any, Dict, List, Optional, Tuple
-from multiprocessing import Queue
-
-from local_operator.jobs import JobManager
 
 from langchain_community.callbacks.manager import get_openai_callback
 from langchain_core.messages import BaseMessage
@@ -41,6 +39,7 @@ from local_operator.helpers import (
     clean_plain_text_response,
     remove_think_tags,
 )
+from local_operator.jobs import JobManager
 from local_operator.model.configure import ModelConfiguration, calculate_cost
 from local_operator.prompts import (
     SafetyCheckConversationPrompt,
