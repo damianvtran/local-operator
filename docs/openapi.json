@@ -879,6 +879,158 @@
         }
       }
     },
+    "/v1/agents/import": {
+      "post": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Import an agent",
+        "description": "Import an agent from a ZIP file containing agent state files with an agent.yml file.",
+        "operationId": "import_agent_v1_agents_import_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_import_agent_v1_agents_import_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_Agent_"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Agent imported successfully",
+            "content": {
+              "application/json": {
+                "example": {
+                  "status": 201,
+                  "message": "Agent imported successfully",
+                  "result": {
+                    "id": "imported-agent-123",
+                    "name": "Imported Agent",
+                    "created_date": "2024-01-01T00:00:00",
+                    "version": "0.2.16",
+                    "security_prompt": "Example security prompt",
+                    "hosting": "openrouter",
+                    "model": "openai/gpt-4o-mini",
+                    "description": "An imported agent",
+                    "last_message": "",
+                    "last_message_datetime": "2024-01-01T00:00:00"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Invalid ZIP file or missing agent.yml"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Error importing agent"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/{agent_id}/export": {
+      "get": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Export an agent",
+        "description": "Export an agent's state files as a ZIP file.",
+        "operationId": "export_agent_v1_agents__agent_id__export_get",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "ID of the agent to export",
+              "examples": [
+                "agent123"
+              ],
+              "title": "Agent Id"
+            },
+            "description": "ID of the agent to export"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent exported successfully",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "application/octet-stream": {}
+            }
+          },
+          "404": {
+            "description": "Agent not found",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Agent with ID agent123 not found"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Error exporting agent"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/agents/{agent_id}/history": {
       "get": {
         "tags": [
@@ -996,6 +1148,166 @@
               "application/json": {
                 "example": {
                   "detail": "Error retrieving agent execution history"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/{agent_id}/system-prompt": {
+      "get": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Get agent system prompt",
+        "description": "Retrieve the system prompt for a specific agent.",
+        "operationId": "get_agent_system_prompt_v1_agents__agent_id__system_prompt_get",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "ID of the agent",
+              "examples": [
+                "agent123"
+              ],
+              "title": "Agent Id"
+            },
+            "description": "ID of the agent"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent system prompt retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "Agent system prompt retrieved successfully",
+                  "result": {
+                    "system_prompt": "You are a helpful assistant..."
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Agent with ID agent123 not found"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Error retrieving agent system prompt"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Update agent system prompt",
+        "description": "Update the system prompt for a specific agent.",
+        "operationId": "update_agent_system_prompt_v1_agents__agent_id__system_prompt_put",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "ID of the agent",
+              "examples": [
+                "agent123"
+              ],
+              "title": "Agent Id"
+            },
+            "description": "ID of the agent"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "title": "System Prompt"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Agent system prompt updated successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "Agent system prompt updated successfully",
+                  "result": {}
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Agent with ID agent123 not found"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Error updating agent system prompt"
                 }
               }
             }
@@ -2747,6 +3059,21 @@
         "type": "object",
         "title": "AgentUpdate",
         "description": "Data for updating an existing agent."
+      },
+      "Body_import_agent_v1_agents_import_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "format": "binary",
+            "title": "File",
+            "description": "ZIP file containing agent state files"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_import_agent_v1_agents_import_post"
       },
       "CRUDResponse": {
         "properties": {
