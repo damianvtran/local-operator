@@ -1,12 +1,15 @@
 import json
 import logging
+import os
 import shutil
+import tempfile
 import time
 import uuid
+import zipfile
 from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import dill
 import jsonlines
@@ -1161,6 +1164,123 @@ class AgentRegistry:
         except Exception as e:
             logging.error(f"Failed to migrate context for agent {agent_id}: {str(e)}")
             return False
+
+    def import_agent(self, zip_path: Path) -> AgentData:
+        """
+        Import an agent from a ZIP file.
+
+        The ZIP file should contain agent state files with an agent.yml file.
+        A new ID will be assigned to the imported agent, and the current working directory
+        will be reset to local-operator-home.
+
+        Args:
+            zip_path (Path): Path to the ZIP file containing agent state files
+
+        Returns:
+            AgentData: The imported agent's metadata
+
+        Raises:
+            ValueError: If the ZIP file is invalid or missing required files
+            Exception: If there is an error importing the agent
+        """
+        # Create a temporary directory to extract the ZIP file
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_dir_path = Path(temp_dir)
+
+            try:
+                # Extract the ZIP file
+                with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                    zip_ref.extractall(temp_dir_path)
+
+                # Check if agent.yml exists in the extracted files
+                agent_yml_path = None
+                for root, _, files in os.walk(temp_dir_path):
+                    if "agent.yml" in files:
+                        agent_yml_path = Path(root) / "agent.yml"
+                        break
+
+                if not agent_yml_path:
+                    raise ValueError("Missing agent.yml in ZIP file")
+
+                # Load the agent.yml file
+                with open(agent_yml_path, "r", encoding="utf-8") as f:
+                    agent_data = yaml.safe_load(f)
+
+                # Create a new agent with the imported data
+                # Generate a new ID and reset the working directory
+                new_id = str(uuid.uuid4())
+                agent_data["id"] = new_id
+                agent_data["current_working_directory"] = "~/local-operator-home"
+
+                # Save the updated agent.yml
+                with open(agent_yml_path, "w", encoding="utf-8") as f:
+                    yaml.dump(agent_data, f, default_flow_style=False)
+
+                # Create the agent directory in the registry
+                agent_dir = self.agents_dir / new_id
+                if not agent_dir.exists():
+                    agent_dir.mkdir(parents=True, exist_ok=True)
+
+                # Copy all files from the extracted directory to the agent directory
+                extracted_agent_dir = agent_yml_path.parent
+                for item in extracted_agent_dir.iterdir():
+                    if item.is_file():
+                        shutil.copy2(item, agent_dir)
+
+                # Create a new AgentData object directly from the data
+                agent_data = AgentData.model_validate(agent_data)
+
+                # Save the agent to the registry
+                self.save_agent(agent_data)
+
+                # Return the agent data
+                return agent_data
+
+            except zipfile.BadZipFile:
+                raise ValueError("Invalid ZIP file")
+            except yaml.YAMLError:
+                raise ValueError("Invalid YAML in agent.yml")
+            except Exception as e:
+                raise Exception(f"Error importing agent: {str(e)}")
+
+    def export_agent(self, agent_id: str) -> Tuple[Path, str]:
+        """
+        Export an agent's state files as a ZIP file.
+
+        Args:
+            agent_id (str): The unique identifier of the agent to export
+
+        Returns:
+            Tuple[Path, str]: A tuple containing the path to the ZIP file and the filename
+
+        Raises:
+            KeyError: If the agent is not found
+            Exception: If there is an error exporting the agent
+        """
+        # Verify the agent exists
+        agent = self.get_agent(agent_id)
+
+        # Create a temporary directory to store the ZIP file
+        temp_dir = tempfile.mkdtemp()
+        temp_dir_path = Path(temp_dir)
+        filename = f"{agent.name.replace(' ', '_')}.zip"
+        zip_path = temp_dir_path / filename
+
+        try:
+            # Create the ZIP file
+            agent_dir = self.agents_dir / agent_id
+
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                # Add all files from the agent directory to the ZIP file
+                for item in agent_dir.iterdir():
+                    if item.is_file():
+                        zip_file.write(item, arcname=item.name)
+
+            return zip_path, filename
+        except Exception as e:
+            # Clean up the temporary directory if there's an error
+            shutil.rmtree(temp_dir)
+            raise Exception(f"Error exporting agent: {str(e)}")
 
     def update_agent_state(
         self,

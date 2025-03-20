@@ -5,12 +5,25 @@ This module contains the FastAPI route handlers for agent-related endpoints.
 """
 
 import logging
+import shutil
+import tempfile
+import zipfile
 from datetime import datetime, timezone
+from pathlib import Path as FilePath
 from typing import Any, Dict, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    HTTPException,
+    Path,
+    Query,
+    UploadFile,
+)
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import ValidationError
 
 from local_operator.agents import AgentEditFields, AgentRegistry
@@ -660,6 +673,178 @@ async def clear_agent_conversation(
     except Exception as e:
         logger.exception("Error clearing agent conversation")
         raise HTTPException(status_code=500, detail=f"Error clearing agent conversation: {str(e)}")
+
+
+@router.post(
+    "/v1/agents/import",
+    response_model=CRUDResponse[Agent],
+    summary="Import an agent",
+    description=(
+        "Import an agent from a ZIP file containing agent state files with an agent.yml file."
+    ),
+    responses={
+        201: {
+            "description": "Agent imported successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": 201,
+                        "message": "Agent imported successfully",
+                        "result": {
+                            "id": "imported-agent-123",
+                            "name": "Imported Agent",
+                            "created_date": "2024-01-01T00:00:00",
+                            "version": "0.2.16",
+                            "security_prompt": "Example security prompt",
+                            "hosting": "openrouter",
+                            "model": "openai/gpt-4o-mini",
+                            "description": "An imported agent",
+                            "last_message": "",
+                            "last_message_datetime": "2024-01-01T00:00:00",
+                        },
+                    }
+                }
+            },
+        },
+        400: {
+            "description": "Bad request",
+            "content": {
+                "application/json": {"example": {"detail": "Invalid ZIP file or missing agent.yml"}}
+            },
+        },
+        500: {
+            "description": "Internal server error",
+            "content": {"application/json": {"example": {"detail": "Error importing agent"}}},
+        },
+    },
+)
+async def import_agent(
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
+    file: UploadFile = File(..., description="ZIP file containing agent state files"),
+):
+    """
+    Import an agent from a ZIP file.
+
+    The ZIP file should contain agent state files with an agent.yml file.
+    A new ID will be assigned to the imported agent, and the current working directory
+    will be reset to local-operator-home.
+
+    Args:
+        agent_registry: The agent registry dependency
+        file: The uploaded ZIP file containing agent state files
+
+    Returns:
+        CRUDResponse: A response containing the imported agent details
+
+    Raises:
+        HTTPException: If there is an error importing the agent
+    """
+    # Create a temporary directory to save the uploaded file
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_dir_path = FilePath(temp_dir)
+        zip_path = temp_dir_path / "agent.zip"
+
+        # Save the uploaded file to the temporary directory
+        with open(zip_path, "wb") as f:
+            f.write(await file.read())
+
+        # Use the AgentRegistry's import_agent method
+        try:
+            agent_obj = agent_registry.import_agent(zip_path)
+            agent_serialized = agent_obj.model_dump()
+
+            response = CRUDResponse(
+                status=201,
+                message="Agent imported successfully",
+                result=cast(Dict[str, Any], agent_serialized),
+            )
+            return JSONResponse(status_code=201, content=jsonable_encoder(response))
+        except ValueError as e:
+            # Handle ValueError directly as 400 Bad Request
+            error_msg = str(e)
+            logger.exception(f"Invalid agent import data: {error_msg}")
+            raise HTTPException(status_code=400, detail=error_msg)
+        except zipfile.BadZipFile:
+            # Handle BadZipFile directly as 400 Bad Request
+            logger.exception("Invalid ZIP file")
+            raise HTTPException(status_code=400, detail="Invalid ZIP file")
+        except Exception as e:
+            # For other exceptions, check if they contain known error messages
+            error_msg = str(e)
+            logger.exception(f"Error importing agent: {error_msg}")
+
+            # Check for specific error messages that should be 400 errors
+            if "Missing agent.yml" in error_msg or "Invalid ZIP file" in error_msg:
+                raise HTTPException(status_code=400, detail=error_msg)
+
+            # Otherwise, return 500 Internal Server Error
+            raise HTTPException(status_code=500, detail=f"Error importing agent: {error_msg}")
+
+
+@router.get(
+    "/v1/agents/{agent_id}/export",
+    summary="Export an agent",
+    description="Export an agent's state files as a ZIP file.",
+    responses={
+        200: {
+            "description": "Agent exported successfully",
+            "content": {"application/octet-stream": {}},
+        },
+        404: {
+            "description": "Agent not found",
+            "content": {
+                "application/json": {"example": {"detail": "Agent with ID agent123 not found"}}
+            },
+        },
+        500: {
+            "description": "Internal server error",
+            "content": {"application/json": {"example": {"detail": "Error exporting agent"}}},
+        },
+    },
+)
+async def export_agent(
+    background_tasks: BackgroundTasks,
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
+    agent_id: str = Path(..., description="ID of the agent to export", examples=["agent123"]),
+):
+    """
+    Export an agent's state files as a ZIP file.
+
+    Args:
+        background_tasks: FastAPI background tasks for cleanup
+        agent_registry: The agent registry dependency
+        agent_id: The unique identifier of the agent to export
+
+    Returns:
+        StreamingResponse: A streaming response containing the ZIP file
+
+    Raises:
+        HTTPException: If the agent is not found or there is an error exporting the agent
+    """
+    try:
+        # Use the AgentRegistry's export_agent method
+        zip_path, filename = agent_registry.export_agent(agent_id)
+
+        # Ensure the file exists before returning it
+        if not zip_path.exists():
+            raise FileNotFoundError(f"Failed to create ZIP file at {zip_path}")
+
+        # Add cleanup task to remove the temporary directory after the response is sent
+        background_tasks.add_task(shutil.rmtree, zip_path.parent, ignore_errors=True)
+
+        # Return the ZIP file as a streaming response
+        return FileResponse(
+            path=zip_path,
+            filename=filename,
+            media_type="application/octet-stream",
+        )
+
+    except KeyError:
+        logger.exception(f"Agent with ID {agent_id} not found")
+        raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+    except Exception as e:
+        logger.exception("Error exporting agent")
+        raise HTTPException(status_code=500, detail=f"Error exporting agent: {str(e)}")
 
 
 @router.get(
