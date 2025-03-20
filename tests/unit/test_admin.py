@@ -103,7 +103,7 @@ def test_create_agent_from_conversation_no_user_messages(
     Test creating an agent from a conversation that contains no user messages.
     The expected saved conversation history should be empty.
     """
-    executor.conversation_history = [
+    executor.agent_state.conversation = [
         ConversationRecord(role=ConversationRole.SYSTEM, content="Initial prompt")
     ]
     create_tool = create_agent_from_conversation_tool(executor, agent_registry)
@@ -134,7 +134,7 @@ def test_create_agent_from_conversation_with_user_messages(
         ConversationRecord(role=ConversationRole.USER, content="Third user message"),
         ConversationRecord(role=ConversationRole.SYSTEM, content="System message"),
     ]
-    executor.code_history = [
+    executor.agent_state.execution_history = [
         CodeExecutionResult(
             id="test_code_execution_id",
             stdout="",
@@ -148,7 +148,7 @@ def test_create_agent_from_conversation_with_user_messages(
             files=[],
         )
     ]
-    executor.conversation_history = conversation_history
+    executor.agent_state.conversation = conversation_history
     create_tool = create_agent_from_conversation_tool(executor, agent_registry)
     agent_name = "TestAgent2"
     new_agent = create_tool(agent_name)
@@ -185,7 +185,7 @@ def test_save_agent_training_no_agent(
     Expect a ValueError to be raised with the appropriate message.
     """
     conversation_history = [ConversationRecord(role=ConversationRole.USER, content="User message")]
-    executor.conversation_history = conversation_history
+    executor.agent_state.conversation = conversation_history
     executor.agent = None
     save_training_tool = save_agent_training_tool(executor, agent_registry)
     with pytest.raises(ValueError, match="No current agent set"):
@@ -231,8 +231,8 @@ def test_save_agent_training_with_agent(
             files=[],
         ),
     ]
-    executor.conversation_history = conversation_history
-    executor.code_history = execution_history
+    executor.agent_state.conversation = conversation_history
+    executor.agent_state.execution_history = execution_history
     agent = agent_registry.create_agent(
         AgentEditFields(
             name="TrainAgent",
@@ -526,7 +526,7 @@ def test_save_conversation_tool(tmp_path: Any, executor: LocalCodeExecutor) -> N
         ConversationRecord(role=ConversationRole.USER, content="Hello"),
         ConversationRecord(role=ConversationRole.ASSISTANT, content="Hi there!"),
     ]
-    executor.conversation_history = conversation_history
+    executor.agent_state.conversation = conversation_history
     save_tool = save_conversation_raw_json_tool(executor)
     save_tool(str(file_path))
     with open(file_path, "r", encoding="utf-8") as f:

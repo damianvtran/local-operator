@@ -137,7 +137,7 @@ async def chat_endpoint(
             tokenizer = encoding_for_model("gpt-4o")
 
         prompt_tokens = sum(
-            len(tokenizer.encode(msg.content)) for msg in operator.executor.conversation_history
+            len(tokenizer.encode(msg.content)) for msg in operator.executor.agent_state.conversation
         )
         completion_tokens = len(tokenizer.encode(response_content))
         total_tokens = prompt_tokens + completion_tokens
@@ -149,7 +149,7 @@ async def chat_endpoint(
                 response=final_response or "",
                 context=[
                     ConversationRecord(role=msg.role, content=msg.content, files=msg.files)
-                    for msg in operator.executor.conversation_history
+                    for msg in operator.executor.agent_state.conversation
                 ],
                 stats=ChatStats(
                     total_tokens=total_tokens,
@@ -247,7 +247,7 @@ async def chat_with_agent(
             tokenizer = encoding_for_model("gpt-4o")
 
         prompt_tokens = sum(
-            len(tokenizer.encode(msg.content)) for msg in operator.executor.conversation_history
+            len(tokenizer.encode(msg.content)) for msg in operator.executor.agent_state.conversation
         )
         completion_tokens = len(tokenizer.encode(response_content))
         total_tokens = prompt_tokens + completion_tokens
@@ -259,7 +259,7 @@ async def chat_with_agent(
                 response=final_response or "",
                 context=[
                     ConversationRecord(role=msg.role, content=msg.content)
-                    for msg in operator.executor.conversation_history
+                    for msg in operator.executor.agent_state.conversation
                 ],
                 stats=ChatStats(
                     total_tokens=total_tokens,

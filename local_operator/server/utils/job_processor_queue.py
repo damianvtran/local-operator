@@ -138,7 +138,7 @@ def run_job_in_process_with_queue(
                             content=msg.content,
                             files=msg.files,
                         )
-                        for msg in process_operator.executor.conversation_history
+                        for msg in process_operator.executor.agent_state.conversation
                     ],
                 }
 
@@ -256,7 +256,7 @@ def run_agent_job_in_process_with_queue(
                             content=msg.content,
                             files=msg.files,
                         )
-                        for msg in process_operator.executor.conversation_history
+                        for msg in process_operator.executor.agent_state.conversation
                     ],
                 }
 

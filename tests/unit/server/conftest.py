@@ -24,6 +24,7 @@ from local_operator.model.registry import ModelInfo
 from local_operator.server.app import app
 from local_operator.types import (
     ActionType,
+    AgentState,
     CodeExecutionResult,
     ConversationRecord,
     ConversationRole,
@@ -52,8 +53,14 @@ class DummyExecutor:
             ),
             api_key=None,
         )
-        self.conversation_history = []
-        self.code_history = []
+        self.agent_state = AgentState(
+            version="",
+            conversation=[],
+            execution_history=[],
+            learnings=[],
+            current_plan=None,
+            instruction_details=None,
+        )
 
     async def invoke_model(self, conversation_history):
         # Simply return a dummy response content as if coming from the model.
@@ -67,9 +74,9 @@ class DummyExecutor:
         self, new_conversation_history: List[ConversationRecord] = [], overwrite: bool = False
     ):
         if overwrite:
-            self.conversation_history = []
+            self.agent_state.conversation = []
 
-        if len(self.conversation_history) != 0:
+        if len(self.agent_state.conversation) != 0:
             raise ExecutorInitError("Conversation history already initialized")
 
         history = [
@@ -79,15 +86,15 @@ class DummyExecutor:
         ]
 
         if len(new_conversation_history) == 0:
-            self.conversation_history = history
+            self.agent_state.conversation = history
         else:
             filtered_history = [
                 record for record in new_conversation_history if not record.is_system_prompt
             ]
-            self.conversation_history = history + filtered_history
+            self.agent_state.conversation = history + filtered_history
 
     def add_to_code_history(self, code_execution_result: CodeExecutionResult, response):
-        self.code_history.append(code_execution_result)
+        self.agent_state.execution_history.append(code_execution_result)
 
 
 # Dummy Operator using a dummy executor
@@ -111,10 +118,10 @@ class DummyOperator:
             learnings="",
         )
 
-        self.executor.conversation_history.append(
+        self.executor.agent_state.conversation.append(
             ConversationRecord(role=ConversationRole.USER, content=prompt, files=attachments)
         )
-        self.executor.conversation_history.append(
+        self.executor.agent_state.conversation.append(
             ConversationRecord(
                 role=ConversationRole.ASSISTANT, content=dummy_response.model_dump_json()
             )

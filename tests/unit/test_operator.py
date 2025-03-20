@@ -26,7 +26,7 @@ def mock_model_config():
 @pytest.fixture
 def executor(mock_model_config):
     executor = LocalCodeExecutor(model_configuration=mock_model_config)
-    executor.conversation_history = []
+    executor.agent_state.conversation = []
     executor.tool_registry = ToolRegistry()
     yield executor
 
@@ -124,7 +124,7 @@ async def test_cli_operator_chat(cli_operator, mock_model_config):
     assert mock_classify_request.call_count == 1
     assert mock_generate_plan.call_count == 1
     assert mock_generate_response.call_count == 1
-    assert "final response" in cli_operator.executor.conversation_history[-1].content
+    assert "final response" in cli_operator.executor.agent_state.conversation[-1].content
 
     # Clean up patches
     patch.stopall()
@@ -271,8 +271,8 @@ async def test_operator_print_hello_world(cli_operator):
     _, final_response = await cli_operator.handle_user_input("print hello world")
 
     # Verify conversation history was updated
-    assert len(cli_operator.executor.conversation_history) > 0
-    last_conversation_message = cli_operator.executor.conversation_history[-1]
+    assert len(cli_operator.executor.agent_state.conversation) > 0
+    last_conversation_message = cli_operator.executor.agent_state.conversation[-1]
 
     assert last_conversation_message.content == final_response
     assert final_response == "I have printed 'Hello World' to the console."

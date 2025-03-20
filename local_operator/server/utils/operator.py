@@ -101,12 +101,12 @@ def create_operator(
     if not request_hosting:
         raise ValueError("Hosting is not set")
 
-    agent_conversation_data = None
+    agent_state = None
 
     chat_args = {}
 
     if current_agent:
-        agent_conversation_data = agent_registry.load_agent_state(current_agent.id)
+        agent_state = agent_registry.load_agent_state(current_agent.id)
 
         if current_agent.temperature:
             chat_args["temperature"] = current_agent.temperature
@@ -126,7 +126,7 @@ def create_operator(
             chat_args["seed"] = current_agent.seed
 
     else:
-        agent_conversation_data = AgentState(
+        agent_state = AgentState(
             version="",
             conversation=[],
             execution_history=[],
@@ -164,10 +164,8 @@ def create_operator(
         agent=current_agent,
         verbosity_level=VerbosityLevel.QUIET,
         agent_registry=agent_registry,
+        agent_state=agent_state,
         persist_conversation=persist_conversation,
-        learnings=agent_conversation_data.learnings,
-        current_plan=agent_conversation_data.current_plan,
-        instruction_details=agent_conversation_data.instruction_details,
         job_manager=job_manager,
         job_id=job_id,
     )
@@ -190,7 +188,6 @@ def create_operator(
     )
     executor.set_tool_registry(tool_registry)
 
-    executor.load_conversation_history(agent_conversation_data.conversation)
-    executor.load_execution_history(agent_conversation_data.execution_history)
+    executor.load_agent_state(agent_state)
 
     return operator

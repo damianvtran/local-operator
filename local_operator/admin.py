@@ -76,8 +76,8 @@ def create_agent_from_conversation_tool(
             AgentData: The newly created agent's data
         """
         # Find index of last user message by iterating backwards
-        conversation_history = executor.conversation_history
-        execution_history = executor.code_history
+        conversation_history = executor.agent_state.conversation
+        execution_history = executor.agent_state.execution_history
         last_user_idx = None
 
         for i in range(len(conversation_history) - 1, -1, -1):
@@ -162,8 +162,8 @@ def save_agent_training_tool(
             raise ValueError("No current agent set in executor")
 
         # Find index of last user message by iterating backwards
-        conversation_history = executor.conversation_history
-        execution_history = executor.code_history
+        conversation_history = executor.agent_state.conversation
+        execution_history = executor.agent_state.execution_history
         last_user_idx = None
 
         for i in range(len(conversation_history) - 1, -1, -1):
@@ -624,7 +624,7 @@ def save_conversation_history_to_notebook_tool(
         """
         try:
             save_code_history_to_notebook(
-                code_history=executor.code_history,
+                code_history=executor.agent_state.execution_history,
                 model_configuration=executor.model_configuration,
                 max_conversation_history=executor.max_conversation_history,
                 detail_conversation_length=executor.detail_conversation_length,

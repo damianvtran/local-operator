@@ -50,6 +50,7 @@ from local_operator.prompts import (
 from local_operator.tools import ToolRegistry, list_working_directory
 from local_operator.types import (
     ActionType,
+    AgentState,
     CodeExecutionResult,
     ConversationRecord,
     ConversationRole,
@@ -364,10 +365,13 @@ class CodeExecutionError(Exception):
 
 class LocalCodeExecutor:
     """A class to handle local Python code execution with safety checks and context management.
+
+    This executor manages the execution of Python code blocks, maintains conversation history,
+    tracks execution context, and handles interactions with language models. It provides
+    safety checks, error handling, and context persistence between executions.
+
     Attributes:
         context (Dict[str, Any]): A dictionary to maintain execution context between code blocks.
-        conversation_history (List[ConversationRecord]): A list of
-        message records tracking the conversation.
         model_configuration (ModelConfiguration): Configuration for the language model used.
         step_counter (int): A counter to track the current step in sequential execution.
         max_conversation_history (int): The maximum number of messages to keep in the
@@ -379,22 +383,19 @@ class LocalCodeExecutor:
         can_prompt_user (bool): Informs the executor about whether the end user has access to the
             terminal (True), or is consuming the service from some remote source where they
             cannot respond via the terminal (False).
-        token_metrics (ExecutorTokenMetrics): Tracks token usage and
-        cost metrics for model executions.
+        token_metrics (ExecutorTokenMetrics): Tracks token usage and cost metrics for model calls.
         agent (AgentData | None): The agent data for the current conversation.
         agent_registry (AgentRegistry | None): The agent registry for the current conversation.
         tool_registry (ToolRegistry | None): The tool registry for the current conversation.
-        learnings (List[str]): A list of learnings from the current conversation.
-        current_plan (str | None): The current plan for the agent.
-        code_history (List[CodeExecutionResult]): A list of code execution results.
         persist_conversation (bool): Whether to persist the conversation history and code
             execution history to the agent registry on each step.
-        instruction_details (str | None): A set of instructions for the agent based on
-            the classification of the user's request.
+        agent_state (AgentState): Contains the agent's state including conversation history,
+            execution history, learnings, current plan, and instruction details.
+        status_queue (Queue | None): A queue for status updates if this is part
+            of a running job for a server operator.
     """
 
     context: Dict[str, Any]
-    conversation_history: List[ConversationRecord]
     model_configuration: ModelConfiguration
     step_counter: int
     max_conversation_history: int
@@ -405,11 +406,9 @@ class LocalCodeExecutor:
     agent: AgentData | None
     agent_registry: AgentRegistry | None
     tool_registry: ToolRegistry | None
-    learnings: List[str]
-    current_plan: str | None
-    code_history: List[CodeExecutionResult]
     persist_conversation: bool
-    instruction_details: str | None
+    agent_state: AgentState
+    status_queue: Optional[Queue] = None  # type: ignore
 
     def __init__(
         self,
@@ -417,64 +416,57 @@ class LocalCodeExecutor:
         max_conversation_history: int = 100,
         detail_conversation_length: int = 10,
         can_prompt_user: bool = True,
-        conversation_history: List[ConversationRecord] = [],
         agent: AgentData | None = None,
+        agent_state: AgentState = AgentState(
+            version="",
+            conversation=[],
+            execution_history=[],
+            learnings=[],
+            current_plan=None,
+            instruction_details=None,
+        ),
+        agent_registry: AgentRegistry | None = None,
         max_learnings_history: int = 50,
         verbosity_level: VerbosityLevel = VerbosityLevel.VERBOSE,
-        agent_registry: AgentRegistry | None = None,
         persist_conversation: bool = False,
-        learnings: List[str] = [],
-        current_plan: str | None = None,
-        instruction_details: str | None = None,
         job_manager: Optional["JobManager"] = None,
         job_id: Optional[str] = None,
     ):
         """Initialize the LocalCodeExecutor with a language model.
 
         Args:
-            model_configuration (ModelConfiguration): The model configuration to use
-            max_conversation_history (int): The maximum number of messages to keep in
-                the conversation history. This doesn't include the system prompt.
-            detail_conversation_length (int): The number of messages to keep in full detail in the
-                conversation history. Every step before this except the system prompt will be
-                summarized. Set to -1 to keep all messages in full detail.
-            can_prompt_user (bool): Informs the executor about whether
-            the end user has access to the
-                terminal (True), or is consuming the service from some remote source where they
-                cannot respond via the terminal (False).
-            conversation_history (List[ConversationRecord]): A list of
-            message records tracking the conversation.
-            agent (AgentData | None): The agent data for the current conversation.
-            max_learnings_history (int): The maximum number of learnings to keep in history.
-            verbosity_level (ExecutorVerbosityLevel): The level of detail to output
-            from the executor.
-            agent_registry (AgentRegistry | None): The agent registry for the current conversation.
-            persist_conversation (bool): Whether to persist the conversation history and code
-                execution history to the agent registry on each step.
-            learnings (List[str]): A list of learnings from the current conversation.
-            current_plan (str | None): The current plan for the agent.
-            instruction_details (str | None): A set of instructions for the agent based on
-                the classification of the user's request.
-            job_manager (JobManager | None): The job manager for the current conversation.
-            job_id (str | None): The job ID for the current conversation.
+            model_configuration: Configuration for the language model to use
+            max_conversation_history: Maximum number of messages to keep in the
+                conversation history, excluding the system prompt
+            detail_conversation_length: Number of recent messages to keep in full detail, with
+                earlier messages being summarized (except system prompt). Set to -1 to keep all
+                messages in full detail.
+            can_prompt_user: Whether the end user has terminal access (True) or is using a remote
+                interface without terminal access (False)
+            agent: Optional agent data for the current conversation
+            agent_state: Optional initial state for the agent, including conversation history,
+                execution history, learnings, current plan, and instruction details
+            agent_registry: Optional registry for managing agent data and state persistence
+            max_learnings_history: Maximum number of learnings to retain in history
+            verbosity_level: Controls the level of detail in executor output
+            persist_conversation: Whether to automatically persist conversation and execution
+                history to the agent registry after each step
+            job_manager: Optional manager for handling background or scheduled jobs
+            job_id: Optional identifier for the current job being processed
         """
         self.context = {}
         self.model_configuration = model_configuration
-        self.conversation_history = conversation_history
+        self.agent_state = agent_state
         self.max_conversation_history = max_conversation_history
         self.detail_conversation_length = detail_conversation_length
         self.can_prompt_user = can_prompt_user
         self.token_metrics = ExecutorTokenMetrics()
         self.agent = agent
         self.interrupted = False
-        self.learnings = learnings
-        self.current_plan = current_plan
         self.max_learnings_history = max_learnings_history
-        self.code_history = []
         self.verbosity_level = verbosity_level
         self.agent_registry = agent_registry
         self.persist_conversation = persist_conversation
-        self.instruction_details = instruction_details
         self.job_manager = job_manager
         self.job_id = job_id
 
@@ -509,12 +501,12 @@ class LocalCodeExecutor:
                 should_summarize: Whether to summarize this message in the future
                 ephemeral: Whether this message is temporary/ephemeral
 
-        The method updates self.conversation_history in-place.
+        The method updates self.agent_state.conversation in-place.
         """
         if not new_record.timestamp:
             new_record.timestamp = datetime.now()
 
-        self.conversation_history.append(new_record)
+        self.agent_state.conversation.append(new_record)
         self._limit_conversation_history()
 
     async def _summarize_old_steps(self) -> None:
@@ -532,14 +524,14 @@ class LocalCodeExecutor:
         Raises:
             ValueError: If the conversation record is not of the expected type.
         """
-        if len(self.conversation_history) <= 1:  # Just system prompt or empty
+        if len(self.agent_state.conversation) <= 1:  # Just system prompt or empty
             return
 
         if self.detail_conversation_length == -1:
             return
 
         # Calculate which messages need summarizing
-        history_to_summarize = self.conversation_history[1 : -self.detail_conversation_length]
+        history_to_summarize = self.agent_state.conversation[1 : -self.detail_conversation_length]
 
         for msg in history_to_summarize:
             # Skip messages that are already sufficiently concise/summarized
@@ -609,9 +601,9 @@ class LocalCodeExecutor:
                 Defaults to False.
         """
         if overwrite:
-            self.conversation_history = []
+            self.agent_state.conversation = []
 
-        if len(self.conversation_history) != 0:
+        if len(self.agent_state.conversation) != 0:
             raise ValueError("Conversation history already initialized")
 
         system_prompt = create_system_prompt(self.tool_registry)
@@ -625,16 +617,16 @@ class LocalCodeExecutor:
         ]
 
         if len(new_conversation_history) == 0:
-            self.conversation_history = history
+            self.agent_state.conversation = history
         else:
             # Remove the system prompt from the loaded history if it exists
             filtered_history = [
                 record for record in new_conversation_history if not record.is_system_prompt
             ]
-            self.conversation_history = history + filtered_history
+            self.agent_state.conversation = history + filtered_history
 
-    def load_conversation_history(self, new_conversation_history: List[ConversationRecord]) -> None:
-        """Load a conversation history into the executor from a previous session.
+    def load_agent_state(self, new_agent_state: AgentState) -> None:
+        """Load an agent state into the executor from a previous session.
 
         This method initializes the conversation history by prepending the system prompt
         and then appending the provided conversation history, excluding the initial system
@@ -659,19 +651,14 @@ class LocalCodeExecutor:
 
         # Remove the system prompt from the loaded history if it exists
         filtered_history = [
-            record for record in new_conversation_history if not record.is_system_prompt
+            record for record in new_agent_state.conversation if not record.is_system_prompt
         ]
 
-        self.conversation_history = history + filtered_history
-
-    def load_execution_history(self, new_execution_history: List[CodeExecutionResult]) -> None:
-        """Load a code execution history into the executor from a previous session.
-
-        This method initializes the code execution history by prepending the system prompt
-        and then appending the provided code execution history, excluding the initial system
-        prompt.
-        """
-        self.code_history = new_execution_history
+        self.agent_state.conversation = history + filtered_history
+        self.agent_state.execution_history = new_agent_state.execution_history
+        self.agent_state.learnings = new_agent_state.learnings
+        self.agent_state.current_plan = new_agent_state.current_plan
+        self.agent_state.instruction_details = new_agent_state.instruction_details
 
     def extract_code_blocks(self, text: str) -> List[str]:
         """Extract Python code blocks from text using markdown-style syntax.
@@ -928,7 +915,7 @@ class LocalCodeExecutor:
             ),
         ]
 
-        if len(self.conversation_history) + 1 > conversation_length:
+        if len(self.agent_state.conversation) + 1 > conversation_length:
             safety_check_conversation.append(
                 ConversationRecord(
                     role=ConversationRole.USER,
@@ -939,9 +926,9 @@ class LocalCodeExecutor:
                 )
             )
 
-            safety_check_conversation.extend(self.conversation_history[-conversation_length:])
+            safety_check_conversation.extend(self.agent_state.conversation[-conversation_length:])
         else:
-            safety_check_conversation.extend(self.conversation_history[1:])
+            safety_check_conversation.extend(self.agent_state.conversation[1:])
 
         safety_check_conversation.append(
             ConversationRecord(
@@ -1023,7 +1010,7 @@ class LocalCodeExecutor:
             else:
                 # The agent must read the security advisory and request confirmation
                 # from the user to continue.
-                safety_summary = await self.invoke_model(self.conversation_history)
+                safety_summary = await self.invoke_model(self.agent_state.conversation)
                 safety_summary_content = (
                     safety_summary.content
                     if isinstance(safety_summary.content, str)
@@ -1443,7 +1430,7 @@ class LocalCodeExecutor:
         Returns:
             str: Code from model response
         """
-        response = await self.invoke_model(self.conversation_history)
+        response = await self.invoke_model(self.agent_state.conversation)
         response_content = (
             response.content if isinstance(response.content, str) else str(response.content)
         )
@@ -1524,8 +1511,8 @@ class LocalCodeExecutor:
         if self.persist_conversation and self.agent_registry and self.agent:
             self.agent_registry.update_agent_state(
                 agent_id=self.agent.id,
-                conversation_history=self.conversation_history,
-                code_history=self.code_history,
+                conversation_history=self.agent_state.conversation,
+                code_history=self.agent_state.execution_history,
                 current_working_directory=current_working_directory,
                 context=self.context,
             )
@@ -1971,16 +1958,16 @@ class LocalCodeExecutor:
         # cache breaking
         chunk_size = self.max_conversation_history // 2
 
-        if len(self.conversation_history) - 1 > self.max_conversation_history:
+        if len(self.agent_state.conversation) - 1 > self.max_conversation_history:
             # Keep the first message (system prompt) and the most recent messages
-            self.conversation_history = [
-                self.conversation_history[0],
+            self.agent_state.conversation = [
+                self.agent_state.conversation[0],
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content="[Some conversation history has been truncated for brevity]",
                     should_summarize=False,
                 ),
-            ] + self.conversation_history[-chunk_size:]
+            ] + self.agent_state.conversation[-chunk_size:]
 
     async def _summarize_conversation_step(self, msg: ConversationRecord) -> str:
         """
@@ -2043,11 +2030,13 @@ class LocalCodeExecutor:
         Returns:
             list[ConversationRecord]: The conversation history as a list of ConversationRecord
         """
-        return self.conversation_history
+        return self.agent_state.conversation
 
     def remove_ephemeral_messages(self) -> None:
         """Remove ephemeral messages from the conversation history."""
-        self.conversation_history = [msg for msg in self.conversation_history if not msg.ephemeral]
+        self.agent_state.conversation = [
+            msg for msg in self.agent_state.conversation if not msg.ephemeral
+        ]
 
     def format_directory_tree(self, directory_index: Dict[str, List[Tuple[str, str, int]]]) -> str:
         """Format a directory index into a human-readable tree structure.
@@ -2212,7 +2201,7 @@ Current time: {current_time}
 
     def reset_learnings(self) -> None:
         """Reset the learnings list."""
-        self.learnings = []
+        self.agent_state.learnings = []
 
     def add_to_learnings(self, learning: str) -> None:
         """Add a unique learning to the learnings list.
@@ -2223,12 +2212,12 @@ Current time: {current_time}
         Args:
             learning: The learning to add to the list, if it's not already present.
         """
-        if not learning or learning in self.learnings:
+        if not learning or learning in self.agent_state.learnings:
             return
 
-        self.learnings.append(learning)
-        if len(self.learnings) > self.max_learnings_history:
-            self.learnings.pop(0)
+        self.agent_state.learnings.append(learning)
+        if len(self.agent_state.learnings) > self.max_learnings_history:
+            self.agent_state.learnings.pop(0)
 
     def get_learning_details(self) -> str:
         """Get the learning details from the current conversation.
@@ -2238,7 +2227,7 @@ Current time: {current_time}
         """
         template = f"""
         <learning_details>
-        {"\n".join([f"- {learning}" for learning in self.learnings])}
+        {"\n".join([f"- {learning}" for learning in self.agent_state.learnings])}
         </learning_details>
         """
         return template
@@ -2339,7 +2328,7 @@ the user's request.  You should take them into account as you work on the curren
         """
         template = f"""
         <current_plan>
-        {self.current_plan}
+        {self.agent_state.current_plan}
         </current_plan>
         """
         return template
@@ -2350,7 +2339,7 @@ the user's request.  You should take them into account as you work on the curren
         Args:
             instruction_details (str): The instruction details for the agent
         """
-        self.instruction_details = instruction_details
+        self.agent_state.instruction_details = instruction_details
 
     def get_instruction_details(self) -> str:
         """Get the instruction details for the agent.
@@ -2360,7 +2349,7 @@ the user's request.  You should take them into account as you work on the curren
         """
         template = f"""
         <instruction_details>
-        {self.instruction_details}
+        {self.agent_state.instruction_details}
         </instruction_details>
         """
         return template
@@ -2389,10 +2378,7 @@ the user's request.  You should take them into account as you work on the curren
         if classification and not new_code_record.task_classification:
             new_code_record.task_classification = classification.type
 
-        self.code_history.append(new_code_record)
-
-    # Add status_queue as an instance variable
-    status_queue: Optional[Queue] = None  # type: ignore
+        self.agent_state.execution_history.append(new_code_record)
 
     async def update_job_execution_state(self, new_code_record: CodeExecutionResult) -> None:
         """Update the job execution state.
