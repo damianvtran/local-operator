@@ -312,7 +312,7 @@
           "Agents"
         ],
         "summary": "List agents",
-        "description": "Retrieve a paginated list of agents with their details. Optionally filter by agent name.",
+        "description": "Retrieve a paginated list of agents with their details. Optionally filter by agent name and sort by various fields.",
         "operationId": "list_agents_v1_agents_get",
         "parameters": [
           {
@@ -351,6 +351,30 @@
               "title": "Name"
             },
             "description": "Filter agents by name (case-insensitive)"
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Sort field (name, created_date, last_message_datetime)",
+              "default": "last_message_datetime",
+              "title": "Sort"
+            },
+            "description": "Sort field (name, created_date, last_message_datetime)"
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Sort direction (asc, desc)",
+              "default": "desc",
+              "title": "Direction"
+            },
+            "description": "Sort direction (asc, desc)"
           }
         ],
         "responses": {
