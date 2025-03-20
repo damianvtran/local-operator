@@ -935,6 +935,12 @@ class AgentRegistry:
                 return type(obj)(convert_unpicklable(x) for x in obj)
             elif isinstance(obj, (int, float, str, bool, type(None))):
                 return obj
+            elif hasattr(obj, "__iter__") and hasattr(obj, "__next__"):
+                # Handle generator objects by converting to a list
+                try:
+                    return list(obj)
+                except Exception:
+                    return str(obj)
             else:
                 try:
                     dill.dumps(obj)
