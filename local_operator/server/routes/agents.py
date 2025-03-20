@@ -34,7 +34,7 @@ logger = logging.getLogger("local_operator.server.routes.agents")
     response_model=CRUDResponse[AgentListResult],
     summary="List agents",
     description="Retrieve a paginated list of agents with their details. Optionally filter "
-    "by agent name.",
+    "by agent name and sort by various fields.",
     openapi_extra={
         "responses": {
             "200": {
@@ -83,12 +83,21 @@ async def list_agents(
     page: int = Query(1, ge=1, description="Page number"),
     per_page: int = Query(10, ge=1, description="Number of agents per page"),
     name: str = Query(None, description="Filter agents by name (case-insensitive)"),
+    sort: str = Query(
+        "last_message_datetime",
+        description="Sort field (name, created_date, last_message_datetime)",
+    ),
+    direction: str = Query("desc", description="Sort direction (asc, desc)"),
 ):
     """
     Retrieve a paginated list of agents.
 
     Optionally filter the list by agent name using the 'name' query parameter.
     The filter is case-insensitive and matches agents whose names contain the provided string.
+
+    Supports sorting by name, created_date, or last_message_datetime in ascending or
+    descending order.
+    Default sort is by last_message_datetime in descending order.
     """
     try:
         agents_list = agent_registry.list_agents()
@@ -96,6 +105,43 @@ async def list_agents(
         # Filter by name if provided
         if name:
             agents_list = [agent for agent in agents_list if name.lower() in agent.name.lower()]
+
+        # Validate sort field
+        valid_sort_fields = ["name", "created_date", "last_message_datetime"]
+        if sort not in valid_sort_fields:
+            sort = "last_message_datetime"
+
+        # Validate direction
+        is_ascending = direction.lower() == "asc"
+
+        # Sort the agents list
+        if sort == "name":
+            agents_list.sort(key=lambda agent: agent.name.lower(), reverse=not is_ascending)
+        elif sort == "created_date":
+            agents_list.sort(
+                key=lambda agent: (
+                    datetime.fromisoformat(agent.created_date)
+                    if isinstance(agent.created_date, str)
+                    else agent.created_date
+                ),
+                reverse=not is_ascending,
+            )
+        else:  # last_message_datetime
+            # Default to created_date if last_message_datetime is not available
+            agents_list.sort(
+                key=lambda agent: (
+                    datetime.fromisoformat(agent.last_message_datetime)
+                    if hasattr(agent, "last_message_datetime")
+                    and agent.last_message_datetime
+                    and isinstance(agent.last_message_datetime, str)
+                    else (
+                        datetime.fromisoformat(agent.created_date)
+                        if isinstance(agent.created_date, str)
+                        else agent.created_date
+                    )
+                ),
+                reverse=not is_ascending,
+            )
     except Exception as e:
         logger.exception("Error retrieving agents")
         raise HTTPException(status_code=500, detail=f"Error retrieving agents: {e}")
