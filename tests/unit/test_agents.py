@@ -1419,3 +1419,106 @@ def test_migrate_legacy_agents_no_migration_needed(temp_agents_dir: Path):
     agent = registry.get_agent(agent_id)
     assert agent.id == agent_id
     assert agent.name == "Test Agent 1"
+
+
+def test_get_agent_system_prompt(temp_agents_dir: Path):
+    registry = AgentRegistry(temp_agents_dir)
+    agent_name = "Test Agent"
+    agent = registry.create_agent(
+        AgentEditFields(
+            name=agent_name,
+            security_prompt="test security prompt",
+            hosting="test-hosting",
+            model="test-model",
+            description="test description",
+            last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+
+    # Create a system prompt file
+    agent_dir = temp_agents_dir / "agents" / agent.id
+    system_prompt_path = agent_dir / "system_prompt.md"
+    test_prompt = "This is a test system prompt for the agent."
+
+    with system_prompt_path.open("w", encoding="utf-8") as f:
+        f.write(test_prompt)
+
+    # Get the system prompt and verify it matches
+    retrieved_prompt = registry.get_agent_system_prompt(agent.id)
+    assert retrieved_prompt == test_prompt
+
+    # Test getting system prompt for non-existent file
+    system_prompt_path.unlink()
+    empty_prompt = registry.get_agent_system_prompt(agent.id)
+    assert empty_prompt == ""
+
+    # Test getting system prompt for non-existent agent
+    with pytest.raises(KeyError):
+        registry.get_agent_system_prompt("non-existent-id")
+
+
+def test_set_agent_system_prompt(temp_agents_dir: Path):
+    registry = AgentRegistry(temp_agents_dir)
+    agent_name = "Test Agent"
+    agent = registry.create_agent(
+        AgentEditFields(
+            name=agent_name,
+            security_prompt="test security prompt",
+            hosting="test-hosting",
+            model="test-model",
+            description="test description",
+            last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+
+    # Set the system prompt
+    test_prompt = "This is a new system prompt for the agent."
+    registry.set_agent_system_prompt(agent.id, test_prompt)
+
+    # Verify the prompt was written to file
+    agent_dir = temp_agents_dir / "agents" / agent.id
+    system_prompt_path = agent_dir / "system_prompt.md"
+    assert system_prompt_path.exists()
+
+    with system_prompt_path.open("r", encoding="utf-8") as f:
+        saved_prompt = f.read()
+
+    assert saved_prompt == test_prompt
+
+    # Test setting system prompt for non-existent agent
+    with pytest.raises(KeyError):
+        registry.set_agent_system_prompt("non-existent-id", "Test prompt")
+
+    # Test error handling when writing fails
+
+    # Create a mock that raises IOError when writing
+    original_open = open
+
+    def mock_open_that_fails(*args, **kwargs):
+        if args[0] == system_prompt_path and "w" in args[1]:
+            raise IOError("Simulated write error")
+        return original_open(*args, **kwargs)
+
+    # Apply the mock and test
+    with pytest.raises(IOError):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("builtins.open", mock_open_that_fails)
+            registry.set_agent_system_prompt(agent.id, "This should fail")

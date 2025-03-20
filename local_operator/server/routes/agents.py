@@ -995,3 +995,152 @@ async def get_agent_execution_history(
         raise HTTPException(
             status_code=500, detail=f"Error retrieving agent execution history: {str(e)}"
         )
+
+
+@router.get(
+    "/v1/agents/{agent_id}/system-prompt",
+    response_model=CRUDResponse,
+    summary="Get agent system prompt",
+    description="Retrieve the system prompt for a specific agent.",
+    responses={
+        200: {
+            "description": "Agent system prompt retrieved successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": 200,
+                        "message": "Agent system prompt retrieved successfully",
+                        "result": {"system_prompt": "You are a helpful assistant..."},
+                    }
+                }
+            },
+        },
+        404: {
+            "description": "Agent not found",
+            "content": {
+                "application/json": {"example": {"detail": "Agent with ID agent123 not found"}}
+            },
+        },
+        500: {
+            "description": "Internal server error",
+            "content": {
+                "application/json": {"example": {"detail": "Error retrieving agent system prompt"}}
+            },
+        },
+    },
+)
+async def get_agent_system_prompt(
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
+    agent_id: str = Path(..., description="ID of the agent", examples=["agent123"]),
+):
+    """
+    Retrieve the system prompt for a specific agent.
+
+    Args:
+        agent_registry: The agent registry dependency
+        agent_id: The unique identifier of the agent
+
+    Returns:
+        CRUDResponse: A response containing the agent's system prompt
+
+    Raises:
+        HTTPException: If the agent is not found or there is an error retrieving the system prompt
+    """
+    try:
+        system_prompt = agent_registry.get_agent_system_prompt(agent_id)
+        return CRUDResponse(
+            status=200,
+            message="Agent system prompt retrieved successfully",
+            result={"system_prompt": system_prompt},
+        )
+    except KeyError:
+        logger.exception(f"Agent with ID {agent_id} not found")
+        raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+    except FileNotFoundError as e:
+        logger.exception(f"System prompt file not found for agent {agent_id}")
+        raise HTTPException(status_code=404, detail=str(e))
+    except IOError as e:
+        logger.exception(f"Error reading system prompt for agent {agent_id}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.exception("Error retrieving agent system prompt")
+        raise HTTPException(
+            status_code=500, detail=f"Error retrieving agent system prompt: {str(e)}"
+        )
+
+
+@router.put(
+    "/v1/agents/{agent_id}/system-prompt",
+    response_model=CRUDResponse,
+    summary="Update agent system prompt",
+    description="Update the system prompt for a specific agent.",
+    responses={
+        200: {
+            "description": "Agent system prompt updated successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": 200,
+                        "message": "Agent system prompt updated successfully",
+                        "result": {},
+                    }
+                }
+            },
+        },
+        404: {
+            "description": "Agent not found",
+            "content": {
+                "application/json": {"example": {"detail": "Agent with ID agent123 not found"}}
+            },
+        },
+        500: {
+            "description": "Internal server error",
+            "content": {
+                "application/json": {"example": {"detail": "Error updating agent system prompt"}}
+            },
+        },
+    },
+)
+async def update_agent_system_prompt(
+    system_prompt: Dict[str, str],
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
+    agent_id: str = Path(..., description="ID of the agent", examples=["agent123"]),
+):
+    """
+    Update the system prompt for a specific agent.
+
+    Args:
+        system_prompt: A dictionary containing the system prompt text
+        agent_registry: The agent registry dependency
+        agent_id: The unique identifier of the agent
+
+    Returns:
+        CRUDResponse: A response indicating success or failure
+
+    Raises:
+        HTTPException: If the agent is not found or there is an error updating the system prompt
+    """
+    try:
+        if "system_prompt" not in system_prompt:
+            raise HTTPException(
+                status_code=422, detail="Request body must contain 'system_prompt' field"
+            )
+
+        agent_registry.set_agent_system_prompt(agent_id, system_prompt["system_prompt"])
+        return CRUDResponse(
+            status=200,
+            message="Agent system prompt updated successfully",
+            result={},
+        )
+    except KeyError:
+        logger.exception(f"Agent with ID {agent_id} not found")
+        raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+    except IOError as e:
+        logger.exception(f"Error writing system prompt for agent {agent_id}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise
+
+        logger.exception("Error updating agent system prompt")
+        raise HTTPException(status_code=500, detail=f"Error updating agent system prompt: {str(e)}")
