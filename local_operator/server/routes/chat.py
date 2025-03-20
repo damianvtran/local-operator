@@ -354,7 +354,7 @@ async def chat_async_endpoint(
                 credential_manager,
                 config_manager,
                 agent_registry,
-                job_manager,
+                "job_manager",  # Pass a string ID instead of the actual job_manager object
                 request.context if request.context else None,
                 request.options.model_dump() if request.options else None,
             ),
@@ -481,7 +481,7 @@ async def chat_with_agent_async(
                 credential_manager,
                 config_manager,
                 agent_registry,
-                job_manager,
+                "job_manager",  # Pass a string ID instead of the actual job_manager object
                 request.persist_conversation,
                 request.user_message_id,
             ),
