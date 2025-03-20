@@ -38,6 +38,7 @@ from local_operator.executor import LocalCodeExecutor
 from local_operator.notebook import save_code_history_to_notebook
 from local_operator.operator import ConversationRole
 from local_operator.tools import ToolRegistry
+from local_operator.types import AgentState
 
 
 def create_agent_from_conversation_tool(
@@ -111,7 +112,15 @@ def create_agent_from_conversation_tool(
             )
         )
         agent_registry.save_agent_state(
-            new_agent.id, conversation_history_to_save, execution_history_to_save
+            new_agent.id,
+            AgentState(
+                version=new_agent.version,
+                conversation=conversation_history_to_save,
+                execution_history=execution_history_to_save,
+                learnings=executor.agent_state.learnings,
+                current_plan=executor.agent_state.current_plan,
+                instruction_details=executor.agent_state.instruction_details,
+            ),
         )
         return new_agent
 
@@ -177,7 +186,15 @@ def save_agent_training_tool(
         execution_history_to_save = execution_history[:cutoff_idx]
 
         agent_registry.save_agent_state(
-            executor.agent.id, conversation_history_to_save, execution_history_to_save
+            executor.agent.id,
+            AgentState(
+                version=executor.agent.version,
+                conversation=conversation_history_to_save,
+                execution_history=execution_history_to_save,
+                learnings=executor.agent_state.learnings,
+                current_plan=executor.agent_state.current_plan,
+                instruction_details=executor.agent_state.instruction_details,
+            ),
         )
         return executor.agent
 

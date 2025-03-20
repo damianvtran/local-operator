@@ -10,6 +10,7 @@ import yaml
 
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.types import (
+    AgentState,
     CodeExecutionResult,
     ConversationRecord,
     ConversationRole,
@@ -583,7 +584,15 @@ def test_save_and_load_state(temp_agents_dir: Path):
 
     # Save the conversation with all data
     registry.save_agent_state(
-        agent.id, conversation, execution_history, learnings, current_plan, instruction_details
+        agent_id=agent.id,
+        agent_state=AgentState(
+            version="",
+            conversation=conversation,
+            execution_history=execution_history,
+            learnings=learnings,
+            current_plan=current_plan,
+            instruction_details=instruction_details,
+        ),
     )
 
     # Verify JSONL files exist
@@ -784,12 +793,15 @@ def test_clone_agent(temp_agents_dir: Path):
 
     # Save the conversation with all data
     registry.save_agent_state(
-        source_agent.id,
-        conversation,
-        execution_history,
-        learnings,
-        current_plan,
-        instruction_details,
+        agent_id=source_agent.id,
+        agent_state=AgentState(
+            version="",
+            conversation=conversation,
+            execution_history=execution_history,
+            learnings=learnings,
+            current_plan=current_plan,
+            instruction_details=instruction_details,
+        ),
     )
 
     # Clone the agent
@@ -1085,7 +1097,17 @@ def test_update_agent_state_with_context(temp_agents_dir: Path):
 
     # Update agent state
     registry.update_agent_state(
-        agent.id, conversation, code_history, test_working_dir, test_context
+        agent_id=agent.id,
+        agent_state=AgentState(
+            version="",
+            conversation=conversation,
+            execution_history=code_history,
+            learnings=[],
+            current_plan="",
+            instruction_details="",
+        ),
+        context=test_context,
+        current_working_directory=test_working_dir,
     )
 
     # Verify conversation was saved

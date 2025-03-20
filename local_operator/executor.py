@@ -1511,8 +1511,7 @@ class LocalCodeExecutor:
         if self.persist_conversation and self.agent_registry and self.agent:
             self.agent_registry.update_agent_state(
                 agent_id=self.agent.id,
-                conversation_history=self.agent_state.conversation,
-                code_history=self.agent_state.execution_history,
+                agent_state=self.agent_state,
                 current_working_directory=current_working_directory,
                 context=self.context,
             )

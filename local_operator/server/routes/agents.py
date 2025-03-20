@@ -24,6 +24,7 @@ from local_operator.server.models.schemas import (
     AgentUpdate,
     CRUDResponse,
 )
+from local_operator.types import AgentState
 
 router = APIRouter(tags=["Agents"])
 logger = logging.getLogger("local_operator.server.routes.agents")
@@ -632,15 +633,19 @@ async def clear_agent_conversation(
     """
     try:
         # Get the agent to verify it exists
-        agent_registry.get_agent(agent_id)
+        agent = agent_registry.get_agent(agent_id)
 
         # Clear the conversation by saving an empty list
         agent_registry.save_agent_state(
             agent_id=agent_id,
-            conversation=[],
-            execution_history=[],
-            current_plan="",
-            instruction_details="",
+            agent_state=AgentState(
+                version=agent.version,
+                conversation=[],
+                execution_history=[],
+                learnings=[],
+                current_plan="",
+                instruction_details="",
+            ),
         )
         agent_registry.save_agent_context(agent_id=agent_id, context={})
 
