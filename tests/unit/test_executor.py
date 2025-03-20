@@ -80,6 +80,7 @@ def executor(mock_model_config, test_tool_registry):
         learnings=[],
         current_plan=None,
         instruction_details=None,
+        agent_system_prompt=None,
     )
 
     mock_executor = LocalCodeExecutor(mock_model_config, agent=agent)
@@ -1778,6 +1779,7 @@ def test_load_conversation_history(executor, initial_history, new_history, expec
             learnings=[],
             current_plan=None,
             instruction_details=None,
+            agent_system_prompt=None,
         )
 
         executor.load_agent_state(new_agent_state)

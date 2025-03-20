@@ -382,7 +382,11 @@ class Operator:
         if current_task_classification.type != RequestType.CONTINUE:
             self.executor.set_current_plan("")
 
-        system_prompt = create_system_prompt(self.executor.tool_registry, PlanSystemPrompt)
+        system_prompt = create_system_prompt(
+            tool_registry=self.executor.tool_registry,
+            response_format=PlanSystemPrompt,
+            agent_system_prompt=self.executor.agent_state.agent_system_prompt,
+        )
 
         messages = [
             ConversationRecord(
@@ -480,7 +484,11 @@ class Operator:
         It starts by creating a system prompt based on the available tools and the
         predefined reflection system prompt. The method then appends the current
         """
-        system_prompt = create_system_prompt(self.executor.tool_registry, "")
+        system_prompt = create_system_prompt(
+            tool_registry=self.executor.tool_registry,
+            response_format="",
+            agent_system_prompt=self.executor.agent_state.agent_system_prompt,
+        )
 
         messages = [
             ConversationRecord(

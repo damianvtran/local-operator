@@ -331,6 +331,7 @@ class AgentState(BaseModel):
         learnings (List[str]): List of learnings extracted from the conversation
         current_plan (str | None): The current plan for the agent, if any
         instruction_details (str | None): Detailed instructions for the agent, if any
+        agent_system_prompt (str | None): The system prompt for the agent, if any
     """
 
     version: str = Field(..., description="The version of the conversation")
@@ -345,3 +346,4 @@ class AgentState(BaseModel):
     instruction_details: str | None = Field(
         None, description="The details of the instructions for the agent"
     )
+    agent_system_prompt: str | None = Field(None, description="The system prompt for the agent")

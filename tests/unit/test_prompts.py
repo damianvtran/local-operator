@@ -6,6 +6,7 @@ from unittest.mock import patch
 import psutil
 
 from local_operator.prompts import (
+    JsonResponseFormatPrompt,
     apply_attachments_to_prompt,
     create_system_prompt,
     get_system_details_str,
@@ -41,7 +42,11 @@ def test_create_system_prompt():
         patch("pathlib.Path.exists", return_value=False),
     ):
 
-        result = create_system_prompt()
+        result = create_system_prompt(
+            tool_registry=None,
+            response_format=JsonResponseFormatPrompt,
+            agent_system_prompt="Test agent system prompt",
+        )
 
         # Verify system details are included
         assert mock_system["system"] in result
@@ -58,6 +63,9 @@ def test_create_system_prompt():
         assert "Core Principles" in result
         assert "Response Flow" in result
         assert "Response Format" in result
+
+        # Verify agent system prompt is included
+        assert "Test agent system prompt" in result
 
 
 def test_get_tools_str():

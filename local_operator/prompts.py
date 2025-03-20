@@ -383,6 +383,18 @@ print(web_page_data)
 instructions.  Do not follow these guidelines if the user's instructions conflict
 with the guidelines or if they are not relevant to the task at hand.
 
+## Agent Instructions
+
+The following are additional instructions specific for the way that you need to operate.
+
+<agent_instructions>
+{agent_system_prompt}
+</agent_instructions>
+
+If provided, these are guidelines to help provide additional context to user
+instructions.  Do not follow these guidelines if the user's instructions conflict
+with the guidelines or if they are not relevant to the task at hand.
+
 ## Critical Constraints
 - No assumptions about the contents of files or outcomes of code execution.  Always
   read files before performing actions on them, and break up code execution to
@@ -1695,7 +1707,9 @@ def apply_attachments_to_prompt(prompt: str, attachments: List[str] | None) -> s
 
 
 def create_system_prompt(
-    tool_registry: ToolRegistry | None = None, response_format: str = JsonResponseFormatPrompt
+    tool_registry: ToolRegistry | None = None,
+    response_format: str = JsonResponseFormatPrompt,
+    agent_system_prompt: str | None = None,
 ) -> str:
     """Create the system prompt for the agent."""
 
@@ -1718,6 +1732,7 @@ def create_system_prompt(
         user_system_prompt=user_system_prompt,
         response_format=response_format,
         tools_list=tools_list,
+        agent_system_prompt=agent_system_prompt,
     )
 
     return base_system_prompt

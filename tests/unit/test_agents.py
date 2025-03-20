@@ -592,6 +592,7 @@ def test_save_and_load_state(temp_agents_dir: Path):
             learnings=learnings,
             current_plan=current_plan,
             instruction_details=instruction_details,
+            agent_system_prompt="test system prompt",
         ),
     )
 
@@ -620,6 +621,11 @@ def test_save_and_load_state(temp_agents_dir: Path):
     assert instruction_file.exists()
     with instruction_file.open("r") as f:
         assert f.read() == instruction_details
+
+    system_prompt_file = agent_dir / "system_prompt.md"
+    assert system_prompt_file.exists()
+    with system_prompt_file.open("r") as f:
+        assert f.read() == "test system prompt"
 
     # Load the conversation and verify data
     loaded_conversation_data = registry.load_agent_state(agent.id)
@@ -801,6 +807,7 @@ def test_clone_agent(temp_agents_dir: Path):
             learnings=learnings,
             current_plan=current_plan,
             instruction_details=instruction_details,
+            agent_system_prompt="test system prompt",
         ),
     )
 
@@ -832,6 +839,12 @@ def test_clone_agent(temp_agents_dir: Path):
     assert plan_file.exists()
     instruction_file = cloned_agent_dir / "instruction_details.txt"
     assert instruction_file.exists()
+
+    # Verify system prompt file was created
+    system_prompt_file = cloned_agent_dir / "system_prompt.md"
+    assert system_prompt_file.exists()
+    with system_prompt_file.open("r") as f:
+        assert f.read() == "test system prompt"
 
     # Verify conversation was copied
     cloned_conversation_data = registry.load_agent_state(cloned_agent.id)
@@ -1105,6 +1118,7 @@ def test_update_agent_state_with_context(temp_agents_dir: Path):
             learnings=[],
             current_plan="",
             instruction_details="",
+            agent_system_prompt="",
         ),
         context=test_context,
         current_working_directory=test_working_dir,

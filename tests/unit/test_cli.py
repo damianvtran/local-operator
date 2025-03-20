@@ -59,6 +59,7 @@ def mock_agent_registry(mock_agent):
         execution_history=[],
         current_plan="",
         instruction_details="",
+        agent_system_prompt="",
     )
     return registry
 

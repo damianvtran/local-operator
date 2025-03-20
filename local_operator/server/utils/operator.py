@@ -133,6 +133,7 @@ def create_operator(
             learnings=[],
             current_plan=None,
             instruction_details=None,
+            agent_system_prompt=None,
         )
 
     model_info_client: Optional[OpenRouterClient] = None

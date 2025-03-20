@@ -560,6 +560,7 @@ async def test_get_agent_conversation_pagination_default(
             learnings=[],
             current_plan="",
             instruction_details="",
+            agent_system_prompt="",
         ),
     )
 
@@ -628,6 +629,7 @@ async def test_get_agent_conversation_pagination_second_page(
             learnings=[],
             current_plan="",
             instruction_details="",
+            agent_system_prompt="",
         ),
     )
 
@@ -696,6 +698,7 @@ async def test_get_agent_conversation_custom_per_page(
             learnings=[],
             current_plan="",
             instruction_details="",
+            agent_system_prompt="",
         ),
     )
 
@@ -763,6 +766,7 @@ async def test_get_agent_conversation_page_out_of_bounds(
             learnings=[],
             current_plan="",
             instruction_details="",
+            agent_system_prompt="",
         ),
     )
     # Test page out of bounds
@@ -837,6 +841,7 @@ async def test_get_agent_execution_history(test_app_client, dummy_registry: Agen
             learnings=[],
             current_plan="",
             instruction_details="",
+            agent_system_prompt="",
         ),
     )
 
@@ -910,6 +915,7 @@ async def test_get_agent_execution_history_pagination(
             learnings=[],
             current_plan="",
             instruction_details="",
+            agent_system_prompt="",
         ),
     )
 
@@ -994,6 +1000,7 @@ async def test_get_agent_execution_history_page_out_of_bounds(
             learnings=[],
             current_plan="",
             instruction_details="",
+            agent_system_prompt="",
         ),
     )
 
@@ -1103,6 +1110,7 @@ async def test_clear_agent_conversation(test_app_client, dummy_registry: AgentRe
             learnings=[],
             current_plan="",
             instruction_details="",
+            agent_system_prompt="",
         ),
     )
 

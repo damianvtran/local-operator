@@ -120,6 +120,7 @@ def create_agent_from_conversation_tool(
                 learnings=executor.agent_state.learnings,
                 current_plan=executor.agent_state.current_plan,
                 instruction_details=executor.agent_state.instruction_details,
+                agent_system_prompt=executor.agent_state.agent_system_prompt,
             ),
         )
         return new_agent
@@ -185,16 +186,15 @@ def save_agent_training_tool(
         conversation_history_to_save = conversation_history[:cutoff_idx]
         execution_history_to_save = execution_history[:cutoff_idx]
 
+        agent_state_to_save = AgentState(
+            conversation=conversation_history_to_save,
+            execution_history=execution_history_to_save,
+            **executor.agent_state.model_dump(exclude={"conversation", "execution_history"}),
+        )
+
         agent_registry.save_agent_state(
             executor.agent.id,
-            AgentState(
-                version=executor.agent.version,
-                conversation=conversation_history_to_save,
-                execution_history=execution_history_to_save,
-                learnings=executor.agent_state.learnings,
-                current_plan=executor.agent_state.current_plan,
-                instruction_details=executor.agent_state.instruction_details,
-            ),
+            agent_state_to_save,
         )
         return executor.agent
 
