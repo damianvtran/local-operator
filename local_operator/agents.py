@@ -1,5 +1,6 @@
 import json
 import logging
+import shutil
 import time
 import uuid
 from datetime import datetime, timezone
@@ -8,6 +9,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import dill
+import jsonlines
+import yaml
 from pydantic import BaseModel, Field
 
 from local_operator.types import (
@@ -160,12 +163,19 @@ class AgentRegistry:
     """
     Registry for managing agents and their conversation histories.
 
-    This registry loads agent metadata from an 'agents.json' file located in the config directory.
-    Each agent's conversation history is stored separately in a JSON file named
-    '{agent_id}_conversation.json'.
+    This registry loads agent metadata from agent.yml files located in subdirectories
+    of the agents directory.
+    Each agent has its own directory with the agent ID as the directory name.
+    Agent data is stored in separate files within the agent directory:
+    - agent.yml: Agent configuration
+    - conversation.jsonl: Conversation history
+    - execution_history.jsonl: Execution history
+    - learnings.jsonl: Learnings from the conversation
+    - context.pkl: Agent context
     """
 
     config_dir: Path
+    agents_dir: Path
     agents_file: Path
     _agents: Dict[str, AgentData]
     _last_refresh_time: float
@@ -173,40 +183,61 @@ class AgentRegistry:
 
     def __init__(self, config_dir: Path, refresh_interval: float = 5.0) -> None:
         """
-        Initialize the AgentRegistry, loading metadata from agents.json.
+        Initialize the AgentRegistry, loading metadata from agent.yml files.
 
         Args:
-            config_dir (Path): Directory containing agents.json and conversation history files
+            config_dir (Path): Directory containing the agents directory
             refresh_interval (float): Time in seconds between refreshes of agent data from disk
         """
         self.config_dir = config_dir
         if not self.config_dir.exists():
             self.config_dir.mkdir(parents=True, exist_ok=True)
 
+        self.agents_dir = self.config_dir / "agents"
+        if not self.agents_dir.exists():
+            self.agents_dir.mkdir(parents=True, exist_ok=True)
+
+        # For backward compatibility
         self.agents_file: Path = self.config_dir / "agents.json"
+
         self._agents: Dict[str, AgentData] = {}
         self._last_refresh_time = time.time()
         self._refresh_interval = refresh_interval
+
+        # Migrate old agents if needed
+        self.migrate_legacy_agents()
+
+        # Load agent metadata
         self._load_agents_metadata()
 
     def _load_agents_metadata(self) -> None:
         """
-        Load agents' metadata from the agents.json file into memory.
-        Only metadata such as 'id', 'name', 'created_date', and 'version' is stored.
+        Load agents' metadata from agent.yml files in the agents directory.
+        Each agent has its own directory with the agent ID as the directory name.
 
         Raises:
-            Exception: If there is an error loading or parsing the agents metadata file
+            Exception: If there is an error loading or parsing the agent metadata files
         """
-        if self.agents_file.exists():
-            with self.agents_file.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            # Expect data to be a list of agent metadata dictionaries.
-            for item in data:
-                try:
-                    agent = AgentData.model_validate(item)
-                    self._agents[agent.id] = agent
-                except Exception as e:
-                    raise Exception(f"Invalid agent metadata: {str(e)}")
+        # Clear existing agents
+        self._agents = {}
+
+        # Iterate through all directories in the agents directory
+        for agent_dir in self.agents_dir.iterdir():
+            if not agent_dir.is_dir():
+                continue
+
+            agent_config_file = agent_dir / "agent.yml"
+            if not agent_config_file.exists():
+                continue
+
+            try:
+                with agent_config_file.open("r", encoding="utf-8") as f:
+                    agent_data = yaml.safe_load(f)
+
+                agent = AgentData.model_validate(agent_data)
+                self._agents[agent.id] = agent
+            except Exception as e:
+                logging.error(f"Invalid agent metadata in {agent_dir.name}: {str(e)}")
 
     def create_agent(self, agent_edit_metadata: AgentEditFields) -> AgentData:
         """
@@ -269,27 +300,41 @@ class AgentRegistry:
         # Add to in-memory agents
         self._agents[agent_metadata.id] = agent_metadata
 
-        # Save updated agents metadata to file
-        agents_list = [agent.model_dump() for agent in self._agents.values()]
+        # Create agent directory if it doesn't exist
+        agent_dir = self.agents_dir / agent_metadata.id
+        if not agent_dir.exists():
+            agent_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save agent metadata to agent.yml
         try:
-            with self.agents_file.open("w", encoding="utf-8") as f:
-                json.dump(agents_list, f, indent=2, default=str)
+            with (agent_dir / "agent.yml").open("w", encoding="utf-8") as f:
+                yaml.dump(agent_metadata.model_dump(), f, default_flow_style=False)
         except Exception as e:
             # Remove from in-memory if file save fails
             self._agents.pop(agent_metadata.id)
             raise Exception(f"Failed to save agent metadata: {str(e)}")
 
-        # Create empty conversation file
-        conversation_file = self.config_dir / f"{agent_metadata.id}_conversation.json"
+        # Create empty conversation.jsonl file
         try:
-            with conversation_file.open("w", encoding="utf-8") as f:
-                json.dump([], f)
+            conversation_file = agent_dir / "conversation.jsonl"
+            if not conversation_file.exists():
+                conversation_file.touch()
+
+            # Create empty execution_history.jsonl file
+            execution_history_file = agent_dir / "execution_history.jsonl"
+            if not execution_history_file.exists():
+                execution_history_file.touch()
+
+            # Create empty learnings.jsonl file
+            learnings_file = agent_dir / "learnings.jsonl"
+            if not learnings_file.exists():
+                learnings_file.touch()
         except Exception as e:
-            # Clean up metadata if conversation file creation fails
+            # Clean up metadata if file creation fails
             self._agents.pop(agent_metadata.id)
-            if self.agents_file.exists():
-                self.agents_file.unlink()
-            raise Exception(f"Failed to create conversation file: {str(e)}")
+            if agent_dir.exists():
+                shutil.rmtree(agent_dir)
+            raise Exception(f"Failed to create agent files: {str(e)}")
 
         return agent_metadata
 
@@ -321,11 +366,14 @@ class AgentRegistry:
         # Update the in-memory agent data
         self._agents[agent_id] = current_metadata
 
-        # Save updated agents metadata to file
-        agents_list = [agent.model_dump() for agent in self._agents.values()]
+        # Save agent metadata to agent.yml
+        agent_dir = self.agents_dir / agent_id
+        if not agent_dir.exists():
+            agent_dir.mkdir(parents=True, exist_ok=True)
+
         try:
-            with self.agents_file.open("w", encoding="utf-8") as f:
-                json.dump(agents_list, f, indent=2, default=str)
+            with (agent_dir / "agent.yml").open("w", encoding="utf-8") as f:
+                yaml.dump(current_metadata.model_dump(), f, default_flow_style=False)
         except Exception as e:
             # Restore original metadata if save fails
             self._agents[agent_id] = AgentData.model_validate(agent_id)
@@ -335,7 +383,7 @@ class AgentRegistry:
 
     def delete_agent(self, agent_id: str) -> None:
         """
-        Delete an agent and its associated conversation history.
+        Delete an agent and its associated files.
 
         Args:
             agent_id (str): The unique identifier of the agent to delete.
@@ -350,25 +398,40 @@ class AgentRegistry:
         # Remove from in-memory dict
         self._agents.pop(agent_id)
 
-        # Save updated agents metadata to file
-        agents_list = [agent.model_dump() for agent in self._agents.values()]
-        try:
-            with self.agents_file.open("w", encoding="utf-8") as f:
-                json.dump(agents_list, f, indent=2, default=str)
-        except Exception as e:
-            raise Exception(f"Failed to update agent metadata file: {str(e)}")
+        # Delete agent directory if it exists
+        agent_dir = self.agents_dir / agent_id
+        if agent_dir.exists():
+            try:
+                shutil.rmtree(agent_dir)
+            except Exception as e:
+                raise Exception(f"Failed to delete agent directory: {str(e)}")
 
-        # Delete conversation file if it exists
+        # For backward compatibility, delete old files
         conversation_file = self.config_dir / f"{agent_id}_conversation.json"
         if conversation_file.exists():
             try:
                 conversation_file.unlink()
             except Exception as e:
-                raise Exception(f"Failed to delete conversation file: {str(e)}")
+                logging.warning(f"Failed to delete old conversation file: {str(e)}")
+
+        context_file = self.config_dir / f"{agent_id}_context.pkl"
+        if context_file.exists():
+            try:
+                context_file.unlink()
+            except Exception as e:
+                logging.warning(f"Failed to delete old context file: {str(e)}")
+
+        # Update agents.json for backward compatibility
+        agents_list = [agent.model_dump() for agent in self._agents.values()]
+        try:
+            with self.agents_file.open("w", encoding="utf-8") as f:
+                json.dump(agents_list, f, indent=2, default=str)
+        except Exception as e:
+            logging.warning(f"Failed to update agents.json for backward compatibility: {str(e)}")
 
     def clone_agent(self, agent_id: str, new_name: str) -> AgentData:
         """
-        Clone an existing agent with a new name, copying over its conversation history.
+        Clone an existing agent with a new name, copying over all its files.
 
         Args:
             agent_id (str): The unique identifier of the agent to clone
@@ -409,19 +472,76 @@ class AgentRegistry:
             )
         )
 
-        # Copy conversation history from source agent
-        source_conversation = self.load_agent_conversation(agent_id)
-        try:
-            self.save_agent_conversation(
-                new_agent.id,
-                source_conversation.conversation,
-                source_conversation.execution_history,
-            )
-            return new_agent
-        except Exception as e:
-            # Clean up if conversation copy fails
-            self.delete_agent(new_agent.id)
-            raise Exception(f"Failed to copy conversation history: {str(e)}")
+        # Copy all files from source agent directory to new agent directory
+        source_dir = self.agents_dir / agent_id
+        target_dir = self.agents_dir / new_agent.id
+
+        if source_dir.exists():
+            try:
+                # Copy conversation.jsonl if it exists
+                source_conversation_file = source_dir / "conversation.jsonl"
+                if (
+                    source_conversation_file.exists()
+                    and source_conversation_file.stat().st_size > 0
+                ):
+                    shutil.copy2(source_conversation_file, target_dir / "conversation.jsonl")
+
+                # Copy execution_history.jsonl if it exists
+                source_execution_file = source_dir / "execution_history.jsonl"
+                if source_execution_file.exists() and source_execution_file.stat().st_size > 0:
+                    shutil.copy2(source_execution_file, target_dir / "execution_history.jsonl")
+
+                # Copy learnings.jsonl if it exists
+                source_learnings_file = source_dir / "learnings.jsonl"
+                if source_learnings_file.exists() and source_learnings_file.stat().st_size > 0:
+                    shutil.copy2(source_learnings_file, target_dir / "learnings.jsonl")
+
+                # Copy current_plan.txt if it exists
+                source_plan_file = source_dir / "current_plan.txt"
+                if source_plan_file.exists():
+                    shutil.copy2(source_plan_file, target_dir / "current_plan.txt")
+
+                # Copy instruction_details.txt if it exists
+                source_instruction_file = source_dir / "instruction_details.txt"
+                if source_instruction_file.exists():
+                    shutil.copy2(source_instruction_file, target_dir / "instruction_details.txt")
+
+                # Copy context.pkl if it exists
+                source_context_file = source_dir / "context.pkl"
+                if source_context_file.exists():
+                    shutil.copy2(source_context_file, target_dir / "context.pkl")
+
+                return new_agent
+            except Exception as e:
+                # Clean up if file copy fails
+                self.delete_agent(new_agent.id)
+                raise Exception(f"Failed to copy agent files: {str(e)}")
+        else:
+            # For backward compatibility, copy from old format files
+            try:
+                # Load conversation data from old format
+                source_conversation = self.load_agent_conversation(agent_id)
+
+                # Save to new format
+                self.save_agent_conversation(
+                    new_agent.id,
+                    source_conversation.conversation,
+                    source_conversation.execution_history,
+                    source_conversation.learnings,
+                    source_conversation.current_plan,
+                    source_conversation.instruction_details,
+                )
+
+                # Copy context if it exists
+                context = self.load_agent_context(agent_id)
+                if context is not None:
+                    self.save_agent_context(new_agent.id, context)
+
+                return new_agent
+            except Exception as e:
+                # Clean up if conversation copy fails
+                self.delete_agent(new_agent.id)
+                raise Exception(f"Failed to copy agent data: {str(e)}")
 
     def _refresh_if_needed(self) -> None:
         """
@@ -434,31 +554,57 @@ class AgentRegistry:
 
     def _refresh_agents_metadata(self) -> None:
         """
-        Reload agents' metadata from the agents.json file into memory.
+        Reload agents' metadata from agent.yml files in the agents directory.
         This is used to refresh the in-memory state with changes made by other processes.
         """
+        # Clear existing agents
+        refreshed_agents = {}
+
+        # First try to load from agent.yml files in the agents directory
+        if self.agents_dir.exists():
+            # Iterate through all directories in the agents directory
+            for agent_dir in self.agents_dir.iterdir():
+                if not agent_dir.is_dir():
+                    continue
+
+                agent_config_file = agent_dir / "agent.yml"
+                if not agent_config_file.exists():
+                    continue
+
+                try:
+                    with agent_config_file.open("r", encoding="utf-8") as f:
+                        agent_data = yaml.safe_load(f)
+
+                    agent = AgentData.model_validate(agent_data)
+                    refreshed_agents[agent.id] = agent
+                except Exception as e:
+                    # Log the error but continue processing other agents
+                    logging.error(
+                        f"Error refreshing agent metadata from {agent_dir.name}: {str(e)}"
+                    )
+
+        # For backward compatibility, also check agents.json
         if self.agents_file.exists():
             try:
                 with self.agents_file.open("r", encoding="utf-8") as f:
                     data = json.load(f)
 
-                # Create a new dictionary to store refreshed agents
-                refreshed_agents = {}
-
                 # Process each agent in the file
                 for item in data:
                     try:
                         agent = AgentData.model_validate(item)
-                        refreshed_agents[agent.id] = agent
+                        # Only add if not already loaded from agent.yml
+                        if agent.id not in refreshed_agents:
+                            refreshed_agents[agent.id] = agent
                     except Exception as e:
                         # Log the error but continue processing other agents
-                        print(f"Error refreshing agent metadata: {str(e)}")
-
-                # Update the in-memory agents dictionary
-                self._agents = refreshed_agents
+                        logging.error(f"Error refreshing agent metadata from agents.json: {str(e)}")
             except Exception as e:
                 # Log the error but don't crash
-                print(f"Error refreshing agents metadata: {str(e)}")
+                logging.error(f"Error refreshing agents metadata from agents.json: {str(e)}")
+
+        # Update the in-memory agents dictionary
+        self._agents = refreshed_agents
 
     def get_agent(self, agent_id: str) -> AgentData:
         """
@@ -514,53 +660,116 @@ class AgentRegistry:
         """
         Load the conversation history for a specified agent.
 
-        The conversation history is stored in a JSON file named
-        "{agent_id}_conversation.json" in the config directory.
+        The conversation history is stored in separate JSONL files in the agent's directory:
+        - conversation.jsonl: Conversation history
+        - execution_history.jsonl: Execution history
+        - learnings.jsonl: Learnings from the conversation
 
         Args:
             agent_id (str): The unique identifier of the agent.
 
         Returns:
-            List[ConversationRecord]: The conversation history as a list of ConversationRecord
-                objects.
-                Returns an empty list if no conversation history exists or if there's an error.
+            AgentConversation: The agent's conversation data.
+                Returns an empty conversation if no conversation history exists or if
+                there's an error.
         """
         # Refresh agent data from disk if needed
         self._refresh_if_needed()
 
-        conversation_file = self.config_dir / f"{agent_id}_conversation.json"
-
         if agent_id not in self._agents:
             raise KeyError(f"Agent with id {agent_id} not found")
 
-        if conversation_file.exists():
-            try:
-                with conversation_file.open("r", encoding="utf-8") as f:
-                    raw_data = json.load(f)
+        agent = self._agents[agent_id]
+        agent_dir = self.agents_dir / agent_id
 
-                    try:
-                        conversation_data = AgentConversation.model_validate(raw_data)
-                        return conversation_data
-                    except Exception as e:
-                        logging.error(f"Failed to load conversation: {str(e)}")
-                        raise Exception(f"Failed to load conversation: {str(e)}")
-            except Exception:
-                # Return an empty conversation if the file is unreadable.
-                return AgentConversation(
-                    version="",
-                    conversation=[],
-                    execution_history=[],
-                    learnings=[],
-                    current_plan=None,
-                    instruction_details=None,
-                )
+        # Initialize empty conversation data
+        conversation_records = []
+        execution_history_records = []
+        learnings_list = []
+        current_plan = None
+        instruction_details = None
+
+        # Check for new format files
+        if agent_dir.exists():
+            # Load conversation records
+            conversation_file = agent_dir / "conversation.jsonl"
+            if conversation_file.exists() and conversation_file.stat().st_size > 0:
+                try:
+                    with jsonlines.open(conversation_file, mode="r") as reader:
+                        for record in reader:
+                            conversation_records.append(ConversationRecord.model_validate(record))
+                except Exception as e:
+                    logging.error(f"Failed to load conversation records: {str(e)}")
+
+            # Load execution history records
+            execution_history_file = agent_dir / "execution_history.jsonl"
+            if execution_history_file.exists() and execution_history_file.stat().st_size > 0:
+                try:
+                    with jsonlines.open(execution_history_file, mode="r") as reader:
+                        for record in reader:
+                            execution_history_records.append(
+                                CodeExecutionResult.model_validate(record)
+                            )
+                except Exception as e:
+                    logging.error(f"Failed to load execution history records: {str(e)}")
+
+            # Load learnings
+            learnings_file = agent_dir / "learnings.jsonl"
+            if learnings_file.exists() and learnings_file.stat().st_size > 0:
+                try:
+                    with jsonlines.open(learnings_file, mode="r") as reader:
+                        for record in reader:
+                            if isinstance(record, str):
+                                learnings_list.append(record)
+                            elif isinstance(record, dict) and "learning" in record:
+                                learnings_list.append(record["learning"])
+                except Exception as e:
+                    logging.error(f"Failed to load learnings: {str(e)}")
+
+            # Load plan and instruction details if they exist
+            plan_file = agent_dir / "current_plan.txt"
+            if plan_file.exists():
+                try:
+                    with plan_file.open("r", encoding="utf-8") as f:
+                        current_plan = f.read()
+                except Exception as e:
+                    logging.error(f"Failed to load current plan: {str(e)}")
+
+            instruction_file = agent_dir / "instruction_details.txt"
+            if instruction_file.exists():
+                try:
+                    with instruction_file.open("r", encoding="utf-8") as f:
+                        instruction_details = f.read()
+                except Exception as e:
+                    logging.error(f"Failed to load instruction details: {str(e)}")
+
+        # Check for old format file for backward compatibility
+        else:
+            old_conversation_file = self.config_dir / f"{agent_id}_conversation.json"
+            if old_conversation_file.exists():
+                try:
+                    with old_conversation_file.open("r", encoding="utf-8") as f:
+                        raw_data = json.load(f)
+                        try:
+                            old_data = AgentConversation.model_validate(raw_data)
+                            conversation_records = old_data.conversation
+                            execution_history_records = old_data.execution_history
+                            learnings_list = old_data.learnings
+                            current_plan = old_data.current_plan
+                            instruction_details = old_data.instruction_details
+                        except Exception as e:
+                            logging.error(f"Failed to load old conversation format: {str(e)}")
+                except Exception as e:
+                    logging.error(f"Failed to open old conversation file: {str(e)}")
+
+        # Create and return the conversation data
         return AgentConversation(
-            version="",
-            conversation=[],
-            execution_history=[],
-            learnings=[],
-            current_plan=None,
-            instruction_details=None,
+            version=agent.version,
+            conversation=conversation_records,
+            execution_history=execution_history_records,
+            learnings=learnings_list,
+            current_plan=current_plan,
+            instruction_details=instruction_details,
         )
 
     def save_agent_conversation(
@@ -575,39 +784,60 @@ class AgentRegistry:
         """
         Save the conversation history for a specified agent.
 
-        The conversation history is saved to a JSON file named
-        "{agent_id}_conversation.json" in the config directory.
+        The conversation history is stored in separate JSONL files in the agent's directory:
+        - conversation.jsonl: Conversation history
+        - execution_history.jsonl: Execution history
+        - learnings.jsonl: Learnings from the conversation
+        - current_plan.txt: Current plan text
+        - instruction_details.txt: Instruction details text
 
         Args:
             agent_id (str): The unique identifier of the agent.
-            conversation (List[Dict[str, str]]): The conversation history to save, with each message
-                containing 'role' (matching ConversationRole enum values) and 'content' fields.
+            conversation (List[ConversationRecord]): The conversation history to save.
+            execution_history (List[CodeExecutionResult]): The execution history to save.
+            learnings (List[str]): The learnings from the conversation.
+            current_plan (str | None): The current plan for the agent.
+            instruction_details (str | None): The instruction details for the agent.
         """
-        agent = self.get_agent(agent_id)
+        agent_dir = self.agents_dir / agent_id
 
-        conversation_file = self.config_dir / f"{agent_id}_conversation.json"
-        conversation_data = AgentConversation(
-            version=agent.version,
-            conversation=conversation,
-            execution_history=execution_history,
-            learnings=learnings,
-            current_plan=current_plan,
-            instruction_details=instruction_details,
-        )
+        # Create agent directory if it doesn't exist
+        if not agent_dir.exists():
+            agent_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            with conversation_file.open("w", encoding="utf-8") as f:
-                # Use a custom JSON encoder to handle datetime objects
-                json.dump(
-                    conversation_data.model_dump(),
-                    f,
-                    indent=2,
-                    ensure_ascii=False,
-                    default=lambda o: o.isoformat() if isinstance(o, datetime) else None,
-                )
+            # Save conversation records
+            conversation_file = agent_dir / "conversation.jsonl"
+            with jsonlines.open(conversation_file, mode="w") as writer:
+                for record in conversation:
+                    writer.write(record.model_dump())
+
+            # Save execution history records
+            execution_history_file = agent_dir / "execution_history.jsonl"
+            with jsonlines.open(execution_history_file, mode="w") as writer:
+                for record in execution_history:
+                    writer.write(record.model_dump())
+
+            # Save learnings
+            learnings_file = agent_dir / "learnings.jsonl"
+            with jsonlines.open(learnings_file, mode="w") as writer:
+                for learning in learnings:
+                    writer.write({"learning": learning})
+
+            # Save current plan if provided
+            if current_plan is not None:
+                plan_file = agent_dir / "current_plan.txt"
+                with plan_file.open("w", encoding="utf-8") as f:
+                    f.write(current_plan)
+
+            # Save instruction details if provided
+            if instruction_details is not None:
+                instruction_file = agent_dir / "instruction_details.txt"
+                with instruction_file.open("w", encoding="utf-8") as f:
+                    f.write(instruction_details)
+
         except Exception as e:
-            # In a production scenario, consider logging this exception
-            raise e
+            raise Exception(f"Failed to save agent conversation: {str(e)}")
 
     def create_autosave_agent(self) -> AgentData:
         """
@@ -703,7 +933,7 @@ class AgentRegistry:
         """Save the agent's context to a file.
 
         This method serializes the agent's context using dill and saves it to a file
-        named "{agent_id}_context.pkl" in the config directory. It handles unpicklable objects
+        named "context.pkl" in the agent's directory. It handles unpicklable objects
         by converting them to a serializable format.
 
         Args:
@@ -717,7 +947,12 @@ class AgentRegistry:
         if agent_id not in self._agents:
             raise KeyError(f"Agent with id {agent_id} not found")
 
-        context_file = self.config_dir / f"{agent_id}_context.pkl"
+        # Create agent directory if it doesn't exist
+        agent_dir = self.agents_dir / agent_id
+        if not agent_dir.exists():
+            agent_dir.mkdir(parents=True, exist_ok=True)
+
+        context_file = agent_dir / "context.pkl"
 
         def convert_unpicklable(obj: Any) -> Any:
             if isinstance(obj, dict):
@@ -744,7 +979,7 @@ class AgentRegistry:
         """Load the agent's context from a file.
 
         This method deserializes the agent's context using dill from a file
-        named "{agent_id}_context.pkl" in the config directory.
+        named "context.pkl" in the agent's directory.
 
         Args:
             agent_id (str): The unique identifier of the agent.
@@ -759,15 +994,196 @@ class AgentRegistry:
         if agent_id not in self._agents:
             raise KeyError(f"Agent with id {agent_id} not found")
 
-        context_file = self.config_dir / f"{agent_id}_context.pkl"
-        if not context_file.exists():
-            return None
+        agent_dir = self.agents_dir / agent_id
+        context_file = agent_dir / "context.pkl"
+
+        # Check if the new format file exists
+        if context_file.exists():
+            try:
+                with context_file.open("rb") as f:
+                    return dill.load(f)
+            except Exception as e:
+                logging.error(f"Failed to load agent context from new format: {str(e)}")
+
+        # Check for old format file for backward compatibility
+        old_context_file = self.config_dir / f"{agent_id}_context.pkl"
+        if old_context_file.exists():
+            try:
+                with old_context_file.open("rb") as f:
+                    return dill.load(f)
+            except Exception as e:
+                logging.error(f"Failed to load agent context from old format: {str(e)}")
+
+        # No context found
+        return None
+
+    def migrate_legacy_agents(self) -> List[str]:
+        """
+        Migrate agents from the old format to the new format.
+
+        This method checks for the existence of agents.json and migrates any agents
+        that don't have the new file structure. It loads the agent-id_conversation.json
+        file and splits the contents into separate files.
+
+        Returns:
+            List[str]: List of agent IDs that were migrated
+        """
+        migrated_agents = []
+
+        # Check if agents.json exists
+        if not self.agents_file.exists():
+            return migrated_agents
 
         try:
-            with context_file.open("rb") as f:
-                return dill.load(f)
+            # Load agents from agents.json
+            with self.agents_file.open("r", encoding="utf-8") as f:
+                agents_data = json.load(f)
+
+            # Process each agent
+            for agent_data in agents_data:
+                try:
+                    agent_id = agent_data.get("id")
+                    if not agent_id:
+                        logging.warning(f"Skipping agent without ID: {agent_data}")
+                        continue
+
+                    # Check if agent directory already exists
+                    agent_dir = self.agents_dir / agent_id
+                    agent_yml_file = agent_dir / "agent.yml"
+
+                    # Skip if agent.yml already exists
+                    if agent_yml_file.exists():
+                        continue
+
+                    # Create agent directory if it doesn't exist
+                    if not agent_dir.exists():
+                        agent_dir.mkdir(parents=True, exist_ok=True)
+
+                    # Save agent metadata to agent.yml
+                    with agent_yml_file.open("w", encoding="utf-8") as f:
+                        yaml.dump(agent_data, f, default_flow_style=False)
+
+                    # Migrate conversation history
+                    self._migrate_agent_conversation(agent_id)
+
+                    # Migrate context
+                    self._migrate_agent_context(agent_id)
+
+                    migrated_agents.append(agent_id)
+                    logging.info(f"Migrated agent: {agent_id}")
+                except Exception as e:
+                    logging.error(
+                        f"Failed to migrate agent {agent_data.get('id', 'unknown')}: {str(e)}"
+                    )
+
+            return migrated_agents
         except Exception as e:
-            raise Exception(f"Failed to load agent context: {str(e)}")
+            logging.error(f"Failed to migrate agents: {str(e)}")
+            return migrated_agents
+
+    def _migrate_agent_conversation(self, agent_id: str) -> bool:
+        """
+        Migrate an agent's conversation history from the old format to the new format.
+
+        Args:
+            agent_id (str): The unique identifier of the agent.
+
+        Returns:
+            bool: True if migration was successful, False otherwise.
+        """
+        old_conversation_file = self.config_dir / f"{agent_id}_conversation.json"
+        if not old_conversation_file.exists():
+            return False
+
+        try:
+            # Load old conversation data
+            with old_conversation_file.open("r", encoding="utf-8") as f:
+                raw_data = json.load(f)
+
+            # Parse the data
+            try:
+                old_data = AgentConversation.model_validate(raw_data)
+
+                # Create agent directory if it doesn't exist
+                agent_dir = self.agents_dir / agent_id
+                if not agent_dir.exists():
+                    agent_dir.mkdir(parents=True, exist_ok=True)
+
+                # Save conversation records
+                conversation_file = agent_dir / "conversation.jsonl"
+                with jsonlines.open(conversation_file, mode="w") as writer:
+                    for record in old_data.conversation:
+                        writer.write(record.model_dump())
+
+                # Save execution history records
+                execution_history_file = agent_dir / "execution_history.jsonl"
+                with jsonlines.open(execution_history_file, mode="w") as writer:
+                    for record in old_data.execution_history:
+                        writer.write(record.model_dump())
+
+                # Save learnings
+                learnings_file = agent_dir / "learnings.jsonl"
+                with jsonlines.open(learnings_file, mode="w") as writer:
+                    for learning in old_data.learnings:
+                        writer.write({"learning": learning})
+
+                # Save current plan if provided
+                if old_data.current_plan is not None:
+                    plan_file = agent_dir / "current_plan.txt"
+                    with plan_file.open("w", encoding="utf-8") as f:
+                        f.write(old_data.current_plan)
+
+                # Save instruction details if provided
+                if old_data.instruction_details is not None:
+                    instruction_file = agent_dir / "instruction_details.txt"
+                    with instruction_file.open("w", encoding="utf-8") as f:
+                        f.write(old_data.instruction_details)
+
+                logging.info(f"Successfully migrated conversation for agent {agent_id}")
+                return True
+            except Exception as e:
+                logging.error(
+                    f"Failed to parse old conversation format for agent {agent_id}: {str(e)}"
+                )
+                return False
+        except Exception as e:
+            logging.error(f"Failed to load old conversation file for agent {agent_id}: {str(e)}")
+            return False
+
+    def _migrate_agent_context(self, agent_id: str) -> bool:
+        """
+        Migrate an agent's context from the old format to the new format.
+
+        Args:
+            agent_id (str): The unique identifier of the agent.
+
+        Returns:
+            bool: True if migration was successful, False otherwise.
+        """
+        old_context_file = self.config_dir / f"{agent_id}_context.pkl"
+        if not old_context_file.exists():
+            return False
+
+        try:
+            # Load old context
+            with old_context_file.open("rb") as f:
+                context = dill.load(f)
+
+            # Create agent directory if it doesn't exist
+            agent_dir = self.agents_dir / agent_id
+            if not agent_dir.exists():
+                agent_dir.mkdir(parents=True, exist_ok=True)
+
+            # Save context to new location
+            context_file = agent_dir / "context.pkl"
+            with context_file.open("wb") as f:
+                dill.dump(context, f)
+
+            logging.info(f"Successfully migrated context for agent {agent_id}")
+            return True
+        except Exception as e:
+            logging.error(f"Failed to migrate context for agent {agent_id}: {str(e)}")
+            return False
 
     def update_agent_state(
         self,

@@ -136,6 +136,17 @@ class ConversationRecord(BaseModel):
             "should_cache": self.should_cache,
         }
 
+    def model_dump(self, *args, **kwargs) -> Dict[str, Any]:
+        """Convert the conversation record to a dictionary for serialization.
+
+        Returns:
+            dict: Dictionary representation with properly formatted timestamp
+        """
+        data = super().model_dump(*args, **kwargs)
+        if self.timestamp:
+            data["timestamp"] = self.timestamp.isoformat()
+        return data
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ConversationRecord":
         """Create a ConversationRecord from a dictionary.
@@ -246,6 +257,17 @@ class CodeExecutionResult(BaseModel):
     action: Optional[ActionType] = None
     execution_type: ExecutionType = Field(default=ExecutionType.NONE)
     task_classification: str = Field(default="")
+
+    def model_dump(self, *args, **kwargs) -> Dict[str, Any]:
+        """Convert the conversation record to a dictionary for serialization.
+
+        Returns:
+            dict: Dictionary representation with properly formatted timestamp
+        """
+        data = super().model_dump(*args, **kwargs)
+        if self.timestamp:
+            data["timestamp"] = self.timestamp.isoformat()
+        return data
 
 
 class AgentExecutorState(BaseModel):
