@@ -32,6 +32,8 @@ dependencies = [
     "psutil",
     "dill",
     "pyreadline3",
+    "jsonlines",
+    "python-multipart",
     # Constraints
     "certifi>=2024.7.4",
     "configobj>=5.0.9",
