@@ -31,7 +31,7 @@ def run_job_in_process_with_queue(
     credential_manager: CredentialManager,
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
-    job_manager: JobManager,
+    job_manager_id: str,  # Pass job_manager_id instead of job_manager
     context: Optional[list[ConversationRecord]] = None,
     options: Optional[dict[str, object]] = None,
     status_queue: Optional[Queue] = None,  # type: ignore
@@ -68,6 +68,16 @@ def run_job_in_process_with_queue(
                 # Send status update to the parent process
                 if status_queue:
                     status_queue.put(("status_update", job_id, JobStatus.PROCESSING, None))
+
+                # Create a new JobManager instance in the child process
+                job_manager = JobManager()
+                # Initialize the job in the child process (will be updated via queue)
+                if job_id not in job_manager.jobs:
+                    from local_operator.jobs import Job
+
+                    job_manager.jobs[job_id] = Job(
+                        id=job_id, prompt=prompt, model=model, hosting=hosting
+                    )
 
                 # Create a new operator for this process
                 process_operator = create_operator(
@@ -155,7 +165,7 @@ def run_agent_job_in_process_with_queue(
     credential_manager: CredentialManager,
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
-    job_manager: JobManager,
+    job_manager_id: str,  # Pass job_manager_id instead of job_manager
     persist_conversation: bool = False,
     user_message_id: Optional[str] = None,
     status_queue: Optional[Queue] = None,  # type: ignore
@@ -204,6 +214,16 @@ def run_agent_job_in_process_with_queue(
                     and agent_obj.current_working_directory != "."
                 ):
                     job_context.change_directory(agent_obj.current_working_directory)
+
+                # Create a new JobManager instance in the child process
+                job_manager = JobManager()
+                # Initialize the job in the child process (will be updated via queue)
+                if job_id not in job_manager.jobs:
+                    from local_operator.jobs import Job
+
+                    job_manager.jobs[job_id] = Job(
+                        id=job_id, prompt=prompt, model=model, hosting=hosting, agent_id=agent_id
+                    )
 
                 # Create a new operator for this process
                 process_operator = create_operator(
