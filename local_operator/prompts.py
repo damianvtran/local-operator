@@ -828,9 +828,10 @@ RequestClassificationSystemPrompt: str = (
 For this task, you must analyze the user request and classify it into a JSON format with:
 - type: conversation | creative_writing | data_science | mathematics | accounting |
   quick_search | deep_research | media | competitive_coding | software_development |
-  finance | news_report | console_command | continue |other
+  finance | news_report | console_command | continue | other
 - planning_required: true | false
 - relative_effort: low | medium | high
+- subject_change: true | false
 
 Respond only with the JSON object, no other text.
 
@@ -889,6 +890,12 @@ low: Simple, straightforward tasks taking a single step.
 medium: Moderate complexity tasks taking 2-5 steps.
 high: Complex tasks taking >5 steps or requiring significant reasoning, planning,
 and research effort.
+
+Subject change:
+true: The user request is about a new topic or subject that is different from the
+current flow of conversation.
+false: The user request is about the same or similar topic or subject as the previous
+request and is part of the current task or flow of conversation.
 
 Remember, respond in JSON format for this next message otherwise your response will
 fail to be parsed.
