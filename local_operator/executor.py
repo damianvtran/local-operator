@@ -8,9 +8,10 @@ import subprocess
 import sys
 from datetime import datetime
 from enum import Enum
+from multiprocessing import Queue
 from pathlib import Path
 from traceback import format_exception
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_community.callbacks.manager import get_openai_callback
 from langchain_core.messages import BaseMessage
@@ -38,6 +39,7 @@ from local_operator.helpers import (
     clean_plain_text_response,
     remove_think_tags,
 )
+from local_operator.jobs import JobManager
 from local_operator.model.configure import ModelConfiguration, calculate_cost
 from local_operator.prompts import (
     SafetyCheckConversationPrompt,
@@ -421,6 +423,11 @@ class LocalCodeExecutor:
         verbosity_level: VerbosityLevel = VerbosityLevel.VERBOSE,
         agent_registry: AgentRegistry | None = None,
         persist_conversation: bool = False,
+        learnings: List[str] = [],
+        current_plan: str | None = None,
+        instruction_details: str | None = None,
+        job_manager: Optional["JobManager"] = None,
+        job_id: Optional[str] = None,
     ):
         """Initialize the LocalCodeExecutor with a language model.
 
@@ -444,6 +451,12 @@ class LocalCodeExecutor:
             agent_registry (AgentRegistry | None): The agent registry for the current conversation.
             persist_conversation (bool): Whether to persist the conversation history and code
                 execution history to the agent registry on each step.
+            learnings (List[str]): A list of learnings from the current conversation.
+            current_plan (str | None): The current plan for the agent.
+            instruction_details (str | None): A set of instructions for the agent based on
+                the classification of the user's request.
+            job_manager (JobManager | None): The job manager for the current conversation.
+            job_id (str | None): The job ID for the current conversation.
         """
         self.context = {}
         self.model_configuration = model_configuration
@@ -454,14 +467,16 @@ class LocalCodeExecutor:
         self.token_metrics = ExecutorTokenMetrics()
         self.agent = agent
         self.interrupted = False
-        self.learnings = []
-        self.current_plan = None
+        self.learnings = learnings
+        self.current_plan = current_plan
         self.max_learnings_history = max_learnings_history
         self.code_history = []
         self.verbosity_level = verbosity_level
         self.agent_registry = agent_registry
         self.persist_conversation = persist_conversation
-        self.instruction_details = None
+        self.instruction_details = instruction_details
+        self.job_manager = job_manager
+        self.job_id = job_id
 
         # Load agent context if agent and agent_registry are provided
         if self.agent and self.agent_registry:
@@ -638,6 +653,7 @@ class LocalCodeExecutor:
                 role=ConversationRole.SYSTEM,
                 content=system_prompt,
                 is_system_prompt=True,
+                should_cache=True,
             )
         ]
 
@@ -739,7 +755,38 @@ class LocalCodeExecutor:
         Raises:
             Exception: If there is an error during model invocation.
         """
-        messages_list = [msg.dict() for msg in messages]
+        messages_list = []
+
+        # Only Anthropic requires manual cache control
+        should_manual_cache_control = (
+            "anthropic" in self.get_model_name() or self.model_configuration.hosting == "anthropic"
+        )
+
+        for record in messages:
+            msg = {
+                "role": record.role,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": record.content,
+                    }
+                ],
+            }
+            messages_list.append(msg)
+
+        if should_manual_cache_control:
+            cache_count = 0
+            for idx, msg in reversed(list(enumerate(messages_list))):
+                if messages[idx].should_cache:
+                    msg["content"][0]["cache_control"] = {
+                        "type": "ephemeral",
+                    }
+                    cache_count += 1
+
+                    # Only 4 cache checkpoints allowed
+                    if cache_count >= 4:
+                        break
+
         model_instance = self.model_configuration.instance
 
         new_tokens_prompt = 0
@@ -816,7 +863,6 @@ class LocalCodeExecutor:
                         # Regular exponential backoff for other errors
                         delay = base_delay * (2 ** (attempt - 1))
                         await asyncio.sleep(delay)
-                continue
 
         # If we've exhausted all attempts, raise the last error
         if last_error:
@@ -846,6 +892,8 @@ class LocalCodeExecutor:
                 ConversationRecord(
                     role=ConversationRole.SYSTEM,
                     content=safety_prompt,
+                    should_cache=True,
+                    is_system_prompt=True,
                 ),
                 ConversationRecord(
                     role=ConversationRole.USER,
@@ -875,6 +923,8 @@ class LocalCodeExecutor:
             ConversationRecord(
                 role=ConversationRole.SYSTEM,
                 content=SafetyCheckConversationPrompt,
+                should_cache=True,
+                is_system_prompt=True,
             ),
         ]
 
@@ -1320,6 +1370,7 @@ class LocalCodeExecutor:
                 f"<logger>\n{condensed_log_output}\n</logger>\n"
                 "Please review the results and and determine what to do next.",
                 should_summarize=True,
+                should_cache=True,
             )
         )
 
@@ -1528,6 +1579,22 @@ class LocalCodeExecutor:
                 status=ProcessResponseStatus.SUCCESS,
                 message="Action completed",
             )
+
+        await self.update_job_execution_state(
+            CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code=response.code,
+                message=response.response,
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.IN_PROGRESS,
+                files=[],
+                execution_type=ExecutionType.ACTION,
+                action=response.action,
+            )
+        )
 
         print_execution_section(
             ExecutionSection.HEADER,
@@ -1753,6 +1820,7 @@ class LocalCodeExecutor:
                     f"END"
                 ),
                 should_summarize=True,
+                should_cache=True,
             )
         )
 
@@ -1878,6 +1946,7 @@ class LocalCodeExecutor:
                     "END"
                 ),
                 should_summarize=True,
+                should_cache=True,
             )
         )
 
@@ -1897,6 +1966,11 @@ class LocalCodeExecutor:
 
     def _limit_conversation_history(self) -> None:
         """Limit the conversation history to the maximum number of messages."""
+
+        # Limit in chunks of half the max conversation history to reduce
+        # cache breaking
+        chunk_size = self.max_conversation_history // 2
+
         if len(self.conversation_history) - 1 > self.max_conversation_history:
             # Keep the first message (system prompt) and the most recent messages
             self.conversation_history = [
@@ -1906,7 +1980,7 @@ class LocalCodeExecutor:
                     content="[Some conversation history has been truncated for brevity]",
                     should_summarize=False,
                 ),
-            ] + self.conversation_history[-self.max_conversation_history :]
+            ] + self.conversation_history[-chunk_size:]
 
     async def _summarize_conversation_step(self, msg: ConversationRecord) -> str:
         """
@@ -1946,7 +2020,12 @@ class LocalCodeExecutor:
         )
 
         summary_history = [
-            ConversationRecord(role=ConversationRole.SYSTEM, content=summary_prompt),
+            ConversationRecord(
+                role=ConversationRole.SYSTEM,
+                content=summary_prompt,
+                is_system_prompt=True,
+                should_cache=True,
+            ),
             ConversationRecord(role=ConversationRole.USER, content=step_info),
         ]
 
@@ -2311,3 +2390,26 @@ the user's request.  You should take them into account as you work on the curren
             new_code_record.task_classification = classification.type
 
         self.code_history.append(new_code_record)
+
+    # Add status_queue as an instance variable
+    status_queue: Optional[Queue] = None  # type: ignore
+
+    async def update_job_execution_state(self, new_code_record: CodeExecutionResult) -> None:
+        """Update the job execution state.
+
+        Args:
+            new_code_record (CodeExecutionResult): The new code execution result to
+            update the job execution state with.
+        """
+        # Update job execution state if job manager and job ID are provided
+        if self.job_manager and self.job_id:
+            try:
+                # First, try to update directly in the current process
+                await self.job_manager.update_job_execution_state(self.job_id, new_code_record)
+
+                # If we're in a multiprocessing context with a status queue
+                if self.status_queue:
+                    # Send execution state update through the queue to the parent process
+                    self.status_queue.put(("execution_update", self.job_id, new_code_record))
+            except Exception as e:
+                print(f"Failed to update job execution state: {e}")

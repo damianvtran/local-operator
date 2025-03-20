@@ -1040,6 +1040,22 @@
                       "stats": {
                         "total_tokens": 100
                       }
+                    },
+                    "current_execution": {
+                      "id": "execution-123456",
+                      "stdout": "Hello, world!",
+                      "stderr": "",
+                      "logging": "",
+                      "message": "Code executed successfully",
+                      "code": "print('Hello, world!')",
+                      "formatted_print": "Hello, world!",
+                      "role": "assistant",
+                      "status": "success",
+                      "timestamp": "2023-01-01T12:00:05Z",
+                      "files": [],
+                      "action": "CODE",
+                      "execution_type": "action",
+                      "task_classification": "software_development"
                     }
                   }
                 }
@@ -1866,6 +1882,44 @@
               "title": "Path"
             },
             "description": "Path to the image file on disk"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/static/videos": {
+      "get": {
+        "tags": [
+          "Static"
+        ],
+        "summary": "Serve video file",
+        "description": "Serves a video file from disk by path. Only video file types are allowed.",
+        "operationId": "get_video_v1_static_videos_get",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Path to the video file on disk",
+              "title": "Path"
+            },
+            "description": "Path to the video file on disk"
           }
         ],
         "responses": {
@@ -3533,6 +3587,18 @@
               }
             ],
             "title": "Files"
+          },
+          "should_cache": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Should Cache",
+            "default": false
           }
         },
         "type": "object",
@@ -4051,6 +4117,7 @@
           "error",
           "interrupted",
           "confirmation_required",
+          "in_progress",
           "none"
         ],
         "title": "ProcessResponseStatus",

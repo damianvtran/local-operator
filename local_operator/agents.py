@@ -147,6 +147,13 @@ class AgentConversation(BaseModel):
     execution_history: List[CodeExecutionResult] = Field(
         default_factory=list, description="The execution history"
     )
+    learnings: List[str] = Field(
+        default_factory=list, description="The learnings from the conversation"
+    )
+    current_plan: str | None = Field(None, description="The current plan for the agent")
+    instruction_details: str | None = Field(
+        None, description="The details of the instructions for the agent"
+    )
 
 
 class AgentRegistry:
@@ -543,11 +550,17 @@ class AgentRegistry:
                     version="",
                     conversation=[],
                     execution_history=[],
+                    learnings=[],
+                    current_plan=None,
+                    instruction_details=None,
                 )
         return AgentConversation(
             version="",
             conversation=[],
             execution_history=[],
+            learnings=[],
+            current_plan=None,
+            instruction_details=None,
         )
 
     def save_agent_conversation(
@@ -555,6 +568,9 @@ class AgentRegistry:
         agent_id: str,
         conversation: List[ConversationRecord],
         execution_history: List[CodeExecutionResult],
+        learnings: List[str] = [],
+        current_plan: str | None = None,
+        instruction_details: str | None = None,
     ) -> None:
         """
         Save the conversation history for a specified agent.
@@ -574,6 +590,9 @@ class AgentRegistry:
             version=agent.version,
             conversation=conversation,
             execution_history=execution_history,
+            learnings=learnings,
+            current_plan=current_plan,
+            instruction_details=instruction_details,
         )
 
         try:

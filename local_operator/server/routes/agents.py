@@ -589,8 +589,14 @@ async def clear_agent_conversation(
         agent_registry.get_agent(agent_id)
 
         # Clear the conversation by saving an empty list
-        agent_registry.save_agent_conversation(agent_id, [], [])
-        agent_registry.save_agent_context(agent_id, {})
+        agent_registry.save_agent_conversation(
+            agent_id=agent_id,
+            conversation=[],
+            execution_history=[],
+            current_plan="",
+            instruction_details="",
+        )
+        agent_registry.save_agent_context(agent_id=agent_id, context={})
 
         return CRUDResponse(
             status=200,

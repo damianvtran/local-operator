@@ -76,6 +76,8 @@ def run_job_in_process(
                     credential_manager=credential_manager,
                     config_manager=config_manager,
                     agent_registry=agent_registry,
+                    job_manager=job_manager,
+                    job_id=job_id,
                 )
 
                 # Initialize conversation history
@@ -199,6 +201,8 @@ def run_agent_job_in_process(
                     agent_registry=agent_registry,
                     current_agent=agent_obj,
                     persist_conversation=persist_conversation,
+                    job_manager=job_manager,
+                    job_id=job_id,
                 )
 
                 # Configure model options if provided
