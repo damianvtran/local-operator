@@ -1359,3 +1359,62 @@ class AgentRegistry:
 
         # Reset the refresh timer to force other processes to refresh soon
         self._last_refresh_time = 0
+
+    def get_agent_system_prompt(self, agent_id: str) -> str:
+        """
+        Get the system prompt for an agent.
+
+        Args:
+            agent_id: The unique identifier of the agent
+
+        Returns:
+            str: The system prompt content
+
+        Raises:
+            KeyError: If the agent with the given ID does not exist
+            FileNotFoundError: If the system prompt file does not exist
+            IOError: If there is an error reading the system prompt file
+        """
+        if agent_id not in self._agents:
+            raise KeyError(f"Agent with id {agent_id} not found")
+
+        agent_dir = self.agents_dir / agent_id
+        system_prompt_path = agent_dir / "system_prompt.md"
+
+        try:
+            if not system_prompt_path.exists():
+                return ""
+
+            with open(system_prompt_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except IOError as e:
+            logging.error(f"Error reading system prompt for agent {agent_id}: {str(e)}")
+            raise IOError(f"Failed to read system prompt: {str(e)}")
+
+    def set_agent_system_prompt(self, agent_id: str, system_prompt: str) -> None:
+        """
+        Set the system prompt for an agent.
+
+        Args:
+            agent_id: The unique identifier of the agent
+            system_prompt: The system prompt content to save
+
+        Raises:
+            KeyError: If the agent with the given ID does not exist
+            IOError: If there is an error writing the system prompt file
+        """
+        if agent_id not in self._agents:
+            raise KeyError(f"Agent with id {agent_id} not found")
+
+        agent_dir = self.agents_dir / agent_id
+        system_prompt_path = agent_dir / "system_prompt.md"
+
+        try:
+            with open(system_prompt_path, "w", encoding="utf-8") as f:
+                f.write(system_prompt)
+
+            # Reset the refresh timer to force other processes to refresh soon
+            self._last_refresh_time = 0
+        except IOError as e:
+            logging.error(f"Error writing system prompt for agent {agent_id}: {str(e)}")
+            raise IOError(f"Failed to write system prompt: {str(e)}")

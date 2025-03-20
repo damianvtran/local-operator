@@ -1139,3 +1139,152 @@ async def test_clear_agent_conversation_not_found(test_app_client, dummy_registr
     assert response.status_code == 404
     data = response.json()
     assert f"Agent with ID {non_existent_id} not found" in data.get("detail", "")
+
+
+@pytest.mark.asyncio
+async def test_get_agent_system_prompt(test_app_client, dummy_registry: AgentRegistry):
+    """Test retrieving an agent's system prompt."""
+    # Create a test agent
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="System Prompt Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description=None,
+            last_message=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+    agent_id = agent.id
+
+    # Write a system prompt for the agent
+    test_system_prompt = "This is a test system prompt for the agent."
+    dummy_registry.set_agent_system_prompt(agent_id, test_system_prompt)
+
+    # Get the system prompt
+    response = await test_app_client.get(f"/v1/agents/{agent_id}/system-prompt")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("status") == 200
+    assert data.get("message") == "Agent system prompt retrieved successfully"
+    assert data.get("result") == {"system_prompt": test_system_prompt}
+
+
+@pytest.mark.asyncio
+async def test_get_agent_system_prompt_not_found(test_app_client, dummy_registry: AgentRegistry):
+    """Test retrieving system prompt for a non-existent agent."""
+    non_existent_id = "nonexistent"
+    response = await test_app_client.get(f"/v1/agents/{non_existent_id}/system-prompt")
+
+    assert response.status_code == 404
+    data = response.json()
+    assert f"Agent with ID {non_existent_id} not found" in data.get("detail", "")
+
+
+@pytest.mark.asyncio
+async def test_update_agent_system_prompt(test_app_client, dummy_registry: AgentRegistry):
+    """Test updating an agent's system prompt."""
+    # Create a test agent
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="Update System Prompt Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description=None,
+            last_message=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+    agent_id = agent.id
+
+    # Initial system prompt
+    initial_prompt = "Initial system prompt"
+    dummy_registry.set_agent_system_prompt(agent_id, initial_prompt)
+
+    # Update the system prompt
+    new_prompt = "This is the updated system prompt."
+    update_payload = {"system_prompt": new_prompt}
+    response = await test_app_client.put(
+        f"/v1/agents/{agent_id}/system-prompt", json=update_payload
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("status") == 200
+    assert data.get("message") == "Agent system prompt updated successfully"
+    assert data.get("result") == {}
+
+    # Verify the system prompt was updated
+    response = await test_app_client.get(f"/v1/agents/{agent_id}/system-prompt")
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("result") == {"system_prompt": new_prompt}
+
+
+@pytest.mark.asyncio
+async def test_update_agent_system_prompt_not_found(test_app_client, dummy_registry: AgentRegistry):
+    """Test updating system prompt for a non-existent agent."""
+    non_existent_id = "nonexistent"
+    update_payload = {"system_prompt": "New system prompt"}
+    response = await test_app_client.put(
+        f"/v1/agents/{non_existent_id}/system-prompt", json=update_payload
+    )
+
+    assert response.status_code == 404
+    data = response.json()
+    assert f"Agent with ID {non_existent_id} not found" in data.get("detail", "")
+
+
+@pytest.mark.asyncio
+async def test_update_agent_system_prompt_validation_error(
+    test_app_client, dummy_registry: AgentRegistry
+):
+    """Test updating system prompt with invalid payload."""
+    # Create a test agent
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="Validation Error Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description=None,
+            last_message=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+    agent_id = agent.id
+
+    # Invalid payload (missing system_prompt field)
+    invalid_payload = {"wrong_field": "This won't work"}
+    response = await test_app_client.put(
+        f"/v1/agents/{agent_id}/system-prompt", json=invalid_payload
+    )
+
+    assert response.status_code == 422  # Validation error
