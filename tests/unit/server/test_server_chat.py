@@ -317,9 +317,7 @@ async def test_chat_async_process_execution(
 
     # Mock the job processor functions
     mock_process = MagicMock()
-    mock_create_and_start_job_process_with_queue = MagicMock(
-        return_value=(mock_process, MagicMock())
-    )
+    mock_create_and_start_job_process_with_queue = MagicMock(return_value=mock_process)
 
     # Mock the job processor functions to avoid pickling issues in tests
     with patch(
@@ -354,10 +352,7 @@ async def test_chat_async_endpoint_success(
     """Test successful asynchronous chat request."""
     # Mock the job processor functions
     mock_process = MagicMock()
-    mock_monitor_task = MagicMock()
-    mock_create_and_start_job_process_with_queue = MagicMock(
-        return_value=(mock_process, mock_monitor_task)
-    )
+    mock_create_and_start_job_process_with_queue = MagicMock(return_value=mock_process)
 
     # Setup mock job
     mock_job = MagicMock()
@@ -441,7 +436,6 @@ async def test_chat_async_job_processing(test_app_client, mock_create_operator, 
 
     # Create a mock process that will be returned by create_and_start_job_process_with_queue
     mock_process = MagicMock()
-    mock_monitor_task = MagicMock()
 
     # This is the key change - we need to simulate what create_and_start_job_process_with_queue does
     # In the real implementation, it starts the process and registers it
@@ -451,8 +445,8 @@ async def test_chat_async_job_processing(test_app_client, mock_create_operator, 
         # Register the process with the job manager
         job_id = args[0] if args else kwargs.get("job_id")
         mock_job_manager.register_process(job_id, mock_process)
-        # Return the process and monitor task
-        return mock_process, mock_monitor_task
+        # Return only the process
+        return mock_process
 
     mock_create_and_start = MagicMock(side_effect=mock_create_and_start_side_effect)
 
@@ -524,9 +518,7 @@ async def test_chat_with_agent_async_success(
 
     # Mock the job processor functions
     mock_process = MagicMock()
-    mock_create_and_start_job_process_with_queue = MagicMock(
-        return_value=(mock_process, MagicMock())
-    )
+    mock_create_and_start_job_process_with_queue = MagicMock(return_value=mock_process)
 
     # Mock the job processor functions to avoid pickling issues in tests
     with patch(
@@ -598,9 +590,7 @@ async def test_chat_with_agent_async_persist_conversation(
 
     # Mock the job processor functions
     mock_process = MagicMock()
-    mock_create_and_start_job_process_with_queue = MagicMock(
-        return_value=(mock_process, MagicMock())
-    )
+    mock_create_and_start_job_process_with_queue = MagicMock(return_value=mock_process)
 
     # Mock the job processor functions to avoid pickling issues in tests
     with patch(
@@ -727,9 +717,7 @@ async def test_chat_with_agent_async_with_context(
 
     # Mock the job processor functions
     mock_process = MagicMock()
-    mock_create_and_start_job_process_with_queue = MagicMock(
-        return_value=(mock_process, MagicMock())
-    )
+    mock_create_and_start_job_process_with_queue = MagicMock(return_value=mock_process)
 
     # Create a custom context
     custom_context = [

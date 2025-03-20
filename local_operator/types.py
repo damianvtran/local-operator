@@ -98,6 +98,7 @@ class ConversationRecord(BaseModel):
     is_system_prompt: Optional[bool] = False
     timestamp: Optional[datetime] = None
     files: Optional[List[str]] = None
+    should_cache: Optional[bool] = False
 
     def dict(self, *args, **kwargs) -> Dict[str, Any]:
         """Convert the conversation record to a dictionary format compatible with LangChain.
@@ -114,6 +115,7 @@ class ConversationRecord(BaseModel):
             "is_system_prompt": str(self.is_system_prompt),
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
             "files": self.files,
+            "should_cache": self.should_cache,
         }
 
     def to_dict(self) -> Dict[str, Any]:
@@ -131,6 +133,7 @@ class ConversationRecord(BaseModel):
             "is_system_prompt": str(self.is_system_prompt),
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
             "files": self.files,
+            "should_cache": self.should_cache,
         }
 
     @classmethod
@@ -156,6 +159,7 @@ class ConversationRecord(BaseModel):
                 else None
             ),
             files=data.get("files", None),
+            should_cache=data.get("should_cache", "true").lower() == "true",
         )
 
 
@@ -191,6 +195,7 @@ class ProcessResponseStatus(str, Enum):
     ERROR = "error"
     INTERRUPTED = "interrupted"
     CONFIRMATION_REQUIRED = "confirmation_required"
+    IN_PROGRESS = "in_progress"
     NONE = "none"
 
 
@@ -273,8 +278,10 @@ class RequestClassification(BaseModel):
         type (str): The type of request
         planning_required (bool): Whether planning is required for the request
         relative_effort (str): The relative effort required for the request
+        subject_change (bool): Whether the subject of the conversation has changed
     """
 
     type: str
     planning_required: bool = Field(default=False)
     relative_effort: RelativeEffortLevel = Field(default=RelativeEffortLevel.LOW)
+    subject_change: bool = Field(default=False)

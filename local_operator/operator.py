@@ -296,6 +296,21 @@ class Operator:
         attempt = 0
         last_error = None
 
+        await self.executor.update_job_execution_state(
+            CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message="",
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.IN_PROGRESS,
+                files=[],
+                execution_type=ExecutionType.CLASSIFICATION,
+            )
+        )
+
         while attempt < max_attempts:
             try:
                 response = await self.executor.invoke_model(messages)
@@ -374,6 +389,7 @@ class Operator:
                 role=ConversationRole.SYSTEM,
                 content=system_prompt,
                 is_system_prompt=True,
+                should_cache=True,
             ),
         ]
 
@@ -383,6 +399,21 @@ class Operator:
             ConversationRecord(
                 role=ConversationRole.USER,
                 content=PlanUserPrompt,
+            )
+        )
+
+        await self.executor.update_job_execution_state(
+            CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message="",
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.IN_PROGRESS,
+                files=[],
+                execution_type=ExecutionType.PLAN,
             )
         )
 
@@ -457,6 +488,7 @@ class Operator:
                 role=ConversationRole.SYSTEM,
                 content=system_prompt,
                 is_system_prompt=True,
+                should_cache=True,
             ),
         ]
 
@@ -466,6 +498,21 @@ class Operator:
             ConversationRecord(
                 role=ConversationRole.USER,
                 content=ReflectionUserPrompt,
+            )
+        )
+
+        await self.executor.update_job_execution_state(
+            CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message="",
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.IN_PROGRESS,
+                files=[],
+                execution_type=ExecutionType.REFLECTION,
             )
         )
 
@@ -548,6 +595,21 @@ class Operator:
             )
         )
 
+        await self.executor.update_job_execution_state(
+            CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message="",
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.IN_PROGRESS,
+                files=[],
+                execution_type=ExecutionType.RESPONSE,
+            )
+        )
+
         # Invoke the model to generate the response
         response = await self.executor.invoke_model(messages)
 
@@ -623,6 +685,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
                 content=task_instructions,
                 is_system_prompt=False,
                 ephemeral=request_classification.type == RequestType.CONVERSATION,
+                should_cache=True,
             )
         )
 
@@ -670,8 +733,6 @@ This is a {request_type} message, here are some guidelines for how to respond:
             None,
         )
 
-        self.executor.reset_learnings()
-
         response_json: ResponseJsonSchema | None = None
         response: BaseMessage | None = None
         final_response: str = ""
@@ -686,6 +747,22 @@ This is a {request_type} message, here are some guidelines for how to respond:
             verbosity_level=self.verbosity_level,
         ):
             classification = await self.classify_request(user_input)
+
+        if classification.subject_change:
+            self.executor.set_current_plan("")
+            self.executor.reset_learnings()
+
+            # Add a breakpoint to steer the conversation inertia
+            self.executor.conversation_history.append(
+                ConversationRecord(
+                    role=ConversationRole.USER,
+                    content=(
+                        "I would like to change the subject.  Please stop the current task "
+                        "and pay attention to my new message."
+                    ),
+                    should_summarize=False,
+                )
+            )
 
         # Add the task instructions as an ephemeral message to help the agent
         # prioritize the information and the task at hand.
@@ -727,6 +804,21 @@ This is a {request_type} message, here are some guidelines for how to respond:
         ):
             if self.model_configuration is None:
                 raise ValueError("Model is not initialized")
+
+            await self.executor.update_job_execution_state(
+                CodeExecutionResult(
+                    stdout="",
+                    stderr="",
+                    logging="",
+                    formatted_print="",
+                    code="",
+                    message="",
+                    role=ConversationRole.ASSISTANT,
+                    status=ProcessResponseStatus.IN_PROGRESS,
+                    files=[],
+                    execution_type=ExecutionType.ACTION,
+                )
+            )
 
             async with spinner_context(
                 "Formulating a response",
