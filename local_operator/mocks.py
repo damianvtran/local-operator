@@ -89,7 +89,11 @@ class ChatMock:
         # Get last user message
         user_message = ""
         for msg in reversed(list(messages)):
-            if msg.get("role") == ConversationRole.USER.value:
+            if (
+                msg.get("role") == ConversationRole.USER.value
+                and "agent heads up display"
+                not in msg.get("content", [])[0].get("text", "").lower()
+            ):
                 user_message = msg.get("content", [])[0].get("text", "") or ""
                 break
 
@@ -105,8 +109,13 @@ class ChatMock:
                 max_match_length = len(key_lower)
 
         if not best_match:
-            print(f"No mock response for message: {user_message}")
-            raise ValueError(f"No mock response for message: {user_message}")
+            if len(user_message) > 100:
+                truncated_user_message = user_message[:100] + "..."
+            else:
+                truncated_user_message = user_message
+
+            print(f"No mock response for message: {truncated_user_message}")
+            raise ValueError(f"No mock response for message: {truncated_user_message}")
 
         if isinstance(USER_MOCK_RESPONSES[best_match], dict):
             response_content = json.dumps(USER_MOCK_RESPONSES[best_match])
