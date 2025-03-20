@@ -14,6 +14,7 @@ import yaml
 from pydantic import BaseModel, Field
 
 from local_operator.types import (
+    AgentState,
     CodeExecutionResult,
     ConversationRecord,
     ConversationRole,
@@ -129,33 +130,6 @@ class AgentEditFields(BaseModel):
         None,
         description="The current working directory for the agent.  Updated whenever the "
         "agent changes its working directory through code execution.",
-    )
-
-
-class AgentConversation(BaseModel):
-    """
-    Pydantic model representing an agent's conversation history.
-
-    This model stores both the version of the conversation format and the actual
-    conversation history as a list of ConversationRecord objects.
-
-    Attributes:
-        version (str): The version of the conversation format/schema
-        conversation (List[ConversationRecord]): List of conversation messages, where each
-            message is a ConversationRecord object
-    """
-
-    version: str = Field(..., description="The version of the conversation")
-    conversation: List[ConversationRecord] = Field(..., description="The conversation history")
-    execution_history: List[CodeExecutionResult] = Field(
-        default_factory=list, description="The execution history"
-    )
-    learnings: List[str] = Field(
-        default_factory=list, description="The learnings from the conversation"
-    )
-    current_plan: str | None = Field(None, description="The current plan for the agent")
-    instruction_details: str | None = Field(
-        None, description="The details of the instructions for the agent"
     )
 
 
@@ -656,7 +630,7 @@ class AgentRegistry:
 
         return list(self._agents.values())
 
-    def load_agent_conversation(self, agent_id: str) -> AgentConversation:
+    def load_agent_conversation(self, agent_id: str) -> AgentState:
         """
         Load the conversation history for a specified agent.
 
@@ -669,7 +643,7 @@ class AgentRegistry:
             agent_id (str): The unique identifier of the agent.
 
         Returns:
-            AgentConversation: The agent's conversation data.
+            AgentState: The agent's conversation data.
                 Returns an empty conversation if no conversation history exists or if
                 there's an error.
         """
@@ -751,7 +725,7 @@ class AgentRegistry:
                     with old_conversation_file.open("r", encoding="utf-8") as f:
                         raw_data = json.load(f)
                         try:
-                            old_data = AgentConversation.model_validate(raw_data)
+                            old_data = AgentState.model_validate(raw_data)
                             conversation_records = old_data.conversation
                             execution_history_records = old_data.execution_history
                             learnings_list = old_data.learnings
@@ -763,7 +737,7 @@ class AgentRegistry:
                     logging.error(f"Failed to open old conversation file: {str(e)}")
 
         # Create and return the conversation data
-        return AgentConversation(
+        return AgentState(
             version=agent.version,
             conversation=conversation_records,
             execution_history=execution_history_records,
@@ -1102,7 +1076,7 @@ class AgentRegistry:
 
             # Parse the data
             try:
-                old_data = AgentConversation.model_validate(raw_data)
+                old_data = AgentState.model_validate(raw_data)
 
                 # Create agent directory if it doesn't exist
                 agent_dir = self.agents_dir / agent_id
