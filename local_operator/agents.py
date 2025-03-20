@@ -455,38 +455,15 @@ class AgentRegistry:
 
         if source_dir.exists():
             try:
-                # Copy conversation.jsonl if it exists
-                source_conversation_file = source_dir / "conversation.jsonl"
-                if (
-                    source_conversation_file.exists()
-                    and source_conversation_file.stat().st_size > 0
-                ):
-                    shutil.copy2(source_conversation_file, target_dir / "conversation.jsonl")
+                # Copy all files from source directory to target directory
+                for source_file in source_dir.iterdir():
+                    if source_file.is_file() and source_file.name != "agent.yml":
+                        # For JSONL files, only copy if they have content
+                        if source_file.suffix == ".jsonl" and source_file.stat().st_size == 0:
+                            continue
 
-                # Copy execution_history.jsonl if it exists
-                source_execution_file = source_dir / "execution_history.jsonl"
-                if source_execution_file.exists() and source_execution_file.stat().st_size > 0:
-                    shutil.copy2(source_execution_file, target_dir / "execution_history.jsonl")
-
-                # Copy learnings.jsonl if it exists
-                source_learnings_file = source_dir / "learnings.jsonl"
-                if source_learnings_file.exists() and source_learnings_file.stat().st_size > 0:
-                    shutil.copy2(source_learnings_file, target_dir / "learnings.jsonl")
-
-                # Copy current_plan.txt if it exists
-                source_plan_file = source_dir / "current_plan.txt"
-                if source_plan_file.exists():
-                    shutil.copy2(source_plan_file, target_dir / "current_plan.txt")
-
-                # Copy instruction_details.txt if it exists
-                source_instruction_file = source_dir / "instruction_details.txt"
-                if source_instruction_file.exists():
-                    shutil.copy2(source_instruction_file, target_dir / "instruction_details.txt")
-
-                # Copy context.pkl if it exists
-                source_context_file = source_dir / "context.pkl"
-                if source_context_file.exists():
-                    shutil.copy2(source_context_file, target_dir / "context.pkl")
+                        target_file = target_dir / source_file.name
+                        shutil.copy2(source_file, target_file)
 
                 return new_agent
             except Exception as e:
@@ -661,6 +638,7 @@ class AgentRegistry:
         learnings_list = []
         current_plan = None
         instruction_details = None
+        agent_system_prompt = ""
 
         # Check for new format files
         if agent_dir.exists():
@@ -716,6 +694,11 @@ class AgentRegistry:
                 except Exception as e:
                     logging.error(f"Failed to load instruction details: {str(e)}")
 
+            try:
+                agent_system_prompt = self.get_agent_system_prompt(agent_id)
+            except Exception as e:
+                logging.error(f"Failed to load agent system prompt: {str(e)}")
+
         # Check for old format file for backward compatibility
         else:
             old_conversation_file = self.config_dir / f"{agent_id}_conversation.json"
@@ -730,6 +713,7 @@ class AgentRegistry:
                             learnings_list = old_data.learnings
                             current_plan = old_data.current_plan
                             instruction_details = old_data.instruction_details
+                            agent_system_prompt = ""
                         except Exception as e:
                             logging.error(f"Failed to load old conversation format: {str(e)}")
                 except Exception as e:
@@ -743,6 +727,7 @@ class AgentRegistry:
             learnings=learnings_list,
             current_plan=current_plan,
             instruction_details=instruction_details,
+            agent_system_prompt=agent_system_prompt,
         )
 
     def save_agent_state(
@@ -800,6 +785,12 @@ class AgentRegistry:
                 instruction_file = agent_dir / "instruction_details.txt"
                 with instruction_file.open("w", encoding="utf-8") as f:
                     f.write(agent_state.instruction_details)
+
+            if agent_state.agent_system_prompt is not None:
+                try:
+                    self.set_agent_system_prompt(agent_id, agent_state.agent_system_prompt)
+                except Exception as e:
+                    logging.error(f"Failed to save agent system prompt: {str(e)}")
 
         except Exception as e:
             raise Exception(f"Failed to save agent conversation: {str(e)}")
@@ -875,6 +866,7 @@ class AgentRegistry:
                 learnings=[],
                 current_plan=None,
                 instruction_details=None,
+                agent_system_prompt="",
             ),
         )
 
@@ -1297,8 +1289,7 @@ class AgentRegistry:
 
         Args:
             agent_id: The unique identifier of the agent to update.
-            conversation_history: The list of conversation records to save.
-            code_history: The list of code execution results to save.
+            agent_state: The agent state to save.
             current_working_directory: Optional new working directory for the agent.
             context: Optional context to save for the agent. If None, the context is not updated.
 

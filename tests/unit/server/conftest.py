@@ -60,6 +60,7 @@ class DummyExecutor:
             learnings=[],
             current_plan=None,
             instruction_details=None,
+            agent_system_prompt=None,
         )
 
     async def invoke_model(self, conversation_history):

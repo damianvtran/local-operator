@@ -424,6 +424,7 @@ class LocalCodeExecutor:
             learnings=[],
             current_plan=None,
             instruction_details=None,
+            agent_system_prompt=None,
         ),
         agent_registry: AgentRegistry | None = None,
         max_learnings_history: int = 50,
@@ -606,7 +607,10 @@ class LocalCodeExecutor:
         if len(self.agent_state.conversation) != 0:
             raise ValueError("Conversation history already initialized")
 
-        system_prompt = create_system_prompt(self.tool_registry)
+        system_prompt = create_system_prompt(
+            tool_registry=self.tool_registry,
+            agent_system_prompt=self.agent_state.agent_system_prompt,
+        )
 
         history = [
             ConversationRecord(
@@ -638,7 +642,10 @@ class LocalCodeExecutor:
                 in this list is a system prompt, which will be replaced by the current
                 system prompt.
         """
-        system_prompt = create_system_prompt(self.tool_registry)
+        system_prompt = create_system_prompt(
+            tool_registry=self.tool_registry,
+            agent_system_prompt=self.agent_state.agent_system_prompt,
+        )
 
         history = [
             ConversationRecord(
