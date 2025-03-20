@@ -38,6 +38,7 @@ from local_operator.executor import LocalCodeExecutor
 from local_operator.notebook import save_code_history_to_notebook
 from local_operator.operator import ConversationRole
 from local_operator.tools import ToolRegistry
+from local_operator.types import AgentState
 
 
 def create_agent_from_conversation_tool(
@@ -76,8 +77,8 @@ def create_agent_from_conversation_tool(
             AgentData: The newly created agent's data
         """
         # Find index of last user message by iterating backwards
-        conversation_history = executor.conversation_history
-        execution_history = executor.code_history
+        conversation_history = executor.agent_state.conversation
+        execution_history = executor.agent_state.execution_history
         last_user_idx = None
 
         for i in range(len(conversation_history) - 1, -1, -1):
@@ -110,8 +111,17 @@ def create_agent_from_conversation_tool(
                 current_working_directory=None,
             )
         )
-        agent_registry.save_agent_conversation(
-            new_agent.id, conversation_history_to_save, execution_history_to_save
+        agent_registry.save_agent_state(
+            new_agent.id,
+            AgentState(
+                version=new_agent.version,
+                conversation=conversation_history_to_save,
+                execution_history=execution_history_to_save,
+                learnings=executor.agent_state.learnings,
+                current_plan=executor.agent_state.current_plan,
+                instruction_details=executor.agent_state.instruction_details,
+                agent_system_prompt=executor.agent_state.agent_system_prompt,
+            ),
         )
         return new_agent
 
@@ -162,8 +172,8 @@ def save_agent_training_tool(
             raise ValueError("No current agent set in executor")
 
         # Find index of last user message by iterating backwards
-        conversation_history = executor.conversation_history
-        execution_history = executor.code_history
+        conversation_history = executor.agent_state.conversation
+        execution_history = executor.agent_state.execution_history
         last_user_idx = None
 
         for i in range(len(conversation_history) - 1, -1, -1):
@@ -176,8 +186,15 @@ def save_agent_training_tool(
         conversation_history_to_save = conversation_history[:cutoff_idx]
         execution_history_to_save = execution_history[:cutoff_idx]
 
-        agent_registry.save_agent_conversation(
-            executor.agent.id, conversation_history_to_save, execution_history_to_save
+        agent_state_to_save = AgentState(
+            conversation=conversation_history_to_save,
+            execution_history=execution_history_to_save,
+            **executor.agent_state.model_dump(exclude={"conversation", "execution_history"}),
+        )
+
+        agent_registry.save_agent_state(
+            executor.agent.id,
+            agent_state_to_save,
         )
         return executor.agent
 
@@ -509,48 +526,45 @@ def update_config_tool(config_manager: ConfigManager) -> Callable[[Dict[str, Any
 
 
 def open_agents_config_tool(agent_registry: AgentRegistry) -> Callable[[], None]:
-    """Create a tool function that opens the agents configuration file.
+    """Create a tool function that opens the agents directory.
 
-    This function returns a callable that opens the agents.json file in the default system editor.
-    The file location is determined from the agent registry's config directory.
+    This function returns a callable that opens the agents directory in the default system file
+    explorer. The directory location is determined from the agent registry's config directory.
 
     Args:
         agent_registry: The AgentRegistry instance containing the config directory path
 
     Returns:
-        Callable[[], None]: A function that opens the agents configuration file
+        Callable[[], None]: A function that opens the agents directory
 
     Raises:
-        RuntimeError: If there are issues opening the configuration file
+        RuntimeError: If there are issues opening the directory
     """
 
     def open_agents_config() -> None:
-        """Open the agents configuration file in the default system editor.
+        """Open the agents directory in the default system file explorer.
 
-        Opens the agents.json file located in the agent registry's config directory
-        using the system's default application for JSON files.
+        Opens the agents directory located in the agent registry's config directory
+        using the system's default file explorer.
 
         Raises:
-            RuntimeError: If the configuration file cannot be opened
+            RuntimeError: If the directory cannot be opened
         """
         try:
-            agents_file = agent_registry.config_dir / "agents.json"
-            if not agents_file.exists():
-                raise RuntimeError(f"Agents configuration file not found at {agents_file}")
-
-            import platform
-            import subprocess
+            agents_dir = agent_registry.agents_dir
+            if not agents_dir.exists():
+                raise RuntimeError(f"Agents directory not found at {agents_dir}")
 
             system = platform.system()
             if system == "Darwin":  # macOS
-                subprocess.run(["open", str(agents_file)], check=True)
+                subprocess.run(["open", str(agents_dir)], check=True)
             elif system == "Windows":
-                subprocess.run(["start", str(agents_file)], shell=True, check=True)
+                subprocess.run(["start", str(agents_dir)], shell=True, check=True)
             else:  # Linux and other Unix-like
-                subprocess.run(["xdg-open", str(agents_file)], check=True)
+                subprocess.run(["xdg-open", str(agents_dir)], check=True)
 
         except Exception as e:
-            raise RuntimeError(f"Failed to open agents configuration file: {str(e)}")
+            raise RuntimeError(f"Failed to open agents directory: {str(e)}")
 
     return open_agents_config
 
@@ -627,7 +641,7 @@ def save_conversation_history_to_notebook_tool(
         """
         try:
             save_code_history_to_notebook(
-                code_history=executor.code_history,
+                code_history=executor.agent_state.execution_history,
                 model_configuration=executor.model_configuration,
                 max_conversation_history=executor.max_conversation_history,
                 detail_conversation_length=executor.detail_conversation_length,

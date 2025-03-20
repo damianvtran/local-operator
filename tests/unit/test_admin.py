@@ -103,13 +103,13 @@ def test_create_agent_from_conversation_no_user_messages(
     Test creating an agent from a conversation that contains no user messages.
     The expected saved conversation history should be empty.
     """
-    executor.conversation_history = [
+    executor.agent_state.conversation = [
         ConversationRecord(role=ConversationRole.SYSTEM, content="Initial prompt")
     ]
     create_tool = create_agent_from_conversation_tool(executor, agent_registry)
     agent_name = "TestAgent"
     new_agent = create_tool(agent_name)
-    saved_history = agent_registry.load_agent_conversation(new_agent.id)
+    saved_history = agent_registry.load_agent_state(new_agent.id)
     assert (
         saved_history.conversation == []
     ), f"Expected empty conversation history, got {saved_history}"
@@ -134,7 +134,7 @@ def test_create_agent_from_conversation_with_user_messages(
         ConversationRecord(role=ConversationRole.USER, content="Third user message"),
         ConversationRecord(role=ConversationRole.SYSTEM, content="System message"),
     ]
-    executor.code_history = [
+    executor.agent_state.execution_history = [
         CodeExecutionResult(
             id="test_code_execution_id",
             stdout="",
@@ -148,11 +148,11 @@ def test_create_agent_from_conversation_with_user_messages(
             files=[],
         )
     ]
-    executor.conversation_history = conversation_history
+    executor.agent_state.conversation = conversation_history
     create_tool = create_agent_from_conversation_tool(executor, agent_registry)
     agent_name = "TestAgent2"
     new_agent = create_tool(agent_name)
-    saved_history = agent_registry.load_agent_conversation(new_agent.id)
+    saved_history = agent_registry.load_agent_state(new_agent.id)
     expected_history = conversation_history[:4]
     expected_execution_history = [
         CodeExecutionResult(
@@ -185,7 +185,7 @@ def test_save_agent_training_no_agent(
     Expect a ValueError to be raised with the appropriate message.
     """
     conversation_history = [ConversationRecord(role=ConversationRole.USER, content="User message")]
-    executor.conversation_history = conversation_history
+    executor.agent_state.conversation = conversation_history
     executor.agent = None
     save_training_tool = save_agent_training_tool(executor, agent_registry)
     with pytest.raises(ValueError, match="No current agent set"):
@@ -231,8 +231,8 @@ def test_save_agent_training_with_agent(
             files=[],
         ),
     ]
-    executor.conversation_history = conversation_history
-    executor.code_history = execution_history
+    executor.agent_state.conversation = conversation_history
+    executor.agent_state.execution_history = execution_history
     agent = agent_registry.create_agent(
         AgentEditFields(
             name="TrainAgent",
@@ -257,7 +257,7 @@ def test_save_agent_training_with_agent(
     updated_agent = save_training_tool()
     expected_history = conversation_history[:2]
     expected_execution_history = execution_history
-    stored_history = agent_registry.load_agent_conversation(agent.id)
+    stored_history = agent_registry.load_agent_state(agent.id)
     assert (
         stored_history.conversation == expected_history
     ), f"Expected conversation history {expected_history}, got {stored_history}"
@@ -526,7 +526,7 @@ def test_save_conversation_tool(tmp_path: Any, executor: LocalCodeExecutor) -> N
         ConversationRecord(role=ConversationRole.USER, content="Hello"),
         ConversationRecord(role=ConversationRole.ASSISTANT, content="Hi there!"),
     ]
-    executor.conversation_history = conversation_history
+    executor.agent_state.conversation = conversation_history
     save_tool = save_conversation_raw_json_tool(executor)
     save_tool(str(file_path))
     with open(file_path, "r", encoding="utf-8") as f:

@@ -29,7 +29,7 @@ import uvicorn
 from pydantic import SecretStr
 
 from local_operator.admin import add_admin_tools
-from local_operator.agents import AgentConversation, AgentEditFields, AgentRegistry
+from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.clients.openrouter import OpenRouterClient
 from local_operator.clients.serpapi import SerpApiClient
 from local_operator.clients.tavily import TavilyClient
@@ -39,6 +39,7 @@ from local_operator.executor import LocalCodeExecutor
 from local_operator.model.configure import configure_model, validate_model
 from local_operator.operator import Operator, OperatorType
 from local_operator.tools import ToolRegistry
+from local_operator.types import AgentState
 
 CLI_DESCRIPTION = """
     Local Operator - An environment for agentic AI models to perform tasks on the local device.
@@ -621,7 +622,7 @@ def main() -> int:
 
         if agent:
             # Get conversation history if agent name provided
-            agent_conversation_data = agent_registry.load_agent_conversation(agent.id)
+            agent_state = agent_registry.load_agent_state(agent.id)
 
             # Use agent's hosting and model if provided
             if agent.hosting:
@@ -646,13 +647,14 @@ def main() -> int:
                 chat_args["seed"] = agent.seed
 
         else:
-            agent_conversation_data = AgentConversation(
+            agent_state = AgentState(
                 version="",
                 conversation=[],
                 execution_history=[],
                 learnings=[],
                 current_plan=None,
                 instruction_details=None,
+                agent_system_prompt=None,
             )
 
         model_info_client: Optional[OpenRouterClient] = None
@@ -697,10 +699,8 @@ def main() -> int:
             max_learnings_history=config_manager.get_config_value("max_learnings_history", 50),
             agent=agent,
             agent_registry=agent_registry,
+            agent_state=agent_state,
             persist_conversation=training_mode,
-            learnings=agent_conversation_data.learnings,
-            current_plan=agent_conversation_data.current_plan,
-            instruction_details=agent_conversation_data.instruction_details,
         )
 
         operator = Operator(
@@ -721,8 +721,7 @@ def main() -> int:
 
         executor.set_tool_registry(tool_registry)
 
-        executor.load_conversation_history(agent_conversation_data.conversation)
-        executor.load_execution_history(agent_conversation_data.execution_history)
+        executor.load_agent_state(agent_state)
 
         # Start the async chat interface or execute single command
         if single_execution_mode:

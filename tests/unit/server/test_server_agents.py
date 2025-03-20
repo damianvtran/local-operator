@@ -14,6 +14,7 @@ from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.server.app import app
 from local_operator.server.models.schemas import AgentCreate, AgentUpdate
 from local_operator.types import (
+    AgentState,
     CodeExecutionResult,
     ConversationRecord,
     ConversationRole,
@@ -550,7 +551,18 @@ async def test_get_agent_conversation_pagination_default(
         )
 
     # Save the mock conversation
-    dummy_registry.save_agent_conversation(agent_id, mock_conversation, [])
+    dummy_registry.save_agent_state(
+        agent_id=agent_id,
+        agent_state=AgentState(
+            version="",
+            conversation=mock_conversation,
+            execution_history=[],
+            learnings=[],
+            current_plan="",
+            instruction_details="",
+            agent_system_prompt="",
+        ),
+    )
 
     # Test default pagination (page 1, per_page 10)
     response = await test_app_client.get(f"/v1/agents/{agent_id}/conversation")
@@ -608,7 +620,18 @@ async def test_get_agent_conversation_pagination_second_page(
         )
 
     # Save the mock conversation
-    dummy_registry.save_agent_conversation(agent_id, mock_conversation, [])
+    dummy_registry.save_agent_state(
+        agent_id=agent_id,
+        agent_state=AgentState(
+            version="",
+            conversation=mock_conversation,
+            execution_history=[],
+            learnings=[],
+            current_plan="",
+            instruction_details="",
+            agent_system_prompt="",
+        ),
+    )
 
     # Test second page
     response = await test_app_client.get(f"/v1/agents/{agent_id}/conversation?page=2&per_page=10")
@@ -666,7 +689,18 @@ async def test_get_agent_conversation_custom_per_page(
         )
 
     # Save the mock conversation
-    dummy_registry.save_agent_conversation(agent_id, mock_conversation, [])
+    dummy_registry.save_agent_state(
+        agent_id=agent_id,
+        agent_state=AgentState(
+            version="",
+            conversation=mock_conversation,
+            execution_history=[],
+            learnings=[],
+            current_plan="",
+            instruction_details="",
+            agent_system_prompt="",
+        ),
+    )
 
     # Test custom per_page
     response = await test_app_client.get(f"/v1/agents/{agent_id}/conversation?per_page=5")
@@ -723,8 +757,18 @@ async def test_get_agent_conversation_page_out_of_bounds(
         )
 
     # Save the mock conversation
-    dummy_registry.save_agent_conversation(agent_id, mock_conversation, [])
-
+    dummy_registry.save_agent_state(
+        agent_id=agent_id,
+        agent_state=AgentState(
+            version="",
+            conversation=mock_conversation,
+            execution_history=[],
+            learnings=[],
+            current_plan="",
+            instruction_details="",
+            agent_system_prompt="",
+        ),
+    )
     # Test page out of bounds
     response = await test_app_client.get(f"/v1/agents/{agent_id}/conversation?page=4&per_page=5")
 
@@ -788,7 +832,18 @@ async def test_get_agent_execution_history(test_app_client, dummy_registry: Agen
         )
 
     # Save the mock executions
-    dummy_registry.save_agent_conversation(agent_id, [], mock_executions)
+    dummy_registry.save_agent_state(
+        agent_id=agent_id,
+        agent_state=AgentState(
+            version="",
+            conversation=[],
+            execution_history=mock_executions,
+            learnings=[],
+            current_plan="",
+            instruction_details="",
+            agent_system_prompt="",
+        ),
+    )
 
     # Test retrieving execution history
     response = await test_app_client.get(f"/v1/agents/{agent_id}/history")
@@ -851,7 +906,18 @@ async def test_get_agent_execution_history_pagination(
         )
 
     # Save the mock executions
-    dummy_registry.save_agent_conversation(agent_id, [], mock_executions)  # type: ignore
+    dummy_registry.save_agent_state(
+        agent_id=agent_id,
+        agent_state=AgentState(
+            version="",
+            conversation=[],
+            execution_history=mock_executions,
+            learnings=[],
+            current_plan="",
+            instruction_details="",
+            agent_system_prompt="",
+        ),
+    )
 
     # Test pagination - page 1 with 5 per page
     response = await test_app_client.get(f"/v1/agents/{agent_id}/history?page=1&per_page=5")
@@ -925,7 +991,18 @@ async def test_get_agent_execution_history_page_out_of_bounds(
         )
 
     # Save the mock executions
-    dummy_registry.save_agent_conversation(agent_id, [], mock_executions)  # type: ignore
+    dummy_registry.save_agent_state(
+        agent_id=agent_id,
+        agent_state=AgentState(
+            version="",
+            conversation=[],
+            execution_history=mock_executions,
+            learnings=[],
+            current_plan="",
+            instruction_details="",
+            agent_system_prompt="",
+        ),
+    )
 
     # Test page out of bounds
     response = await test_app_client.get(f"/v1/agents/{agent_id}/history?page=4&per_page=5")
@@ -1024,7 +1101,18 @@ async def test_clear_agent_conversation(test_app_client, dummy_registry: AgentRe
         )
 
     # Save the mock conversation
-    dummy_registry.save_agent_conversation(agent_id, mock_conversation, [])
+    dummy_registry.save_agent_state(
+        agent_id=agent_id,
+        agent_state=AgentState(
+            version="",
+            conversation=mock_conversation,
+            execution_history=[],
+            learnings=[],
+            current_plan="",
+            instruction_details="",
+            agent_system_prompt="",
+        ),
+    )
 
     # Verify conversation exists
     response = await test_app_client.get(f"/v1/agents/{agent_id}/conversation")
@@ -1059,3 +1147,152 @@ async def test_clear_agent_conversation_not_found(test_app_client, dummy_registr
     assert response.status_code == 404
     data = response.json()
     assert f"Agent with ID {non_existent_id} not found" in data.get("detail", "")
+
+
+@pytest.mark.asyncio
+async def test_get_agent_system_prompt(test_app_client, dummy_registry: AgentRegistry):
+    """Test retrieving an agent's system prompt."""
+    # Create a test agent
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="System Prompt Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description=None,
+            last_message=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+    agent_id = agent.id
+
+    # Write a system prompt for the agent
+    test_system_prompt = "This is a test system prompt for the agent."
+    dummy_registry.set_agent_system_prompt(agent_id, test_system_prompt)
+
+    # Get the system prompt
+    response = await test_app_client.get(f"/v1/agents/{agent_id}/system-prompt")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("status") == 200
+    assert data.get("message") == "Agent system prompt retrieved successfully"
+    assert data.get("result") == {"system_prompt": test_system_prompt}
+
+
+@pytest.mark.asyncio
+async def test_get_agent_system_prompt_not_found(test_app_client, dummy_registry: AgentRegistry):
+    """Test retrieving system prompt for a non-existent agent."""
+    non_existent_id = "nonexistent"
+    response = await test_app_client.get(f"/v1/agents/{non_existent_id}/system-prompt")
+
+    assert response.status_code == 404
+    data = response.json()
+    assert f"Agent with ID {non_existent_id} not found" in data.get("detail", "")
+
+
+@pytest.mark.asyncio
+async def test_update_agent_system_prompt(test_app_client, dummy_registry: AgentRegistry):
+    """Test updating an agent's system prompt."""
+    # Create a test agent
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="Update System Prompt Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description=None,
+            last_message=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+    agent_id = agent.id
+
+    # Initial system prompt
+    initial_prompt = "Initial system prompt"
+    dummy_registry.set_agent_system_prompt(agent_id, initial_prompt)
+
+    # Update the system prompt
+    new_prompt = "This is the updated system prompt."
+    update_payload = {"system_prompt": new_prompt}
+    response = await test_app_client.put(
+        f"/v1/agents/{agent_id}/system-prompt", json=update_payload
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("status") == 200
+    assert data.get("message") == "Agent system prompt updated successfully"
+    assert data.get("result") == {}
+
+    # Verify the system prompt was updated
+    response = await test_app_client.get(f"/v1/agents/{agent_id}/system-prompt")
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("result") == {"system_prompt": new_prompt}
+
+
+@pytest.mark.asyncio
+async def test_update_agent_system_prompt_not_found(test_app_client, dummy_registry: AgentRegistry):
+    """Test updating system prompt for a non-existent agent."""
+    non_existent_id = "nonexistent"
+    update_payload = {"system_prompt": "New system prompt"}
+    response = await test_app_client.put(
+        f"/v1/agents/{non_existent_id}/system-prompt", json=update_payload
+    )
+
+    assert response.status_code == 404
+    data = response.json()
+    assert f"Agent with ID {non_existent_id} not found" in data.get("detail", "")
+
+
+@pytest.mark.asyncio
+async def test_update_agent_system_prompt_validation_error(
+    test_app_client, dummy_registry: AgentRegistry
+):
+    """Test updating system prompt with invalid payload."""
+    # Create a test agent
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="Validation Error Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description=None,
+            last_message=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+    agent_id = agent.id
+
+    # Invalid payload (missing system_prompt field)
+    invalid_payload = {"wrong_field": "This won't work"}
+    response = await test_app_client.put(
+        f"/v1/agents/{agent_id}/system-prompt", json=invalid_payload
+    )
+
+    assert response.status_code == 422  # Validation error

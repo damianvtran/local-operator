@@ -26,6 +26,8 @@ setup(
         "psutil>=6.1.1",
         "dill>=0.3.9",
         "pyreadline3>=3.5.4",
+        "jsonlines>=4.0.0",
+        "python-multipart==0.0.20",
     ],
     python_requires=">=3.12",
     extras_require={

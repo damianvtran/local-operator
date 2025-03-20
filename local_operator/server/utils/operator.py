@@ -6,7 +6,7 @@ import logging
 from typing import Optional, cast
 
 from local_operator.admin import add_admin_tools
-from local_operator.agents import AgentConversation, AgentRegistry
+from local_operator.agents import AgentRegistry
 from local_operator.clients.openrouter import OpenRouterClient
 from local_operator.clients.serpapi import SerpApiClient
 from local_operator.clients.tavily import TavilyClient
@@ -18,6 +18,7 @@ from local_operator.jobs import JobManager
 from local_operator.model.configure import configure_model
 from local_operator.operator import Operator, OperatorType
 from local_operator.tools import ToolRegistry
+from local_operator.types import AgentState
 
 logger = logging.getLogger("local_operator.server.utils")
 
@@ -100,12 +101,12 @@ def create_operator(
     if not request_hosting:
         raise ValueError("Hosting is not set")
 
-    agent_conversation_data = None
+    agent_state = None
 
     chat_args = {}
 
     if current_agent:
-        agent_conversation_data = agent_registry.load_agent_conversation(current_agent.id)
+        agent_state = agent_registry.load_agent_state(current_agent.id)
 
         if current_agent.temperature:
             chat_args["temperature"] = current_agent.temperature
@@ -125,13 +126,14 @@ def create_operator(
             chat_args["seed"] = current_agent.seed
 
     else:
-        agent_conversation_data = AgentConversation(
+        agent_state = AgentState(
             version="",
             conversation=[],
             execution_history=[],
             learnings=[],
             current_plan=None,
             instruction_details=None,
+            agent_system_prompt=None,
         )
 
     model_info_client: Optional[OpenRouterClient] = None
@@ -163,10 +165,8 @@ def create_operator(
         agent=current_agent,
         verbosity_level=VerbosityLevel.QUIET,
         agent_registry=agent_registry,
+        agent_state=agent_state,
         persist_conversation=persist_conversation,
-        learnings=agent_conversation_data.learnings,
-        current_plan=agent_conversation_data.current_plan,
-        instruction_details=agent_conversation_data.instruction_details,
         job_manager=job_manager,
         job_id=job_id,
     )
@@ -189,7 +189,6 @@ def create_operator(
     )
     executor.set_tool_registry(tool_registry)
 
-    executor.load_conversation_history(agent_conversation_data.conversation)
-    executor.load_execution_history(agent_conversation_data.execution_history)
+    executor.load_agent_state(agent_state)
 
     return operator

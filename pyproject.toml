@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.4.9"
+version = "0.5.0"
 description = "A Python-based agent for local command execution"
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damianvtran@gmail.com" }]
@@ -32,6 +32,8 @@ dependencies = [
     "psutil",
     "dill",
     "pyreadline3",
+    "jsonlines",
+    "python-multipart",
     # Constraints
     "certifi>=2024.7.4",
     "configobj>=5.0.9",
