@@ -509,48 +509,45 @@ def update_config_tool(config_manager: ConfigManager) -> Callable[[Dict[str, Any
 
 
 def open_agents_config_tool(agent_registry: AgentRegistry) -> Callable[[], None]:
-    """Create a tool function that opens the agents configuration file.
+    """Create a tool function that opens the agents directory.
 
-    This function returns a callable that opens the agents.json file in the default system editor.
-    The file location is determined from the agent registry's config directory.
+    This function returns a callable that opens the agents directory in the default system file
+    explorer. The directory location is determined from the agent registry's config directory.
 
     Args:
         agent_registry: The AgentRegistry instance containing the config directory path
 
     Returns:
-        Callable[[], None]: A function that opens the agents configuration file
+        Callable[[], None]: A function that opens the agents directory
 
     Raises:
-        RuntimeError: If there are issues opening the configuration file
+        RuntimeError: If there are issues opening the directory
     """
 
     def open_agents_config() -> None:
-        """Open the agents configuration file in the default system editor.
+        """Open the agents directory in the default system file explorer.
 
-        Opens the agents.json file located in the agent registry's config directory
-        using the system's default application for JSON files.
+        Opens the agents directory located in the agent registry's config directory
+        using the system's default file explorer.
 
         Raises:
-            RuntimeError: If the configuration file cannot be opened
+            RuntimeError: If the directory cannot be opened
         """
         try:
-            agents_file = agent_registry.config_dir / "agents.json"
-            if not agents_file.exists():
-                raise RuntimeError(f"Agents configuration file not found at {agents_file}")
-
-            import platform
-            import subprocess
+            agents_dir = agent_registry.agents_dir
+            if not agents_dir.exists():
+                raise RuntimeError(f"Agents directory not found at {agents_dir}")
 
             system = platform.system()
             if system == "Darwin":  # macOS
-                subprocess.run(["open", str(agents_file)], check=True)
+                subprocess.run(["open", str(agents_dir)], check=True)
             elif system == "Windows":
-                subprocess.run(["start", str(agents_file)], shell=True, check=True)
+                subprocess.run(["start", str(agents_dir)], shell=True, check=True)
             else:  # Linux and other Unix-like
-                subprocess.run(["xdg-open", str(agents_file)], check=True)
+                subprocess.run(["xdg-open", str(agents_dir)], check=True)
 
         except Exception as e:
-            raise RuntimeError(f"Failed to open agents configuration file: {str(e)}")
+            raise RuntimeError(f"Failed to open agents directory: {str(e)}")
 
     return open_agents_config
 
