@@ -278,8 +278,10 @@ class RequestClassification(BaseModel):
         type (str): The type of request
         planning_required (bool): Whether planning is required for the request
         relative_effort (str): The relative effort required for the request
+        subject_change (bool): Whether the subject of the conversation has changed
     """
 
     type: str
     planning_required: bool = Field(default=False)
     relative_effort: RelativeEffortLevel = Field(default=RelativeEffortLevel.LOW)
+    subject_change: bool = Field(default=False)

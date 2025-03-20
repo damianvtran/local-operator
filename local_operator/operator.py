@@ -733,8 +733,6 @@ This is a {request_type} message, here are some guidelines for how to respond:
             None,
         )
 
-        self.executor.reset_learnings()
-
         response_json: ResponseJsonSchema | None = None
         response: BaseMessage | None = None
         final_response: str = ""
@@ -749,6 +747,22 @@ This is a {request_type} message, here are some guidelines for how to respond:
             verbosity_level=self.verbosity_level,
         ):
             classification = await self.classify_request(user_input)
+
+        if classification.subject_change:
+            self.executor.set_current_plan("")
+            self.executor.reset_learnings()
+
+            # Add a breakpoint to steer the conversation inertia
+            self.executor.conversation_history.append(
+                ConversationRecord(
+                    role=ConversationRole.USER,
+                    content=(
+                        "I would like to change the subject.  Please stop the current task "
+                        "and pay attention to my new message."
+                    ),
+                    should_summarize=False,
+                )
+            )
 
         # Add the task instructions as an ephemeral message to help the agent
         # prioritize the information and the task at hand.
