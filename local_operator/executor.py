@@ -760,8 +760,7 @@ class LocalCodeExecutor:
 
         # Only Anthropic requires manual cache control
         should_manual_cache_control = (
-            "anthropic" in self.get_model_name()
-            or self.model_configuration.hosting == "anthropic"
+            "anthropic" in self.get_model_name() or self.model_configuration.hosting == "anthropic"
         )
 
         for record in messages:
