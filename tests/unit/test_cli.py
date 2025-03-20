@@ -53,7 +53,7 @@ def mock_agent_registry(mock_agent):
     registry.delete_agent = MagicMock()
     registry.list_agents = MagicMock()
     registry.get_agent_by_name.return_value = mock_agent
-    registry.load_agent_conversation.return_value = AgentState(
+    registry.load_agent_state.return_value = AgentState(
         version="",
         conversation=[],
         execution_history=[],
@@ -227,7 +227,7 @@ def test_main_success(mock_operator, mock_agent_registry, mock_model):
             mock_configure_model.assert_called_once()
             mock_operator_cls.assert_called_once()
             mock_agent_registry.get_agent_by_name.assert_called_once_with("test-agent")
-            mock_agent_registry.load_agent_conversation.assert_called_once_with("test-id")
+            mock_agent_registry.load_agent_state.assert_called_once_with("test-id")
             mock_asyncio_run.assert_called_once_with(mock_operator.chat())
 
 

@@ -622,7 +622,7 @@ def main() -> int:
 
         if agent:
             # Get conversation history if agent name provided
-            agent_conversation_data = agent_registry.load_agent_conversation(agent.id)
+            agent_conversation_data = agent_registry.load_agent_state(agent.id)
 
             # Use agent's hosting and model if provided
             if agent.hosting:

@@ -110,7 +110,7 @@ def create_agent_from_conversation_tool(
                 current_working_directory=None,
             )
         )
-        agent_registry.save_agent_conversation(
+        agent_registry.save_agent_state(
             new_agent.id, conversation_history_to_save, execution_history_to_save
         )
         return new_agent
@@ -176,7 +176,7 @@ def save_agent_training_tool(
         conversation_history_to_save = conversation_history[:cutoff_idx]
         execution_history_to_save = execution_history[:cutoff_idx]
 
-        agent_registry.save_agent_conversation(
+        agent_registry.save_agent_state(
             executor.agent.id, conversation_history_to_save, execution_history_to_save
         )
         return executor.agent

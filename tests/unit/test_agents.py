@@ -532,9 +532,9 @@ def test_list_agents(temp_agents_dir: Path):
     assert ids == {agent1.id, agent2.id}
 
 
-def test_save_and_load_conversation(temp_agents_dir: Path):
+def test_save_and_load_state(temp_agents_dir: Path):
     registry = AgentRegistry(temp_agents_dir)
-    agent_name = "Agent Conversation"
+    agent_name = "Agent State"
     agent = registry.create_agent(
         AgentEditFields(
             name=agent_name,
@@ -582,7 +582,7 @@ def test_save_and_load_conversation(temp_agents_dir: Path):
     instruction_details = "Test instruction details"
 
     # Save the conversation with all data
-    registry.save_agent_conversation(
+    registry.save_agent_state(
         agent.id, conversation, execution_history, learnings, current_plan, instruction_details
     )
 
@@ -613,7 +613,7 @@ def test_save_and_load_conversation(temp_agents_dir: Path):
         assert f.read() == instruction_details
 
     # Load the conversation and verify data
-    loaded_conversation_data = registry.load_agent_conversation(agent.id)
+    loaded_conversation_data = registry.load_agent_state(agent.id)
     assert loaded_conversation_data.conversation == conversation
     assert loaded_conversation_data.execution_history == execution_history
     assert loaded_conversation_data.learnings == learnings
@@ -666,7 +666,7 @@ def test_load_nonexistent_conversation(temp_agents_dir: Path):
         old_conversation_file.unlink()
 
     # Load conversation and verify it's empty
-    conversation_data = registry.load_agent_conversation(agent.id)
+    conversation_data = registry.load_agent_state(agent.id)
     assert conversation_data.conversation == []
     assert conversation_data.execution_history == []
     assert conversation_data.learnings == []
@@ -783,7 +783,7 @@ def test_clone_agent(temp_agents_dir: Path):
     instruction_details = "Test instruction details"
 
     # Save the conversation with all data
-    registry.save_agent_conversation(
+    registry.save_agent_state(
         source_agent.id,
         conversation,
         execution_history,
@@ -822,7 +822,7 @@ def test_clone_agent(temp_agents_dir: Path):
     assert instruction_file.exists()
 
     # Verify conversation was copied
-    cloned_conversation_data = registry.load_agent_conversation(cloned_agent.id)
+    cloned_conversation_data = registry.load_agent_state(cloned_agent.id)
     assert cloned_conversation_data.conversation == conversation
     assert cloned_conversation_data.execution_history == execution_history
     assert cloned_conversation_data.learnings == learnings
@@ -1300,7 +1300,7 @@ def test_migrate_legacy_agents(temp_agents_dir: Path):
     assert agent.name == "Test Agent 1"
 
     # Verify conversation can be loaded
-    conversation = registry.load_agent_conversation(agent_id)
+    conversation = registry.load_agent_state(agent_id)
     assert len(conversation.conversation) == 2
     assert conversation.conversation[0].role == ConversationRole.USER
     assert conversation.conversation[0].content == "Hello"

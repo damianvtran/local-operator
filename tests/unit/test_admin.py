@@ -109,7 +109,7 @@ def test_create_agent_from_conversation_no_user_messages(
     create_tool = create_agent_from_conversation_tool(executor, agent_registry)
     agent_name = "TestAgent"
     new_agent = create_tool(agent_name)
-    saved_history = agent_registry.load_agent_conversation(new_agent.id)
+    saved_history = agent_registry.load_agent_state(new_agent.id)
     assert (
         saved_history.conversation == []
     ), f"Expected empty conversation history, got {saved_history}"
@@ -152,7 +152,7 @@ def test_create_agent_from_conversation_with_user_messages(
     create_tool = create_agent_from_conversation_tool(executor, agent_registry)
     agent_name = "TestAgent2"
     new_agent = create_tool(agent_name)
-    saved_history = agent_registry.load_agent_conversation(new_agent.id)
+    saved_history = agent_registry.load_agent_state(new_agent.id)
     expected_history = conversation_history[:4]
     expected_execution_history = [
         CodeExecutionResult(
@@ -257,7 +257,7 @@ def test_save_agent_training_with_agent(
     updated_agent = save_training_tool()
     expected_history = conversation_history[:2]
     expected_execution_history = execution_history
-    stored_history = agent_registry.load_agent_conversation(agent.id)
+    stored_history = agent_registry.load_agent_state(agent.id)
     assert (
         stored_history.conversation == expected_history
     ), f"Expected conversation history {expected_history}, got {stored_history}"

@@ -314,6 +314,12 @@ class AgentState(BaseModel):
     Pydantic model representing an agent's state, including conversation history,
     execution history, learnings, current plan, and instruction details.
 
+    Contains data that is safe for import and export, which will allow the agent
+    to operate with conversation context and learnings from previous conversations.
+
+    This does not contain the agent execution context, which contains pickled
+    data that is not guaranteed to be safe for import.
+
     This model stores both the version of the conversation format and the actual
     conversation history as a list of ConversationRecord objects.
 

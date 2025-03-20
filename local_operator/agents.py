@@ -494,10 +494,10 @@ class AgentRegistry:
             # For backward compatibility, copy from old format files
             try:
                 # Load conversation data from old format
-                source_conversation = self.load_agent_conversation(agent_id)
+                source_conversation = self.load_agent_state(agent_id)
 
                 # Save to new format
-                self.save_agent_conversation(
+                self.save_agent_state(
                     new_agent.id,
                     source_conversation.conversation,
                     source_conversation.execution_history,
@@ -630,7 +630,7 @@ class AgentRegistry:
 
         return list(self._agents.values())
 
-    def load_agent_conversation(self, agent_id: str) -> AgentState:
+    def load_agent_state(self, agent_id: str) -> AgentState:
         """
         Load the conversation history for a specified agent.
 
@@ -746,7 +746,7 @@ class AgentRegistry:
             instruction_details=instruction_details,
         )
 
-    def save_agent_conversation(
+    def save_agent_state(
         self,
         agent_id: str,
         conversation: List[ConversationRecord],
@@ -875,7 +875,7 @@ class AgentRegistry:
         Raises:
             KeyError: If the autosave agent does not exist
         """
-        return self.save_agent_conversation("autosave", conversation, execution_history)
+        return self.save_agent_state("autosave", conversation, execution_history)
 
     def get_agent_conversation_history(self, agent_id: str) -> List[ConversationRecord]:
         """
@@ -888,7 +888,7 @@ class AgentRegistry:
             List[ConversationRecord]: The conversation history as a list of ConversationRecord
                 objects.
         """
-        return self.load_agent_conversation(agent_id).conversation
+        return self.load_agent_state(agent_id).conversation
 
     def get_agent_execution_history(self, agent_id: str) -> List[CodeExecutionResult]:
         """
@@ -901,7 +901,7 @@ class AgentRegistry:
             List[CodeExecutionResult]: The execution history as a list of CodeExecutionResult
                 objects.
         """
-        return self.load_agent_conversation(agent_id).execution_history
+        return self.load_agent_state(agent_id).execution_history
 
     def save_agent_context(self, agent_id: str, context: Any) -> None:
         """Save the agent's context to a file.
@@ -1193,7 +1193,7 @@ class AgentRegistry:
         if agent_id not in self._agents:
             raise KeyError(f"Agent with id {agent_id} not found")
 
-        self.save_agent_conversation(
+        self.save_agent_state(
             agent_id,
             conversation_history,
             code_history,
