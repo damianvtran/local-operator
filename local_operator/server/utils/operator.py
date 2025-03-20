@@ -106,7 +106,7 @@ def create_operator(
     chat_args = {}
 
     if current_agent:
-        agent_conversation_data = agent_registry.load_agent_conversation(current_agent.id)
+        agent_conversation_data = agent_registry.load_agent_state(current_agent.id)
 
         if current_agent.temperature:
             chat_args["temperature"] = current_agent.temperature

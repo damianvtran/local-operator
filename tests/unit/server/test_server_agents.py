@@ -550,7 +550,7 @@ async def test_get_agent_conversation_pagination_default(
         )
 
     # Save the mock conversation
-    dummy_registry.save_agent_conversation(agent_id, mock_conversation, [])
+    dummy_registry.save_agent_state(agent_id, mock_conversation, [])
 
     # Test default pagination (page 1, per_page 10)
     response = await test_app_client.get(f"/v1/agents/{agent_id}/conversation")
@@ -608,7 +608,7 @@ async def test_get_agent_conversation_pagination_second_page(
         )
 
     # Save the mock conversation
-    dummy_registry.save_agent_conversation(agent_id, mock_conversation, [])
+    dummy_registry.save_agent_state(agent_id, mock_conversation, [])
 
     # Test second page
     response = await test_app_client.get(f"/v1/agents/{agent_id}/conversation?page=2&per_page=10")
@@ -666,7 +666,7 @@ async def test_get_agent_conversation_custom_per_page(
         )
 
     # Save the mock conversation
-    dummy_registry.save_agent_conversation(agent_id, mock_conversation, [])
+    dummy_registry.save_agent_state(agent_id, mock_conversation, [])
 
     # Test custom per_page
     response = await test_app_client.get(f"/v1/agents/{agent_id}/conversation?per_page=5")
@@ -723,7 +723,7 @@ async def test_get_agent_conversation_page_out_of_bounds(
         )
 
     # Save the mock conversation
-    dummy_registry.save_agent_conversation(agent_id, mock_conversation, [])
+    dummy_registry.save_agent_state(agent_id, mock_conversation, [])
 
     # Test page out of bounds
     response = await test_app_client.get(f"/v1/agents/{agent_id}/conversation?page=4&per_page=5")
@@ -788,7 +788,7 @@ async def test_get_agent_execution_history(test_app_client, dummy_registry: Agen
         )
 
     # Save the mock executions
-    dummy_registry.save_agent_conversation(agent_id, [], mock_executions)
+    dummy_registry.save_agent_state(agent_id, [], mock_executions)
 
     # Test retrieving execution history
     response = await test_app_client.get(f"/v1/agents/{agent_id}/history")
@@ -851,7 +851,7 @@ async def test_get_agent_execution_history_pagination(
         )
 
     # Save the mock executions
-    dummy_registry.save_agent_conversation(agent_id, [], mock_executions)  # type: ignore
+    dummy_registry.save_agent_state(agent_id, [], mock_executions)  # type: ignore
 
     # Test pagination - page 1 with 5 per page
     response = await test_app_client.get(f"/v1/agents/{agent_id}/history?page=1&per_page=5")
@@ -925,7 +925,7 @@ async def test_get_agent_execution_history_page_out_of_bounds(
         )
 
     # Save the mock executions
-    dummy_registry.save_agent_conversation(agent_id, [], mock_executions)  # type: ignore
+    dummy_registry.save_agent_state(agent_id, [], mock_executions)  # type: ignore
 
     # Test page out of bounds
     response = await test_app_client.get(f"/v1/agents/{agent_id}/history?page=4&per_page=5")
@@ -1024,7 +1024,7 @@ async def test_clear_agent_conversation(test_app_client, dummy_registry: AgentRe
         )
 
     # Save the mock conversation
-    dummy_registry.save_agent_conversation(agent_id, mock_conversation, [])
+    dummy_registry.save_agent_state(agent_id, mock_conversation, [])
 
     # Verify conversation exists
     response = await test_app_client.get(f"/v1/agents/{agent_id}/conversation")

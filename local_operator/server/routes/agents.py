@@ -635,7 +635,7 @@ async def clear_agent_conversation(
         agent_registry.get_agent(agent_id)
 
         # Clear the conversation by saving an empty list
-        agent_registry.save_agent_conversation(
+        agent_registry.save_agent_state(
             agent_id=agent_id,
             conversation=[],
             execution_history=[],
