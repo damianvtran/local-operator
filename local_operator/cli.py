@@ -622,7 +622,7 @@ def main() -> int:
 
         if agent:
             # Get conversation history if agent name provided
-            agent_conversation_data = agent_registry.load_agent_state(agent.id)
+            agent_state = agent_registry.load_agent_state(agent.id)
 
             # Use agent's hosting and model if provided
             if agent.hosting:
@@ -647,7 +647,7 @@ def main() -> int:
                 chat_args["seed"] = agent.seed
 
         else:
-            agent_conversation_data = AgentState(
+            agent_state = AgentState(
                 version="",
                 conversation=[],
                 execution_history=[],
@@ -698,10 +698,8 @@ def main() -> int:
             max_learnings_history=config_manager.get_config_value("max_learnings_history", 50),
             agent=agent,
             agent_registry=agent_registry,
+            agent_state=agent_state,
             persist_conversation=training_mode,
-            learnings=agent_conversation_data.learnings,
-            current_plan=agent_conversation_data.current_plan,
-            instruction_details=agent_conversation_data.instruction_details,
         )
 
         operator = Operator(
@@ -722,8 +720,7 @@ def main() -> int:
 
         executor.set_tool_registry(tool_registry)
 
-        executor.load_conversation_history(agent_conversation_data.conversation)
-        executor.load_execution_history(agent_conversation_data.execution_history)
+        executor.load_agent_state(agent_state)
 
         # Start the async chat interface or execute single command
         if single_execution_mode:

@@ -23,6 +23,7 @@ from local_operator.operator import Operator, OperatorType
 from local_operator.tools import ToolRegistry
 from local_operator.types import (
     ActionType,
+    AgentState,
     ConversationRecord,
     ConversationRole,
     ExecutionType,
@@ -71,9 +72,21 @@ def executor(mock_model_config, test_tool_registry):
     agent.version = "1.0.0"
     agent.security_prompt = ""
 
+    # Create a fresh AgentState for each test
+    fresh_agent_state = AgentState(
+        version="",
+        conversation=[],
+        execution_history=[],
+        learnings=[],
+        current_plan=None,
+        instruction_details=None,
+    )
+
     mock_executor = LocalCodeExecutor(mock_model_config, agent=agent)
     mock_executor.tool_registry = test_tool_registry
-    return mock_executor
+    mock_executor.agent_state = fresh_agent_state
+
+    yield mock_executor
 
 
 @pytest.fixture
@@ -537,8 +550,8 @@ async def test_execute_code_safety_no_prompt(executor, mock_model_config):
 
         # Should not cancel execution but add warning to conversation history
         assert "The code is unsafe because it deletes important files" in execution_result.message
-        assert len(executor.conversation_history) > 0
-        last_message = executor.conversation_history[-1]
+        assert len(executor.agent_state.conversation) > 0
+        last_message = executor.agent_state.conversation[-1]
         assert last_message.role == ConversationRole.ASSISTANT
         assert "The code is unsafe because it deletes important files" in last_message.content
 
@@ -570,8 +583,8 @@ async def test_execute_code_safety_with_prompt(executor, mock_model_config):
 
         # Should cancel execution when user declines
         assert "Code execution canceled by user" in execution_result.message
-        assert len(executor.conversation_history) > 0
-        last_message = executor.conversation_history[-1]
+        assert len(executor.agent_state.conversation) > 0
+        last_message = executor.agent_state.conversation[-1]
         assert last_message.role == ConversationRole.USER
         assert "this is a dangerous operation" in last_message.content
 
@@ -752,25 +765,25 @@ def test_limit_conversation_history(executor):
     ]
     for test_case in test_cases:
         executor.max_conversation_history = 3
-        executor.conversation_history = test_case["initial"]
+        executor.agent_state.conversation = test_case["initial"]
         executor._limit_conversation_history()
 
         expected_len = len(test_case["expected"])
-        actual_len = len(executor.conversation_history)
+        actual_len = len(executor.agent_state.conversation)
         assert (
             expected_len == actual_len
         ), f"{test_case['name']}: Expected length {expected_len} but got {actual_len}"
 
         for i, msg in enumerate(test_case["expected"]):
             expected_role = msg.role
-            actual_role = executor.conversation_history[i].role
+            actual_role = executor.agent_state.conversation[i].role
             assert expected_role == actual_role, (
                 f"{test_case['name']}: Expected role {expected_role} but got {actual_role} "
                 f"at position {i}"
             )
 
             expected_content = msg.content
-            actual_content = executor.conversation_history[i].content
+            actual_content = executor.agent_state.conversation[i].content
             assert expected_content == actual_content, (
                 f"{test_case['name']}: Expected content {expected_content} "
                 f"but got {actual_content} at position {i}"
@@ -948,27 +961,27 @@ async def test_summarize_old_steps(mock_model_config):
     ]
 
     for test_case in test_cases:
-        executor.conversation_history = test_case["initial"]
+        executor.agent_state.conversation = test_case["initial"]
         executor.detail_conversation_length = 2
         await executor._summarize_old_steps()
 
-        assert executor.conversation_history == test_case["expected"], (
+        assert executor.agent_state.conversation == test_case["expected"], (
             f"{test_case['name']}: Expected conversation history to match "
-            f"but got {executor.conversation_history}"
+            f"but got {executor.agent_state.conversation}"
         )
 
 
 @pytest.mark.asyncio
 async def test_summarize_old_steps_all_detail(executor):
     executor.detail_conversation_length = -1
-    executor.conversation_history = [
+    executor.agent_state.conversation = [
         ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt"),
         ConversationRecord(role=ConversationRole.USER, content="user msg"),
     ]
 
     await executor._summarize_old_steps()
 
-    assert executor.conversation_history == [
+    assert executor.agent_state.conversation == [
         ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt"),
         ConversationRecord(role=ConversationRole.USER, content="user msg"),
     ]
@@ -1379,7 +1392,7 @@ async def test_perform_action_handles_exception(executor: LocalCodeExecutor):
 
     with patch("sys.stdout", new_callable=io.StringIO):
         result = await executor.perform_action(response, RequestClassification(type="data_science"))
-        assert "error encountered" in executor.conversation_history[-1].content
+        assert "error encountered" in executor.agent_state.conversation[-1].content
         assert result is not None
         assert result.status == ProcessResponseStatus.SUCCESS
 
@@ -1417,7 +1430,7 @@ async def test_read_file_action(executor: LocalCodeExecutor, tmp_path: Path, fil
     result = await executor.read_file(str(file_path))
 
     assert "Successfully read file" in result.formatted_print
-    assert str(file_path) in executor.conversation_history[-1].content
+    assert str(file_path) in executor.agent_state.conversation[-1].content
 
     with open(file_path, "r") as f:
         lines = f.readlines()
@@ -1430,7 +1443,7 @@ async def test_read_file_action(executor: LocalCodeExecutor, tmp_path: Path, fil
         )  # Handle different line endings
         expected_content += f"{line_number:>4} | {line_length:>4} | {line}"
 
-    assert expected_content in executor.conversation_history[-1].content
+    assert expected_content in executor.agent_state.conversation[-1].content
 
 
 @pytest.mark.asyncio
@@ -1476,7 +1489,7 @@ async def test_write_file_action(
 
     assert actual_content == expected_content
     assert "Successfully wrote to file" in result.formatted_print
-    assert str(file_path) in executor.conversation_history[-1].content
+    assert str(file_path) in executor.agent_state.conversation[-1].content
 
 
 @pytest.mark.asyncio
@@ -1563,7 +1576,7 @@ async def test_edit_file_action(
         assert file_content == expected_content
         assert result is not None
         assert "Successfully edited file" in result.formatted_print
-        assert str(file_path) in executor.conversation_history[-1].content
+        assert str(file_path) in executor.agent_state.conversation[-1].content
 
 
 @pytest.mark.parametrize(
@@ -1647,11 +1660,9 @@ def test_initialize_conversation_history(executor, initial_history, expected_his
         initial_history: The initial conversation history.
         expected_history: The expected conversation history after initialization.
     """
-    executor.conversation_history = []
-
     with patch("local_operator.executor.create_system_prompt", return_value="SYSTEM_PROMPT"):
         executor.initialize_conversation_history(initial_history)
-        assert executor.conversation_history == expected_history
+        assert executor.agent_state.conversation == expected_history
 
 
 @pytest.mark.parametrize(
@@ -1757,12 +1768,20 @@ def test_load_conversation_history(executor, initial_history, new_history, expec
         new_history: The new conversation history to load.
         expected_history: The expected conversation history after loading.
     """
-    executor.conversation_history = []
-
     with patch("local_operator.executor.create_system_prompt", return_value="SYSTEM_PROMPT"):
-        executor.conversation_history = initial_history
-        executor.load_conversation_history(new_history)
-        assert executor.conversation_history == expected_history
+        executor.agent_state.conversation = initial_history
+
+        new_agent_state = AgentState(
+            version="",
+            conversation=new_history,
+            execution_history=[],
+            learnings=[],
+            current_plan=None,
+            instruction_details=None,
+        )
+
+        executor.load_agent_state(new_agent_state)
+        assert executor.agent_state.conversation == expected_history
 
 
 def test_get_environment_details(executor, monkeypatch, tmp_path):
@@ -1974,40 +1993,40 @@ def test_code_execution_error_agent_info_str(
 
 @pytest.fixture
 def executor_with_learnings(executor):
-    executor.learnings = ["learning1", "learning2"]
+    executor.agent_state.learnings = ["learning1", "learning2"]
     return executor
 
 
 def test_add_to_learnings_new_learning(executor_with_learnings):
     executor_with_learnings.add_to_learnings("learning3")
-    assert "learning3" in executor_with_learnings.learnings
-    assert len(executor_with_learnings.learnings) == 3
+    assert "learning3" in executor_with_learnings.agent_state.learnings
+    assert len(executor_with_learnings.agent_state.learnings) == 3
 
 
 def test_add_to_learnings_duplicate_learning(executor_with_learnings):
     executor_with_learnings.add_to_learnings("learning1")
-    assert executor_with_learnings.learnings.count("learning1") == 1
-    assert len(executor_with_learnings.learnings) == 2
+    assert executor_with_learnings.agent_state.learnings.count("learning1") == 1
+    assert len(executor_with_learnings.agent_state.learnings) == 2
 
 
 def test_add_to_learnings_empty_learning(executor_with_learnings):
     executor_with_learnings.add_to_learnings("")
-    assert len(executor_with_learnings.learnings) == 2
+    assert len(executor_with_learnings.agent_state.learnings) == 2
 
 
 def test_add_to_learnings_none_learning(executor_with_learnings):
     executor_with_learnings.add_to_learnings(None)  # type: ignore
-    assert len(executor_with_learnings.learnings) == 2
+    assert len(executor_with_learnings.agent_state.learnings) == 2
 
 
 def test_add_to_learnings_exceed_max_learnings(executor):
     executor.max_learnings_history = 2
-    executor.learnings = ["learning1", "learning2"]
+    executor.agent_state.learnings = ["learning1", "learning2"]
     executor.add_to_learnings("learning3")
-    assert "learning1" not in executor.learnings
-    assert "learning2" in executor.learnings
-    assert "learning3" in executor.learnings
-    assert len(executor.learnings) == 2
+    assert "learning1" not in executor.agent_state.learnings
+    assert "learning2" in executor.agent_state.learnings
+    assert "learning3" in executor.agent_state.learnings
+    assert len(executor.agent_state.learnings) == 2
 
 
 @pytest.mark.parametrize(
@@ -2020,32 +2039,32 @@ def test_add_to_learnings_exceed_max_learnings(executor):
 )
 def test_append_to_history_adds_record(executor, record_data, expected_length):
     # Clear existing history
-    executor.conversation_history = []
+    executor.agent_state.conversation = []
 
     # Create record and append
     record = ConversationRecord(**record_data)
     executor.append_to_history(record)
 
     # Verify record was added
-    assert len(executor.conversation_history) == expected_length
-    assert executor.conversation_history[0].role == record.role
-    assert executor.conversation_history[0].content == record.content
-    assert executor.conversation_history[0].timestamp is not None
+    assert len(executor.agent_state.conversation) == expected_length
+    assert executor.agent_state.conversation[0].role == record.role
+    assert executor.agent_state.conversation[0].content == record.content
+    assert executor.agent_state.conversation[0].timestamp is not None
 
 
 def test_append_to_history_sets_timestamp_if_none(executor):
-    executor.conversation_history = []
+    executor.agent_state.conversation = []
     record = ConversationRecord(role=ConversationRole.USER, content="Test message")
     assert record.timestamp is None
 
     executor.append_to_history(record)
 
-    assert executor.conversation_history[0].timestamp is not None
-    assert isinstance(executor.conversation_history[0].timestamp, datetime)
+    assert executor.agent_state.conversation[0].timestamp is not None
+    assert isinstance(executor.agent_state.conversation[0].timestamp, datetime)
 
 
 def test_append_to_history_preserves_timestamp(executor):
-    executor.conversation_history = []
+    executor.agent_state.conversation = []
     timestamp = datetime(2023, 1, 1, 12, 0, 0)
     record = ConversationRecord(
         role=ConversationRole.USER, content="Test message", timestamp=timestamp
@@ -2053,13 +2072,13 @@ def test_append_to_history_preserves_timestamp(executor):
 
     executor.append_to_history(record)
 
-    assert executor.conversation_history[0].timestamp == timestamp
+    assert executor.agent_state.conversation[0].timestamp == timestamp
 
 
 def test_append_to_history_limits_history_length(executor):
     # Set small max history
     executor.max_conversation_history = 3
-    executor.conversation_history = [
+    executor.agent_state.conversation = [
         ConversationRecord(role=ConversationRole.SYSTEM, content="System prompt")
     ]
 
@@ -2069,11 +2088,11 @@ def test_append_to_history_limits_history_length(executor):
         executor.append_to_history(record)
 
     # Verify only the most recent messages are kept
-    assert len(executor.conversation_history) == 4
-    assert executor.conversation_history[0].content == "System prompt"
+    assert len(executor.agent_state.conversation) == 4
+    assert executor.agent_state.conversation[0].content == "System prompt"
     assert (
-        executor.conversation_history[1].content
+        executor.agent_state.conversation[1].content
         == "[Some conversation history has been truncated for brevity]"
     )
-    assert executor.conversation_history[2].content == "Message 4"
-    assert executor.conversation_history[3].content == "Message 5"
+    assert executor.agent_state.conversation[2].content == "Message 4"
+    assert executor.agent_state.conversation[3].content == "Message 5"

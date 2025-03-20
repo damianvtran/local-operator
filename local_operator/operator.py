@@ -269,7 +269,7 @@ class Operator:
             ),
         ]
 
-        if len(self.executor.conversation_history) + 1 > max_conversation_depth:
+        if len(self.executor.agent_state.conversation) + 1 > max_conversation_depth:
             messages.append(
                 ConversationRecord(
                     role=ConversationRole.USER,
@@ -282,9 +282,9 @@ class Operator:
                 )
             )
 
-            messages.extend(self.executor.conversation_history[-max_conversation_depth:])
+            messages.extend(self.executor.agent_state.conversation[-max_conversation_depth:])
         else:
-            messages.extend(self.executor.conversation_history[1:])
+            messages.extend(self.executor.agent_state.conversation[1:])
 
         messages.append(
             ConversationRecord(
@@ -320,7 +320,7 @@ class Operator:
 
                 classification = process_classification_json(response_content)
 
-                self.executor.conversation_history.append(
+                self.executor.agent_state.conversation.append(
                     ConversationRecord(
                         role=ConversationRole.ASSISTANT,
                         content=(
@@ -393,7 +393,7 @@ class Operator:
             ),
         ]
 
-        messages.extend(self.executor.conversation_history[1:])
+        messages.extend(self.executor.agent_state.conversation[1:])
 
         messages.append(
             ConversationRecord(
@@ -426,7 +426,7 @@ class Operator:
         # Remove think tags for reasoning models
         response_content = remove_think_tags(response_content)
 
-        self.executor.conversation_history.extend(
+        self.executor.agent_state.conversation.extend(
             [
                 ConversationRecord(
                     role=ConversationRole.ASSISTANT,
@@ -468,8 +468,8 @@ class Operator:
         if self.persist_agent_conversation and self.agent_registry and self.current_agent:
             self.agent_registry.update_agent_state(
                 self.current_agent.id,
-                self.executor.conversation_history,
-                self.executor.code_history,
+                self.executor.agent_state.conversation,
+                self.executor.agent_state.execution_history,
             )
 
         return response_content
@@ -492,7 +492,7 @@ class Operator:
             ),
         ]
 
-        messages.extend(self.executor.conversation_history[1:])
+        messages.extend(self.executor.agent_state.conversation[1:])
 
         messages.append(
             ConversationRecord(
@@ -528,7 +528,7 @@ class Operator:
         # Clean the response content
         response_content = clean_plain_text_response(response_content)
 
-        self.executor.conversation_history.extend(
+        self.executor.agent_state.conversation.extend(
             [
                 ConversationRecord(
                     role=ConversationRole.ASSISTANT,
@@ -560,8 +560,8 @@ class Operator:
         if self.persist_agent_conversation and self.agent_registry and self.current_agent:
             self.agent_registry.update_agent_state(
                 self.current_agent.id,
-                self.executor.conversation_history,
-                self.executor.code_history,
+                self.executor.agent_state.conversation,
+                self.executor.agent_state.execution_history,
             )
 
         return response_content
@@ -585,7 +585,7 @@ class Operator:
             Exception: If there's an error during model invocation
         """
         # Create a copy of the conversation history
-        messages = list(self.executor.conversation_history)
+        messages = list(self.executor.agent_state.conversation)
 
         messages.append(
             ConversationRecord(
@@ -621,7 +621,7 @@ class Operator:
         response_content = remove_think_tags(response_content)
 
         # Add the response to conversation history
-        self.executor.conversation_history.extend(
+        self.executor.agent_state.conversation.extend(
             [
                 ConversationRecord(
                     role=ConversationRole.ASSISTANT,
@@ -655,8 +655,8 @@ class Operator:
         if self.persist_agent_conversation and self.agent_registry and self.current_agent:
             self.agent_registry.update_agent_state(
                 self.current_agent.id,
-                self.executor.conversation_history,
-                self.executor.code_history,
+                self.executor.agent_state.conversation,
+                self.executor.agent_state.execution_history,
             )
 
         return response_content
@@ -679,7 +679,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
             ),
         )
 
-        self.executor.conversation_history.append(
+        self.executor.agent_state.conversation.append(
             ConversationRecord(
                 role=ConversationRole.USER,
                 content=task_instructions,
@@ -753,7 +753,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
             self.executor.reset_learnings()
 
             # Add a breakpoint to steer the conversation inertia
-            self.executor.conversation_history.append(
+            self.executor.agent_state.conversation.append(
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content=(
@@ -769,7 +769,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
         self.add_task_instructions(classification)
 
         # Add the user's request after the task instructions
-        self.executor.conversation_history.append(
+        self.executor.agent_state.conversation.append(
             ConversationRecord(
                 role=ConversationRole.USER,
                 content=user_input_with_attachments,
@@ -824,7 +824,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
                 "Formulating a response",
                 verbosity_level=self.verbosity_level,
             ):
-                response = await self.executor.invoke_model(self.executor.conversation_history)
+                response = await self.executor.invoke_model(self.executor.agent_state.conversation)
 
             response_content = (
                 response.content if isinstance(response.content, str) else str(response.content)
@@ -843,7 +843,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
                     for i, err in enumerate(e.errors())
                 )
 
-                self.executor.conversation_history.extend(
+                self.executor.agent_state.conversation.extend(
                     [
                         ConversationRecord(
                             role=ConversationRole.ASSISTANT,
@@ -906,8 +906,8 @@ This is a {request_type} message, here are some guidelines for how to respond:
                 try:
                     self.handle_autosave(
                         self.agent_registry.config_dir,
-                        self.executor.conversation_history,
-                        self.executor.code_history,
+                        self.executor.agent_state.conversation,
+                        self.executor.agent_state.execution_history,
                     )
                 except Exception as e:
                     error_str = str(e)
@@ -932,12 +932,12 @@ This is a {request_type} message, here are some guidelines for how to respond:
 
     def print_conversation_history(self) -> None:
         """Print the conversation history for debugging."""
-        total_tokens = self.executor.get_invoke_token_count(self.executor.conversation_history)
+        total_tokens = self.executor.get_invoke_token_count(self.executor.agent_state.conversation)
 
         print("\n\033[1;35m╭─ Debug: Conversation History ───────────────────────\033[0m")
         print(f"\033[1;35m│ Message tokens: {total_tokens}                       \033[0m")
         print(f"\033[1;35m│ Session tokens: {self.executor.get_session_token_usage()}\033[0m")
-        for i, entry in enumerate(self.executor.conversation_history, 1):
+        for i, entry in enumerate(self.executor.agent_state.conversation, 1):
             role = entry.role
             content = entry.content
             print(f"\033[1;35m│ {i}. {role.value.capitalize()}:\033[0m")
