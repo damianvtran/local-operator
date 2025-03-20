@@ -6,7 +6,7 @@ import logging
 from typing import Optional, cast
 
 from local_operator.admin import add_admin_tools
-from local_operator.agents import AgentConversation, AgentRegistry
+from local_operator.agents import AgentRegistry
 from local_operator.clients.openrouter import OpenRouterClient
 from local_operator.clients.serpapi import SerpApiClient
 from local_operator.clients.tavily import TavilyClient
@@ -18,6 +18,7 @@ from local_operator.jobs import JobManager
 from local_operator.model.configure import configure_model
 from local_operator.operator import Operator, OperatorType
 from local_operator.tools import ToolRegistry
+from local_operator.types import AgentState
 
 logger = logging.getLogger("local_operator.server.utils")
 
@@ -125,7 +126,7 @@ def create_operator(
             chat_args["seed"] = current_agent.seed
 
     else:
-        agent_conversation_data = AgentConversation(
+        agent_conversation_data = AgentState(
             version="",
             conversation=[],
             execution_history=[],

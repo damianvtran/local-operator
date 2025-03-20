@@ -307,3 +307,35 @@ class RequestClassification(BaseModel):
     planning_required: bool = Field(default=False)
     relative_effort: RelativeEffortLevel = Field(default=RelativeEffortLevel.LOW)
     subject_change: bool = Field(default=False)
+
+
+class AgentState(BaseModel):
+    """
+    Pydantic model representing an agent's state, including conversation history,
+    execution history, learnings, current plan, and instruction details.
+
+    This model stores both the version of the conversation format and the actual
+    conversation history as a list of ConversationRecord objects.
+
+    Attributes:
+        version (str): The version of the conversation format/schema
+        conversation (List[ConversationRecord]): List of conversation messages, where each
+            message is a ConversationRecord object
+        execution_history (List[CodeExecutionResult]): History of code execution results
+        learnings (List[str]): List of learnings extracted from the conversation
+        current_plan (str | None): The current plan for the agent, if any
+        instruction_details (str | None): Detailed instructions for the agent, if any
+    """
+
+    version: str = Field(..., description="The version of the conversation")
+    conversation: List[ConversationRecord] = Field(..., description="The conversation history")
+    execution_history: List[CodeExecutionResult] = Field(
+        default_factory=list, description="The execution history"
+    )
+    learnings: List[str] = Field(
+        default_factory=list, description="The learnings from the conversation"
+    )
+    current_plan: str | None = Field(None, description="The current plan for the agent")
+    instruction_details: str | None = Field(
+        None, description="The details of the instructions for the agent"
+    )

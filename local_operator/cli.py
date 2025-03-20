@@ -29,7 +29,7 @@ import uvicorn
 from pydantic import SecretStr
 
 from local_operator.admin import add_admin_tools
-from local_operator.agents import AgentConversation, AgentEditFields, AgentRegistry
+from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.clients.openrouter import OpenRouterClient
 from local_operator.clients.serpapi import SerpApiClient
 from local_operator.clients.tavily import TavilyClient
@@ -39,6 +39,7 @@ from local_operator.executor import LocalCodeExecutor
 from local_operator.model.configure import configure_model, validate_model
 from local_operator.operator import Operator, OperatorType
 from local_operator.tools import ToolRegistry
+from local_operator.types import AgentState
 
 CLI_DESCRIPTION = """
     Local Operator - An environment for agentic AI models to perform tasks on the local device.
@@ -646,7 +647,7 @@ def main() -> int:
                 chat_args["seed"] = agent.seed
 
         else:
-            agent_conversation_data = AgentConversation(
+            agent_conversation_data = AgentState(
                 version="",
                 conversation=[],
                 execution_history=[],

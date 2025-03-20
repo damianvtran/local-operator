@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import SecretStr
 
-from local_operator.agents import AgentConversation, AgentData
+from local_operator.agents import AgentData
 from local_operator.cli import (
     agents_create_command,
     agents_delete_command,
@@ -17,6 +17,7 @@ from local_operator.cli import (
     serve_command,
 )
 from local_operator.model.configure import ModelConfiguration
+from local_operator.types import AgentState
 
 
 @pytest.fixture
@@ -52,7 +53,7 @@ def mock_agent_registry(mock_agent):
     registry.delete_agent = MagicMock()
     registry.list_agents = MagicMock()
     registry.get_agent_by_name.return_value = mock_agent
-    registry.load_agent_conversation.return_value = AgentConversation(
+    registry.load_agent_conversation.return_value = AgentState(
         version="",
         conversation=[],
         execution_history=[],
