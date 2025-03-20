@@ -658,6 +658,7 @@ async def clear_agent_conversation(
                 learnings=[],
                 current_plan="",
                 instruction_details="",
+                agent_system_prompt=None,
             ),
         )
         agent_registry.save_agent_context(agent_id=agent_id, context={})
