@@ -675,6 +675,18 @@ class ModelListQueryParams(BaseModel):
     )
 
 
+class AgentImportResponse(BaseModel):
+    """Response for agent import endpoint.
+
+    Attributes:
+        agent_id: ID of the imported agent
+        name: Name of the imported agent
+    """
+
+    agent_id: str = Field(..., description="ID of the imported agent")
+    name: str = Field(..., description="Name of the imported agent")
+
+
 class HealthCheckResponse(BaseModel):
     """Response for health check endpoint.
 
