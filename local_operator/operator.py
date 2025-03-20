@@ -467,9 +467,8 @@ class Operator:
         # if the persist_conversation flag is set.
         if self.persist_agent_conversation and self.agent_registry and self.current_agent:
             self.agent_registry.update_agent_state(
-                self.current_agent.id,
-                self.executor.agent_state.conversation,
-                self.executor.agent_state.execution_history,
+                agent_id=self.current_agent.id,
+                agent_state=self.executor.agent_state,
             )
 
         return response_content
@@ -559,9 +558,8 @@ class Operator:
         # if the persist_conversation flag is set.
         if self.persist_agent_conversation and self.agent_registry and self.current_agent:
             self.agent_registry.update_agent_state(
-                self.current_agent.id,
-                self.executor.agent_state.conversation,
-                self.executor.agent_state.execution_history,
+                agent_id=self.current_agent.id,
+                agent_state=self.executor.agent_state,
             )
 
         return response_content
@@ -654,9 +652,8 @@ class Operator:
         # Persist conversation if enabled
         if self.persist_agent_conversation and self.agent_registry and self.current_agent:
             self.agent_registry.update_agent_state(
-                self.current_agent.id,
-                self.executor.agent_state.conversation,
-                self.executor.agent_state.execution_history,
+                agent_id=self.current_agent.id,
+                agent_state=self.executor.agent_state,
             )
 
         return response_content

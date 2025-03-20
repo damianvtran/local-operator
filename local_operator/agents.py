@@ -494,16 +494,12 @@ class AgentRegistry:
             # For backward compatibility, copy from old format files
             try:
                 # Load conversation data from old format
-                source_conversation = self.load_agent_state(agent_id)
+                source_state = self.load_agent_state(agent_id)
 
                 # Save to new format
                 self.save_agent_state(
                     new_agent.id,
-                    source_conversation.conversation,
-                    source_conversation.execution_history,
-                    source_conversation.learnings,
-                    source_conversation.current_plan,
-                    source_conversation.instruction_details,
+                    source_state,
                 )
 
                 # Copy context if it exists
@@ -749,16 +745,12 @@ class AgentRegistry:
     def save_agent_state(
         self,
         agent_id: str,
-        conversation: List[ConversationRecord],
-        execution_history: List[CodeExecutionResult],
-        learnings: List[str] = [],
-        current_plan: str | None = None,
-        instruction_details: str | None = None,
+        agent_state: AgentState,
     ) -> None:
         """
-        Save the conversation history for a specified agent.
+        Save the agent's state.
 
-        The conversation history is stored in separate JSONL files in the agent's directory:
+        The agent's state is stored in separate files in the agent's directory:
         - conversation.jsonl: Conversation history
         - execution_history.jsonl: Execution history
         - learnings.jsonl: Learnings from the conversation
@@ -767,11 +759,7 @@ class AgentRegistry:
 
         Args:
             agent_id (str): The unique identifier of the agent.
-            conversation (List[ConversationRecord]): The conversation history to save.
-            execution_history (List[CodeExecutionResult]): The execution history to save.
-            learnings (List[str]): The learnings from the conversation.
-            current_plan (str | None): The current plan for the agent.
-            instruction_details (str | None): The instruction details for the agent.
+            agent_state (AgentState): The agent's state to save.
         """
         agent_dir = self.agents_dir / agent_id
 
@@ -783,32 +771,32 @@ class AgentRegistry:
             # Save conversation records
             conversation_file = agent_dir / "conversation.jsonl"
             with jsonlines.open(conversation_file, mode="w") as writer:
-                for record in conversation:
+                for record in agent_state.conversation:
                     writer.write(record.model_dump())
 
             # Save execution history records
             execution_history_file = agent_dir / "execution_history.jsonl"
             with jsonlines.open(execution_history_file, mode="w") as writer:
-                for record in execution_history:
+                for record in agent_state.execution_history:
                     writer.write(record.model_dump())
 
             # Save learnings
             learnings_file = agent_dir / "learnings.jsonl"
             with jsonlines.open(learnings_file, mode="w") as writer:
-                for learning in learnings:
+                for learning in agent_state.learnings:
                     writer.write({"learning": learning})
 
             # Save current plan if provided
-            if current_plan is not None:
+            if agent_state.current_plan is not None:
                 plan_file = agent_dir / "current_plan.txt"
                 with plan_file.open("w", encoding="utf-8") as f:
-                    f.write(current_plan)
+                    f.write(agent_state.current_plan)
 
             # Save instruction details if provided
-            if instruction_details is not None:
+            if agent_state.instruction_details is not None:
                 instruction_file = agent_dir / "instruction_details.txt"
                 with instruction_file.open("w", encoding="utf-8") as f:
-                    f.write(instruction_details)
+                    f.write(agent_state.instruction_details)
 
         except Exception as e:
             raise Exception(f"Failed to save agent conversation: {str(e)}")
@@ -875,7 +863,17 @@ class AgentRegistry:
         Raises:
             KeyError: If the autosave agent does not exist
         """
-        return self.save_agent_state("autosave", conversation, execution_history)
+        return self.save_agent_state(
+            "autosave",
+            AgentState(
+                version=version("local-operator"),
+                conversation=conversation,
+                execution_history=execution_history,
+                learnings=[],
+                current_plan=None,
+                instruction_details=None,
+            ),
+        )
 
     def get_agent_conversation_history(self, agent_id: str) -> List[ConversationRecord]:
         """
@@ -916,7 +914,6 @@ class AgentRegistry:
 
         Raises:
             KeyError: If the agent with the specified ID does not exist.
-            Exception: If there is an error saving the context.
         """
         if agent_id not in self._agents:
             raise KeyError(f"Agent with id {agent_id} not found")
@@ -953,7 +950,7 @@ class AgentRegistry:
             with context_file.open("wb") as f:
                 dill.dump(serializable_context, f)
         except Exception as e:
-            raise Exception(f"Failed to save agent context: {str(e)}")
+            logging.error(f"Failed to save agent context: {str(e)}")
 
     def load_agent_context(self, agent_id: str) -> Any:
         """Load the agent's context from a file.
@@ -1168,12 +1165,11 @@ class AgentRegistry:
     def update_agent_state(
         self,
         agent_id: str,
-        conversation_history: List[ConversationRecord],
-        code_history: List[CodeExecutionResult],
+        agent_state: AgentState,
         current_working_directory: Optional[str] = None,
         context: Any = None,
     ) -> None:
-        """Save the current agent's conversation history and code execution history.
+        """Save the current agent's state.
 
         This method persists the agent's state by saving the current conversation
         and code execution history to the agent registry. It also updates the agent's
@@ -1201,8 +1197,7 @@ class AgentRegistry:
 
         self.save_agent_state(
             agent_id,
-            conversation_history,
-            code_history,
+            agent_state,
         )
 
         # Save the context if provided
@@ -1211,7 +1206,9 @@ class AgentRegistry:
 
         # Extract the last assistant message from code history
         assistant_messages = [
-            record.message for record in code_history if record.role == ConversationRole.ASSISTANT
+            record.message
+            for record in agent_state.execution_history
+            if record.role == ConversationRole.ASSISTANT
         ]
 
         last_assistant_message = None
