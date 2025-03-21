@@ -104,7 +104,7 @@ def clean_json_response(response_content: str) -> str:
     response_content = remove_think_tags(response_content)
 
     # Check for JSON content between the text "JSON response content: ```json" and "```"
-    json_response_marker = "JSON response content: ```json"
+    json_response_marker = "```json"
     if json_response_marker in response_content:
         start_index = response_content.find(json_response_marker) + len(json_response_marker)
         response_content = response_content[start_index:]
