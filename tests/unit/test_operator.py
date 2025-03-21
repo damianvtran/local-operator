@@ -1,10 +1,15 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from local_operator.executor import LocalCodeExecutor
 from local_operator.model.configure import configure_model
-from local_operator.operator import Operator, OperatorType
+from local_operator.operator import (
+    Operator,
+    OperatorType,
+    process_classification_response,
+)
 from local_operator.prompts import RequestType
 from local_operator.tools import ToolRegistry
 from local_operator.types import (
@@ -276,3 +281,159 @@ async def test_operator_print_hello_world(cli_operator):
 
     assert last_conversation_message.content == final_response
     assert final_response == "I have printed 'Hello World' to the console."
+
+
+@pytest.mark.parametrize(
+    "response_content,expected",
+    [
+        pytest.param(
+            "<type>software_development</type><planning_required>true</planning_required>"
+            "<relative_effort>medium</relative_effort><subject_change>false</subject_change>",
+            RequestClassification(
+                type=RequestType.SOFTWARE_DEVELOPMENT,
+                planning_required=True,
+                relative_effort=RelativeEffortLevel.MEDIUM,
+                subject_change=False,
+            ),
+            id="xml_tag_format",
+        ),
+        pytest.param(
+            "<type>software_development</type>",
+            RequestClassification(
+                type=RequestType.SOFTWARE_DEVELOPMENT,
+                planning_required=False,
+                relative_effort=RelativeEffortLevel.LOW,
+                subject_change=False,
+            ),
+            id="default_values_for_missing_tags",
+        ),
+        pytest.param(
+            "Here is some text<type>software_development</type><planning_required>true"
+            "</planning_required><relative_effort>medium</relative_effort>"
+            "<subject_change>false</subject_change>  Here is some more text",
+            RequestClassification(
+                type=RequestType.SOFTWARE_DEVELOPMENT,
+                planning_required=True,
+                relative_effort=RelativeEffortLevel.MEDIUM,
+                subject_change=False,
+            ),
+            id="text_with_embedded_tags",
+        ),
+        pytest.param(
+            """
+            Here is some text
+            <type>software_development</type>
+            <planning_required>true</planning_required>
+            <relative_effort>medium</relative_effort>
+            <subject_change>false</subject_change>
+            Here is some more text
+            """,
+            RequestClassification(
+                type=RequestType.SOFTWARE_DEVELOPMENT,
+                planning_required=True,
+                relative_effort=RelativeEffortLevel.MEDIUM,
+                subject_change=False,
+            ),
+            id="multiline_text_with_tags",
+        ),
+        pytest.param(
+            """
+            Here is some text
+            <type>
+            software_development
+            </type>
+            <planning_required>
+            true
+            </planning_required>
+            <relative_effort>
+            medium
+            </relative_effort>
+            <subject_change>
+            false
+            </subject_change>
+            Here is some more text
+            """,
+            RequestClassification(
+                type=RequestType.SOFTWARE_DEVELOPMENT,
+                planning_required=True,
+                relative_effort=RelativeEffortLevel.MEDIUM,
+                subject_change=False,
+            ),
+            id="multiline_tags",
+        ),
+        pytest.param(
+            "<type>conversation</type><planning_required>false</planning_required>"
+            "<relative_effort>low</relative_effort><subject_change>true</subject_change>",
+            RequestClassification(
+                type=RequestType.CONVERSATION,
+                planning_required=False,
+                relative_effort=RelativeEffortLevel.LOW,
+                subject_change=True,
+            ),
+            id="conversation_type",
+        ),
+        pytest.param(
+            "<type>CONVERSATION</type><planning_required>false</planning_required>"
+            "<relative_effort>low</relative_effort><subject_change>true</subject_change>",
+            RequestClassification(
+                type=RequestType.CONVERSATION,
+                planning_required=False,
+                relative_effort=RelativeEffortLevel.LOW,
+                subject_change=True,
+            ),
+            id="uppercase_type_value",
+        ),
+        pytest.param(
+            "<type>software_development</type><planning_required>True</planning_required>"
+            "<relative_effort>medium</relative_effort><subject_change>False</subject_change>",
+            RequestClassification(
+                type=RequestType.SOFTWARE_DEVELOPMENT,
+                planning_required=True,
+                relative_effort=RelativeEffortLevel.MEDIUM,
+                subject_change=False,
+            ),
+            id="mixed_case_boolean_values",
+        ),
+        pytest.param(
+            "I think this is a <type>software_development</type> request with "
+            "<planning_required>true</planning_required> "
+            "planning and <relative_effort>high</relative_effort> effort. "
+            "<subject_change>false</subject_change>",
+            RequestClassification(
+                type=RequestType.SOFTWARE_DEVELOPMENT,
+                planning_required=True,
+                relative_effort=RelativeEffortLevel.HIGH,
+                subject_change=False,
+            ),
+            id="partial_xml_tags_with_text",
+        ),
+    ],
+)
+def test_process_classification_response(response_content, expected):
+    """Test that process_classification_response correctly parses different formats."""
+    result = process_classification_response(response_content)
+
+    assert result.type == expected.type
+    assert result.planning_required == expected.planning_required
+    assert result.relative_effort == expected.relative_effort
+    assert result.subject_change == expected.subject_change
+
+
+@pytest.mark.parametrize(
+    "invalid_content",
+    [
+        pytest.param("Here is a response with no tags", id="no_tags"),
+        pytest.param(
+            "Here is a response with incomplete xml tags <type>software_development",
+            id="incomplete_tags",
+        ),
+        pytest.param(
+            "Here is a response missing the type field <planning_required>true</planning_required>",
+            id="missing_type_field",
+        ),
+    ],
+)
+def test_process_classification_response_invalid(invalid_content):
+    """Test that process_classification_response raises ValidationError for invalid inputs."""
+    with pytest.raises(ValidationError):
+        process_classification_response(invalid_content)

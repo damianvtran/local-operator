@@ -6,7 +6,7 @@ from unittest.mock import patch
 import psutil
 
 from local_operator.prompts import (
-    JsonResponseFormatPrompt,
+    ActionResponseFormatPrompt,
     apply_attachments_to_prompt,
     create_system_prompt,
     get_system_details_str,
@@ -44,7 +44,7 @@ def test_create_system_prompt():
 
         result = create_system_prompt(
             tool_registry=None,
-            response_format=JsonResponseFormatPrompt,
+            response_format=ActionResponseFormatPrompt,
             agent_system_prompt="Test agent system prompt",
         )
 

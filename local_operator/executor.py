@@ -42,6 +42,7 @@ from local_operator.helpers import (
 from local_operator.jobs import JobManager
 from local_operator.model.configure import ModelConfiguration, calculate_cost
 from local_operator.prompts import (
+    AgentHeadsUpDisplayPrompt,
     SafetyCheckConversationPrompt,
     SafetyCheckSystemPrompt,
     SafetyCheckUserPrompt,
@@ -1494,23 +1495,6 @@ class LocalCodeExecutor:
         ):
             print_agent_response(self.step_counter, formatted_response, self.verbosity_level)
 
-            self.append_to_history(
-                ConversationRecord(
-                    role=ConversationRole.ASSISTANT,
-                    content=response.model_dump_json(),
-                    should_summarize=True,
-                )
-            )
-        else:
-            self.append_to_history(
-                ConversationRecord(
-                    role=ConversationRole.ASSISTANT,
-                    content=f"Final action: {response.model_dump_json()}.  I will now "
-                    "respond to you with the final response.",
-                    should_summarize=True,
-                )
-            )
-
         result = await self.perform_action(response, classification)
 
         current_working_directory = os.getcwd()
@@ -1678,7 +1662,7 @@ class LocalCodeExecutor:
                     else:
                         raise ValueError("File path is required for READ action")
 
-                else:
+                elif response.action == ActionType.CODE:
                     code_block = response.code
                     if code_block:
                         print_execution_section(
@@ -2152,7 +2136,6 @@ class LocalCodeExecutor:
         context_vars = get_context_vars_str(self.context)
 
         return f"""
-<environment_details>
 Current working directory: {cwd}
 Current time: {current_time}
 <git_status>
@@ -2164,7 +2147,6 @@ Current time: {current_time}
 <execution_context_variables>
 {context_vars}
 </execution_context_variables>
-</environment_details>
         """
 
     def _get_git_status(self) -> str:
@@ -2231,12 +2213,7 @@ Current time: {current_time}
         Returns:
             str: Formatted string containing learning details
         """
-        template = f"""
-        <learning_details>
-        {"\n".join([f"- {learning}" for learning in self.agent_state.learnings])}
-        </learning_details>
-        """
-        return template
+        return "\n".join([f"- {learning}" for learning in self.agent_state.learnings])
 
     def update_ephemeral_messages(self) -> None:
         """Add environment details and other ephemeral messages to the conversation history.
@@ -2268,46 +2245,12 @@ Current time: {current_time}
         instruction_details = self.get_instruction_details()
 
         # "Heads up display" for the agent
-        hud_message = f"""
-# Agent Heads Up Display
-
-This is your "heads up display" to help you understand the current state of the
-conversation and the environment.  It is a message that is ephemeral and moves up
-closer to the top of the conversation history to give you the most relevant information
-at each point in time as you complete each task.  It will update and move forward after
-each action.
-
-Use this information to help you complete the user's request.
-
-## Environment Details
-This is information about the files, variables, and other details about the current
-state of the environment.  Use these in this and future steps as needed instead of
-re-writing code.
-
-### About Environment Details
-- git_status: this is the current git status of the working directory
-- directory_tree: this is a tree of the current working directory.  You can use this
-  to see what files and directories are available to you right here.
-- execution_context_variables: this is a list of variables that are available for use
-  in the current execution context.  You can use them in this step or future steps in
-  the python code that you write to complete tasks.
-
-{environment_details}
-
-## Learning Details
-This is a notepad of things that you have learned from previous conversations.
-{learning_details}
-
-## Current Plan
-This is the current and original plan that you made based on the user's request.
-Follow it closely and accurately and make sure that you are making progress towards it.
-{current_plan_details}
-
-## Instruction Details
-This is a set of guidelines about how to best complete the current task or respond to
-the user's request.  You should take them into account as you work on the current task.
-{instruction_details}
-        """
+        hud_message = AgentHeadsUpDisplayPrompt.format(
+            environment_details=environment_details,
+            learning_details=learning_details,
+            current_plan_details=current_plan_details,
+            instruction_details=instruction_details,
+        )
 
         self.append_to_history(
             ConversationRecord(
@@ -2332,12 +2275,7 @@ the user's request.  You should take them into account as you work on the curren
         Returns:
             str: Formatted string containing current plan details
         """
-        template = f"""
-        <current_plan>
-        {self.agent_state.current_plan}
-        </current_plan>
-        """
-        return template
+        return self.agent_state.current_plan or ""
 
     def set_instruction_details(self, instruction_details: str) -> None:
         """Set the instruction details for the agent.
@@ -2353,12 +2291,7 @@ the user's request.  You should take them into account as you work on the curren
         Returns:
             str: Formatted string containing instruction details
         """
-        template = f"""
-        <instruction_details>
-        {self.agent_state.instruction_details}
-        </instruction_details>
-        """
-        return template
+        return self.agent_state.instruction_details or ""
 
     def add_to_code_history(
         self,
