@@ -107,8 +107,7 @@ def process_classification_response(response_content: str) -> RequestClassificat
     if classification_data:
         return RequestClassification.model_validate(classification_data)
 
-    # If no XML tags found, try to parse as JSON
-    return RequestClassification.model_validate_json(response_content)
+    raise ValueError("No valid classification data found in the response")
 
 
 class Operator:
@@ -718,8 +717,6 @@ This is a {request_type} message, here are some guidelines for how to respond:
     ) -> ResponseJsonSchema:
         """Interpret the action response from the agent."""
 
-        print(f"Response content to interpret: {response_content}")
-
         messages = [
             ConversationRecord(
                 role=ConversationRole.SYSTEM,
@@ -761,8 +758,6 @@ This is a {request_type} message, here are some guidelines for how to respond:
                 if isinstance(json_response.content, str)
                 else str(json_response.content)
             )
-
-            print(f"JSON response content: {json_response_content}")
 
             try:
                 response_json = process_json_response(json_response_content)

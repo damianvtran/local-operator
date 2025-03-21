@@ -92,39 +92,73 @@ def clean_plain_text_response(response_content: str) -> str:
 
 def clean_json_response(response_content: str) -> str:
     """
-    Clean JSON responses by removing code blocks and standalone JSON.
+    Clean JSON responses by extracting the JSON content from various formats.
 
     Args:
         response_content (str): The original JSON response potentially containing
-                               code blocks or standalone JSON objects.
+                               code blocks, markdown formatting, or other text.
 
     Returns:
-        str: The cleaned JSON response with code blocks and standalone JSON removed.
+        str: The extracted JSON content as a string.
     """
-    response_content = response_content
-
     response_content = remove_think_tags(response_content)
 
-    # Check for markdown code block format
-    start_tag = "```json"
-    end_tag = "```"
+    # Check for JSON content between the text "JSON response content: ```json" and "```"
+    json_response_marker = "JSON response content: ```json"
+    if json_response_marker in response_content:
+        start_index = response_content.find(json_response_marker) + len(json_response_marker)
+        response_content = response_content[start_index:]
 
-    start_index = response_content.find(start_tag)
-    if start_index != -1:
-        response_content = response_content[start_index + len(start_tag) :]
-
-        end_index = response_content.find(end_tag)
+        end_index = response_content.find("```")
         if end_index != -1:
-            response_content = response_content[:end_index]
-    else:
-        # If no code block, try to extract JSON object directly
-        # Look for the first { and the last }
-        first_brace = response_content.find("{")
-        last_brace = response_content.rfind("}")
+            json_content = response_content[:end_index].strip()
+            # Validate if this is valid JSON before returning
+            try:
+                json.loads(json_content)
+                return json_content
+            except json.JSONDecodeError:
+                # If not valid JSON, continue with other extraction methods
+                pass
 
-        if first_brace != -1 and last_brace != -1 and first_brace < last_brace:
-            response_content = response_content[first_brace : last_brace + 1]
+    # Check if the entire content is already valid JSON
+    try:
+        if response_content.strip().startswith("{") and response_content.strip().endswith("}"):
+            json.loads(response_content.strip())
+            return response_content.strip()
+    except json.JSONDecodeError:
+        pass
 
-    response_content = response_content.strip()
+    # Check for JSON code block format with triple backticks
+    json_block_patterns = ["```json\n", "```\n"]
 
-    return response_content
+    for pattern in json_block_patterns:
+        if pattern in response_content:
+            start_index = response_content.find(pattern)
+            content_after_marker = response_content[start_index + len(pattern) :]
+            end_index = content_after_marker.find("```")
+
+            if end_index != -1:
+                extracted_content = content_after_marker[:end_index].strip()
+                try:
+                    json.loads(extracted_content)
+                    return extracted_content
+                except json.JSONDecodeError:
+                    # Continue to next pattern if this isn't valid JSON
+                    pass
+
+    # If no specific markers found, try to extract JSON object directly
+    # Look for the first { and the last }
+    first_brace = response_content.find("{")
+    last_brace = response_content.rfind("}")
+
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        extracted_json = response_content[first_brace : last_brace + 1].strip()
+        try:
+            json.loads(extracted_json)
+            return extracted_json
+        except json.JSONDecodeError:
+            # If not valid JSON, return the best attempt
+            pass
+
+    # If we couldn't extract valid JSON, return the original content
+    return response_content.strip()

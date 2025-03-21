@@ -75,37 +75,42 @@ def test_clean_plain_text_response(response_content, expected_output):
 @pytest.mark.parametrize(
     "response_content, expected_output",
     [
-        (
+        pytest.param(
             '```json\n{"action": "EXECUTE_CODE", "code": "print(\'test\')"}\n```',
             '{"action": "EXECUTE_CODE", "code": "print(\'test\')"}',
+            id="json_in_code_block",
         ),
-        (
+        pytest.param(
             '{"action": "EXECUTE_CODE", "code": "print(\'test\')"}',
             '{"action": "EXECUTE_CODE", "code": "print(\'test\')"}',
+            id="plain_json",
         ),
-        (
+        pytest.param(
             'Some text before ```json\n{"action": "EXECUTE_CODE"}\n``` and after',
             '{"action": "EXECUTE_CODE"}',
+            id="json_with_surrounding_text",
         ),
-        (
+        pytest.param(
             'Text {"action": "EXECUTE_CODE"} more text',
             '{"action": "EXECUTE_CODE"}',
+            id="json_embedded_in_text",
         ),
-        (
+        pytest.param(
             '<think>Thinking...</think>{"action": "EXECUTE_CODE"}',
             '{"action": "EXECUTE_CODE"}',
+            id="json_with_think_tags",
         ),
-        (
+        pytest.param(
             '```json\n{"nested": {"key": "value"}}\n```',
             '{"nested": {"key": "value"}}',
+            id="nested_json_in_code_block",
         ),
-        (
-            '{"incomplete": "json"',
-            '{"incomplete": "json"',
-        ),
-        (
-            "No JSON content",
-            "No JSON content",
+        pytest.param('{"incomplete": "json"', '{"incomplete": "json"', id="incomplete_json"),
+        pytest.param("No JSON content", "No JSON content", id="no_json_content"),
+        pytest.param(
+            'JSON response content: ```json\n{"action": "WRITE", "learnings": "I learned...", "response": "Writing the first 10 Fibonacci numbers to a markdown file in a readable format.", "code": "", "content": "# First 10 Fibonacci Numbers\\n\\nThe following are the first 10 Fibonacci numbers, starting with F(0) = 0 and F(1) = 1. Each subsequent number is the sum of the two preceding numbers.\\n\\n```\\n0, 1, 1, 2, 3, 5, 8, 13, 21, 34\\n```", "file_path": "fibonacci_numbers.md", "mentioned_files": [], "replacements": []}\n```',  # noqa: E501
+            '{"action": "WRITE", "learnings": "I learned...", "response": "Writing the first 10 Fibonacci numbers to a markdown file in a readable format.", "code": "", "content": "# First 10 Fibonacci Numbers\\n\\nThe following are the first 10 Fibonacci numbers, starting with F(0) = 0 and F(1) = 1. Each subsequent number is the sum of the two preceding numbers.\\n\\n```\\n0, 1, 1, 2, 3, 5, 8, 13, 21, 34\\n```", "file_path": "fibonacci_numbers.md", "mentioned_files": [], "replacements": []}',  # noqa: E501
+            id="json_response_content_marker",
         ),
     ],
 )
