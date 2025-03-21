@@ -483,11 +483,6 @@ Fields:
   use for any actions that are not WRITE.
 - file_path: Required for READ/WRITE/EDIT: path to file.  Do not use for any actions
   that are not READ/WRITE/EDIT.
-- mentioned_files: List of files that are interacted with in the CODE action.  The purpose
-  of this is to communicate with the user about the files that you are working with.  Only
-  provide this for the CODE action since it is already provided in the file_path field
-  for other actions.  Include data files, images, plots, documents, and any files that
-  are being created, used, edited, or otherwise interacted with in the CODE action.
 - replacements: List of replacements to make in the file.
 - action: Required for all actions: CODE | READ | WRITE | EDIT | DONE | ASK | BYE
 
@@ -517,14 +512,9 @@ df = pd.read_csv('data.csv')
 print(df.head())
 </code>
 
-<mentioned_files>
-data.csv
-</mentioned_files>
 </action_response>
 
 - Make sure that you include the code in the "code" tag or you will run into parsing errors.
-- Always include all files that you are working with in the "mentioned_files" tag
-  otherwise the user will not be able to get to them easily.
 
 #### Example for WRITE:
 
@@ -595,21 +585,12 @@ useful for the user to know this because of x reason.
 Marking the task as complete.
 </response>
 
-<mentioned_files>
-existing_file.txt
-other_file_used.csv
-graph_to_show_user.png
-</mentioned_files>
 </action_response>
 
 DONE usage guidelines:
-- If the user has a simple request or asks you something that doesn't require multi-step
-  action, provide an empty "response" field and be ready to provide a final response
-  after the DONE action instead.
+- If the user has a simple request or asks you something that doesn't require multi-step action, provide an empty "response" field and be ready to provide a final response after the DONE action instead.
 - Use the "response" field only, do NOT use the "content" field.
--  When responding with DONE, you are ending the task and will not have the opportunity to
-   run more steps until the user asks you to do so.  Make sure that the task is complete before
-   using this action.
+- When responding with DONE, you are ending the task and will not have the opportunity to run more steps until the user asks you to do so.  Make sure that the task is complete before using this action.
 - You will be asked to provide a final response to the user after the DONE action.
 
 #### Example for ASK:
@@ -631,7 +612,7 @@ ASK usage guidelines:
 - Use ASK to ask the user for information that you need to complete the task.
 - You will be asked to provide your question to the user in the first person after
   the ASK action.
-"""
+"""  # noqa: E501
 
 PlanSystemPrompt: str = """
 ## Goal Planning
@@ -692,20 +673,20 @@ You will need to interpret the actions and provide the correct JSON response for
 each action type.
 
 You must reinterpret the agent's response purely in JSON format with the following fields:
-- action: The action that the agent wants to take.  One of: CODE | READ | WRITE |
-  EDIT | DONE | ASK | BYE.  Must not be empty.
-- learnings: The learnings from the action, such as how to do new things or information
-  from the web or data files that will be useful for the agent to know and retrieve
-  later.  Empty string if there is nothing to note down for this action.
+- action: The action that the agent wants to take.  One of: CODE | READ | WRITE | EDIT | DONE | ASK | BYE.  Must not be empty.
+- learnings: The learnings from the action, such as how to do new things or information from the web or data files that will be useful for the agent to know and retrieve later.  Empty string if there is nothing to note down for this action.
 - response: Short description of what the agent is doing at this time.  Written in
-  the present continuous tense.
+  the present continuous tense.  Empty string if there is nothing to note down for this action.
 - code: The code that the agent has written.  An empty string if the action is not CODE.
 - content: The content that the agent has written to a file.  An empty string if
   the action is not WRITE.
-- file_path: The path to the file that the agent has written to.  An empty string if
-  the action is not READ/WRITE/EDIT.
-- mentioned_files: The files that the agent has mentioned.  An empty list if no files
-  are mentioned.
+- file_path: The path to the file that the agent has read/wrote/edited.  An empty
+  string if the action is not READ/WRITE/EDIT.
+- mentioned_files: The files that the agent has references in CODE.  Include the
+  path to the files exactly as mentioned in the code.  Make sure that all the files
+  are included in the list.  If there are file names that are programatically assigned,
+  infer the values and include them in the list as well.  An empty list if there are
+  no files referenced in the code or if the action is not CODE.
 - replacements: The replacements that the agent has made to a file.  This field must
   be non-empty for EDIT actions and an empty list otherwise.
 
@@ -728,16 +709,11 @@ Reading data from the file and printing the first few rows.
 import pandas as pd
 
 # Read the data from the file
-df = pd.read_csv('data.csv')
+df = pd.read_csv('relative/path/to/data.csv')
 
 # Print the first few rows of the data
 print(df.head())
 </code>
-
-<mentioned_files>
-relative/path/to/file.txt
-relative/path/to/file2.csv
-</mentioned_files>
 
 <file_path>
 relative/path/to/file.txt
@@ -759,14 +735,12 @@ You must format the response in JSON format, following the schema:
 
 <json_response>
 {
-  "learnings": "I learned about this new content that I found from the web.  It will be
-  useful for the user to know this because of x reason.",
+  "learnings": "I learned about this new content that I found from the web.  It will be useful for the user to know this because of x reason.",
   "response": "Reading data from the file and printing the first few rows.",
-  "code": "import pandas as pd\n\n# Read the data from the file\ndf =
-  pd.read_csv('data.csv')\n\n# Print the first few rows of the data\nprint(df.head())",
+  "code": "import pandas as pd\n\n# Read the data from the file\ndf = pd.read_csv('relative/path/to/data.csv')\n\n# Print the first few rows of the data\nprint(df.head())",
   "content": "Content to write to a file.",
   "file_path": "relative/path/to/file.txt",
-  "mentioned_files": ["relative/path/to/file.txt", "relative/path/to/file2.csv"],
+  "mentioned_files": ["relative/path/to/data.csv"],
   "replacements": [
     {
       "find": "old_content\nto\nreplace",
@@ -784,7 +758,7 @@ You must format the response in JSON format, following the schema:
 Make sure to follow the format exactly.  Any incorrect fields will cause parsing
 errors and you will be asked to fix them and provide the correct JSON format.  Include
 all fields, and use empty values for any that don't apply for the particular action.
-"""
+"""  # noqa: E501
 
 JsonResponseFormatSchema: str = """
 {
