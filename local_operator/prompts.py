@@ -627,9 +627,9 @@ time or what you need to change.  What else do you need to know, what relevant q
 come up for you based on the last step?  Think about what you will do next.
 
 If you are done, then be ready to analyze your data and respond with a detailed response
-field to the user.  Make sure that you summarize in your own words clearly and accurately
+field to me.  Make sure that you summarize in your own words clearly and accurately
 if needed, and provide information from the conversation history in your final response.
-Don't assume that the user will go back to previous responses to get your summary.
+Don't assume that I will go back to previous responses to get your summary.
 
 This is just a question to help you think.  Typing will help you think through next
 steps and perform better.  Respond ONLY in natural language, not JSON or code.  Stop
@@ -837,7 +837,7 @@ RequestClassificationSystemPrompt: str = (
     + """
 ## Request Classification
 
-For this task, you must analyze the user request and classify it into a JSON format with:
+For this task, you must analyze my request and classify it into a JSON format with:
 - type: conversation | creative_writing | data_science | mathematics | accounting |
   quick_search | deep_research | media | competitive_coding | software_development |
   finance | news_report | console_command | continue | other
@@ -847,8 +847,8 @@ For this task, you must analyze the user request and classify it into a JSON for
 
 Respond only with the JSON object, no other text.
 
-You will then use this classification in further steps to determine how to respond to the
-user and how to perform the task if there is some work associated with the request.
+You will then use this classification in further steps to determine how to respond to me
+and how to perform the task if there is some work associated with the request.
 
 Here are the request types and how to think about classifying them:
 
@@ -866,7 +866,7 @@ deep_research: In-depth research requiring extensive sources and synthesis.  Thi
 business analysis, intelligence research, competitive benchmarking, competitor analysis,
 market sizing, customer segmentation, stock research, background checks, and other similar
 tasks that require a deep understanding of the topic and a comprehensive analysis.
-ONLY use this for requests where the user has asked for a report or extensive research.
+ONLY use this for requests where I have asked for a report or extensive research.
 media: Image, audio, or video processing, editing, manipulation, and generation
 competitive_coding: Solving coding problems from websites like LeetCode, HackerRank, etc.
 software_development: Software development, coding, debugging, testing, git operations, etc.
@@ -881,7 +881,7 @@ more complex news analysis and deeper research tasks.
 console_command: Command line operations, shell scripting, system administration tasks
 personal_assistance: Desktop assistance, file management, application management,
 note taking, scheduling, calendar, trip planning, and other personal assistance tasks
-continue: Continue with the current task, no need to classify.  Do this if the user is
+continue: Continue with the current task, no need to classify.  Do this if I am
 providing you with some refinement or more information, or has interrupted a previous
 task and then asked you to continue.
 other: Anything else that doesn't fit into the above categories, you will need to
@@ -895,7 +895,7 @@ Planning is required for:
 - Complex analysis or research
 - Tasks with dependencies
 - Tasks that benefit from upfront organization
-- User requests that materially change the scope or trajectory of the task
+- My requests that materially change the scope or trajectory of the task
 
 Relative effort levels:
 low: Simple, straightforward tasks taking a single step.
@@ -904,9 +904,9 @@ high: Complex tasks taking >5 steps or requiring significant reasoning, planning
 and research effort.
 
 Subject change:
-true: The user request is about a new topic or subject that is different from the
+true: My request is about a new topic or subject that is different from the
 current flow of conversation.
-false: The user request is about the same or similar topic or subject as the previous
+false: My request is about the same or similar topic or subject as the previous
 request and is part of the current task or flow of conversation.
 
 Remember, respond in JSON format for this next message otherwise your response will
@@ -942,8 +942,8 @@ class RequestType(str, Enum):
         CONSOLE_COMMAND: Command line operations, shell scripting, system administration tasks
         PERSONAL_ASSISTANCE: Desktop assistance, file management, application management,
         note taking, scheduling, calendar, trip planning, and other personal assistance tasks
-        CONTINUE: Continue with the current task, no need to classify.  Do this if the user
-        is providing you with some refinement or more information, or has interrupted a
+        CONTINUE: Continue with the current task, no need to classify.  Do this if I
+        am providing you with some refinement or more information, or has interrupted a
         previous task and then asked you to continue.
         OTHER: Tasks that don't fit into other defined categories
     """
@@ -986,9 +986,9 @@ ConversationInstructions: str = """
   opinions and thoughts, and questions to keep the conversation engaging and interesting.
   Don't be overbearing with questions and make sure to mix it up between questions and
   contributions.  Not all messages need to have questions if you have offered an
-  interesting insight or thought that the user might respond to.
+  interesting insight or thought that I might respond to.
 - Use humor and jokes where appropriate to keep the conversation light and engaging.
-  Gauge the mood of the user and the subject matter to determine if it's appropriate.
+  Gauge my mood and the subject matter to determine if it's appropriate.
 - Don't be cringe or over the top, try to be authentic and natural in your responses.
 """
 
@@ -996,8 +996,8 @@ ConversationInstructions: str = """
 CreativeWritingInstructions: str = """
 ## Creative Writing Guidelines
 - Be creative, write to the fullest extent of your ability and don't short-cut or write
-  too short of a piece unless the user has asked for a short piece.
-- If the user asks for a long story, then sketch out the story in a markdown file and
+  too short of a piece unless I have asked for a short piece.
+- If I ask for a long story, then sketch out the story in a markdown file and
   replace the sections as you go.
 - Understand the target audience and adapt your style accordingly
 - Structure your writing with clear sections, paragraphs, and transitions
@@ -1047,7 +1047,7 @@ to solve challenging real world problems.
 - Interpret results and provide actionable insights
 - Visualize data as you go and save the plots to the disk instead of displaying them
   with show() or display().  Make sure that you include the plots in the "mentioned_files"
-  field so that the user can see them in the chat ui.
+  field so that I can see them in the chat ui.
 - Document your approach, assumptions, and limitations
 """
 
@@ -1068,7 +1068,7 @@ approaches step by step to ensure that there are no logical gaps.
 - Consider edge cases and special conditions
 - Use visualizations when helpful to illustrate concepts
 - Provide your output in markdown format with the appropriate mathematical notation that
-  will be easy for the user to follow along with in a chat ui.
+  will be easy for me to follow along with in a chat ui.
 """
 
 # Specialized instructions for accounting tasks
@@ -1165,7 +1165,7 @@ Guidelines:
 - Distinguish between verified facts and general knowledge
 - Acknowledge when information might be incomplete or uncertain
 - Look at alternative points of view and perspectives, make sure to include them for
-  the user to consider.  Offer a balanced perspective when the topic has multiple
+  me to consider.  Offer a balanced perspective when the topic has multiple
   viewpoints.
 - Provide brief definitions for technical terms when necessary
 - Include relevant dates, numbers, or statistics when they add value
@@ -1180,7 +1180,7 @@ Follow the general flow below:
 2. Perform the searches and read the results.  Determine if there are any missing pieces
    of information and if so, then do additional reads and searches until you have a
    complete picture.
-3. Summarize the information and provide it to the user in markdown format.  Embed
+3. Summarize the information and provide it to me in markdown format.  Embed
    citations in the text to the original sources on the web or in the files. If there
    are multiple viewpoints, then provide a balanced perspective.
 4. Include diagrams and charts to help illustrate the information, such as tables
@@ -1201,7 +1201,7 @@ DeepResearchInstructions: str = """
 - Present balanced perspectives and acknowledge limitations
 - Use proper citation format consistently throughout
 - Always embed citations in the text when you are using information from a source so
-  that the user can understand what information comes from which source.
+  that I can understand what information comes from which source.
 - Embed the citations with markdown links to the source and the source titles and URLs.
   Don't use numbered citations as these are easy to lose track of and end up in the wrong
   order in the bibliography.
@@ -1213,11 +1213,11 @@ DeepResearchInstructions: str = """
   are satisfied that the report is complete and accurate.  Don't leave any placeholders
   or sections that are not written.
 
-Use your judgement to determine the best type of output for the user.  The guidelines
+Use your judgement to determine the best type of output for me.  The guidelines
 below are to help you structure your work and ensure that you are thorough and accurate,
-but you should use your judgement to determine the best type of output for the user.
+but you should use your judgement to determine the best type of output for me.
 
-The user might require some table, spreadsheet, chart, or other output to best
+I might require some table, spreadsheet, chart, or other output to best
 structure the information found from a deep research task.
 
 Follow the general flow below:
@@ -1229,18 +1229,18 @@ Follow the general flow below:
      - Low effort tasks: aim for 1000 words, do the work in memory and don't save
        information to a file intermediate.  This will fit in your context window.
        Save the sections to variables in the execution context and then assemble
-       and summarize the final response to the user.
+       and summarize the final response to me.
      - Medium effort tasks: aim for 4000 words, do the work in memory and don't save
        information to a file intermediate.  This will fit in your context window.
        Save the sections to variables in the execution context and then assemble
-       and summarize the final response to the user.
+       and summarize the final response to me.
      - High effort tasks: aim for 10000 words, write the report to a file intermediate
        and use the WRITE command to save the report to the file.  This will fit in your
-       context window.  In your final response, make sure to direct the user to the
+       context window.  In your final response, make sure to direct me to the
        file to open and read the report.
    The words number is just a guideline, don't just fill with content that doesn't
    matter.  The idea is that the article should be a long and fulsome report that is
-   useful and informative to the user.  Include an introduction, body and conclusion.  The
+   useful and informative to me.  Include an introduction, body and conclusion.  The
    body should have an analysis of the information, including the most important details
    and findings.  The introduction should provide background information and the conclusion
    should summarize the main points.
@@ -1252,14 +1252,14 @@ Follow the general flow below:
    lists, and other formatting to make the report easy to read.  Use tables to present
    data in a clear and easy to understand format.
 6. Make sure to cite your sources and provide proper citations.  Embed citations in all
-   parts of the report where you are using information from a source so that the user
-   can click on them to follow the source right where the fact is written in the text.
+   parts of the report where you are using information from a source so that I can
+   click on them to follow the source right where the fact is written in the text.
    Make sure to include the source name, author, title, date, and URL.
 7. Make sure to include a bibliography at the end of the report.  Include all the sources
    you used to write the report.
 8. Make sure to include a conclusion that summarizes the main points of the report.
 9. For HIGH effort tasks only, save the final report to disk in markdown format.  For
-   MEDIUM and LOW effort tasks, summarize the final report to the user in the response
+   MEDIUM and LOW effort tasks, summarize the final report to me in the response
    field and do not save the report to disk.
 10. Read each section over again after you are done and correct any errors or go back to
    complete research on any sections that you might have missed.  Check for missing
@@ -1330,12 +1330,12 @@ git actions.
 - Always read files before you make changes to them
 - Always understand diffs and changes in git before writing commits or making PR/MRs
 - You can perform all git actions, make sure to use the appropriate git commands to
-  carry out the actions requested by the user.  Don't use git commands unless the user
-  asks you to carry out a git related action (for example, don't inadvertently commit
-  changes to the code base after making edits without the user's permission).
+  carry out the actions requested by me.  Don't use git commands unless I
+  ask you to carry out a git related action (for example, don't inadvertently commit
+  changes to the code base after making edits without my permission).
 - Do NOT write descriptions that you can store in memory or in variables to the disk
   for git operations, as this will change the diffs and then you will accidentally
-  commit changes to the code base without the user's permission.
+  commit changes to the code base without my permission.
 - Make sure that you only commit intended changes to the code base and be diligent with
   your git operations for git related tasks.
 - Make sure to use non-interactive methods, since you must run autonomously without
@@ -1360,7 +1360,7 @@ git actions.
   to check the license of the assets and only use royalty free assets, non-copy left
   assets, or assets that you have permission to use.  Using assets that you do not have
   permission to use will result in a violation of the license and could result in
-  getting the user into trouble, so make sure to keep them safe against this issue.
+  getting me into trouble, so make sure to keep me safe against this issue.
 
 Follow the general flow below for integrating functionality into the code base:
 1. Define the problem clearly and identify key questions.  List the files that you will
@@ -1384,8 +1384,8 @@ Follow the general flow below for integrating functionality into the code base:
    linting and unit tests if applicable to determine if any other changes need to
    be made to make sure that there are no errors, style issues, or regressions.
 7. Once you've confirmed that there are no errors in the files, summarize the full
-   set of changes that you have made and report this back to the user as complete.
-8. Be ready to make any additional changes that the user may request
+   set of changes that you have made and report this back to me as complete.
+8. Be ready to make any additional changes that I may request
 
 Follow the general flow below for git operations like commits, PRs/MRs, etc.:
 1. Get the git diffs for the files that are changed.  Use the git diff command to get
@@ -1396,10 +1396,10 @@ Follow the general flow below for git operations like commits, PRs/MRs, etc.:
    information based on the diffs that you have read.  Do not make assumptions
    about changes that you have not seen.
 4. Once you understand the full scope of changes, then perform the git actions requested
-   by the user with the appropriate git commands.  Make sure to perform actions safely
-   and avoid any dangerous git operations unless explicitly requested by the user.
+   by me with the appropriate git commands.  Make sure to perform actions safely
+   and avoid any dangerous git operations unless explicitly requested by me.
 5. Use the GitHub or GitLab CLI to create PRs/MRs and perform other cloud hosted git
-   actions if the user has requested it.
+   actions if I have requested it.
 
 There is useful information in your agent heads up display that you can use to help
 you with development and git operations, make use of them as necessary:
@@ -1456,11 +1456,11 @@ Guidelines:
 - Cite sources and provide attribution.  Embed citations in the text when you are
   using information from a source.  Make sure to include the source name, author,
   title, date, and URL.
-- Respond to the user through the chat interface using the JSON response field instead
+- Respond to me through the chat interface using the JSON response field instead
   of writing the report to disk.
 
 Procedure:
-1. Rephrase the user's question and think about what information is relevant to the
+1. Rephrase my question and think about what information is relevant to the
    topic.  Think about the research tasks that you will need to perform and list the
    searches that you will do to gather information.
 2. Perform the searches using your web search tools.  If you don't have web search tools
@@ -1472,10 +1472,10 @@ Procedure:
    about the information.  If you have found the information that you need, then you can
    go ahead and write the report.  If you need more information, then write down your
    new questions and then continue to search for more information, building a knowledge
-   base of information that you can read and reflect on for your response to the user.
-4. Once you have found the information that you need, then write the report in your
-   response to the user in a nice readable format with your summary and interpretation
-   of the information.  Don't write the report to disk unless the user has requested
+   base of information that you can read and reflect on for my response.
+4. Once you have found the information that you need, then write the report in my
+   response to you in a nice readable format with your summary and interpretation
+   of the information.  Don't write the report to disk unless I have requested
    it.
 """
 
@@ -1586,7 +1586,7 @@ REQUEST_TYPE_INSTRUCTIONS: Dict[RequestType, str] = {
 FinalResponseInstructions: str = """
 ## Final Response Guidelines
 
-Make sure that you respond in the first person directly to the user.  Use a friendly,
+Make sure that you respond in the first person directly to me.  Use a friendly,
 natural, and conversational tone.  Respond in natural language, don't use the
 JSON action schema for this response.
 
@@ -1600,7 +1600,7 @@ For DONE actions:
 - Summarize the key findings, actions taken, and results in markdown format
 - Include all of the details interpreted from the console outputs of the previous
   actions that you took.  Do not make up information or make assumptions about what
-  the user has seen from previous steps.  Make sure to report and summarize all the
+  I have seen from previous steps.  Make sure to report and summarize all the
   information in complete detail in a way that makes sense for a broad range of
   users.
 - Use clear, concise language appropriate for the task type
@@ -1611,8 +1611,8 @@ For DONE actions:
 - End with a conclusion that directly addresses the original request
 
 For ASK actions:
-- Provide a clear, concise question that will help you to achieve the user's goal.
-- Provide necessary context for the question to the user so they understand the
+- Provide a clear, concise question that will help you to achieve my goal.
+- Provide necessary context for the question to me so I understand the
   background and context for the question.
 
 Please provide the final response now.  Do NOT acknowledge this message in your
