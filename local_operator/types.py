@@ -53,6 +53,8 @@ class ExecutionType(str, Enum):
 
     Used to track the execution phase within the agent's thought process:
     - PLAN: Initial planning phase where the agent outlines its approach
+    - PRE_ACTION: The agent is generating a response for the action interpreter to
+      review and produce a structured system message.
     - ACTION: Execution of specific actions like running code or accessing resources
     - REFLECTION: Analysis and evaluation of previous actions and their results
     - RESPONSE: Final response generation based on the execution results
@@ -62,6 +64,7 @@ class ExecutionType(str, Enum):
     """
 
     PLAN = "plan"
+    PRE_ACTION = "pre_action"
     ACTION = "action"
     REFLECTION = "reflection"
     RESPONSE = "response"
