@@ -1213,18 +1213,37 @@ DeepResearchInstructions: str = """
   are satisfied that the report is complete and accurate.  Don't leave any placeholders
   or sections that are not written.
 
+Use your judgement to determine the best type of output for the user.  The guidelines
+below are to help you structure your work and ensure that you are thorough and accurate,
+but you should use your judgement to determine the best type of output for the user.
+
+The user might require some table, spreadsheet, chart, or other output to best
+structure the information found from a deep research task.
+
 Follow the general flow below:
 1. Define the research question and objectives
 2. Gather initial data to understand the lay of the land with a broad search
 3. Based on the information, define the outline of the report and save it to an initial
-   markdown file.  Plan to write a detailed and useful report with a logical flow.  Aim
-   for at least 4000 words.  The 4000 words number is just a guideline, don't just
-   fill with content that doesn't matter.  The idea is that the article should be a long
-   and fulsome report that is useful and informative to the user.  Include an
-   introduction, body and conclusion.  The body should have an analysis of the
-   information, including the most important details and findings.  The introduction
-   should provide background information and the conclusion should summarize the main
-   points.
+   markdown file.  Plan to write a detailed and useful report with a logical flow.
+   Based on the level of effort that you classified for this task, do the following:
+     - Low effort tasks: aim for 1000 words, do the work in memory and don't save
+       information to a file intermediate.  This will fit in your context window.
+       Save the sections to variables in the execution context and then assemble
+       and summarize the final response to the user.
+     - Medium effort tasks: aim for 4000 words, do the work in memory and don't save
+       information to a file intermediate.  This will fit in your context window.
+       Save the sections to variables in the execution context and then assemble
+       and summarize the final response to the user.
+     - High effort tasks: aim for 10000 words, write the report to a file intermediate
+       and use the WRITE command to save the report to the file.  This will fit in your
+       context window.  In your final response, make sure to direct the user to the
+       file to open and read the report.
+   The words number is just a guideline, don't just fill with content that doesn't
+   matter.  The idea is that the article should be a long and fulsome report that is
+   useful and informative to the user.  Include an introduction, body and conclusion.  The
+   body should have an analysis of the information, including the most important details
+   and findings.  The introduction should provide background information and the conclusion
+   should summarize the main points.
 4. Iteratively go through each section and research the information, write the section
    with citations, and then replace the placeholder section in the markdown with the new
    content.  Make sure that you don't lose track of sections and don't leave any sections
@@ -1239,7 +1258,9 @@ Follow the general flow below:
 7. Make sure to include a bibliography at the end of the report.  Include all the sources
    you used to write the report.
 8. Make sure to include a conclusion that summarizes the main points of the report.
-9. Save the final report to disk in markdown format.
+9. For HIGH effort tasks only, save the final report to disk in markdown format.  For
+   MEDIUM and LOW effort tasks, summarize the final report to the user in the response
+   field and do not save the report to disk.
 10. Read each section over again after you are done and correct any errors or go back to
    complete research on any sections that you might have missed.  Check for missing
    citations, incomplete sections, grammatical errors, formatting issues, and other
@@ -1249,7 +1270,9 @@ Follow the general flow below:
    until you are satisfied with the quality of your report.
 
 Always make sure to proof-read your end work and do not report the task as complete until
-you are sure that all sections of the report are complete, accurate, and well-formatted.
+you are sure that all sections of the report are complete, accurate, and well-formatted.  You MUST
+look for any remaining placeholders, missing sections, missing citations, formatting errors,
+and other issues before reporting the task as complete.
 """
 
 # Specialized instructions for media tasks
@@ -1333,6 +1356,11 @@ git actions.
   each write or edit to make sure that your formatting is correct.
 - For typescript and python, use strict types, and run a check on types with tsc or
   pyright to make sure that all types are correct after each write or edit.
+- If you are using public assets downloaded from the internet for your work, make sure
+  to check the license of the assets and only use royalty free assets, non-copy left
+  assets, or assets that you have permission to use.  Using assets that you do not have
+  permission to use will result in a violation of the license and could result in
+  getting the user into trouble, so make sure to keep them safe against this issue.
 
 Follow the general flow below for integrating functionality into the code base:
 1. Define the problem clearly and identify key questions.  List the files that you will
