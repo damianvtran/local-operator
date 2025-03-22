@@ -38,7 +38,7 @@ USER_MOCK_RESPONSES = {
     <relative_effort>low</relative_effort>
     <subject_change>false</subject_change>
     """,
-    "<type>conversation</type>": {
+    "<type>conversation</type>\n<planning_required>true</planning_required>\n<relative_effort>low</relative_effort>\n<subject_change>false</subject_change>": {  # noqa: E501
         "type": "conversation",
         "planning_required": True,
         "relative_effort": "low",
@@ -104,7 +104,7 @@ class ChatMock:
         for msg in reversed(list(messages)):
             if (
                 msg.get("role") == ConversationRole.USER.value
-                and "agent heads up display"
+                and "agent_heads_up_display"
                 not in msg.get("content", [])[0].get("text", "").lower()
             ):
                 user_message = msg.get("content", [])[0].get("text", "") or ""
