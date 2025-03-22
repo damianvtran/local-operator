@@ -16,7 +16,13 @@ USER_MOCK_RESPONSES = {
         "mentioned_files": [],
         "replacements": [],
     },
-    "please proceed according to your plan": {
+    "please proceed according to your plan": """
+    <action>CODE</action>
+    <code>print("Hello World")</code>
+    <response>I will execute a simple Python script to print "Hello World".</response>
+    <learnings>I learned about the Python print function.</learnings>
+    """,
+    '<code>print("Hello World")</code>': {
         "response": 'I will execute a simple Python script to print "Hello World".',
         "code": 'print("Hello World")',
         "action": "CODE",
@@ -26,10 +32,17 @@ USER_MOCK_RESPONSES = {
         "mentioned_files": [],
         "replacements": [],
     },
-    "print hello world": {
+    "print hello world": """
+    <type>conversation</type>
+    <planning_required>true</planning_required>
+    <relative_effort>low</relative_effort>
+    <subject_change>false</subject_change>
+    """,
+    "<type>conversation</type>": {
         "type": "conversation",
         "planning_required": True,
         "relative_effort": "low",
+        "subject_change": False,
     },
     "think aloud about what you will need to do": (
         "I will need to print 'Hello World' to the console."

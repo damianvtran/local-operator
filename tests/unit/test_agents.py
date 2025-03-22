@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from local_operator.agents import AgentEditFields, AgentRegistry
+from local_operator.clients.tavily import TavilyResponse, TavilyResult
 from local_operator.types import (
     AgentState,
     CodeExecutionResult,
@@ -1175,6 +1176,17 @@ def test_update_agent_unpickleable_context(temp_agents_dir: Path):
     unpickleable_context = {
         "variables": {"x": 10, "y": 20},
         "ssl_context": ssl.create_default_context(),
+        "pydantic_model": TavilyResponse(
+            query="test query",
+            results=[
+                TavilyResult(
+                    title="Test Title",
+                    url="https://test.com",
+                    content="Test Content",
+                    score=0.95,
+                )
+            ],
+        ),
     }
 
     # Save the context
@@ -1186,10 +1198,18 @@ def test_update_agent_unpickleable_context(temp_agents_dir: Path):
     # Verify the pickleable parts were saved
     assert loaded_context["variables"]["x"] == 10
     assert loaded_context["variables"]["y"] == 20
+    assert loaded_context["pydantic_model"].query == "test query"
 
     # Verify unpickleable object was converted to string
     assert isinstance(loaded_context["ssl_context"], str)
     assert "SSLContext" in loaded_context["ssl_context"]
+
+    # Verify the pydantic model was saved
+    assert len(loaded_context["pydantic_model"].results) == 1
+    assert loaded_context["pydantic_model"].results[0].title == "Test Title"
+    assert loaded_context["pydantic_model"].results[0].url == "https://test.com"
+    assert loaded_context["pydantic_model"].results[0].content == "Test Content"
+    assert loaded_context["pydantic_model"].results[0].score == 0.95
 
 
 def test_migrate_legacy_agents(temp_agents_dir: Path):

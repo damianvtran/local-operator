@@ -1,6 +1,7 @@
 import logging
 import os
 import platform
+import re
 import signal
 import uuid
 from enum import Enum
@@ -25,22 +26,20 @@ from local_operator.executor import (
     LocalCodeExecutor,
     process_json_response,
 )
-from local_operator.helpers import (
-    clean_json_response,
-    clean_plain_text_response,
-    remove_think_tags,
-)
+from local_operator.helpers import clean_plain_text_response, remove_think_tags
 from local_operator.model.configure import ModelConfiguration
 from local_operator.notebook import save_code_history_to_notebook
 from local_operator.prompts import (
     FinalResponseInstructions,
-    JsonResponseFormatPrompt,
+    JsonResponseFormatSchema,
     PlanSystemPrompt,
     PlanUserPrompt,
     ReflectionUserPrompt,
     RequestClassificationSystemPrompt,
+    RequestClassificationUserPrompt,
     RequestType,
     apply_attachments_to_prompt,
+    create_action_interpreter_prompt,
     create_system_prompt,
     get_request_type_instructions,
 )
@@ -49,7 +48,9 @@ from local_operator.types import (
     ConversationRecord,
     ConversationRole,
     ExecutionType,
+    ProcessResponseOutput,
     ProcessResponseStatus,
+    RelativeEffortLevel,
     RequestClassification,
     ResponseJsonSchema,
 )
@@ -68,28 +69,54 @@ class OperatorType(Enum):
     SERVER = "server"
 
 
-def process_classification_json(response_content: str) -> RequestClassification:
-    """Process and validate a JSON response string from the language model into a
+def process_classification_response(response_content: str) -> RequestClassification:
+    """Process and validate a response string from the language model into a
     RequestClassification.
 
     Args:
-        response_content (str): Raw response string from the model, which may be wrapped in
-            markdown-style JSON code block delimiters (```json) or provided as a plain JSON object.
+        response_content (str): Raw response string from the model, which may contain XML tags
+            like <type>, <planning_required>, <relative_effort>, and <subject_change>.
 
     Returns:
         RequestClassification: Validated classification object containing the model's output.
             See RequestClassification class for the expected schema.
 
     Raises:
-        ValidationError: If the JSON response does not match the expected schema.
-        ValueError: If no valid JSON object can be extracted from the response.
+        ValidationError: If the extracted data does not match the expected schema.
+        ValueError: If no valid classification data can be extracted from the response.
     """
-    response_content = clean_json_response(response_content)
+    # Extract values from XML-like tags if present
+    classification_data = {}
 
-    # Validate the JSON response
-    classification = RequestClassification.model_validate_json(response_content)
+    # Look for each expected tag in the response
+    for tag in ["type", "planning_required", "relative_effort", "subject_change"]:
+        start_tag = f"<{tag}>"
+        end_tag = f"</{tag}>"
 
-    return classification
+        if start_tag in response_content and end_tag in response_content:
+            start_idx = response_content.find(start_tag) + len(start_tag)
+            end_idx = response_content.find(end_tag)
+            if start_idx < end_idx:
+                value = response_content[start_idx:end_idx].strip().lower()
+
+                # Convert string boolean values to actual booleans
+                if value == "true":
+                    value = True
+                elif value == "false":
+                    value = False
+
+                classification_data[tag] = value
+
+    # If we found XML tags, create a classification from the extracted data
+    if classification_data:
+        return RequestClassification.model_validate(classification_data)
+
+    return RequestClassification(
+        type=RequestType.CONTINUE,
+        planning_required=False,
+        relative_effort=RelativeEffortLevel.LOW,
+        subject_change=False,
+    )
 
 
 class Operator:
@@ -277,7 +304,7 @@ class Operator:
                         f"... The conversation history before this message has been truncated "
                         f"to the last {max_conversation_depth} messages.  Please review the "
                         "following messages in the sequence and respond with the request "
-                        "type in the required JSON format."
+                        "type with the required request classification XML tags."
                     ),
                 )
             )
@@ -289,7 +316,7 @@ class Operator:
         messages.append(
             ConversationRecord(
                 role=ConversationRole.USER,
-                content=user_input,
+                content=RequestClassificationUserPrompt.format(user_message=user_input),
             ),
         )
 
@@ -318,7 +345,7 @@ class Operator:
                     response.content if isinstance(response.content, str) else str(response.content)
                 )
 
-                classification = process_classification_json(response_content)
+                classification = process_classification_response(response_content)
 
                 self.executor.agent_state.conversation.append(
                     ConversationRecord(
@@ -342,9 +369,9 @@ class Operator:
 
                 if attempt < max_attempts:
                     error_message = (
-                        f"The response you provided wasn't valid JSON. Error: {last_error}. "
-                        "Please provide a valid JSON response matching the "
-                        "RequestClassification schema."
+                        "The response you provided didn't have the required XML tags. "
+                        f"Error: {last_error}. Please provide a valid XML response matching "
+                        "the required classification schema."
                     )
                     messages.append(
                         ConversationRecord(
@@ -694,6 +721,143 @@ This is a {request_type} message, here are some guidelines for how to respond:
             )
         )
 
+    async def interpret_action_response(
+        self, response_content: str, max_attempts: int = 3
+    ) -> ResponseJsonSchema:
+        """Interpret the action response from the agent."""
+
+        messages = [
+            ConversationRecord(
+                role=ConversationRole.SYSTEM,
+                content=create_action_interpreter_prompt(tool_registry=self.executor.tool_registry),
+                is_system_prompt=True,
+                should_cache=True,
+            ),
+            ConversationRecord(
+                role=ConversationRole.USER,
+                content=response_content,
+                should_summarize=True,
+            ),
+        ]
+
+        await self.executor.update_job_execution_state(
+            CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message="",
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.IN_PROGRESS,
+                files=[],
+                execution_type=ExecutionType.PRE_ACTION,
+            )
+        )
+
+        response_json = None
+        json_response_content = None
+        attempts = 0
+
+        while attempts < max_attempts and response_json is None:
+            attempts += 1
+            json_response = await self.executor.invoke_model(messages)
+
+            json_response_content = (
+                json_response.content
+                if isinstance(json_response.content, str)
+                else str(json_response.content)
+            )
+
+            try:
+                response_json = process_json_response(json_response_content)
+            except ValidationError as e:
+                logging.error(f"JSON validation error (attempt {attempts}/{max_attempts}): {e}")
+
+                if attempts >= max_attempts:
+                    break
+
+                error_details = "\n".join(
+                    f"Error {i+1}:\n"
+                    f"  Location: {' -> '.join(str(loc) for loc in err['loc'])}\n"
+                    f"  Type: {err['type']}\n"
+                    f"  Message: {err['msg']}"
+                    for i, err in enumerate(e.errors())
+                )
+
+                messages.extend(
+                    [
+                        ConversationRecord(
+                            role=ConversationRole.ASSISTANT,
+                            content=json_response_content,
+                            should_summarize=True,
+                        ),
+                        ConversationRecord(
+                            role=ConversationRole.USER,
+                            content=(
+                                "Your attempted response failed JSON schema "
+                                f"validation (attempt {attempts}/{max_attempts}). "
+                                "Please review the validation errors and generate a "
+                                "valid response:\n\n"
+                                f"{error_details}\n\n"
+                                "Your response must exactly match the expected JSON format: "
+                                f"{JsonResponseFormatSchema}"
+                            ),
+                            should_summarize=True,
+                        ),
+                    ]
+                )
+
+        if not response_json:
+            raise ValueError(
+                f"Failed to generate valid JSON response after {max_attempts} "
+                f'attempts.\n\nFailed response: "{json_response_content}"'
+            )
+
+        return response_json
+
+    def process_early_response(
+        self,
+        response_content: str,
+        response_json: ResponseJsonSchema,
+        classification: RequestClassification,
+    ) -> tuple[str, ProcessResponseOutput]:
+        """Process an early response from the agent."""
+
+        final_response = response_content
+
+        # Add final response to code history
+        self.executor.add_to_code_history(
+            CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message=final_response,
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.SUCCESS,
+                files=[],
+                execution_type=ExecutionType.RESPONSE,
+                action=response_json.action,
+                task_classification=classification.type,
+            ),
+            None,
+            classification,
+        )
+
+        # Persist conversation if enabled
+        if self.persist_agent_conversation and self.agent_registry and self.current_agent:
+            self.agent_registry.update_agent_state(
+                agent_id=self.current_agent.id,
+                agent_state=self.executor.agent_state,
+            )
+
+        return final_response, ProcessResponseOutput(
+            status=ProcessResponseStatus.SUCCESS,
+            message=final_response,
+        )
+
     async def handle_user_input(
         self, user_input: str, user_message_id: str | None = None, attachments: List[str] = []
     ) -> tuple[ResponseJsonSchema | None, str]:
@@ -835,76 +999,61 @@ This is a {request_type} message, here are some guidelines for how to respond:
                 response.content if isinstance(response.content, str) else str(response.content)
             )
 
-            try:
-                response_json = process_json_response(response_content)
-            except ValidationError as e:
-                logging.error(f"JSON validation error: {e}")
-
-                error_details = "\n".join(
-                    f"Error {i+1}:\n"
-                    f"  Location: {' -> '.join(str(loc) for loc in err['loc'])}\n"
-                    f"  Type: {err['type']}\n"
-                    f"  Message: {err['msg']}"
-                    for i, err in enumerate(e.errors())
+            self.executor.append_to_history(
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content=response_content,
+                    should_summarize=True,
                 )
+            )
 
-                self.executor.agent_state.conversation.extend(
-                    [
-                        ConversationRecord(
-                            role=ConversationRole.ASSISTANT,
-                            content=response_content,
-                            should_summarize=True,
-                        ),
-                        ConversationRecord(
-                            role=ConversationRole.USER,
-                            content=(
-                                "Your attempted response failed JSON schema validation. "
-                                "Please review the validation errors and generate a valid "
-                                "response:\n\n"
-                                f"{error_details}\n\n"
-                                "Your response must exactly match the expected JSON format: "
-                                f"{JsonResponseFormatPrompt}"
-                            ),
-                            should_summarize=True,
-                        ),
-                    ]
+            response_json = await self.interpret_action_response(response_content)
+
+            is_terminal_response = (
+                response_json.action == ActionType.DONE
+                or response_json.action == ActionType.ASK
+                or response_json.action == ActionType.BYE
+            )
+
+            # Check if the response contains an action tag
+            has_action_tag = re.search(r"<action>([^<]+)</action>", response_content) is not None
+
+            if self.executor.step_counter == 1 and is_terminal_response and not has_action_tag:
+                # This is a single response from the agent, such as from a conversation
+                # or other response that doesn't require an action
+                final_response, result = self.process_early_response(
+                    response_content, response_json, classification
                 )
-                continue
-
-            result = await self.executor.process_response(response_json, classification)
-
-            # Update the "Agent Heads Up Display"
-
-            if (
-                response_json.action != ActionType.DONE
-                and response_json.action != ActionType.ASK
-                and response_json.action != ActionType.BYE
-            ):
-                self.executor.update_ephemeral_messages()
-
-                # Reflect on the results of the last operation
-                async with spinner_context(
-                    "Reflecting on the last step",
-                    verbosity_level=self.verbosity_level,
-                ):
-                    reflection = await self.generate_reflection(classification)
-
-                    if reflection and self.verbosity_level >= VerbosityLevel.VERBOSE:
-                        formatted_reflection = format_agent_output(reflection)
-                        print(
-                            "\n\033[1;36m╭─ Agent Reflection ──────────────────────────────\033[0m"
-                        )
-                        print(f"\033[1;36m│\033[0m {formatted_reflection}")
-                        print(
-                            "\033[1;36m╰──────────────────────────────────────────────────\033[0m\n"
-                        )
-
             else:
-                final_response = await self.generate_response(response_json, classification)
+                result = await self.executor.process_response(response_json, classification)
 
-                print_agent_response(
-                    self.executor.step_counter, final_response, self.verbosity_level
-                )
+                # Update the "Agent Heads Up Display"
+                if not is_terminal_response:
+                    self.executor.update_ephemeral_messages()
+
+                    # Reflect on the results of the last operation
+                    async with spinner_context(
+                        "Reflecting on the last step",
+                        verbosity_level=self.verbosity_level,
+                    ):
+                        reflection = await self.generate_reflection(classification)
+
+                        if reflection and self.verbosity_level >= VerbosityLevel.VERBOSE:
+                            formatted_reflection = format_agent_output(reflection)
+                            print(
+                                "\n\033[1;36m╭─ Agent Reflection "
+                                "──────────────────────────────\033[0m"
+                            )
+                            print(f"\033[1;36m│\033[0m {formatted_reflection}")
+                            print(
+                                "\033[1;36m╰────────────────────────────────"
+                                "──────────────────\033[0m\n"
+                            )
+
+                else:
+                    final_response = await self.generate_response(response_json, classification)
+
+            print_agent_response(self.executor.step_counter, final_response, self.verbosity_level)
 
             # Auto-save on each step if enabled
             if self.auto_save_conversation:
