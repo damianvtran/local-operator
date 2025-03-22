@@ -312,7 +312,7 @@ def test_log_retry_error_with_attempts(monkeypatch):
     monkeypatch.setattr(sys, "stdout", output)
     error = Exception("Retry error")
     # For attempt 0 (i.e. retry 1 of 3) the extra message should be printed.
-    log_retry_error(error, attempt=0, max_retries=3)
+    log_retry_error(error, attempt=0, max_retries=3, verbosity_level=VerbosityLevel.VERBOSE)
     result = output.getvalue()
 
     assert "✗ Error during execution (attempt 1):" in result
@@ -325,7 +325,7 @@ def test_log_retry_error_without_extra_message(monkeypatch):
     monkeypatch.setattr(sys, "stdout", output)
     error = Exception("Final error")
     # For attempt = max_retries - 1 (attempt 3 of 3) extra message should not be printed.
-    log_retry_error(error, attempt=2, max_retries=3)
+    log_retry_error(error, attempt=2, max_retries=3, verbosity_level=VerbosityLevel.VERBOSE)
     result = output.getvalue()
 
     assert "✗ Error during execution (attempt 3):" in result

@@ -1014,6 +1014,10 @@ class Operator:
                 final_response, result = self.process_early_response(
                     response_content, response_json, classification
                 )
+
+                print_agent_response(
+                    self.executor.step_counter, final_response, self.verbosity_level
+                )
             else:
                 result = await self.executor.process_response(response_json, classification)
 
@@ -1043,7 +1047,9 @@ class Operator:
                 else:
                     final_response = await self.generate_response(response_json, classification)
 
-            print_agent_response(self.executor.step_counter, final_response, self.verbosity_level)
+                    print_agent_response(
+                        self.executor.step_counter, final_response, self.verbosity_level
+                    )
 
             # Auto-save on each step if enabled
             if self.auto_save_conversation:
