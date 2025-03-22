@@ -755,6 +755,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
         )
 
         response_json = None
+        json_response_content = None
         attempts = 0
 
         while attempts < max_attempts and response_json is None:

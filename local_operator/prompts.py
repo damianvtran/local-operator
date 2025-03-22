@@ -771,7 +771,11 @@ For CODE actions, you may need to revise or clean up the code before you return 
 - Attempting to print a variable without print(), in the code executor, unlike in the python interpreter, variables are not printed if they are not explicitly printed.
 - Attempting to use a tool incorrectly, or not invoking it correctly.
 
-Here is the list of tools, revise any incorrect tool usage, names, parameters, or async/await usage.  All tools must be invoked with tools.[TOOL_NAME] without an import, since the tools object is available in every execution context.
+Other than the above, do NOT change code in unexpected ways.  Consider that the agent is running in an environment where previous variables are available in future code snippets, so it is allowed to use undeclared variables.
+
+## Tool Usage in Code
+
+Here is the list of tools, revise any incorrect tool usage, names, parameters, or async/await usage.  Tools are run through python code.  All tools must be invoked with `tools.[TOOL_NAME]` without an associated `tools` import, since the tools object is available in every execution context.
 
 <tool_list>
 {tool_list}
