@@ -664,8 +664,11 @@ The actions are:
 - READ: The agent wants to read a file to get information from it.
 - WRITE: The agent wants to write to a file to store data.
 - EDIT: The agent wants to edit a file to change, revise, or update it.
-- DONE: The agent has marked the task as complete and wants to respond to the user.
-- ASK: The agent has asked a question and needs information from the user.
+- DONE: The agent has marked the task as complete and wants to respond to the user, or
+  the user has responded in a conversation turn which doesn't require any actions.
+- ASK: The agent has asked a question and needs information from the user.  Only use
+  this if there is an explicit ASK action tag in the response.  Otherwise, use
+  DONE to indicate that this is a question asked in a conversation message.
 - BYE: The agent has interpreted the user's request as a request to exit the program
   and quit.  On the CLI, this will terminate the program entirely.
 
@@ -734,7 +737,7 @@ relative/path/to/file.txt
 You must format the response in JSON format, following the schema:
 
 <json_response>
-{
+{{
   "learnings": "I learned about this new content that I found from the web.  It will be useful for the user to know this because of x reason.",
   "response": "Reading data from the file and printing the first few rows.",
   "code": "import pandas as pd\n\n# Read the data from the file\ndf = pd.read_csv('relative/path/to/data.csv')\n\n# Print the first few rows of the data\nprint(df.head())",
@@ -742,22 +745,48 @@ You must format the response in JSON format, following the schema:
   "file_path": "relative/path/to/file.txt",
   "mentioned_files": ["relative/path/to/data.csv"],
   "replacements": [
-    {
+    {{
       "find": "old_content\nto\nreplace",
       "replace": "new_content"
-    },
-    {
+    }},
+    {{
       "find": "old_content\nto\nreplace",
       "replace": "new_content"
-    }
+    }}
   ],
   "action": "CODE"
-}
+}}
 </json_response>
 
 Make sure to follow the format exactly.  Any incorrect fields will cause parsing
 errors and you will be asked to fix them and provide the correct JSON format.  Include
 all fields, and use empty values for any that don't apply for the particular action.
+
+For CODE actions, you may need to revise or clean up the code before you return it in the JSON response.  Notably, look out for the following issues and revise them:
+- Indentation errors
+- Using asyncio.run(): just await the coroutines directly since the code executor already executes in an asyncio run context
+- Attempting to show plots instead of saving them to a file.  The user cannot see
+  the plots, so they must be saved to a file and you must provide the file paths
+  in the mentioned_files field.
+- Attempting to print a variable without print(), in the code executor, unlike in the python interpreter, variables are not printed if they are not explicitly printed.
+- Attempting to use a tool incorrectly, or not invoking it correctly.
+
+Here is the list of tools, revise any incorrect tool usage, names, parameters, or async/await usage.  All tools must be invoked with tools.[TOOL_NAME] without an import, since the tools object is available in every execution context.
+
+<tool_list>
+{tool_list}
+</tool_list>
+
+Example of proper tool usage:
+
+<action>CODE</action>
+<code>
+search_results = tools.search_web("what is Local Operator?")
+print(search_results)
+</code>
+
+Particularly, make sure that tools that don't return a coroutine are not awaited,
+or you will waste cycles needing to resubmit the same request without awaiting.
 """  # noqa: E501
 
 JsonResponseFormatSchema: str = """
@@ -986,25 +1015,24 @@ RequestClassificationSystemPrompt: str = (
 ## Request Classification
 
 For this task, you must analyze my request and classify it into an XML tag format with:
+<request_classification_schema>
 - type: conversation | creative_writing | data_science | mathematics | accounting |
   quick_search | deep_research | media | competitive_coding | software_development |
   finance | news_report | console_command | continue | other
 - planning_required: true | false
 - relative_effort: low | medium | high
 - subject_change: true | false
+</request_classification_schema>
 
-Unless you are 100% sure about the request type, then respond with other and apply
-your best judgement to handle the request.  Don't assume a classification type without
-a good reason to do so, otherwise you will use guidelines that are too strict, rigid,
-or potentially inefficient for the task at hand.
+Unless you are 100 percent sure about the request type, then respond with the type "other" and apply your best judgement to handle the request.  Don't assume a classification type without a good reason to do so, otherwise you will use guidelines that are too strict, rigid, or potentially inefficient for the task at hand.
 
 Respond only with the JSON object, no other text.
 
-You will then use this classification in further steps to determine how to respond to me
-and how to perform the task if there is some work associated with the request.
+You will then use this classification in further steps to determine how to respond to me and how to perform the task if there is some work associated with the request.
 
 Here are the request types and how to think about classifying them:
 
+<request_types>
 conversation: General chat, questions, discussions that don't require complex analysis or
 processing, role playing, etc.
 creative_writing: Writing stories, poems, articles, marketing copy, presentations, speeches, etc.
@@ -1036,31 +1064,38 @@ personal_assistance: Desktop assistance, file management, application management
 note taking, scheduling, calendar, trip planning, and other personal assistance tasks
 continue: Continue with the current task, no need to classify.  Do this if I am
 providing you with some refinement or more information, or has interrupted a previous
-task and then asked you to continue.
+task and then asked you to continue.  Only use this if the course of the conversation has not changed and you don't need to perform any different actions.  If you are in a regular conversation and then you need to suddenly do a task, even if the subject is the same it is not "continue" and you will need to classify the task.
 other: Anything else that doesn't fit into the above categories, you will need to
 determine how to respond to this best based on your intuition.  If you're not sure
 what the category is, then it's best to respond with other and then you can think
 through the solution in following steps.
+</request_types>
 
 Planning is required for:
+<planning_required>
 - Multi-step tasks
 - Tasks requiring coordination between different tools/steps
 - Complex analysis or research
 - Tasks with dependencies
 - Tasks that benefit from upfront organization
 - My requests that materially change the scope or trajectory of the task
+</planning_required>
 
 Relative effort levels:
+<relative_effort>
 low: Simple, straightforward tasks taking a single step.
 medium: Moderate complexity tasks taking 2-5 steps.
 high: Complex tasks taking >5 steps or requiring significant reasoning, planning,
 and research effort.
+</relative_effort>
 
 Subject change:
+<subject_change>
 true: My request is about a new topic or subject that is different from the
 current flow of conversation.
 false: My request is about the same or similar topic or subject as the previous
 request and is part of the current task or flow of conversation.
+</subject_change>
 
 Example XML tags response:
 
@@ -1077,8 +1112,20 @@ Hey, how are you doing today?
 
 Remember, respond in XML format for this next message otherwise your response will
 fail to be parsed.
-"""
+"""  # noqa: E501
 )
+
+RequestClassificationUserPrompt: str = """
+## Message Classification
+
+Here is the user's message:
+
+<user_message>
+{user_message}
+</user_message>
+
+Please respond now with the request classification in the required XML format.
+"""
 
 
 class RequestType(str, Enum):
@@ -1320,12 +1367,14 @@ working directory or find an appropriate directory.  If you can use a python lib
 command line tool, or API then do so.  Use the READ command to read files if needed.
 
 Unless otherwise asked, don't save the information to a file, just provide the
-information in markdown format in the response field.
+information in markdown format in the response field.  Don't use a markdown
+file as an intermediate step, use the variables in the execution context to store
+the information and then summarize the information in the response field.
 
 Guidelines:
 - Identify the core information needed to answer the question
 - Provide direct, concise answers to specific questions
-- Cite sources when providing factual information (with brief source attribution)
+- Cite sources when providing factual information (with full source attribution).  Make sure all source citations are embedded in the text as you are writing, including the source name, dates, and URLs.
 - Organize information logically with clear headings and structure when appropriate
 - Use bullet points or numbered lists for clarity when presenting multiple facts
 - Distinguish between verified facts and general knowledge
@@ -1343,6 +1392,11 @@ Guidelines:
 Follow the general flow below:
 1. Identify the searches on the web and/or the files on the disk that you will need
    to answer the question.
+     - For web searches, be aware of search credit consumption, so use one search
+       with a broad query first and then use targetted additional searches to fill in
+       any gaps.
+     - For file searches, be aware of the file system structure and use the appropriate
+       tools to find the files you need.
 2. Perform the searches and read the results.  Determine if there are any missing pieces
    of information and if so, then do additional reads and searches until you have a
    complete picture.
@@ -1351,7 +1405,7 @@ Follow the general flow below:
    are multiple viewpoints, then provide a balanced perspective.
 4. Include diagrams and charts to help illustrate the information, such as tables
    and Mermaid diagrams.
-"""
+"""  # noqa: E501
 
 
 # Specialized instructions for deep research tasks
@@ -1786,6 +1840,7 @@ For DONE actions:
   I have seen from previous steps.  Make sure to report and summarize all the
   information in complete detail in a way that makes sense for a broad range of
   users.
+- Make sure to include all the source citations in the text of your response. The citations must be in full detail where the information is available, including the source name, dates, and URLs in markdown format.
 - Use clear, concise language appropriate for the task type
 - Use tables, lists, and other formatting to make complex data easier to understand
 - Format your response with proper headings and structure
@@ -1802,9 +1857,9 @@ Please provide the final response now.  Do NOT acknowledge this message in your
 response, and instead respond directly back to me based on the messages before this
 one.  Role-play and respond to me directly with all the required information and
 response formatting according to the guidelines above.  Make sure that you respond
-in plain text or markdown formatting, do not use the JSON action schema for this
+in plain text or markdown formatting, do not use the action XML tags for this
 response.
-"""
+"""  # noqa: E501
 
 AgentHeadsUpDisplayPrompt: str = """
 # Agent Heads Up Display
@@ -1971,6 +2026,14 @@ def apply_attachments_to_prompt(prompt: str, attachments: List[str] | None) -> s
         attachments_section += f"{i}. {attachment}\n"
 
     return prompt + attachments_section
+
+
+def create_action_interpreter_prompt(
+    tool_registry: ToolRegistry | None = None,
+) -> str:
+    """Create the prompt for the action interpreter."""
+
+    return ActionInterpreterSystemPrompt.format(tool_list=get_tools_str(tool_registry))
 
 
 def create_system_prompt(

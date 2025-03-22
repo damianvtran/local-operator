@@ -1359,11 +1359,11 @@ class LocalCodeExecutor:
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.USER,
-                content=f"Here are the results of your last code execution:\n"
+                content=f"Here are the outputs of your last code execution:\n"
                 f"<stdout>\n{condensed_output}\n</stdout>\n"
                 f"<stderr>\n{condensed_error_output}\n</stderr>\n"
                 f"<logger>\n{condensed_log_output}\n</logger>\n"
-                "Please review the results and and determine what to do next.",
+                "Please review the outputs, reflect, and determine next steps.",
                 should_summarize=True,
                 should_cache=True,
             )
@@ -1494,6 +1494,17 @@ class LocalCodeExecutor:
             and response.action != ActionType.BYE
         ):
             print_agent_response(self.step_counter, formatted_response, self.verbosity_level)
+        else:
+            self.append_to_history(
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content=(
+                        "Here is the final action in the sequence:\n"
+                        f"{response.model_dump_json()}"
+                    ),
+                    should_summarize=True,
+                )
+            )
 
         result = await self.perform_action(response, classification)
 

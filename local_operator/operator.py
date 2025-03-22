@@ -1,6 +1,7 @@
 import logging
 import os
 import platform
+import re
 import signal
 import uuid
 from enum import Enum
@@ -29,7 +30,6 @@ from local_operator.helpers import clean_plain_text_response, remove_think_tags
 from local_operator.model.configure import ModelConfiguration
 from local_operator.notebook import save_code_history_to_notebook
 from local_operator.prompts import (
-    ActionInterpreterSystemPrompt,
     FinalResponseInstructions,
     JsonResponseFormatSchema,
     PlanSystemPrompt,
@@ -38,6 +38,7 @@ from local_operator.prompts import (
     RequestClassificationSystemPrompt,
     RequestType,
     apply_attachments_to_prompt,
+    create_action_interpreter_prompt,
     create_system_prompt,
     get_request_type_instructions,
 )
@@ -46,7 +47,9 @@ from local_operator.types import (
     ConversationRecord,
     ConversationRole,
     ExecutionType,
+    ProcessResponseOutput,
     ProcessResponseStatus,
+    RelativeEffortLevel,
     RequestClassification,
     ResponseJsonSchema,
 )
@@ -107,7 +110,12 @@ def process_classification_response(response_content: str) -> RequestClassificat
     if classification_data:
         return RequestClassification.model_validate(classification_data)
 
-    raise ValueError("No valid classification data found in the response")
+    return RequestClassification(
+        type=RequestType.CONTINUE,
+        planning_required=False,
+        relative_effort=RelativeEffortLevel.LOW,
+        subject_change=False,
+    )
 
 
 class Operator:
@@ -295,7 +303,7 @@ class Operator:
                         f"... The conversation history before this message has been truncated "
                         f"to the last {max_conversation_depth} messages.  Please review the "
                         "following messages in the sequence and respond with the request "
-                        "type in the required JSON format."
+                        "type with the required request classification XML tags."
                     ),
                 )
             )
@@ -360,9 +368,9 @@ class Operator:
 
                 if attempt < max_attempts:
                     error_message = (
-                        f"The response you provided wasn't valid JSON. Error: {last_error}. "
-                        "Please provide a valid JSON response matching the "
-                        "RequestClassification schema."
+                        "The response you provided didn't have the required XML tags. "
+                        f"Error: {last_error}. Please provide a valid XML response matching "
+                        "the required classification schema."
                     )
                     messages.append(
                         ConversationRecord(
@@ -720,7 +728,7 @@ This is a {request_type} message, here are some guidelines for how to respond:
         messages = [
             ConversationRecord(
                 role=ConversationRole.SYSTEM,
-                content=ActionInterpreterSystemPrompt,
+                content=create_action_interpreter_prompt(tool_registry=self.executor.tool_registry),
                 is_system_prompt=True,
                 should_cache=True,
             ),
@@ -800,10 +808,53 @@ This is a {request_type} message, here are some guidelines for how to respond:
 
         if not response_json:
             raise ValueError(
-                f"Failed to generate valid JSON response after {max_attempts} attempts"
+                f"Failed to generate valid JSON response after {max_attempts} "
+                f'attempts.\n\nFailed response: "{json_response_content}"'
             )
 
         return response_json
+
+    def process_early_response(
+        self,
+        response_content: str,
+        response_json: ResponseJsonSchema,
+        classification: RequestClassification,
+    ) -> tuple[str, ProcessResponseOutput]:
+        """Process an early response from the agent."""
+
+        final_response = response_content
+
+        # Add final response to code history
+        self.executor.add_to_code_history(
+            CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message=final_response,
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.SUCCESS,
+                files=[],
+                execution_type=ExecutionType.RESPONSE,
+                action=response_json.action,
+                task_classification=classification.type,
+            ),
+            None,
+            classification,
+        )
+
+        # Persist conversation if enabled
+        if self.persist_agent_conversation and self.agent_registry and self.current_agent:
+            self.agent_registry.update_agent_state(
+                agent_id=self.current_agent.id,
+                agent_state=self.executor.agent_state,
+            )
+
+        return final_response, ProcessResponseOutput(
+            status=ProcessResponseStatus.SUCCESS,
+            message=final_response,
+        )
 
     async def handle_user_input(
         self, user_input: str, user_message_id: str | None = None, attachments: List[str] = []
@@ -956,40 +1007,51 @@ This is a {request_type} message, here are some guidelines for how to respond:
 
             response_json = await self.interpret_action_response(response_content)
 
-            result = await self.executor.process_response(response_json, classification)
+            is_terminal_response = (
+                response_json.action == ActionType.DONE
+                or response_json.action == ActionType.ASK
+                or response_json.action == ActionType.BYE
+            )
 
-            # Update the "Agent Heads Up Display"
+            # Check if the response contains an action tag
+            has_action_tag = re.search(r"<action>([^<]+)</action>", response_content) is not None
 
-            if (
-                response_json.action != ActionType.DONE
-                and response_json.action != ActionType.ASK
-                and response_json.action != ActionType.BYE
-            ):
-                self.executor.update_ephemeral_messages()
-
-                # Reflect on the results of the last operation
-                async with spinner_context(
-                    "Reflecting on the last step",
-                    verbosity_level=self.verbosity_level,
-                ):
-                    reflection = await self.generate_reflection(classification)
-
-                    if reflection and self.verbosity_level >= VerbosityLevel.VERBOSE:
-                        formatted_reflection = format_agent_output(reflection)
-                        print(
-                            "\n\033[1;36m╭─ Agent Reflection ──────────────────────────────\033[0m"
-                        )
-                        print(f"\033[1;36m│\033[0m {formatted_reflection}")
-                        print(
-                            "\033[1;36m╰──────────────────────────────────────────────────\033[0m\n"
-                        )
-
-            else:
-                final_response = await self.generate_response(response_json, classification)
-
-                print_agent_response(
-                    self.executor.step_counter, final_response, self.verbosity_level
+            if self.executor.step_counter == 1 and is_terminal_response and not has_action_tag:
+                # This is a single response from the agent, such as from a conversation
+                # or other response that doesn't require an action
+                final_response, result = self.process_early_response(
+                    response_content, response_json, classification
                 )
+            else:
+                result = await self.executor.process_response(response_json, classification)
+
+                # Update the "Agent Heads Up Display"
+                if not is_terminal_response:
+                    self.executor.update_ephemeral_messages()
+
+                    # Reflect on the results of the last operation
+                    async with spinner_context(
+                        "Reflecting on the last step",
+                        verbosity_level=self.verbosity_level,
+                    ):
+                        reflection = await self.generate_reflection(classification)
+
+                        if reflection and self.verbosity_level >= VerbosityLevel.VERBOSE:
+                            formatted_reflection = format_agent_output(reflection)
+                            print(
+                                "\n\033[1;36m╭─ Agent Reflection "
+                                "──────────────────────────────\033[0m"
+                            )
+                            print(f"\033[1;36m│\033[0m {formatted_reflection}")
+                            print(
+                                "\033[1;36m╰────────────────────────────────"
+                                "──────────────────\033[0m\n"
+                            )
+
+                else:
+                    final_response = await self.generate_response(response_json, classification)
+
+            print_agent_response(self.executor.step_counter, final_response, self.verbosity_level)
 
             # Auto-save on each step if enabled
             if self.auto_save_conversation:
