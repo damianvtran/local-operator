@@ -113,8 +113,8 @@ async def test_cli_operator_chat(cli_operator, mock_model_config):
     mock_generate_plan = patch.object(
         cli_operator, "generate_plan", return_value=MagicMock()
     ).start()
-    mock_generate_response = patch.object(
-        cli_operator, "generate_response", return_value="I'm done"
+    mock_interpret_action_response = patch.object(
+        cli_operator, "interpret_action_response", return_value=mock_response
     ).start()
     patch.object(cli_operator, "_agent_should_exit", return_value=True).start()
     patch("builtins.input", return_value="exit").start()
@@ -128,8 +128,8 @@ async def test_cli_operator_chat(cli_operator, mock_model_config):
     # Assertions
     assert mock_classify_request.call_count == 1
     assert mock_generate_plan.call_count == 1
-    assert mock_generate_response.call_count == 1
-    assert "final response" in cli_operator.executor.agent_state.conversation[-1].content
+    assert mock_interpret_action_response.call_count == 1
+    assert "I'm done" in cli_operator.executor.agent_state.conversation[-1].content
 
     # Clean up patches
     patch.stopall()
@@ -420,20 +420,30 @@ def test_process_classification_response(response_content, expected):
 
 
 @pytest.mark.parametrize(
-    "invalid_content",
+    "invalid_content,expect_throw",
     [
-        pytest.param("Here is a response with no tags", id="no_tags"),
+        pytest.param("Here is a response with no tags", False, id="no_tags"),
         pytest.param(
             "Here is a response with incomplete xml tags <type>software_development",
+            False,
             id="incomplete_tags",
         ),
         pytest.param(
             "Here is a response missing the type field <planning_required>true</planning_required>",
+            True,
             id="missing_type_field",
         ),
     ],
 )
-def test_process_classification_response_invalid(invalid_content):
+def test_process_classification_response_invalid(invalid_content, expect_throw):
     """Test that process_classification_response raises ValidationError for invalid inputs."""
-    with pytest.raises(ValidationError):
-        process_classification_response(invalid_content)
+    if expect_throw:
+        with pytest.raises(ValidationError):
+            process_classification_response(invalid_content)
+    else:
+        classification = process_classification_response(invalid_content)
+
+        assert classification.type == RequestType.CONTINUE
+        assert classification.planning_required is False
+        assert classification.relative_effort == RelativeEffortLevel.LOW
+        assert classification.subject_change is False
