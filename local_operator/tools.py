@@ -408,7 +408,7 @@ async def get_page_html_content(url: str) -> str:
             """
             )
 
-            await page.goto(url, wait_until="networkidle")
+            await page.goto(url, wait_until="domcontentloaded")
             await page.wait_for_timeout(2000)  # Wait additional time for dynamic content
 
             content = await page.content()
@@ -455,7 +455,7 @@ async def get_page_text_content(url: str) -> str:
             """
             )
 
-            await page.goto(url, wait_until="networkidle")
+            await page.goto(url, wait_until="domcontentloaded")
             await page.wait_for_timeout(2000)  # Wait additional time for dynamic content
 
             # Extract text from semantic elements
