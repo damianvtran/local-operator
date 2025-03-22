@@ -1122,14 +1122,14 @@ fail to be parsed.
 RequestClassificationUserPrompt: str = """
 ## Message Classification
 
-Here is the user's message:
+Here is the new message that I am sending to the agent:
 
 <user_message>
 {user_message}
 </user_message>
 
-Please respond now with the request classification in the required XML format.
-"""
+Please respond now with the request classification for this message given the conversation history context in the required XML format.
+"""  # noqa: E501
 
 
 class RequestType(str, Enum):

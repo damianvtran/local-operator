@@ -36,6 +36,7 @@ from local_operator.prompts import (
     PlanUserPrompt,
     ReflectionUserPrompt,
     RequestClassificationSystemPrompt,
+    RequestClassificationUserPrompt,
     RequestType,
     apply_attachments_to_prompt,
     create_action_interpreter_prompt,
@@ -315,7 +316,7 @@ class Operator:
         messages.append(
             ConversationRecord(
                 role=ConversationRole.USER,
-                content=user_input,
+                content=RequestClassificationUserPrompt.format(user_message=user_input),
             ),
         )
 
