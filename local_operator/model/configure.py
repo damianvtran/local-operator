@@ -18,7 +18,7 @@ from local_operator.model.registry import (
 
 ModelType = Union[ChatOpenAI, ChatOllama, ChatAnthropic, ChatGoogleGenerativeAI, ChatMock, ChatNoop]
 
-DEFAULT_TEMPERATURE = 0.2
+DEFAULT_TEMPERATURE = 0.5
 """Default temperature value for language models."""
 DEFAULT_TOP_P = 0.9
 """Default top_p value for language models."""

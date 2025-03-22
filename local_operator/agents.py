@@ -1,3 +1,4 @@
+import importlib
 import json
 import logging
 import os
@@ -901,7 +902,7 @@ class AgentRegistry:
 
         This method serializes the agent's context using dill and saves it to a file
         named "context.pkl" in the agent's directory. It handles unpicklable objects
-        by converting them to a serializable format.
+        by converting them to a serializable format, including Pydantic models.
 
         Args:
             agent_id (str): The unique identifier of the agent.
@@ -921,7 +922,13 @@ class AgentRegistry:
         context_file = agent_dir / "context.pkl"
 
         def convert_unpicklable(obj: Any) -> Any:
-            if isinstance(obj, dict):
+            if isinstance(obj, BaseModel):
+                # Convert Pydantic models to dictionaries
+                return {
+                    "__pydantic_model__": obj.__class__.__module__ + "." + obj.__class__.__name__,
+                    "data": convert_unpicklable(obj.model_dump()),
+                }
+            elif isinstance(obj, dict):
                 return {k: convert_unpicklable(v) for k, v in obj.items()}
             elif isinstance(obj, (list, tuple)):
                 return type(obj)(convert_unpicklable(x) for x in obj)
@@ -951,7 +958,8 @@ class AgentRegistry:
         """Load the agent's context from a file.
 
         This method deserializes the agent's context using dill from a file
-        named "context.pkl" in the agent's directory.
+        named "context.pkl" in the agent's directory. It handles the reconstruction
+        of serialized Pydantic models and other transformed objects.
 
         Args:
             agent_id (str): The unique identifier of the agent.
@@ -969,11 +977,33 @@ class AgentRegistry:
         agent_dir = self.agents_dir / agent_id
         context_file = agent_dir / "context.pkl"
 
+        def reconstruct_objects(obj: Any) -> Any:
+            if isinstance(obj, dict) and "__pydantic_model__" in obj:
+                # Reconstruct Pydantic model
+                model_path = obj["__pydantic_model__"]
+                module_name, class_name = model_path.rsplit(".", 1)
+                try:
+                    module = importlib.import_module(module_name)
+                    model_class = getattr(module, class_name)
+                    return model_class.model_validate(reconstruct_objects(obj["data"]))
+                except (ImportError, AttributeError) as e:
+                    logging.error(f"Failed to reconstruct Pydantic model {model_path}: {str(e)}")
+                    return obj
+            elif isinstance(obj, dict):
+                return {k: reconstruct_objects(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [reconstruct_objects(item) for item in obj]
+            elif isinstance(obj, tuple):
+                return tuple(reconstruct_objects(item) for item in obj)
+            else:
+                return obj
+
         # Check if the new format file exists
         if context_file.exists():
             try:
                 with context_file.open("rb") as f:
-                    return dill.load(f)
+                    loaded_context = dill.load(f)
+                    return reconstruct_objects(loaded_context)
             except Exception as e:
                 logging.error(f"Failed to load agent context from new format: {str(e)}")
 
@@ -982,7 +1012,8 @@ class AgentRegistry:
         if old_context_file.exists():
             try:
                 with old_context_file.open("rb") as f:
-                    return dill.load(f)
+                    loaded_context = dill.load(f)
+                    return reconstruct_objects(loaded_context)
             except Exception as e:
                 logging.error(f"Failed to load agent context from old format: {str(e)}")
 
