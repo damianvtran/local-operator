@@ -38,6 +38,7 @@ from local_operator.prompts import (
     RequestClassificationSystemPrompt,
     RequestClassificationUserPrompt,
     RequestType,
+    TaskInstructionsPrompt,
     apply_attachments_to_prompt,
     create_action_interpreter_prompt,
     create_system_prompt,
@@ -346,17 +347,6 @@ class Operator:
                 )
 
                 classification = process_classification_response(response_content)
-
-                self.executor.agent_state.conversation.append(
-                    ConversationRecord(
-                        role=ConversationRole.ASSISTANT,
-                        content=(
-                            f"Here is the classification for your request: {response_content}"
-                        ),
-                        should_summarize=False,
-                        ephemeral=True,
-                    )
-                )
 
                 if classification.type != RequestType.CONTINUE:
                     self.executor.set_instruction_details(response_content)
@@ -698,14 +688,14 @@ class Operator:
         Add the task instructions as an ephemeral message to help the agent
         prioritize the information and the task at hand.
         """
-        task_instructions = """
-This is a {request_type} message, here are some guidelines for how to respond:
+        classification_str = ""
 
-# Task Instructions
+        for key, value in request_classification.model_dump().items():
+            classification_str += f"<{key}>{value}</{key}>\n"
 
-{task_instructions}
-        """.format(
+        task_instructions = TaskInstructionsPrompt.format(
             request_type=request_classification.type,
+            request_classification=classification_str,
             task_instructions=get_request_type_instructions(
                 RequestType(request_classification.type)
             ),
@@ -1024,6 +1014,10 @@ This is a {request_type} message, here are some guidelines for how to respond:
                 final_response, result = self.process_early_response(
                     response_content, response_json, classification
                 )
+
+                print_agent_response(
+                    self.executor.step_counter, final_response, self.verbosity_level
+                )
             else:
                 result = await self.executor.process_response(response_json, classification)
 
@@ -1053,7 +1047,9 @@ This is a {request_type} message, here are some guidelines for how to respond:
                 else:
                     final_response = await self.generate_response(response_json, classification)
 
-            print_agent_response(self.executor.step_counter, final_response, self.verbosity_level)
+                    print_agent_response(
+                        self.executor.step_counter, final_response, self.verbosity_level
+                    )
 
             # Auto-save on each step if enabled
             if self.auto_save_conversation:

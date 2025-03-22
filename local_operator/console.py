@@ -270,7 +270,9 @@ def log_action_error(error: Exception, action: str, verbosity_level: VerbosityLe
     print("\033[1;34m╞══════════════════════════════════════════════════╡\033[0m")
 
 
-def log_retry_error(error: Exception, attempt: int, max_retries: int) -> None:
+def log_retry_error(
+    error: Exception, attempt: int, max_retries: int, verbosity_level: VerbosityLevel
+) -> None:
     """
     Print a formatted error message for a given retry attempt.
 
@@ -278,7 +280,11 @@ def log_retry_error(error: Exception, attempt: int, max_retries: int) -> None:
         error (Exception): The error that occurred.
         attempt (int): The current retry attempt number.
         max_retries (int): The maximum number of retry attempts allowed.
+        verbosity_level (VerbosityLevel): The verbosity level to use for the section.
     """
+    if verbosity_level < VerbosityLevel.VERBOSE:
+        return
+
     error_str = str(error)
     print(f"\n\033[1;31m✗ Error during execution (attempt {attempt + 1}):\033[0m")
     print("\033[1;34m╞══════════════════════════════════════════════════╡\033[0m")

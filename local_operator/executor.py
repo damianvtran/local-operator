@@ -1094,7 +1094,7 @@ class LocalCodeExecutor:
                 else:
                     self._record_retry_error(error, attempt - 1)
 
-                log_retry_error(error, attempt, max_retries)
+                log_retry_error(error, attempt, max_retries, self.verbosity_level)
 
                 self.update_ephemeral_messages()
 
@@ -1106,7 +1106,7 @@ class LocalCodeExecutor:
                         else:
                             break
                     except Exception as retry_error:
-                        log_retry_error(retry_error, attempt, max_retries)
+                        log_retry_error(retry_error, attempt, max_retries, self.verbosity_level)
                         break
 
         formatted_print = format_error_output(
@@ -1494,17 +1494,6 @@ class LocalCodeExecutor:
             and response.action != ActionType.BYE
         ):
             print_agent_response(self.step_counter, formatted_response, self.verbosity_level)
-        else:
-            self.append_to_history(
-                ConversationRecord(
-                    role=ConversationRole.ASSISTANT,
-                    content=(
-                        "Here is the final action in the sequence:\n"
-                        f"{response.model_dump_json()}"
-                    ),
-                    should_summarize=True,
-                )
-            )
 
         result = await self.perform_action(response, classification)
 
