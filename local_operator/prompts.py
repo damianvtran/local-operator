@@ -525,7 +525,7 @@ files do you need to read, what websites do you need to visit, etc.  Be specific
 Determine if there are any clarifying questions that you need to ask the user before
 you proceed.  If so, come up with the questions that you need to ask here, and then you will ask them to the user in an upcoming conversation turn before getting started.  Potentially you will need to update or revise the plan based on the user's answers to these questions before you start.
 
-Respond in natural language, without XML tags or code.  Do not include any code here or markdown code formatting, you will do that after you reflect.
+Respond in natural language, without XML tags or code.  Do not include any code here or markdown code formatting, you will do that after you reflect.  No action tags or actions will be interpreted in the planning message.
 """  # noqa: E501
 
 PlanUserPrompt: str = """
@@ -533,6 +533,8 @@ Given the above information about how you will need to operate in execution mode
 think aloud about what you will need to do.  What tools do you need to use, which
 files do you need to read, what websites do you need to visit, etc.  Be specific.
 Respond in natural language, without XML tags or code.  Do not include any code here or markdown code formatting, you will do that after you plan.
+
+Remember, do NOT use action tags in your response to this message, they will be ignored.  You must wait until the next conversation turn to use actions where the action interpreter will review that message so that the system can carry out your action.
 """  # noqa: E501
 
 ReflectionUserPrompt: str = """
