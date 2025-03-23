@@ -903,7 +903,7 @@ RequestClassificationSystemPrompt: str = (
 For this task, you must analyze my request and classify it into an XML tag format with:
 <request_classification_schema>
 - type: conversation | creative_writing | data_science | mathematics | accounting |
-  quick_search | deep_research | media | competitive_coding | software_development |
+  research | deep_research | media | competitive_coding | software_development |
   finance | news_report | console_command | continue | other
 - planning_required: true | false
 - relative_effort: low | medium | high
@@ -924,8 +924,8 @@ creative_writing: Writing stories, poems, articles, marketing copy, presentation
 data_science: Data analysis, visualization, machine learning, statistics
 mathematics: Math problems, calculations, proofs
 accounting: Financial calculations, bookkeeping, budgets, pricing, cost analysis, etc.
-quick_search: Quick search for information on a specific topic.  Use this for simple requests for information that don't require a deep understanding of the topic.  These are generally questions like "what is the weather in Tokyo?", "what is the capital of Canada?", "who was Albert Einstein?", "tell me some facts about the moon landing".
-deep_research: In-depth research requiring extensive sources and synthesis.  This includes business analysis, intelligence research, competitive benchmarking, competitor analysis, market sizing, customer segmentation, stock research, background checks, and other similar tasks that require a deep understanding of the topic and a comprehensive analysis. ONLY use this for requests where I have asked for a report or extensive research.
+research: Quick search for information on a specific topic.  Use this for most requests for information that require a moderate to basic understanding of the topic.  These are generally questions like "what is the weather in Tokyo?", "what is the capital of Canada?", "who was Albert Einstein?", "tell me some facts about the moon landing".
+deep_research: In-depth report building, requiring extensive sources and synthesis.  This includes business analysis, intelligence research, competitive benchmarking, competitor analysis, market sizing, customer segmentation, stock research, background checks, and other similar tasks that require a deep understanding of the topic and a comprehensive analysis. ONLY use this for requests where I have asked for a report or extensive research.
 media: Image, audio, or video processing, editing, manipulation, and generation
 competitive_coding: Solving coding problems from websites like LeetCode, HackerRank, etc.
 software_development: Software development, coding, debugging, testing, git operations, etc.
@@ -1018,7 +1018,7 @@ class RequestType(str, Enum):
         LEGAL: Legal research, contract review, and legal analysis
         MEDICAL: Medical research, drug development, clinical trials, biochemistry, genetics,
         pharmacology, general practice, optometry, internal medicine, and other medical specialties
-        QUICK_SEARCH: Quick search for information on a specific topic.  Use this for simple
+        RESEARCH: Quick search for information on a specific topic.  Use this for simple
         requests for information that don't require a deep understanding of the topic.
         DEEP_RESEARCH: In-depth research requiring multiple sources and synthesis
         MEDIA: Image, audio, or video processing and manipulation
@@ -1042,7 +1042,7 @@ class RequestType(str, Enum):
     ACCOUNTING = "accounting"
     LEGAL = "legal"
     MEDICAL = "medical"
-    QUICK_SEARCH = "quick_search"
+    RESEARCH = "research"
     DEEP_RESEARCH = "deep_research"
     MEDIA = "media"
     COMPETITIVE_CODING = "competitive_coding"
@@ -1219,9 +1219,9 @@ outcomes.
 medical advice
 """
 
-# Specialized instructions for quick search tasks
-QuickSearchInstructions: str = """
-## Quick Search Guidelines
+# Specialized instructions for research tasks
+ResearchInstructions: str = """
+## Research Guidelines
 
 You need to do a lookup to help me answer a question.  Use the tools available
 to you and/or python code libraries to provide the most relevant information to me.
@@ -1631,7 +1631,7 @@ REQUEST_TYPE_INSTRUCTIONS: Dict[RequestType, str] = {
     RequestType.ACCOUNTING: AccountingInstructions,
     RequestType.LEGAL: LegalInstructions,
     RequestType.MEDICAL: MedicalInstructions,
-    RequestType.QUICK_SEARCH: QuickSearchInstructions,
+    RequestType.RESEARCH: ResearchInstructions,
     RequestType.DEEP_RESEARCH: DeepResearchInstructions,
     RequestType.MEDIA: MediaInstructions,
     RequestType.COMPETITIVE_CODING: CompetitiveCodingInstructions,
