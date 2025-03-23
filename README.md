@@ -75,6 +75,13 @@ Once you have the API key, install the operator CLI with the following command:
 pip install local-operator
 ```
 
+## Running Server in Docker
+
+To run Local Operator in docker, ensure docker is running and run
+```bash
+docker compose up --d
+```
+
 ### Web Browsing
 
 To enable web browsing, you can install the playwright browsers with the following command:
