@@ -640,6 +640,11 @@ class Operator:
             response.content if isinstance(response.content, str) else str(response.content)
         )
 
+        # Add content to the response if it is empty to prevent invoke errors
+        # from the source.
+        if not response_content:
+            response_content = "No response from the agent"
+
         # Clean up the response
         response_content = remove_think_tags(response_content)
 
@@ -760,20 +765,26 @@ class Operator:
             )
 
             try:
+                if not json_response_content:
+                    raise ValueError("JSON response content is empty")
+
                 response_json = process_json_response(json_response_content)
-            except ValidationError as e:
+            except Exception as e:
                 logging.error(f"JSON validation error (attempt {attempts}/{max_attempts}): {e}")
 
                 if attempts >= max_attempts:
                     break
 
-                error_details = "\n".join(
-                    f"Error {i+1}:\n"
-                    f"  Location: {' -> '.join(str(loc) for loc in err['loc'])}\n"
-                    f"  Type: {err['type']}\n"
-                    f"  Message: {err['msg']}"
-                    for i, err in enumerate(e.errors())
-                )
+                if isinstance(e, ValidationError):
+                    error_details = "\n".join(
+                        f"Error {i+1}:\n"
+                        f"  Location: {' -> '.join(str(loc) for loc in err['loc'])}\n"
+                        f"  Type: {err['type']}\n"
+                        f"  Message: {err['msg']}"
+                        for i, err in enumerate(e.errors())
+                    )
+                else:
+                    error_details = str(e)
 
                 messages.extend(
                     [
