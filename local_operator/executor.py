@@ -758,6 +758,10 @@ class LocalCodeExecutor:
         )
 
         for record in messages:
+            # Skip empty messages to prevent provider errors
+            if not record.content:
+                continue
+
             msg = {
                 "role": record.role,
                 "content": [
