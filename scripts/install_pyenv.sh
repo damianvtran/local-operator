@@ -7,9 +7,11 @@
 # 2. Installing Python 3.12 via pyenv if not already installed
 # 3. Making Python 3.12 available as 'python3.12' in the PATH
 # 4. Setting Python 3.12 as the local version for the project
+# 5. Configuring shell environment for pyenv based on detected shell type
 #
-# The script handles different operating systems (macOS, Linux) and
-# installation methods (Homebrew, apt, yum) automatically.
+# The script handles different operating systems (macOS, Linux),
+# installation methods (Homebrew, apt, yum), and shell types (Bash, Zsh, Fish)
+# automatically.
 #
 # Usage: ./scripts/install_pyenv.sh
 #
@@ -89,35 +91,18 @@ else
     # Configure shell for pyenv
     print_warning "Adding pyenv to your shell configuration..."
     
-    # Determine which shell configuration file to use
-    SHELL_CONFIG=""
-    if [[ -f "$HOME/.bashrc" ]]; then
-        SHELL_CONFIG="$HOME/.bashrc"
-    elif [[ -f "$HOME/.zshrc" ]]; then
-        SHELL_CONFIG="$HOME/.zshrc"
-    elif [[ -f "$HOME/.bash_profile" ]]; then
-        SHELL_CONFIG="$HOME/.bash_profile"
-    else
-        print_error "Could not determine shell configuration file. Please add pyenv to your PATH manually."
-        exit 1
-    fi
+    # Detect the current shell
+    configure_shell_for_pyenv
     
-    # Add pyenv initialization to shell config if not already present
-    if ! grep -q "pyenv init" "$SHELL_CONFIG"; then
-        print_status "Adding pyenv initialization to $SHELL_CONFIG..."
-        echo -e "\n# pyenv configuration" >> "$SHELL_CONFIG"
-        echo 'export PYENV_ROOT="$HOME/.pyenv"' >> "$SHELL_CONFIG"
-        echo 'export PATH="$PYENV_ROOT/bin:$PATH"' >> "$SHELL_CONFIG"
-        echo 'eval "$(pyenv init --path)"' >> "$SHELL_CONFIG"
-        echo 'eval "$(pyenv init -)"' >> "$SHELL_CONFIG"
-        
-        print_status "pyenv has been added to $SHELL_CONFIG."
-        print_warning "Please restart your shell or run 'source $SHELL_CONFIG' to use pyenv."
-        
-        # Source the configuration for the current session
-        export PYENV_ROOT="$HOME/.pyenv"
+    # Source the configuration for the current session
+    export PYENV_ROOT="$HOME/.pyenv"
+    [[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"
+    if [[ "$SHELL" == *"fish"* ]]; then
+        # For fish shell in the current session
+        # We can't easily source fish config in a bash script, so just set the path
         export PATH="$PYENV_ROOT/bin:$PATH"
-        eval "$(pyenv init --path)"
+    else
+        # For bash/zsh in the current session
         eval "$(pyenv init -)"
     fi
 fi
@@ -138,6 +123,179 @@ fi
 print_status "Setting Python $PYTHON_VERSION as the local version for this project..."
 pyenv local "$PYTHON_VERSION"
 print_status "Python $PYTHON_VERSION is now set as the local version."
+
+# Function to configure shell environment for pyenv
+# This function detects the user's shell and adds the appropriate
+# pyenv configuration to the shell's configuration files
+configure_shell_for_pyenv() {
+    # Detect the current shell
+    local current_shell
+    if [[ -n "$SHELL" ]]; then
+        current_shell=$(basename "$SHELL")
+    else
+        # Try to detect from /etc/passwd if $SHELL is not set
+        current_shell=$(basename "$(grep "^$USER:" /etc/passwd | cut -d: -f7)")
+    fi
+    
+    print_status "Detected shell: $current_shell"
+    
+    case "$current_shell" in
+        bash)
+            configure_bash
+            ;;
+        zsh)
+            configure_zsh
+            ;;
+        fish)
+            configure_fish
+            ;;
+        *)
+            print_warning "Unsupported shell: $current_shell. Defaulting to bash configuration."
+            configure_bash
+            ;;
+    esac
+}
+
+# Function to configure Bash shell for pyenv
+# Adds pyenv configuration to .bashrc and the appropriate profile file
+configure_bash() {
+    print_status "Configuring Bash shell for pyenv..."
+    
+    # Always add to .bashrc for interactive shells
+    if [[ -f "$HOME/.bashrc" ]]; then
+        add_pyenv_to_bash_config "$HOME/.bashrc"
+    else
+        print_warning "No .bashrc found. Creating one..."
+        touch "$HOME/.bashrc"
+        add_pyenv_to_bash_config "$HOME/.bashrc"
+    fi
+    
+    # Add to profile file for login shells
+    # Check for profile files in order of preference
+    if [[ -f "$HOME/.bash_profile" ]]; then
+        add_pyenv_to_bash_config "$HOME/.bash_profile"
+    elif [[ -f "$HOME/.bash_login" ]]; then
+        add_pyenv_to_bash_config "$HOME/.bash_login"
+    elif [[ -f "$HOME/.profile" ]]; then
+        add_pyenv_to_bash_config "$HOME/.profile"
+    else
+        print_warning "No profile file found. Creating .profile..."
+        touch "$HOME/.profile"
+        add_pyenv_to_bash_config "$HOME/.profile"
+    fi
+    
+    print_status "Bash configuration complete."
+}
+
+# Helper function to add pyenv configuration to a Bash config file
+add_pyenv_to_bash_config() {
+    local config_file="$1"
+    
+    if ! grep -q "PYENV_ROOT" "$config_file"; then
+        print_status "Adding pyenv configuration to $config_file..."
+        echo -e "\n# pyenv configuration" >> "$config_file"
+        echo 'export PYENV_ROOT="$HOME/.pyenv"' >> "$config_file"
+        echo '[[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"' >> "$config_file"
+        echo 'eval "$(pyenv init - bash)"' >> "$config_file"
+        print_status "pyenv configuration added to $config_file."
+    else
+        print_warning "pyenv configuration already exists in $config_file."
+    fi
+}
+
+# Function to configure Zsh shell for pyenv
+# Adds pyenv configuration to .zshrc and optionally to .zprofile or .zlogin
+configure_zsh() {
+    print_status "Configuring Zsh shell for pyenv..."
+    
+    # Add to .zshrc for interactive shells
+    if [[ -f "$HOME/.zshrc" ]]; then
+        add_pyenv_to_zsh_config "$HOME/.zshrc"
+    else
+        print_warning "No .zshrc found. Creating one..."
+        touch "$HOME/.zshrc"
+        add_pyenv_to_zsh_config "$HOME/.zshrc"
+    fi
+    
+    # Optionally add to .zprofile or .zlogin for login shells
+    if [[ -f "$HOME/.zprofile" ]]; then
+        add_pyenv_to_zsh_config "$HOME/.zprofile"
+    elif [[ -f "$HOME/.zlogin" ]]; then
+        add_pyenv_to_zsh_config "$HOME/.zlogin"
+    fi
+    
+    print_status "Zsh configuration complete."
+}
+
+# Helper function to add pyenv configuration to a Zsh config file
+add_pyenv_to_zsh_config() {
+    local config_file="$1"
+    
+    if ! grep -q "PYENV_ROOT" "$config_file"; then
+        print_status "Adding pyenv configuration to $config_file..."
+        echo -e "\n# pyenv configuration" >> "$config_file"
+        echo 'export PYENV_ROOT="$HOME/.pyenv"' >> "$config_file"
+        echo '[[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"' >> "$config_file"
+        echo 'eval "$(pyenv init - zsh)"' >> "$config_file"
+        print_status "pyenv configuration added to $config_file."
+    else
+        print_warning "pyenv configuration already exists in $config_file."
+    fi
+}
+
+# Function to configure Fish shell for pyenv
+# Adds pyenv configuration to config.fish and sets universal variables
+configure_fish() {
+    print_status "Configuring Fish shell for pyenv..."
+    
+    # Create Fish config directory if it doesn't exist
+    mkdir -p "$HOME/.config/fish"
+    
+    # Add to config.fish
+    local config_file="$HOME/.config/fish/config.fish"
+    if [[ ! -f "$config_file" ]] || ! grep -q "pyenv init" "$config_file"; then
+        print_status "Adding pyenv configuration to $config_file..."
+        echo -e "\n# pyenv configuration" >> "$config_file"
+        echo 'pyenv init - fish | source' >> "$config_file"
+        print_status "pyenv configuration added to $config_file."
+    else
+        print_warning "pyenv configuration already exists in $config_file."
+    fi
+    
+    # Set universal variables
+    # Note: We can't directly run fish commands from bash,
+    # so we'll create a temporary fish script and execute it
+    local fish_script="/tmp/pyenv_fish_setup.fish"
+    echo '#!/usr/bin/env fish' > "$fish_script"
+    echo 'set -Ux PYENV_ROOT $HOME/.pyenv' >> "$fish_script"
+    
+    # Check fish version for the appropriate path command
+    if fish -c "type -q fish_add_path" 2>/dev/null; then
+        # Fish 3.2.0 or newer
+        echo 'fish_add_path $PYENV_ROOT/bin' >> "$fish_script"
+    else
+        # Older Fish versions
+        echo 'set -U fish_user_paths $PYENV_ROOT/bin $fish_user_paths' >> "$fish_script"
+    fi
+    
+    chmod +x "$fish_script"
+    
+    if command -v fish >/dev/null 2>&1; then
+        print_status "Setting Fish universal variables..."
+        fish "$fish_script"
+        rm "$fish_script"
+        print_status "Fish universal variables set."
+    else
+        print_warning "Fish shell not found in PATH. Manual configuration required."
+        print_warning "Please run the following commands in Fish shell:"
+        print_warning "set -Ux PYENV_ROOT \$HOME/.pyenv"
+        print_warning "fish_add_path \$PYENV_ROOT/bin  # For Fish 3.2.0+"
+        print_warning "# OR"
+        print_warning "set -U fish_user_paths \$PYENV_ROOT/bin \$fish_user_paths  # For older Fish versions"
+    fi
+    
+    print_status "Fish configuration complete."
+}
 
 # Step 4: Make Python 3.12 available in PATH via symlink
 # -----------------------------------------------------
@@ -166,9 +324,22 @@ if [[ -f "$PYENV_PYTHON_PATH" ]]; then
             
             # Add ~/.local/bin to PATH if not already there
             if ! echo "$PATH" | grep -q "$HOME/.local/bin"; then
-                echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$SHELL_CONFIG"
+                # Detect shell and add to appropriate config
+                if [[ "$SHELL" == *"fish"* ]]; then
+                    # For Fish shell
+                    mkdir -p "$HOME/.config/fish"
+                    echo 'fish_add_path $HOME/.local/bin' >> "$HOME/.config/fish/config.fish"
+                    print_warning "Added $HOME/.local/bin to PATH in Fish config"
+                elif [[ "$SHELL" == *"zsh"* ]]; then
+                    # For Zsh
+                    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.zshrc"
+                    print_warning "Added $HOME/.local/bin to PATH in .zshrc"
+                else
+                    # Default to Bash
+                    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+                    print_warning "Added $HOME/.local/bin to PATH in .bashrc"
+                fi
                 export PATH="$HOME/.local/bin:$PATH"
-                print_warning "Added $HOME/.local/bin to PATH in $SHELL_CONFIG"
             fi
         else
             print_warning "Symlink already exists at $HOME/.local/bin/python3.12"
