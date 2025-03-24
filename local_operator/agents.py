@@ -940,6 +940,13 @@ class AgentRegistry:
                     return list(obj)
                 except Exception:
                     return str(obj)
+            elif callable(obj) and hasattr(obj, "__name__"):
+                # Preserve functions with a special marker
+                try:
+                    return {"__callable__": True, "function": dill.dumps(obj)}
+                except Exception as e:
+                    logging.warning(f"Failed to pickle function {obj.__name__}: {str(e)}")
+                    return str(obj)
             else:
                 try:
                     dill.dumps(obj)
@@ -989,6 +996,15 @@ class AgentRegistry:
                 except (ImportError, AttributeError) as e:
                     logging.error(f"Failed to reconstruct Pydantic model {model_path}: {str(e)}")
                     return obj
+            elif (
+                isinstance(obj, dict) and "__callable__" in obj and obj.get("__callable__") is True
+            ):
+                # Reconstruct callable functions
+                try:
+                    return dill.loads(obj["function"])
+                except Exception as e:
+                    logging.error(f"Failed to reconstruct callable function: {str(e)}")
+                    return None
             elif isinstance(obj, dict):
                 return {k: reconstruct_objects(v) for k, v in obj.items()}
             elif isinstance(obj, list):
