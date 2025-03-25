@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from local_operator.clients.ollama import OllamaClient, OllamaModelData
 from local_operator.clients.openrouter import (
     OpenRouterClient,
     OpenRouterListModelsResponse,
@@ -22,52 +23,170 @@ def client():
     return TestClient(app)
 
 
-def test_list_providers(client):
-    """Test the list_providers endpoint."""
-    response = client.get("/v1/models/providers")
+def test_list_providers_with_ollama_active(client):
+    """Test the list_providers endpoint with Ollama server active."""
+    # Mock the Ollama client to report that the server is healthy
+    with patch("local_operator.clients.ollama.OllamaClient.is_healthy", return_value=True):
+        response = client.get("/v1/models/providers")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == 200
+        assert data["message"] == "Providers retrieved successfully"
+        assert "result" in data
+        assert "providers" in data["result"]
+        providers = data["result"]["providers"]
+        assert isinstance(providers, list)
+
+        # Verify each provider has the expected fields
+        for provider in providers:
+            assert "id" in provider
+            assert "name" in provider
+            assert "description" in provider
+            assert "url" in provider
+            assert "requiredCredentials" in provider
+            assert isinstance(provider["requiredCredentials"], list)
+
+        # Verify expected providers are present
+        provider_ids = [p["id"] for p in providers]
+        expected_providers = [
+            "openai",
+            "anthropic",
+            "google",
+            "mistral",
+            "ollama",  # Ollama should be included when server is active
+            "openrouter",
+            "deepseek",
+            "kimi",
+            "alibaba",
+        ]
+        for provider_id in expected_providers:
+            assert provider_id in provider_ids
+
+        # Verify some specific provider details
+        openai = next(p for p in providers if p["id"] == "openai")
+        assert openai["name"] == "OpenAI"
+        assert openai["url"] == "https://platform.openai.com/"
+        assert openai["requiredCredentials"] == ["OPENAI_API_KEY"]
+
+        # Verify Ollama provider is present and has expected details
+        ollama = next(p for p in providers if p["id"] == "ollama")
+        assert ollama["name"] == "Ollama"
+        assert ollama["requiredCredentials"] == []
+
+
+def test_list_providers_with_ollama_inactive(client):
+    """Test the list_providers endpoint with Ollama server inactive."""
+    # Mock the Ollama client to report that the server is not healthy
+    with patch("local_operator.clients.ollama.OllamaClient.is_healthy", return_value=False):
+        response = client.get("/v1/models/providers")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == 200
+        assert data["message"] == "Providers retrieved successfully"
+        assert "result" in data
+        assert "providers" in data["result"]
+        providers = data["result"]["providers"]
+        assert isinstance(providers, list)
+
+        # Verify each provider has the expected fields
+        for provider in providers:
+            assert "id" in provider
+            assert "name" in provider
+            assert "description" in provider
+            assert "url" in provider
+            assert "requiredCredentials" in provider
+            assert isinstance(provider["requiredCredentials"], list)
+
+        # Verify expected providers are present (except Ollama)
+        provider_ids = [p["id"] for p in providers]
+        expected_providers = [
+            "openai",
+            "anthropic",
+            "google",
+            "mistral",
+            "openrouter",
+            "deepseek",
+            "kimi",
+            "alibaba",
+        ]
+        for provider_id in expected_providers:
+            assert provider_id in provider_ids
+
+        # Verify Ollama provider is NOT present
+        assert "ollama" not in provider_ids
+
+
+def test_list_models_with_ollama_active(client, mock_credential_manager):
+    """Test the list_models endpoint with Ollama server active."""
+    # Mock the Ollama client to report that the server is healthy
+
+    patch.object(OllamaClient, "is_healthy", return_value=True).start()
+    patch.object(
+        OllamaClient,
+        "list_models",
+        return_value=[
+            OllamaModelData(
+                name="qwen-2.5:14b",
+                modified_at="2024-03-15T10:30:00Z",
+                size=4000000000,
+                digest="sha256:abc123",
+            ),
+            OllamaModelData(
+                name="phi-4:14b",
+                modified_at="2024-03-20T14:45:00Z",
+                size=5000000000,
+                digest="sha256:def456",
+            ),
+        ],
+    ).start()
+
+    response = client.get("/v1/models")
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == 200
-    assert data["message"] == "Providers retrieved successfully"
+    assert data["message"] == "Models retrieved successfully"
     assert "result" in data
-    assert "providers" in data["result"]
-    providers = data["result"]["providers"]
-    assert isinstance(providers, list)
+    assert "models" in data["result"]
+    models = data["result"]["models"]
+    assert isinstance(models, list)
 
-    # Verify each provider has the expected fields
-    for provider in providers:
-        assert "id" in provider
-        assert "name" in provider
-        assert "description" in provider
-        assert "url" in provider
-        assert "requiredCredentials" in provider
-        assert isinstance(provider["requiredCredentials"], list)
+    # Find the Ollama models in the response
+    ollama_models = [m for m in models if m.get("provider") == "ollama"]
 
-    # Verify expected providers are present
-    provider_ids = [p["id"] for p in providers]
-    expected_providers = [
-        "openai",
-        "anthropic",
-        "google",
-        "mistral",
-        "ollama",
-        "openrouter",
-        "deepseek",
-        "kimi",
-        "alibaba",
-    ]
-    for provider_id in expected_providers:
-        assert provider_id in provider_ids
+    # Verify Ollama models are present
+    assert len(ollama_models) == 2
 
-    # Verify some specific provider details
-    openai = next(p for p in providers if p["id"] == "openai")
-    assert openai["name"] == "OpenAI"
-    assert openai["url"] == "https://platform.openai.com/"
-    assert openai["requiredCredentials"] == ["OPENAI_API_KEY"]
+    # Verify model details
+    qwen = next((m for m in ollama_models if m.get("id") == "qwen-2.5:14b"), None)
+    assert qwen is not None
+    assert qwen["name"] == "qwen-2.5:14b"
+    assert qwen["provider"] == "ollama"
 
-    ollama = next(p for p in providers if p["id"] == "ollama")
-    assert ollama["name"] == "Ollama"
-    assert ollama["requiredCredentials"] == []
+    phi = next((m for m in ollama_models if m.get("id") == "phi-4:14b"), None)
+    assert phi is not None
+    assert phi["name"] == "phi-4:14b"
+    assert phi["provider"] == "ollama"
+
+    patch.stopall()
+
+
+def test_list_models_with_ollama_inactive(client, mock_credential_manager):
+    """Test the list_models endpoint with Ollama server inactive."""
+    # Mock the Ollama client to report that the server is not healthy
+    with patch("local_operator.clients.ollama.OllamaClient.is_healthy", return_value=False):
+        response = client.get("/v1/models")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == 200
+        assert data["message"] == "Models retrieved successfully"
+        assert "result" in data
+        assert "models" in data["result"]
+        models = data["result"]["models"]
+        assert isinstance(models, list)
+
+        # Verify no Ollama models are present
+        ollama_models = [m for m in models if m.get("provider") == "ollama"]
+        assert len(ollama_models) == 0
 
 
 def test_list_models_no_provider(client, mock_credential_manager):
