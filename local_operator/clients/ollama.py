@@ -8,7 +8,7 @@ local language models.
 from typing import Any, Dict, List, Optional
 
 import requests
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class OllamaModelData(BaseModel):
@@ -35,6 +35,16 @@ class OllamaModelData(BaseModel):
         return super().model_dump(*args, **kwargs)
 
 
+class OllamaGetTagsResponse(BaseModel):
+    """Response from Ollama API's /api/tags endpoint.
+
+    Attributes:
+        models (List[Dict[str, Any]]): List of model data returned by the API.
+    """
+
+    models: List[Dict[str, Any]] = Field(default_factory=list)
+
+
 class OllamaClient:
     """Client for interacting with the Ollama API.
 
@@ -56,8 +66,9 @@ class OllamaClient:
             bool: True if the server is healthy, False otherwise.
         """
         try:
-            response = requests.get(f"{self.base_url}/api/health", timeout=2)
-            return response.status_code == 200
+            # Based on testing, the root endpoint returns "Ollama is running" when healthy
+            response = requests.get(self.base_url, timeout=2)
+            return response.status_code == 200 and "Ollama is running" in response.text
         except requests.exceptions.RequestException:
             return False
 
@@ -77,11 +88,9 @@ class OllamaClient:
         try:
             response = requests.get(url)
             response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
-            data = response.json()
 
-            # The Ollama API returns a dict with a 'models' key containing the list of models
-            models_data = data.get("models", [])
-            return [OllamaModelData.model_validate(model) for model in models_data]
+            tags_response = OllamaGetTagsResponse.model_validate(response.json())
+            return [OllamaModelData.model_validate(model) for model in tags_response.models]
         except requests.exceptions.RequestException as e:
             error_body = (
                 e.response.content.decode()
