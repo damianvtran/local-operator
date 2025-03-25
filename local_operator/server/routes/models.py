@@ -299,14 +299,6 @@ async def list_models(
                     except Exception as e:
                         # If there's an error fetching Ollama models, fall back to the default
                         logger.warning(f"Failed to fetch Ollama models: {str(e)}")
-                        models.append(
-                            ModelEntry(
-                                id="ollama",
-                                name=ollama_default_model_info.name,
-                                provider=provider_detail.id,
-                                info=ollama_default_model_info,
-                            )
-                        )
                 else:
                     # Skip Ollama models if the server is not healthy
                     pass
