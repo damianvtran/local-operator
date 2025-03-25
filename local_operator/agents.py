@@ -929,7 +929,15 @@ class AgentRegistry:
                     "data": convert_unpicklable(obj.model_dump()),
                 }
             elif isinstance(obj, dict):
-                return {k: convert_unpicklable(v) for k, v in obj.items()}
+                result = {}
+                for k, v in obj.items():
+                    try:
+                        # Skip keys that can't be pickled instead of converting to strings
+                        dill.dumps(k)
+                        result[k] = convert_unpicklable(v)
+                    except Exception:
+                        pass
+                return result
             elif isinstance(obj, (list, tuple)):
                 return type(obj)(convert_unpicklable(x) for x in obj)
             elif isinstance(obj, (int, float, str, bool, type(None))):
@@ -940,15 +948,21 @@ class AgentRegistry:
                     return list(obj)
                 except Exception:
                     return str(obj)
-            else:
+            elif callable(obj) and hasattr(obj, "__name__"):
+                # Preserve functions with a special marker
                 try:
-                    dill.dumps(obj)
-                    return obj
-                except Exception:
+                    return {"__callable__": True, "function": dill.dumps(obj)}
+                except Exception as e:
+                    logging.warning(f"Failed to pickle function {obj.__name__}: {str(e)}")
                     return str(obj)
+            else:
+                dill.dumps(obj)
+                return obj
 
         try:
-            serializable_context = convert_unpicklable(context)
+            serializable_context = convert_unpicklable(context.copy())
+            serializable_context.pop("tools", None)
+
             with context_file.open("wb") as f:
                 dill.dump(serializable_context, f)
         except Exception as e:
@@ -989,6 +1003,15 @@ class AgentRegistry:
                 except (ImportError, AttributeError) as e:
                     logging.error(f"Failed to reconstruct Pydantic model {model_path}: {str(e)}")
                     return obj
+            elif (
+                isinstance(obj, dict) and "__callable__" in obj and obj.get("__callable__") is True
+            ):
+                # Reconstruct callable functions
+                try:
+                    return dill.loads(obj["function"])
+                except Exception as e:
+                    logging.error(f"Failed to reconstruct callable function: {str(e)}")
+                    return None
             elif isinstance(obj, dict):
                 return {k: reconstruct_objects(v) for k, v in obj.items()}
             elif isinstance(obj, list):
@@ -996,7 +1019,10 @@ class AgentRegistry:
             elif isinstance(obj, tuple):
                 return tuple(reconstruct_objects(item) for item in obj)
             else:
-                return obj
+                try:
+                    return dill.loads(obj)
+                except Exception:
+                    return obj
 
         # Check if the new format file exists
         if context_file.exists():

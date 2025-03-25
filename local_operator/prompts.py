@@ -173,6 +173,7 @@ BaseSystemPrompt: str = (
 - 📚 For deep research tasks, break down into sections, research each thoroughly with multiple sources, and write iteratively. Include detailed citations and references with links, titles, and dates. Build the final output by combining well-researched sections.
 - 🧠 Avoid writing text files as intermediaries between steps except for deep research and report generation type tasks. For all other tasks, use variables in memory in the execution context to maintain state and pass data between steps.
 - 📝 Don't try to process natural language with code, load the data into the context window and then use that information to write manually. For text analysis, summarization, or generation tasks, read the content first, understand it, and then craft your response based on your understanding rather than trying to automate text processing with code as it will be more error prone and less accurate.
+- 📊 When you are asked to make estimates, never make up numbers or simulate without a bottom-up basis. Always use bottom-up approaches to find hard facts for the basis of calculations and build explainable estimates and projections.
 
 ⚠️ Pay close attention to all the core principles, make sure that all are applied on every step with no exceptions.
 
@@ -922,7 +923,7 @@ Here are the request types and how to think about classifying them:
 
 <request_types>
 conversation: General chat, questions, discussions that don't require complex analysis or processing, role playing, etc.
-creative_writing: Writing stories, poems, articles, marketing copy, presentations, speeches, etc.
+creative_writing: Writing stories, poems, articles, marketing copy, presentations, speeches, etc.  Use this for most creative writing tasks.
 data_science: Data analysis, visualization, machine learning, statistics
 mathematics: Math problems, calculations, proofs
 accounting: Financial calculations, bookkeeping, budgets, pricing, cost analysis, etc.
@@ -1096,7 +1097,7 @@ CreativeWritingInstructions: str = """
 - Revise and edit for clarity, conciseness, and impact
 - Consider the medium and format requirements (blog, essay, story, etc.)
 
-Follow the general flow below:
+Follow the general flow below for writing stories if the request was to write a story:
 1. Define the outline of the story and save it to an initial markdown file.  Plan to
    write a detailed and useful story with a logical and creative flow.  Aim for 3000 words
    for a short story, 10000 words for a medium story, and 40000 words for a long story.
@@ -1109,7 +1110,9 @@ Follow the general flow below:
 3. Save the final story to disk in markdown format.
 4. Read the story over again after you are done and correct any errors or go back to
    complete the story.
-"""
+
+Otherwise, for other creative tasks, try to use ideas that have not been used in the past and mix up ideas and concepts to create a unique and engaging piece.
+"""  # noqa: E501
 
 # Specialized instructions for data science tasks
 DataScienceInstructions: str = """
@@ -1725,18 +1728,20 @@ Make sure to pay attention to the previous messages before the HUD in addition t
 """  # noqa: E501
 
 TaskInstructionsPrompt: str = """
-This is a {request_type} message
+Based on your prediction, this is a {request_type} message
 
 <request_classification>
 {request_classification}
 </request_classification>
 
-Here are some guidelines for how to respond:
+Here are some guidelines for how to respond to this type of message:
 
 # Task Instructions
 
 {task_instructions}
-"""
+
+Follow these guidelines if they make sense for the task at hand.  If the guidelines don't properly apply or make sense based on the user's message and the conversation history, then you can use your discretion to respond in a way makes the most sense and/or helps the user achieve their goals in the most correct and effective way possible.
+"""  # noqa: E501
 
 
 def get_request_type_instructions(request_type: RequestType) -> str:
