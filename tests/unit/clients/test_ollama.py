@@ -56,12 +56,13 @@ def test_is_healthy_success(ollama_client: OllamaClient) -> None:
     """
     mock_requests_get = MagicMock()
     mock_requests_get.return_value.status_code = 200
+    mock_requests_get.return_value.text = "Ollama is running"
 
     with patch("requests.get", mock_requests_get):
         result = ollama_client.is_healthy()
 
     assert result is True
-    mock_requests_get.assert_called_once_with("http://localhost:11434/api/health", timeout=2)
+    mock_requests_get.assert_called_once_with("http://localhost:11434", timeout=2)
 
 
 def test_is_healthy_failure(ollama_client: OllamaClient) -> None:
@@ -196,8 +197,9 @@ def test_custom_base_url() -> None:
     # Test that the custom URL is used in requests
     mock_requests_get = MagicMock()
     mock_requests_get.return_value.status_code = 200
+    mock_requests_get.return_value.text = "Ollama is running"
 
     with patch("requests.get", mock_requests_get):
         client.is_healthy()
 
-    mock_requests_get.assert_called_once_with(f"{custom_url}/api/health", timeout=2)
+    mock_requests_get.assert_called_once_with(custom_url, timeout=2)
