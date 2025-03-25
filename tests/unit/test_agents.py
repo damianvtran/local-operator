@@ -1019,6 +1019,16 @@ def test_save_and_load_agent_context(temp_agents_dir: Path):
     def multiply(a: int, b: int) -> int:
         return a * b
 
+    # Define a generator function for testing
+    def count_generator(max_value: int):
+        count = 0
+        while count < max_value:
+            yield count
+            count += 1
+
+    # Test SSL context
+    ssl_context = ssl.create_default_context()
+
     # Create a test context
     test_context = {
         "variables": {"x": 10, "y": 20, "result": 30},
@@ -1027,6 +1037,10 @@ def test_save_and_load_agent_context(temp_agents_dir: Path):
         "multiply": multiply,
         "objects": {"data": {"name": "test", "value": 42}},
         "class_instance": TestClass(5),
+        "generator": count_generator(5),
+        "ssl_context": ssl_context,
+        "tools": {"should_not_be_saved": True},  # This should be excluded at top level
+        "nested": {"tools": {"should_be_saved": True}},  # This should be saved (nested)
     }
 
     # Save the context
@@ -1055,6 +1069,18 @@ def test_save_and_load_agent_context(temp_agents_dir: Path):
     # Verify class instance and its method work
     assert loaded_context["class_instance"].value == 5
     assert loaded_context["class_instance"].multiply(3) == 15
+    # Verify generator was converted to list
+    assert isinstance(loaded_context["generator"], list)
+    assert loaded_context["generator"] == [0, 1, 2, 3, 4]
+
+    # Verify unpicklable objects are skipped
+    assert "ssl_context" not in loaded_context
+
+    # Verify top-level "tools" key is not saved
+    assert "tools" not in loaded_context
+
+    # Verify nested "tools" objects are saved
+    assert loaded_context["nested"]["tools"]["should_be_saved"] is True
 
 
 def test_load_nonexistent_agent_context(temp_agents_dir: Path):
@@ -1222,8 +1248,7 @@ def test_update_agent_unpickleable_context(temp_agents_dir: Path):
     assert loaded_context["pydantic_model"].query == "test query"
 
     # Verify unpickleable object was converted to string
-    assert isinstance(loaded_context["ssl_context"], str)
-    assert "SSLContext" in loaded_context["ssl_context"]
+    assert "ssl_context" not in loaded_context
 
     # Verify the pydantic model was saved
     assert len(loaded_context["pydantic_model"].results) == 1

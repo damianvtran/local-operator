@@ -929,7 +929,15 @@ class AgentRegistry:
                     "data": convert_unpicklable(obj.model_dump()),
                 }
             elif isinstance(obj, dict):
-                return {k: convert_unpicklable(v) for k, v in obj.items()}
+                result = {}
+                for k, v in obj.items():
+                    try:
+                        # Skip keys that can't be pickled instead of converting to strings
+                        dill.dumps(k)
+                        result[k] = convert_unpicklable(v)
+                    except Exception:
+                        pass
+                return result
             elif isinstance(obj, (list, tuple)):
                 return type(obj)(convert_unpicklable(x) for x in obj)
             elif isinstance(obj, (int, float, str, bool, type(None))):
@@ -948,14 +956,13 @@ class AgentRegistry:
                     logging.warning(f"Failed to pickle function {obj.__name__}: {str(e)}")
                     return str(obj)
             else:
-                try:
-                    dill.dumps(obj)
-                    return obj
-                except Exception:
-                    return str(obj)
+                dill.dumps(obj)
+                return obj
 
         try:
-            serializable_context = convert_unpicklable(context)
+            serializable_context = convert_unpicklable(context.copy())
+            serializable_context.pop("tools", None)
+
             with context_file.open("wb") as f:
                 dill.dump(serializable_context, f)
         except Exception as e:
@@ -1012,7 +1019,10 @@ class AgentRegistry:
             elif isinstance(obj, tuple):
                 return tuple(reconstruct_objects(item) for item in obj)
             else:
-                return obj
+                try:
+                    return dill.loads(obj)
+                except Exception:
+                    return obj
 
         # Check if the new format file exists
         if context_file.exists():
