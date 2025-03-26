@@ -507,8 +507,7 @@ def generate_altered_image_tool(fal_client: FalClient | None) -> Callable[..., A
         guidance_scale: float = 7.5,
         num_images: int = 1,
     ) -> FalImageGenerationResponse:
-        """Alter an existing image using the FAL API.  This tool allows you to modify an existing image based on a text prompt. You must provide a path to an image file on disk and a detailed prompt describing how you want to modify
-        the image. This tool uses the FLUX.1 image-to-image model from FAL AI. When using this tool, save the resulting image to a file so that the user can access it on their computer.  # noqa: E501
+        """Alter an existing image using the FAL API.  This tool allows you to modify an existing image based on a text prompt. You must provide a path to an image file on disk and a detailed prompt describing how you want to modify the image. This tool uses the FLUX.1 image-to-image model from FAL AI. When using this tool, save the resulting image to a file so that the user can access it on their computer.
 
         Args:
             image_path (str): Path to the image file on disk to modify
@@ -528,7 +527,7 @@ def generate_altered_image_tool(fal_client: FalClient | None) -> Callable[..., A
         Raises:
             RuntimeError: If no FAL API client is available or the request fails
             FileNotFoundError: If the image file does not exist
-        """
+        """  # noqa: E501
         if not fal_client:
             raise RuntimeError("FAL API client is not available")
 
@@ -583,10 +582,10 @@ def generate_image_tool(fal_client: FalClient | None) -> Callable[..., Any]:
         image_size: str = "landscape_4_3",
         num_inference_steps: int = 28,
         seed: Optional[int] = None,
-        guidance_scale: float = 3.5,
+        guidance_scale: float = 5.0,
         num_images: int = 1,
     ) -> FalImageGenerationResponse:
-        """Generate an image from a text prompt using the FAL API.  This tool allows you to generate images from text descriptions. You must come up with a detailed prompt to describe the image that you want to generate.  This tool uses the FLUX.1 text-to-image model from FAL AI.  When using this tool, save the image to a file so that the user can access it on their computer.  # noqa: E501
+        """Generate an image from a text prompt using the FAL API.  This tool allows you to generate images from text descriptions. You must come up with a detailed prompt to describe the image that you want to generate.  This tool uses the FLUX.1 text-to-image model from FAL AI.  When using this tool, save the image to a file so that the user can access it on their computer.
 
         Args:
             prompt (str): The text description to generate an image from
@@ -605,7 +604,7 @@ def generate_image_tool(fal_client: FalClient | None) -> Callable[..., Any]:
 
         Raises:
             RuntimeError: If no FAL API client is available or the request fails
-        """
+        """  # noqa: E501
         if not fal_client:
             raise RuntimeError("FAL API client is not available")
 
