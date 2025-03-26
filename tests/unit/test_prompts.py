@@ -116,7 +116,7 @@ def test_get_tools_str():
 ## Response Type Formats
 
 ### Dict
-Custom return type (see function documentation for details)
+Custom return type (print the output to the console to read and interpret in following steps)
 """.strip()  # noqa: E501
             ),
         },
@@ -210,7 +210,6 @@ Fields:
     # Run test cases
     for case in test_cases:
         result = get_tools_str(case["registry"])
-        print(result)
         result_lines = sorted(result.split("\n")) if result else []
         expected_lines = sorted(case["expected"].split("\n")) if case["expected"] else []
         assert (
