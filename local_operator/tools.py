@@ -544,10 +544,12 @@ def generate_image_tool(fal_client: FalClient | None) -> Callable[..., Any]:
             num_inference_steps=num_inference_steps,
             seed=seed,
             guidance_scale=guidance_scale,
-            sync_mode=True,  # Wait for the image to be generated
+            sync_mode=False,  # Use the polling mechanism to get the result
             num_images=num_images,
             enable_safety_checker=True,
         )
+
+        print(f"Response: {response}")
 
         # Ensure we're returning a FalImageGenerationResponse
         if isinstance(response, FalImageGenerationResponse):
