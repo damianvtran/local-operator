@@ -1,6 +1,7 @@
 import os
 import platform
 import subprocess
+from typing import Optional
 from unittest.mock import patch
 
 import psutil
@@ -69,6 +70,15 @@ def test_create_system_prompt():
 
 
 def test_get_tools_str():
+    from pydantic import BaseModel, Field
+
+    class TestModel(BaseModel):
+        """A test model for documentation."""
+
+        name: str = Field(description="The name field")
+        value: int = Field(description="The value field")
+        optional: Optional[bool] = Field(False, description="An optional boolean field")
+
     test_cases = [
         {"name": "No registry provided", "registry": None, "expected": ""},
         {
@@ -98,17 +108,16 @@ def test_get_tools_str():
             "name": "Default init registry",
             "registry": ToolRegistry(),
             "expected": (
-                "- async get_page_html_content(url: str) -> Coroutine[str]: Browse to a URL using "
-                "Playwright to render JavaScript and return the full HTML page content.  Use this "
-                "for any URL that you want to get the full HTML content of for scraping and "
-                "understanding the HTML format of the page.\n"
-                "- async get_page_text_content(url: str) -> Coroutine[str]: Browse to a URL using "
-                "Playwright to render JavaScript and extract clean text content.  Use this for any "
-                "URL that you want to read the content for, for research purposes. Extracts text "
-                "from semantic elements like headings, paragraphs, lists etc. and returns "
-                "a cleaned text representation of the page content.\n"
-                "- list_working_directory(max_depth: int = 3) -> Dict: List the files in the "
-                "current directory showing files and their metadata."
+                """
+- async get_page_html_content(url: str) -> Coroutine[str]: Browse to a URL using Playwright to render JavaScript and return the full HTML page content.  Use this for any URL that you want to get the full HTML content of for scraping and understanding the HTML format of the page.
+- async get_page_text_content(url: str) -> Coroutine[str]: Browse to a URL using Playwright to render JavaScript and extract clean text content.  Use this for any URL that you want to read the content for, for research purposes. Extracts text from semantic elements like headings, paragraphs, lists etc. and returns a cleaned text representation of the page content.
+- list_working_directory(max_depth: int = 3) -> Dict: List the files in the current directory showing files and their metadata.
+
+## Response Type Formats
+
+### Dict
+Custom return type (see function documentation for details)
+""".strip()  # noqa: E501
             ),
         },
         {
@@ -116,6 +125,30 @@ def test_get_tools_str():
             "registry": ToolRegistry(),
             "expected": "- func_with_default_arg(arg: str = 'default') -> str: "
             "Function with default argument",
+        },
+        {
+            "name": "Function with Pydantic return type",
+            "registry": ToolRegistry(),
+            "expected": (
+                """- pydantic_return_func() -> TestModel: Function returning a Pydantic model
+
+## Response Type Formats
+
+### TestModel
+A test model for documentation.
+```json
+{
+  "name": "string value",
+  "value": 0,
+  "optional": null
+}
+```
+
+Fields:
+- `name` (string): The name field
+- `optional` (Optional[boolean]): An optional boolean field
+- `value` (integer): The value field"""
+            ),
         },
     ]
 
@@ -148,6 +181,13 @@ def test_get_tools_str():
     func_with_default_arg.__name__ = "func_with_default_arg"
     func_with_default_arg.__doc__ = "Function with default argument"
 
+    def pydantic_return_func() -> TestModel:
+        """Function returning a Pydantic model"""
+        return TestModel(name="test", value=42, optional=True)
+
+    pydantic_return_func.__name__ = "pydantic_return_func"
+    pydantic_return_func.__doc__ = "Function returning a Pydantic model"
+
     # Configure the one tool registry
     test_cases[2]["registry"].add_tool("test_func", test_func)
 
@@ -164,9 +204,13 @@ def test_get_tools_str():
     # Configure the function with default argument
     test_cases[6]["registry"].add_tool("func_with_default_arg", func_with_default_arg)
 
+    # Configure the function with Pydantic return type
+    test_cases[7]["registry"].add_tool("pydantic_return_func", pydantic_return_func)
+
     # Run test cases
     for case in test_cases:
         result = get_tools_str(case["registry"])
+        print(result)
         result_lines = sorted(result.split("\n")) if result else []
         expected_lines = sorted(case["expected"].split("\n")) if case["expected"] else []
         assert (
