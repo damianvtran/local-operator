@@ -160,6 +160,9 @@ class ConversationRecord(BaseModel):
         Returns:
             ConversationRecord: New instance created from dictionary data
         """
+        timestamp_str = data.get("timestamp")
+        timestamp = datetime.fromisoformat(timestamp_str) if timestamp_str else None
+
         return cls(
             role=ConversationRole(data["role"]),
             content=data["content"],
@@ -167,11 +170,7 @@ class ConversationRecord(BaseModel):
             ephemeral=data.get("ephemeral", "false").lower() == "true",
             summarized=data.get("summarized", "false").lower() == "true",
             is_system_prompt=data.get("is_system_prompt", "false").lower() == "true",
-            timestamp=(
-                datetime.fromisoformat(data.get("timestamp", None))
-                if data.get("timestamp")
-                else None
-            ),
+            timestamp=timestamp,
             files=data.get("files", None),
             should_cache=data.get("should_cache", "true").lower() == "true",
         )
