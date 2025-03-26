@@ -48,6 +48,8 @@ This project is proudly open source under the GPL 3.0 license. We believe AI too
 - **LangChain Integration**: Uses 3rd party cloud-hosted LLM models through LangChain's ChatOpenAI implementation
 - **Asynchronous Execution**: Safe code execution with async/await pattern
 - **Environment Configuration**: Uses credential manager for API key management
+- **Image Generation**: Create and modify images using the FLUX.1 model from FAL AI
+- **Web Search**: Search the web for information using Tavily or SERP API
 
 The Local Operator provides a command-line interface where you can:
 
@@ -78,6 +80,7 @@ pip install local-operator
 ## Running Server in Docker
 
 To run Local Operator in docker, ensure docker is running and run
+
 ```bash
 docker compose up --d
 ```
@@ -108,6 +111,29 @@ local-operator credential update SERP_API_KEY
 
 Once the credential is set, the agent will be able to search the web for information
 using its web search tool on the next start up.
+
+### Image Generation
+
+To enable image generation capabilities, you'll need to get a FAL AI API key from [FAL AI](https://fal.ai/dashboard/keys). The Local Operator uses the FLUX.1 model from FAL AI to generate and modify images.
+
+Get your API key and then configure the `FAL_API_KEY` credential:
+
+```bash
+local-operator credential update FAL_API_KEY
+```
+
+Once the credential is set, the agent will have access to two powerful image generation tools:
+
+1. **Generate Image**: Create new images from text descriptions with customizable parameters like image size, guidance scale, and inference steps.
+
+2. **Generate Altered Image**: Modify existing images based on text prompts, allowing you to transform images while maintaining their core structure.
+
+Example usage in a conversation:
+
+- "Generate an image of a mountain landscape at sunset"
+- "Take this photo and make it look like it was taken in winter"
+
+The agent will handle downloading and saving the generated images to your local machine.
 
 ## 🖥️ Usage (CLI)
 
@@ -263,6 +289,8 @@ local-operator credential delete SERP_API_KEY
 
 - `TAVILY_API_KEY`: The API key for the Tavily API from [Tavily](https://tavily.com/signup).  Alternative to SERP API with pay as you go pricing.  The per unit cost is lower
 for personal use if you go over the SERP API 100 requests per month limit.  The disadvantage is that the search results are not based off of Google like SERP API so the search depth is not as extensive.  Good for if you have run into the SERP API limit for the month.
+
+- `FAL_API_KEY`: The API key for the FAL AI API from [FAL AI](https://fal.ai/dashboard/keys). This enables image generation capabilities using the FLUX.1 text-to-image model. With this key, the agent can generate images from text descriptions and modify existing images based on prompts. The FAL AI API provides high-quality image generation with various customization options like image size, guidance scale, and inference steps.
 
 - `OPENROUTER_API_KEY`: The API key for the OpenRouter API.  This is used to access the OpenRouter service with a wide range of models.  It is the best option for being able to easily switch between models with less configuration.
 
