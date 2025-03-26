@@ -1,10 +1,11 @@
 import fnmatch
 import os
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import playwright.async_api as pw
 
+from local_operator.clients.fal import FalClient, FalImageGenerationResponse, ImageSize
 from local_operator.clients.serpapi import SerpApiClient, SerpApiResponse
 from local_operator.clients.tavily import TavilyClient, TavilyResponse
 
@@ -483,6 +484,81 @@ async def get_page_text_content(url: str) -> str:
         raise RuntimeError(f"Failed to extract text content from {url}: {str(e)}")
 
 
+def generate_image_tool(fal_client: FalClient | None) -> Callable[..., Any]:
+    """Generate images using the FAL API.
+
+    Makes a request to the FAL API using the provided API key to generate images from text prompts.
+    Uses the FLUX.1 text-to-image model.
+
+    Args:
+        fal_client (FalClient | None): The FAL API client to use
+
+    Returns:
+        Callable: A function that generates images from text prompts
+    """
+
+    def generate_image(
+        prompt: str,
+        image_size: str = "landscape_4_3",
+        num_inference_steps: int = 28,
+        seed: Optional[int] = None,
+        guidance_scale: float = 3.5,
+        num_images: int = 1,
+    ) -> FalImageGenerationResponse:
+        """Generate an image from a text prompt using the FAL API.  This tool allows you to generate images from text descriptions. You must come up with a detailed prompt to describe the image that you want to generate.  This tool uses the FLUX.1 text-to-image model from FAL AI.  # noqa: E501
+
+        Args:
+            prompt (str): The text description to generate an image from
+            image_size (str, optional): Size/aspect ratio of the generated image.
+                Options: "square_hd", "square", "portrait_4_3", "portrait_16_9",
+                "landscape_4_3", "landscape_16_9". Defaults to "landscape_4_3".
+            num_inference_steps (int, optional): Number of inference steps. Higher values
+                may produce better quality but take longer. Defaults to 28.
+            seed (Optional[int], optional): Seed for reproducible generation. Defaults to None.
+            guidance_scale (float, optional): How closely to follow the prompt (1-10).
+                Defaults to 3.5.
+            num_images (int, optional): Number of images to generate. Defaults to 1.
+
+        Returns:
+            FalImageGenerationResponse: A response containing the generated image URLs and metadata
+
+        Raises:
+            RuntimeError: If no FAL API client is available or the request fails
+        """
+        if not fal_client:
+            raise RuntimeError("FAL API client is not available")
+
+        # Convert string image_size to enum
+        try:
+            size = ImageSize(image_size)
+        except ValueError:
+            raise ValueError(
+                f"Invalid image_size: {image_size}. Valid options are: "
+                f"{', '.join([s.value for s in ImageSize])}"
+            )
+
+        # Generate the image with sync_mode=True to ensure we get a FalImageGenerationResponse
+        response = fal_client.generate_image(
+            prompt=prompt,
+            image_size=size,
+            num_inference_steps=num_inference_steps,
+            seed=seed,
+            guidance_scale=guidance_scale,
+            sync_mode=True,  # Wait for the image to be generated
+            num_images=num_images,
+            enable_safety_checker=True,
+        )
+
+        # Ensure we're returning a FalImageGenerationResponse
+        if isinstance(response, FalImageGenerationResponse):
+            return response
+        else:
+            # This shouldn't happen with sync_mode=True, but just in case
+            raise RuntimeError("Failed to generate image: Unexpected response type")
+
+    return generate_image
+
+
 def search_web_tool(
     serp_api_client: SerpApiClient | None, tavily_client: TavilyClient | None
 ) -> Callable[..., Any]:
@@ -554,6 +630,7 @@ class ToolRegistry:
     _tools: Dict[str, Callable[..., Any]]
     serp_api_client: SerpApiClient | None = None
     tavily_client: TavilyClient | None = None
+    fal_client: FalClient | None = None
 
     def __init__(self):
         """Initialize an empty tool registry."""
@@ -576,6 +653,14 @@ class ToolRegistry:
         """
         self.tavily_client = tavily_client
 
+    def set_fal_client(self, fal_client: FalClient):
+        """Set the FAL API client for the registry.
+
+        Args:
+            fal_client (FalClient): The FAL API client to set
+        """
+        self.fal_client = fal_client
+
     def init_tools(self):
         """Initialize the registry with default tools.
 
@@ -591,6 +676,9 @@ class ToolRegistry:
 
         if self.serp_api_client or self.tavily_client:
             self.add_tool("search_web", search_web_tool(self.serp_api_client, self.tavily_client))
+
+        if self.fal_client:
+            self.add_tool("generate_image", generate_image_tool(self.fal_client))
 
     def add_tool(self, name: str, tool: Callable[..., Any]):
         """Add a new tool to the registry.

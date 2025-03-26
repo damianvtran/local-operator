@@ -7,6 +7,7 @@ from typing import Optional, cast
 
 from local_operator.admin import add_admin_tools
 from local_operator.agents import AgentRegistry
+from local_operator.clients.fal import FalClient
 from local_operator.clients.openrouter import OpenRouterClient
 from local_operator.clients.serpapi import SerpApiClient
 from local_operator.clients.tavily import TavilyClient
@@ -48,6 +49,7 @@ def build_tool_registry(
 
     serp_api_key = credential_manager.get_credential("SERP_API_KEY")
     tavily_api_key = credential_manager.get_credential("TAVILY_API_KEY")
+    fal_api_key = credential_manager.get_credential("FAL_API_KEY")
 
     if serp_api_key:
         serp_api_client = SerpApiClient(serp_api_key)
@@ -56,6 +58,10 @@ def build_tool_registry(
     if tavily_api_key:
         tavily_client = TavilyClient(tavily_api_key)
         tool_registry.set_tavily_client(tavily_client)
+
+    if fal_api_key:
+        fal_client = FalClient(fal_api_key)
+        tool_registry.set_fal_client(fal_client)
 
     tool_registry.init_tools()
 
