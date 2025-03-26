@@ -1,4 +1,6 @@
+import copy
 import importlib
+import inspect
 import json
 import logging
 import os
@@ -902,7 +904,7 @@ class AgentRegistry:
 
         This method serializes the agent's context using dill and saves it to a file
         named "context.pkl" in the agent's directory. It handles unpicklable objects
-        by converting them to a serializable format, including Pydantic models.
+        by converting them to a serializable format, including Pydantic models and modules.
 
         Args:
             agent_id (str): The unique identifier of the agent.
@@ -948,6 +950,9 @@ class AgentRegistry:
                     return list(obj)
                 except Exception:
                     return str(obj)
+            elif inspect.ismodule(obj):
+                # Handle modules by storing their name
+                return {"__module__": True, "name": obj.__name__}
             elif callable(obj) and hasattr(obj, "__name__"):
                 # Preserve functions with a special marker
                 try:
@@ -960,8 +965,17 @@ class AgentRegistry:
                 return obj
 
         try:
-            serializable_context = convert_unpicklable(context.copy())
-            serializable_context.pop("tools", None)
+            # Make a copy to avoid modifying the original
+            if hasattr(context, "copy"):
+                context_copy = context.copy()
+            else:
+                context_copy = copy.deepcopy(context)
+
+            # Remove tools if present as they often contain unpicklable objects
+            if isinstance(context_copy, dict):
+                context_copy.pop("tools", None)
+
+            serializable_context = convert_unpicklable(context_copy)
 
             with context_file.open("wb") as f:
                 dill.dump(serializable_context, f)
@@ -973,7 +987,7 @@ class AgentRegistry:
 
         This method deserializes the agent's context using dill from a file
         named "context.pkl" in the agent's directory. It handles the reconstruction
-        of serialized Pydantic models and other transformed objects.
+        of serialized Pydantic models, modules, and other transformed objects.
 
         Args:
             agent_id (str): The unique identifier of the agent.
@@ -1003,6 +1017,14 @@ class AgentRegistry:
                 except (ImportError, AttributeError) as e:
                     logging.error(f"Failed to reconstruct Pydantic model {model_path}: {str(e)}")
                     return obj
+            elif isinstance(obj, dict) and "__module__" in obj and obj.get("__module__") is True:
+                # Reconstruct module
+                try:
+                    module_name = obj["name"]
+                    return importlib.import_module(module_name)
+                except ImportError as e:
+                    logging.error(f"Failed to import module {obj['name']}: {str(e)}")
+                    return None
             elif (
                 isinstance(obj, dict) and "__callable__" in obj and obj.get("__callable__") is True
             ):
