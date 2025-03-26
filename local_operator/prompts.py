@@ -1,5 +1,6 @@
 import importlib.metadata
 import inspect
+import json
 import os
 import platform
 import subprocess
@@ -72,6 +73,8 @@ def get_tools_str(tool_registry: Optional[ToolRegistry] = None) -> str:
     builtin_names.update(["dict", "list", "set", "tuple", "Path"])
 
     tools_list: List[str] = []
+    custom_types: Dict[str, type] = {}
+
     for name in tool_registry:
         # Skip private functions and builtins
         if name.startswith("_") or name in builtin_names:
@@ -99,21 +102,106 @@ def get_tools_str(tool_registry: Optional[ToolRegistry] = None) -> str:
 
             return_annotation = sig.return_annotation
             if inspect.iscoroutinefunction(tool):
-                return_type = (
-                    f"Coroutine[{return_annotation.__name__}]"
-                    if hasattr(return_annotation, "__name__")
-                    else f"Coroutine[{return_annotation}]"
-                )
-                async_prefix = "async "
-            else:
-                return_type = (
+                return_type_name = (
                     return_annotation.__name__
                     if hasattr(return_annotation, "__name__")
                     else str(return_annotation)
                 )
+                return_type = f"Coroutine[{return_type_name}]"
+                async_prefix = "async "
+            else:
+                return_type_name = (
+                    return_annotation.__name__
+                    if hasattr(return_annotation, "__name__")
+                    else str(return_annotation)
+                )
+                return_type = return_type_name
                 async_prefix = ""
 
+            # Track custom return types for the legend
+            if (
+                hasattr(return_annotation, "__origin__")
+                and return_annotation.__origin__ is not None
+                and return_annotation.__origin__ is not list
+                and return_annotation.__origin__ is not dict
+            ):
+                # Handle Union, Optional, etc.
+                pass
+            elif (
+                hasattr(return_annotation, "__name__")
+                and return_annotation.__name__ not in builtin_names
+                and not return_annotation.__module__ == "builtins"
+                and return_annotation is not inspect.Signature.empty
+            ):
+                custom_types[return_type_name] = return_annotation
+
             tools_list.append(f"- {async_prefix}{name}({', '.join(args)}) -> {return_type}: {doc}")
+
+    # Add type legend for custom types
+    if custom_types:
+        tools_list.append("\n## Response Type Formats")
+        for type_name, type_obj in custom_types.items():
+            # Check if it's a Pydantic model
+            if hasattr(type_obj, "model_json_schema"):
+                schema = type_obj.model_json_schema()
+                tools_list.append(f"\n### {type_name}")
+
+                # Add description if available
+                if "description" in schema and schema["description"]:
+                    tools_list.append(f"{schema['description']}")
+
+                # Add fields
+                tools_list.append("```json")
+                if "properties" in schema:
+                    example = {}
+                    for prop_name, prop_details in schema["properties"].items():
+                        prop_type = prop_details.get("type", "any")
+                        prop_desc = prop_details.get("description", "")
+
+                        # Create example value based on type
+                        if prop_type == "string":
+                            example[prop_name] = "string value"
+                        elif prop_type == "integer":
+                            example[prop_name] = 0
+                        elif prop_type == "number":
+                            example[prop_name] = 0.0
+                        elif prop_type == "boolean":
+                            example[prop_name] = False
+                        elif prop_type == "array":
+                            example[prop_name] = []
+                        elif prop_type == "object":
+                            example[prop_name] = {}
+                        else:
+                            # For non-standard types, use a sensible default if possible
+                            example[prop_name] = None
+
+                    tools_list.append(json.dumps(example, indent=2))
+
+                tools_list.append("```")
+                # Add field descriptions
+                if "properties" in schema:
+                    tools_list.append("\nFields:")
+                    for prop_name, prop_details in schema["properties"].items():
+                        prop_type = prop_details.get("type", "any")
+
+                        # Handle Optional types by checking if null/None is allowed
+                        if "anyOf" in prop_details:
+                            type_options = [
+                                t.get("type") for t in prop_details.get("anyOf", []) if "type" in t
+                            ]
+                            if "null" in type_options:
+                                # Get the non-null type
+                                non_null_types = [t for t in type_options if t != "null"]
+                                if non_null_types:
+                                    prop_type = f"Optional[{', '.join(non_null_types)}]"
+
+                        prop_desc = prop_details.get("description", "")
+                        tools_list.append(f"- `{prop_name}` ({prop_type}): {prop_desc}")
+            else:
+                # For non-pydantic types, just add the name
+                tools_list.append(f"\n### {type_name}")
+                tools_list.append("Custom return type (see function documentation for details)")
+
     return "\n".join(tools_list)
 
 
