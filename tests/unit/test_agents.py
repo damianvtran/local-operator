@@ -1,4 +1,5 @@
 import json
+import os
 import ssl
 import uuid
 from datetime import datetime, timezone
@@ -6,6 +7,7 @@ from pathlib import Path
 
 import dill
 import pytest
+import requests
 import yaml
 
 from local_operator.agents import AgentEditFields, AgentRegistry
@@ -1041,6 +1043,8 @@ def test_save_and_load_agent_context(temp_agents_dir: Path):
         "ssl_context": ssl_context,
         "tools": {"should_not_be_saved": True},  # This should be excluded at top level
         "nested": {"tools": {"should_be_saved": True}},  # This should be saved (nested)
+        "os": os,
+        "requests": requests,
     }
 
     # Save the context
@@ -1073,11 +1077,14 @@ def test_save_and_load_agent_context(temp_agents_dir: Path):
     assert isinstance(loaded_context["generator"], list)
     assert loaded_context["generator"] == [0, 1, 2, 3, 4]
 
-    # Verify unpicklable objects are skipped
     assert "ssl_context" not in loaded_context
 
     # Verify top-level "tools" key is not saved
     assert "tools" not in loaded_context
+
+    # Verify "os" and "requests" are saved
+    assert loaded_context["os"] == os
+    assert loaded_context["requests"] == requests
 
     # Verify nested "tools" objects are saved
     assert loaded_context["nested"]["tools"]["should_be_saved"] is True

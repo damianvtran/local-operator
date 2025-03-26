@@ -1,3 +1,4 @@
+import base64
 import fnmatch
 import os
 from pathlib import Path
@@ -484,6 +485,86 @@ async def get_page_text_content(url: str) -> str:
         raise RuntimeError(f"Failed to extract text content from {url}: {str(e)}")
 
 
+def generate_altered_image_tool(fal_client: FalClient | None) -> Callable[..., Any]:
+    """Alter existing images using the FAL API.
+
+    Makes a request to the FAL API using the provided API key to modify existing images
+    based on text prompts. Uses the FLUX.1 image-to-image model.
+
+    Args:
+        fal_client (FalClient | None): The FAL API client to use
+
+    Returns:
+        Callable: A function that alters images based on text prompts
+    """
+
+    def generate_altered_image(
+        image_path: str,
+        prompt: str,
+        strength: float = 0.95,
+        num_inference_steps: int = 40,
+        seed: Optional[int] = None,
+        guidance_scale: float = 3.5,
+        num_images: int = 1,
+    ) -> FalImageGenerationResponse:
+        """Alter an existing image using the FAL API.  This tool allows you to modify an existing image based on a text prompt. You must provide a path to an image file on disk and a detailed prompt describing how you want to modify
+        the image. This tool uses the FLUX.1 image-to-image model from FAL AI. When using this tool, save the resulting image to a file so that the user can access it on their computer.  # noqa: E501
+
+        Args:
+            image_path (str): Path to the image file on disk to modify
+            prompt (str): Text description of how to modify the image
+            strength (float, optional): Strength of the modification (0.0-1.0). Higher values
+                result in more dramatic changes. Defaults to 0.95.
+            num_inference_steps (int, optional): Number of inference steps. Higher values
+                may produce better quality but take longer. Defaults to 40.
+            seed (Optional[int], optional): Seed for reproducible generation. Defaults to None.
+            guidance_scale (float, optional): How closely to follow the prompt (1-10).
+                Defaults to 3.5.
+            num_images (int, optional): Number of images to generate. Defaults to 1.
+
+        Returns:
+            FalImageGenerationResponse: A response containing the generated image URLs and metadata
+
+        Raises:
+            RuntimeError: If no FAL API client is available or the request fails
+            FileNotFoundError: If the image file does not exist
+        """
+        if not fal_client:
+            raise RuntimeError("FAL API client is not available")
+
+        # Check if the image file exists
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(f"Image file not found: {image_path}")
+
+        # Read the image file and convert to base64
+        with open(image_path, "rb") as image_file:
+            image_data = image_file.read()
+            base64_image = base64.b64encode(image_data).decode("utf-8")
+            data_uri = f"data:image/jpeg;base64,{base64_image}"
+
+        # Generate the image with image-to-image mode
+        response = fal_client.generate_image(
+            prompt=prompt,
+            image_url=data_uri,  # Pass the base64 data URI as the image_url
+            strength=strength,
+            num_inference_steps=num_inference_steps,
+            seed=seed,
+            guidance_scale=guidance_scale,
+            sync_mode=False,  # Use the polling mechanism to get the result
+            num_images=num_images,
+            enable_safety_checker=True,
+        )
+
+        # Ensure we're returning a FalImageGenerationResponse
+        if isinstance(response, FalImageGenerationResponse):
+            return response
+        else:
+            # This shouldn't happen with sync_mode=True, but just in case
+            raise RuntimeError("Failed to alter image: Unexpected response type")
+
+    return generate_altered_image
+
+
 def generate_image_tool(fal_client: FalClient | None) -> Callable[..., Any]:
     """Generate images using the FAL API.
 
@@ -505,7 +586,7 @@ def generate_image_tool(fal_client: FalClient | None) -> Callable[..., Any]:
         guidance_scale: float = 3.5,
         num_images: int = 1,
     ) -> FalImageGenerationResponse:
-        """Generate an image from a text prompt using the FAL API.  This tool allows you to generate images from text descriptions. You must come up with a detailed prompt to describe the image that you want to generate.  This tool uses the FLUX.1 text-to-image model from FAL AI.  # noqa: E501
+        """Generate an image from a text prompt using the FAL API.  This tool allows you to generate images from text descriptions. You must come up with a detailed prompt to describe the image that you want to generate.  This tool uses the FLUX.1 text-to-image model from FAL AI.  When using this tool, save the image to a file so that the user can access it on their computer.  # noqa: E501
 
         Args:
             prompt (str): The text description to generate an image from
@@ -548,8 +629,6 @@ def generate_image_tool(fal_client: FalClient | None) -> Callable[..., Any]:
             num_images=num_images,
             enable_safety_checker=True,
         )
-
-        print(f"Response: {response}")
 
         # Ensure we're returning a FalImageGenerationResponse
         if isinstance(response, FalImageGenerationResponse):
@@ -681,6 +760,7 @@ class ToolRegistry:
 
         if self.fal_client:
             self.add_tool("generate_image", generate_image_tool(self.fal_client))
+            self.add_tool("generate_altered_image", generate_altered_image_tool(self.fal_client))
 
     def add_tool(self, name: str, tool: Callable[..., Any]):
         """Add a new tool to the registry.
