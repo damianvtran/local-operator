@@ -24,6 +24,13 @@ class ImageSize(str, Enum):
     LANDSCAPE_16_9 = "landscape_16_9"
 
 
+class GenerationType(str, Enum):
+    """Generation type options for the FAL API."""
+
+    TEXT_TO_IMAGE = "text-to-image"
+    IMAGE_TO_IMAGE = "image-to-image"
+
+
 class FalImage(BaseModel):
     """Image information returned by the FAL API.
 
@@ -99,25 +106,45 @@ class FalClient:
             "Content-Type": "application/json",
         }
 
-    def _submit_request(self, payload: Dict[str, Any]) -> FalRequestStatus:
+    def _submit_request(
+        self,
+        payload: Dict[str, Any],
+        generation_type: GenerationType = GenerationType.TEXT_TO_IMAGE,
+    ) -> Union[FalRequestStatus, Dict[str, Any]]:
         """Submit a request to the FAL API.
 
         Args:
             payload (Dict[str, Any]): The request payload
+            generation_type (GenerationType): The type of generation to perform
 
         Returns:
-            FalRequestStatus: Status of the submitted request
+            Union[FalRequestStatus, Dict[str, Any]]: Status of the submitted request or
+            direct response for sync mode
 
         Raises:
             RuntimeError: If the API request fails
         """
-        url = f"{self.base_url}/{self.model_path}"
+        # For text-to-image, use the base URL
+        # For image-to-image, append the endpoint to the URL
+        if generation_type == GenerationType.TEXT_TO_IMAGE:
+            url = f"{self.base_url}/{self.model_path}"
+        else:
+            url = f"{self.base_url}/{self.model_path}/{generation_type.value}"
+
         headers = self._get_headers()
 
         try:
             response = requests.post(url, headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()
+
+            # Handle sync mode response which directly returns the image generation result
+            # without a request_id or status
+            if payload.get("sync_mode", False) and "images" in data:
+                # This is a direct image generation response, not a request status
+                return data
+
+            # Regular async mode response with request_id and status
             return FalRequestStatus(request_id=data["request_id"], status=data["status"])
         except requests.exceptions.RequestException as e:
             error_body = (
@@ -141,13 +168,15 @@ class FalClient:
         Raises:
             RuntimeError: If the API request fails
         """
-        url = f"{self.base_url}/{self.model_path}/requests/{request_id}/status"
+        # The correct URL format for status checks
+        url = f"{self.base_url}/fal-ai/flux/requests/{request_id}/status"
         headers = self._get_headers()
 
         try:
             response = requests.get(url, headers=headers)
             response.raise_for_status()
             data = response.json()
+
             return FalRequestStatus(request_id=request_id, status=data["status"])
         except requests.exceptions.RequestException as e:
             error_body = (
@@ -171,13 +200,15 @@ class FalClient:
         Raises:
             RuntimeError: If the API request fails
         """
-        url = f"{self.base_url}/{self.model_path}/requests/{request_id}"
+        # The correct URL format for result retrieval
+        url = f"{self.base_url}/fal-ai/flux/requests/{request_id}"
         headers = self._get_headers()
 
         try:
             response = requests.get(url, headers=headers)
             response.raise_for_status()
             data = response.json()
+
             return FalImageGenerationResponse.model_validate(data)
         except requests.exceptions.RequestException as e:
             error_body = (
@@ -198,12 +229,14 @@ class FalClient:
         num_inference_steps: int = 28,
         seed: Optional[int] = None,
         guidance_scale: float = 3.5,
-        sync_mode: bool = False,
+        sync_mode: bool = True,  # This parameter is passed to the FAL API
         num_images: int = 1,
         enable_safety_checker: bool = True,
         max_wait_time: int = 60,
         poll_interval: int = 2,
-    ) -> Union[FalImageGenerationResponse, FalRequestStatus]:
+        image_url: Optional[str] = None,
+        strength: Optional[float] = None,
+    ) -> FalImageGenerationResponse:
         """Generate an image using the FAL API.
 
         Args:
@@ -212,86 +245,104 @@ class FalClient:
             num_inference_steps (int): Number of inference steps
             seed (Optional[int]): Seed for reproducible generation
             guidance_scale (float): How closely to follow the prompt (1-10)
-            sync_mode (bool): Whether to wait for the image to be generated
+            sync_mode (bool): Whether to use sync_mode in the FAL API request.
+                This affects how the FAL API handles the request but our function
+                will always wait for the result.
             num_images (int): Number of images to generate
             enable_safety_checker (bool): Whether to enable the safety checker
             max_wait_time (int): Maximum time to wait for image generation in seconds
             poll_interval (int): Time between status checks in seconds
+            image_url (Optional[str]): URL of the image to use as a base for
+                image-to-image generation
+            strength (Optional[float]): Strength parameter for image-to-image generation (0-1)
 
         Returns:
-            Union[FalImageGenerationResponse, FalRequestStatus]: The generated image information
-                or the request status if sync_mode is False
+            FalImageGenerationResponse: The generated image information
 
         Raises:
             RuntimeError: If the API request fails or times out
         """
+        # Determine generation type based on parameters
+        if image_url is not None:
+            generation_type = GenerationType.IMAGE_TO_IMAGE
+        else:
+            generation_type = GenerationType.TEXT_TO_IMAGE
+
         # Prepare the payload
         payload = {
             "prompt": prompt,
-            "image_size": image_size.value if isinstance(image_size, ImageSize) else image_size,
             "num_inference_steps": num_inference_steps,
             "guidance_scale": guidance_scale,
             "num_images": num_images,
             "enable_safety_checker": enable_safety_checker,
-            "sync_mode": sync_mode,
+            "sync_mode": sync_mode,  # Include sync_mode in the payload
         }
+
+        # Add parameters specific to the generation type
+        if generation_type == GenerationType.TEXT_TO_IMAGE:
+            payload["image_size"] = (
+                image_size.value if isinstance(image_size, ImageSize) else image_size
+            )
+        else:  # IMAGE_TO_IMAGE
+            payload["image_url"] = image_url
+            if strength is not None:
+                payload["strength"] = strength
 
         if seed is not None:
             payload["seed"] = seed
 
-        # For async mode, use the existing _submit_request method to maintain error message
-        # consistency
-        if not sync_mode:
-            request_status = self._submit_request(payload)
-            return request_status
-        else:
-            # For sync mode, submit the request directly
-            url = f"{self.base_url}/{self.model_path}"
-            headers = self._get_headers()
+        # Submit the request using the _submit_request method
+        response = self._submit_request(payload, generation_type)
 
-            try:
-                response = requests.post(url, headers=headers, json=payload)
-                response.raise_for_status()
-                data = response.json()
+        # Handle direct response from sync mode
+        if isinstance(response, dict) and "images" in response:
+            return FalImageGenerationResponse.model_validate(response)
 
-                # Check if the response is already an image generation response
-                if "images" in data and "prompt" in data:
-                    return FalImageGenerationResponse.model_validate(data)
-
-                # Otherwise, it's a request status that we need to poll
-                request_status = FalRequestStatus(
-                    request_id=data["request_id"], status=data["status"]
-                )
-
-            except requests.exceptions.RequestException as e:
-                error_body = (
-                    e.response.content.decode()
-                    if hasattr(e, "response") and e.response
-                    else "No response body"
-                )
-                raise RuntimeError(
-                    f"Failed to generate image: {str(e)}, Response Body: {error_body}"
-                )
+        # Handle async response with request status
+        request_status = response if isinstance(response, FalRequestStatus) else None
 
         # If the request is already completed, return the result
-        if request_status.status == "completed":
+        if request_status and request_status.status == "completed":
             return self._get_request_result(request_status.request_id)
 
-        # If the caller doesn't want to wait, return the status
-        if not sync_mode:
-            return request_status
-
-        # Wait for the request to complete
+        # Poll for the result
         start_time = time.time()
+        # Ensure request_status is not None before proceeding
+        if request_status is None:
+            raise RuntimeError("Failed to get request status from FAL API")
+
+        request_id = request_status.request_id
+
         while time.time() - start_time < max_wait_time:
-            request_status = self._get_request_status(request_status.request_id)
-            if request_status.status == "completed":
-                return self._get_request_result(request_status.request_id)
-            elif request_status.status == "failed":
-                raise RuntimeError(f"FAL API request failed: {request_status.request_id}")
-            time.sleep(poll_interval)
+            try:
+                request_status = self._get_request_status(request_id)
+
+                # Check status and take appropriate action
+                if request_status.status.upper() == "COMPLETED":
+                    return self._get_request_result(request_id)
+                elif request_status.status.upper() == "FAILED":
+                    raise RuntimeError(f"FAL API request failed: {request_id}")
+
+                # Wait before polling again
+                time.sleep(poll_interval)
+            except Exception:
+                # Continue polling
+                time.sleep(poll_interval)
+
+                # If we've spent more than half the max wait time with errors, try to get the result
+                if time.time() - start_time > max_wait_time / 2:
+                    try:
+                        # Sometimes the status endpoint might fail but the result is ready
+                        return self._get_request_result(request_id)
+                    except Exception:
+                        # If that fails too, continue polling
+                        pass
 
         # If we get here, the request timed out
-        raise RuntimeError(
-            f"FAL API request timed out after {max_wait_time} seconds: {request_status.request_id}"
-        )
+        # Try one last time to get the result directly before giving up
+        try:
+            return self._get_request_result(request_id)
+        except Exception:
+            raise RuntimeError(
+                f"FAL API request timed out after {max_wait_time} seconds: {request_id}"
+            )
