@@ -7,7 +7,7 @@ import subprocess
 import sys
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 import psutil
 
@@ -69,140 +69,274 @@ def get_tools_str(tool_registry: Optional[ToolRegistry] = None) -> str:
         return ""
 
     # Get list of builtin functions/types to exclude
-    builtin_names = set(dir(__builtins__))
+    builtin_names: Set[str] = set(dir(__builtins__))
     builtin_names.update(["dict", "list", "set", "tuple", "Path"])
 
     tools_list: List[str] = []
-    custom_types: Dict[str, type] = {}
+    custom_types: Dict[str, Any] = {}
 
+    # Process each tool in the registry
     for name in tool_registry:
-        # Skip private functions and builtins
-        if name.startswith("_") or name in builtin_names:
+        if _should_skip_tool(name, builtin_names):
             continue
 
-        tool = tool_registry.get_tool(name)
-        if callable(tool):
-            doc = tool.__doc__ or "No description available"
-            # Get first line of docstring
-            doc = doc.split("\n")[0].strip()
+        tool_str, types = _format_tool_documentation(name, tool_registry, builtin_names)
+        tools_list.append(tool_str)
+        custom_types.update(types)
 
-            sig = inspect.signature(tool)
-            args = []
-            for p in sig.parameters.values():
-                arg_type = (
-                    p.annotation.__name__
-                    if hasattr(p.annotation, "__name__")
-                    else str(p.annotation)
-                )
-                if p.default is not p.empty:
-                    default_value = repr(p.default)
-                    args.append(f"{p.name}: {arg_type} = {default_value}")
-                else:
-                    args.append(f"{p.name}: {arg_type}")
-
-            return_annotation = sig.return_annotation
-            if inspect.iscoroutinefunction(tool):
-                return_type_name = (
-                    return_annotation.__name__
-                    if hasattr(return_annotation, "__name__")
-                    else str(return_annotation)
-                )
-                return_type = f"Coroutine[{return_type_name}]"
-                async_prefix = "async "
-            else:
-                return_type_name = (
-                    return_annotation.__name__
-                    if hasattr(return_annotation, "__name__")
-                    else str(return_annotation)
-                )
-                return_type = return_type_name
-                async_prefix = ""
-
-            # Track custom return types for the legend
-            if (
-                hasattr(return_annotation, "__origin__")
-                and return_annotation.__origin__ is not None
-                and return_annotation.__origin__ is not list
-                and return_annotation.__origin__ is not dict
-            ):
-                # Handle Union, Optional, etc.
-                pass
-            elif (
-                hasattr(return_annotation, "__name__")
-                and return_annotation.__name__ not in builtin_names
-                and not return_annotation.__module__ == "builtins"
-                and return_annotation is not inspect.Signature.empty
-            ):
-                custom_types[return_type_name] = return_annotation
-
-            tools_list.append(f"- {async_prefix}{name}({', '.join(args)}) -> {return_type}: {doc}")
-
-    # Add type legend for custom types
+    # Add documentation for custom types
     if custom_types:
-        tools_list.append("\n## Response Type Formats")
-        for type_name, type_obj in custom_types.items():
-            # Check if it's a Pydantic model
-            if hasattr(type_obj, "model_json_schema"):
-                schema = type_obj.model_json_schema()
-                tools_list.append(f"\n### {type_name}")
-
-                # Add description if available
-                if "description" in schema and schema["description"]:
-                    tools_list.append(f"{schema['description']}")
-
-                # Add fields
-                tools_list.append("```json")
-                if "properties" in schema:
-                    example = {}
-                    for prop_name, prop_details in schema["properties"].items():
-                        prop_type = prop_details.get("type", "any")
-                        prop_desc = prop_details.get("description", "")
-
-                        # Create example value based on type
-                        if prop_type == "string":
-                            example[prop_name] = "string value"
-                        elif prop_type == "integer":
-                            example[prop_name] = 0
-                        elif prop_type == "number":
-                            example[prop_name] = 0.0
-                        elif prop_type == "boolean":
-                            example[prop_name] = False
-                        elif prop_type == "array":
-                            example[prop_name] = []
-                        elif prop_type == "object":
-                            example[prop_name] = {}
-                        else:
-                            # For non-standard types, use a sensible default if possible
-                            example[prop_name] = None
-
-                    tools_list.append(json.dumps(example, indent=2))
-
-                tools_list.append("```")
-                # Add field descriptions
-                if "properties" in schema:
-                    tools_list.append("\nFields:")
-                    for prop_name, prop_details in schema["properties"].items():
-                        prop_type = prop_details.get("type", "any")
-
-                        # Handle Optional types by checking if null/None is allowed
-                        if "anyOf" in prop_details:
-                            type_options = [
-                                t.get("type") for t in prop_details.get("anyOf", []) if "type" in t
-                            ]
-                            if "null" in type_options:
-                                # Get the non-null type
-                                non_null_types = [t for t in type_options if t != "null"]
-                                if non_null_types:
-                                    prop_type = f"Optional[{', '.join(non_null_types)}]"
-
-                        prop_desc = prop_details.get("description", "")
-                        tools_list.append(f"- `{prop_name}` ({prop_type}): {prop_desc}")
-            else:
-                # For non-pydantic types, just add the name
-                tools_list.append(f"\n### {type_name}")
-                tools_list.append("Custom return type (see function documentation for details)")
+        type_docs = _generate_type_documentation(custom_types)
+        tools_list.append(type_docs)
 
     return "\n".join(tools_list)
+
+
+def _should_skip_tool(name: str, builtin_names: Set[str]) -> bool:
+    """Determine if a tool should be skipped in documentation.
+
+    Args:
+        name: Name of the tool
+        builtin_names: Set of builtin function/type names to exclude
+
+    Returns:
+        True if the tool should be skipped, False otherwise
+    """
+    return name.startswith("_") or name in builtin_names
+
+
+def _format_tool_documentation(
+    name: str, tool_registry: ToolRegistry, builtin_names: Set[str]
+) -> tuple[str, Dict[str, Any]]:
+    """Format documentation for a single tool.
+
+    Args:
+        name: Name of the tool
+        tool_registry: ToolRegistry containing the tool
+        builtin_names: Set of builtin function/type names to exclude
+
+    Returns:
+        Tuple of (formatted tool documentation string, dictionary of custom types)
+    """
+    tool = tool_registry.get_tool(name)
+    custom_types: Dict[str, Any] = {}
+
+    if not callable(tool):
+        return "", {}
+
+    # Get first line of docstring
+    doc = tool.__doc__ or "No description available"
+    doc = doc.split("\n")[0].strip()
+
+    # Format function signature
+    sig = inspect.signature(tool)
+    args = _format_function_args(sig)
+
+    # Determine return type and prefix
+    return_annotation = sig.return_annotation
+    return_type, async_prefix = _get_return_type_info(tool, return_annotation)
+    return_type_name = (
+        return_annotation.__name__
+        if hasattr(return_annotation, "__name__")
+        else str(return_annotation)
+    )
+
+    # Track custom return types
+    if _is_custom_type(return_annotation, builtin_names):
+        custom_types[return_type_name] = return_annotation
+
+    return f"- {async_prefix}{name}({', '.join(args)}) -> {return_type}: {doc}", custom_types
+
+
+def _format_function_args(sig: inspect.Signature) -> List[str]:
+    """Format function arguments for documentation.
+
+    Args:
+        sig: Function signature
+
+    Returns:
+        List of formatted argument strings
+    """
+    args = []
+    for p in sig.parameters.values():
+        arg_type = p.annotation.__name__ if hasattr(p.annotation, "__name__") else str(p.annotation)
+        if p.default is not p.empty:
+            default_value = repr(p.default)
+            args.append(f"{p.name}: {arg_type} = {default_value}")
+        else:
+            args.append(f"{p.name}: {arg_type}")
+    return args
+
+
+def _get_return_type_info(tool: Callable[..., Any], return_annotation: Any) -> tuple[str, str]:
+    """Get return type information for a tool.
+
+    Args:
+        tool: The tool function
+        return_annotation: Return type annotation
+
+    Returns:
+        Tuple of (return type string, async prefix)
+    """
+    if inspect.iscoroutinefunction(tool):
+        return_type_name = (
+            return_annotation.__name__
+            if hasattr(return_annotation, "__name__")
+            else str(return_annotation)
+        )
+        return f"Coroutine[{return_type_name}]", "async "
+    else:
+        return_type_name = (
+            return_annotation.__name__
+            if hasattr(return_annotation, "__name__")
+            else str(return_annotation)
+        )
+        return return_type_name, ""
+
+
+def _is_custom_type(annotation: Any, builtin_names: Set[str]) -> bool:
+    """Determine if a type annotation is a custom type that needs documentation.
+
+    Args:
+        annotation: Type annotation
+        builtin_names: Set of builtin function/type names to exclude
+
+    Returns:
+        True if the annotation is a custom type, False otherwise
+    """
+    if (
+        hasattr(annotation, "__origin__")
+        and annotation.__origin__ is not None
+        and annotation.__origin__ is not list
+        and annotation.__origin__ is not dict
+    ):
+        # Handle Union, Optional, etc.
+        return False
+    elif (
+        hasattr(annotation, "__name__")
+        and annotation.__name__ not in builtin_names
+        and not annotation.__module__ == "builtins"
+        and annotation is not inspect.Signature.empty
+    ):
+        return True
+    return False
+
+
+def _generate_type_documentation(custom_types: Dict[str, Any]) -> str:
+    """Generate documentation for custom types.
+
+    Args:
+        custom_types: Dictionary of custom type names to type objects
+
+    Returns:
+        Formatted documentation string for custom types
+    """
+    type_docs = ["\n## Response Type Formats"]
+
+    for type_name, type_obj in custom_types.items():
+        if hasattr(type_obj, "model_json_schema"):
+            # Handle Pydantic models
+            type_docs.append(_generate_pydantic_model_docs(type_name, type_obj))
+        else:
+            # Handle non-Pydantic types
+            type_docs.append(f"\n### {type_name}")
+            type_docs.append(
+                "Custom return type (print the output to the console to read and "
+                "interpret in following steps)"
+            )
+
+    return "\n".join(type_docs)
+
+
+def _generate_pydantic_model_docs(type_name: str, type_obj: Any) -> str:
+    """Generate documentation for a Pydantic model.
+
+    Args:
+        type_name: Name of the type
+        type_obj: Pydantic model class
+
+    Returns:
+        Formatted documentation string for the Pydantic model
+    """
+    docs = [f"\n### {type_name}"]
+    schema = type_obj.model_json_schema()
+
+    # Add description if available
+    if "description" in schema and schema["description"]:
+        docs.append(f"{schema['description']}")
+
+    # Add example JSON
+    docs.append("```json")
+    if "properties" in schema:
+        example = _generate_example_values(schema["properties"])
+        docs.append(json.dumps(example, indent=2))
+    docs.append("```")
+
+    # Add field descriptions
+    if "properties" in schema:
+        docs.append("\nFields:")
+        for prop_name, prop_details in schema["properties"].items():
+            prop_type = _get_property_type(prop_details)
+            prop_desc = prop_details.get("description", "")
+            docs.append(f"- `{prop_name}` ({prop_type}): {prop_desc}")
+
+    return "\n".join(docs)
+
+
+def _generate_example_values(properties: Dict[str, Any]) -> Dict[str, Any]:
+    """Generate example values for Pydantic model properties.
+
+    Args:
+        properties: Dictionary of property names to property details
+
+    Returns:
+        Dictionary of property names to example values
+    """
+    example = {}
+    for prop_name, prop_details in properties.items():
+        prop_type = prop_details.get("type", "any")
+
+        # Create example value based on type
+        if prop_type == "string":
+            example[prop_name] = "string value"
+        elif prop_type == "integer":
+            example[prop_name] = 0
+        elif prop_type == "number":
+            example[prop_name] = 0.0
+        elif prop_type == "boolean":
+            example[prop_name] = False
+        elif prop_type == "array":
+            example[prop_name] = []
+        elif prop_type == "object":
+            example[prop_name] = {}
+        else:
+            # For non-standard types, use a sensible default if possible
+            example[prop_name] = None
+
+    return example
+
+
+def _get_property_type(prop_details: Dict[str, Any]) -> str:
+    """Get the type string for a property.
+
+    Args:
+        prop_details: Property details dictionary
+
+    Returns:
+        Formatted type string
+    """
+    prop_type = prop_details.get("type", "any")
+
+    # Handle Optional types by checking if null/None is allowed
+    if "anyOf" in prop_details:
+        type_options = [t.get("type") for t in prop_details.get("anyOf", []) if "type" in t]
+        if "null" in type_options:
+            # Get the non-null type
+            non_null_types = [t for t in type_options if t != "null"]
+            if non_null_types:
+                prop_type = f"Optional[{', '.join(non_null_types)}]"
+
+    return prop_type
 
 
 LocalOperatorPrompt: str = """

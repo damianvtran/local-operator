@@ -504,7 +504,7 @@ def generate_altered_image_tool(fal_client: FalClient | None) -> Callable[..., A
         strength: float = 0.95,
         num_inference_steps: int = 40,
         seed: Optional[int] = None,
-        guidance_scale: float = 3.5,
+        guidance_scale: float = 7.5,
         num_images: int = 1,
     ) -> FalImageGenerationResponse:
         """Alter an existing image using the FAL API.  This tool allows you to modify an existing image based on a text prompt. You must provide a path to an image file on disk and a detailed prompt describing how you want to modify
