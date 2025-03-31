@@ -1,5 +1,4 @@
 import os
-import os
 import tempfile
 import time
 import uuid
@@ -15,7 +14,14 @@ from local_operator.server.models.schemas import CRUDResponse, TranscribeRespons
 router = APIRouter(tags=["Transcribe"])
 logger = logging.getLogger("local_operator.server.routes.transcribe")
 
-model = whisper.load_model("small")
+# Lazy load model when needed
+_model = None
+
+def get_model():
+    global _model
+    if _model is None:
+        _model = whisper.load_model("small")
+    return _model
 
 @router.post(
     "/v1/transcribe",
@@ -57,6 +63,7 @@ async def transcribe_endpoint(request: Request):
 
         # Transcribe
         logger.info(f"Transcribing audio file: {temp_audio_path}")
+        model = get_model()
         result = model.transcribe(temp_audio_path, language="en")
         logger.info(f"Transcription result: {result}")
 
@@ -72,6 +79,9 @@ async def transcribe_endpoint(request: Request):
             message="Transcription completed successfully",
             result=TranscribeResponse(text=str(result["text"])),
         )
+    except HTTPException:
+        # Re-raise HTTP exceptions as they already have the correct status code and detail
+        raise
     except Exception as e:
         logger.exception("Transcription failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
