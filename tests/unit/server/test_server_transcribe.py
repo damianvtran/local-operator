@@ -73,7 +73,7 @@ def mock_whisper():
     # Override the dependency with this specific mock
     app.dependency_overrides[get_whisper_model] = lambda: mock_model
 
-    yield
+    yield mock_model
 
 
 def test_transcribe_endpoint(mock_whisper):
