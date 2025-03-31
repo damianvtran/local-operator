@@ -4,7 +4,6 @@ from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.jobs import JobManager
-import whisper
 
 
 # Dependency functions to inject managers into route handlers

@@ -194,7 +194,7 @@ def test_app_client(temp_dir):
     # Use a shorter refresh interval for tests to ensure changes are quickly reflected
     mock_agent_registry = AgentRegistry(config_dir=temp_dir, refresh_interval=1.0)
     mock_job_manager = JobManager()
-    
+
     # Create a mock Whisper model for testing
     mock_whisper_model = MagicMock()
     mock_whisper_model.transcribe.return_value = {"text": "test transcription", "segments": []}
@@ -215,7 +215,7 @@ def test_app_client(temp_dir):
     # Restore original state
     for key, value in original_state.items():
         setattr(app.state, key, value)
-    
+
     # Clean up the whisper model
     if hasattr(app.state, "whisper_model"):
         app.state.whisper_model = None

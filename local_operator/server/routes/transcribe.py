@@ -1,12 +1,11 @@
+import base64
+import logging
 import os
 import tempfile
 import time
 import uuid
-import base64
-import logging
-import io
 
-from fastapi import APIRouter, Request, HTTPException, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from local_operator.server.dependencies import get_whisper_model
 from local_operator.server.models.schemas import CRUDResponse, TranscribeResponse
