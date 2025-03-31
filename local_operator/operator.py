@@ -441,19 +441,50 @@ class Operator:
 
         response_content = ""
 
+        new_message = self.executor.add_to_code_history(
+            CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message="",
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.SUCCESS,
+                files=[],
+                execution_type=ExecutionType.PLAN,
+                is_streamable=True,
+                is_complete=False,
+            ),
+            None,
+            current_task_classification,
+        )
+
+        if self.persist_agent_conversation and self.agent_registry and self.current_agent:
+            self.agent_registry.update_agent_state(
+                agent_id=self.current_agent.id,
+                agent_state=self.executor.agent_state,
+            )
+
         async for chunk in self.executor.stream_model(messages):
             chunk_content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
-            response_content += chunk_content
+            new_message.message += chunk_content
+
+            await self.executor.broadcast_message_update(
+                new_message.id,
+                new_message,
+            )
+
             yield chunk_content
 
         # Remove think tags for reasoning models
-        response_content = remove_think_tags(response_content)
+        new_message.message = remove_think_tags(new_message.message)
 
         self.executor.agent_state.conversation.extend(
             [
                 ConversationRecord(
                     role=ConversationRole.ASSISTANT,
-                    content=response_content,
+                    content=new_message.message,
                     should_summarize=False,
                 ),
                 ConversationRecord(
@@ -468,23 +499,14 @@ class Operator:
             ]
         )
 
-        self.executor.set_current_plan(response_content)
-        self.executor.add_to_code_history(
-            CodeExecutionResult(
-                stdout="",
-                stderr="",
-                logging="",
-                formatted_print="",
-                code="",
-                message=response_content,
-                role=ConversationRole.ASSISTANT,
-                status=ProcessResponseStatus.SUCCESS,
-                files=[],
-                execution_type=ExecutionType.PLAN,
-            ),
-            None,
-            current_task_classification,
+        new_message.is_complete = True
+
+        await self.executor.update_code_history(
+            new_message.id,
+            new_message,
         )
+
+        self.executor.set_current_plan(response_content)
 
         # Save the conversation history and code execution history to the agent registry
         # if the persist_conversation flag is set.
@@ -1049,7 +1071,8 @@ class Operator:
                     # Reflect on the results of the last operation
                     async for chunk in self.generate_reflection(classification):
                         reflection += chunk
-                        print(chunk, end="", flush=True)
+                        if self.verbosity_level >= VerbosityLevel.VERBOSE:
+                            print(chunk, end="", flush=True)
 
                     if self.verbosity_level >= VerbosityLevel.VERBOSE:
                         print(
@@ -1067,7 +1090,9 @@ class Operator:
 
                     async for chunk in self.generate_response(response_json, classification):
                         final_response += chunk
-                        print(chunk, end="", flush=True)
+
+                        if self.verbosity_level >= VerbosityLevel.VERBOSE:
+                            print(chunk, end="", flush=True)
 
                     print("\033[1;36m╰══════════════════════════════════════════════════╯\033[0m")
 

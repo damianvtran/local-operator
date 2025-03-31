@@ -279,17 +279,28 @@ def create_and_start_job_process(
     """
     # Create a process for the job
     process = Process(target=process_func, args=args)
-    process.start()
 
-    # Register the process with the job manager
+    # Register the process with the job manager before starting it
+    # This avoids any potential issues with asyncio.Task objects being pickled
     job_manager.register_process(job_id, process)
+
+    # Start the process after registration
+    process.start()
 
     # Create a task to monitor the process
     async def monitor_process():
         # This task just exists to allow cancellation via asyncio
         pass
 
+    # Start the monitor task
     task = asyncio.create_task(monitor_process())
-    asyncio.create_task(job_manager.register_task(job_id, task))
+
+    # Register the task with the job manager
+    # Use a separate function to avoid capturing the task in the closure
+    async def register_monitor_task():
+        await job_manager.register_task(job_id, task)
+
+    # Create a separate task for registration to avoid pickling issues
+    asyncio.create_task(register_monitor_task())
 
     return process

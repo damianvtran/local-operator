@@ -1,4 +1,4 @@
-from fastapi import Request
+from fastapi import Request, WebSocket
 
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
@@ -31,3 +31,19 @@ def get_job_manager(request: Request) -> JobManager:
 def get_websocket_manager(request: Request) -> WebSocketManager:
     """Get the WebSocket manager from the application state."""
     return request.app.state.websocket_manager
+
+
+async def get_websocket_manager_ws(websocket: WebSocket) -> WebSocketManager:
+    """
+    Get the WebSocket manager from the application state for WebSocket routes.
+
+    This dependency is specifically designed for WebSocket routes where the
+    Request object is not directly available.
+
+    Args:
+        websocket (WebSocket): The WebSocket connection.
+
+    Returns:
+        WebSocketManager: The WebSocket manager from the application state.
+    """
+    return websocket.app.state.websocket_manager
