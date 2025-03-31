@@ -36,9 +36,9 @@ def run_job_in_process(
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
     job_manager: JobManager,
+    websocket_manager: Optional[WebSocketManager] = None,
     context: Optional[list[ConversationRecord]] = None,
     options: Optional[dict[str, object]] = None,
-    websocket_manager: Optional[WebSocketManager] = None,
 ):
     """
     Run a chat job in a separate process.
