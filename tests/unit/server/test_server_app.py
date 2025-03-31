@@ -24,6 +24,7 @@ async def test_app_state_initialization(test_app_client):
     assert app.state.credential_manager is not None
     assert app.state.config_manager is not None
     assert app.state.agent_registry is not None
+    assert app.state.whisper_model is not None
 
     # Test a request that depends on the app state
     response = await test_app_client.get("/v1/agents")

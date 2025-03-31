@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from importlib.metadata import version
 from pathlib import Path
 
+import whisper
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -26,6 +27,7 @@ from local_operator.server.routes import (
     jobs,
     models,
     static,
+    transcribe,
 )
 
 logger = logging.getLogger("local_operator.server")
@@ -56,12 +58,20 @@ async def lifespan(app: FastAPI):
     # changes made by child processes are quickly reflected in the parent process
     app.state.agent_registry = AgentRegistry(config_dir=agents_dir, refresh_interval=3.0)
     app.state.job_manager = JobManager()
+
+    # Initialize Whisper model
+    logger.info("Loading Whisper model...")
+    app.state.whisper_model = whisper.load_model("small")
+    logger.info("Whisper model loaded successfully")
+
     yield
+
     # Clean up on shutdown
     app.state.credential_manager = None
     app.state.config_manager = None
     app.state.agent_registry = None
     app.state.job_manager = None
+    app.state.whisper_model = None
 
 
 app = FastAPI(
@@ -131,4 +141,9 @@ app.include_router(
 # /v1/static
 app.include_router(
     static.router,
+)
+
+# /v1/transcribe
+app.include_router(
+    transcribe.router,
 )

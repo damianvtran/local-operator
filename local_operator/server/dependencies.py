@@ -25,3 +25,8 @@ def get_agent_registry(request: Request) -> AgentRegistry:
 def get_job_manager(request: Request) -> JobManager:
     """Get the job manager from the application state."""
     return request.app.state.job_manager
+
+
+def get_whisper_model(request: Request):
+    """Get the Whisper model from the application state."""
+    return request.app.state.whisper_model
