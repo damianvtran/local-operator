@@ -358,9 +358,9 @@ async def chat_async_endpoint(
                 credential_manager,
                 config_manager,
                 agent_registry,
+                websocket_manager,
                 request.context if request.context else None,
                 request.options.model_dump() if request.options else None,
-                websocket_manager,
             ),
             job_manager=job_manager,
         )
@@ -487,9 +487,9 @@ async def chat_with_agent_async(
                 credential_manager,
                 config_manager,
                 agent_registry,
+                websocket_manager,
                 request.persist_conversation,
                 request.user_message_id,
-                websocket_manager,
             ),
             job_manager=job_manager,
         )

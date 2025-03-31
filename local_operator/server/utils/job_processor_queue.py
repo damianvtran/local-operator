@@ -32,10 +32,10 @@ def run_job_in_process_with_queue(
     credential_manager: CredentialManager,
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
+    websocket_manager: Optional[WebSocketManager] = None,
     context: Optional[list[ConversationRecord]] = None,
     options: Optional[dict[str, object]] = None,
     status_queue: Optional[Queue] = None,  # type: ignore
-    websocket_manager: Optional[WebSocketManager] = None,
 ):
     """
     Run a chat job in a separate process, using a queue to communicate status updates.
@@ -167,10 +167,10 @@ def run_agent_job_in_process_with_queue(
     credential_manager: CredentialManager,
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
+    websocket_manager: Optional[WebSocketManager] = None,
     persist_conversation: bool = False,
     user_message_id: Optional[str] = None,
     status_queue: Optional[Queue] = None,  # type: ignore
-    websocket_manager: Optional[WebSocketManager] = None,
 ):
     """
     Run an agent chat job in a separate process, using a queue to communicate status updates.
