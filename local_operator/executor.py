@@ -737,7 +737,7 @@ class LocalCodeExecutor:
 
         return blocks
 
-    async def _convert_and_invoke(
+    async def _convert_and_stream(
         self, messages: List[ConversationRecord]
     ) -> AsyncGenerator[BaseMessage, None]:
         """Convert the messages to a list of dictionaries and invoke the model with streaming.
@@ -859,7 +859,7 @@ class LocalCodeExecutor:
             try:
                 # Use streaming but collect the full response
                 full_response = None
-                async for chunk in self._convert_and_invoke(messages):
+                async for chunk in self._convert_and_stream(messages):
                     if full_response is None:
                         full_response = chunk
                     else:
@@ -898,6 +898,59 @@ class LocalCodeExecutor:
             raise last_error
         else:
             raise Exception("Failed to invoke model")
+
+    async def stream_model(
+        self, messages: List[ConversationRecord], max_attempts: int = 3
+    ) -> AsyncGenerator[BaseMessage, None]:
+        """Stream responses from the language model with a list of messages.
+
+        Similar to invoke_model but yields each chunk as it arrives instead of collecting
+        the full response.
+
+        Args:
+            messages: List of message dictionaries containing 'role' and 'content' keys
+            max_attempts: Maximum number of retry attempts on failure (default: 3)
+
+        Yields:
+            BaseMessage: Chunks of the model's response message
+
+        Raises:
+            Exception: If all retry attempts fail or model invocation fails
+        """
+        attempt = 0
+        last_error: Exception | None = None
+        base_delay = 1  # Base delay in seconds
+
+        while attempt < max_attempts:
+            try:
+                async for chunk in self._convert_and_stream(messages):
+                    yield chunk
+                return
+            except Exception as e:
+                last_error = e
+                attempt += 1
+                if attempt < max_attempts:
+                    # Obey rate limit headers if present
+                    if (
+                        hasattr(e, "__dict__")
+                        and isinstance(getattr(e, "status_code", None), int)
+                        and getattr(e, "status_code") == 429
+                        and isinstance(getattr(e, "headers", None), dict)
+                    ):
+                        # Get retry-after time from headers, default to 3 seconds if not found
+                        headers = getattr(e, "headers")
+                        retry_after = int(headers.get("retry-after", 3))
+                        await asyncio.sleep(retry_after)
+                    else:
+                        # Regular exponential backoff for other errors
+                        delay = base_delay * (2 ** (attempt - 1))
+                        await asyncio.sleep(delay)
+
+        # If we've exhausted all attempts, raise the last error
+        if last_error:
+            raise last_error
+        else:
+            raise Exception("Failed to stream model response")
 
     async def check_response_safety(
         self, response: ResponseJsonSchema, conversation_length: int = 8, prompt_user: bool = True
