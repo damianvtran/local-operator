@@ -243,6 +243,8 @@ class CodeExecutionResult(BaseModel):
         action (ActionType): The action that was taken during the code execution
         execution_type (ExecutionType): The type of execution that was performed
         task_classification (str): The classification of the task that was performed
+        is_complete (bool): Whether the execution is complete
+        is_streamable (bool): Whether the result can be streamed
     """
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -259,6 +261,8 @@ class CodeExecutionResult(BaseModel):
     action: Optional[ActionType] = None
     execution_type: ExecutionType = Field(default=ExecutionType.NONE)
     task_classification: str = Field(default="")
+    is_complete: bool = Field(default=False)
+    is_streamable: bool = Field(default=False)
 
     def model_dump(self, *args, **kwargs) -> Dict[str, Any]:
         """Convert the conversation record to a dictionary for serialization.

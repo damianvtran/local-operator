@@ -26,7 +26,9 @@ from local_operator.server.routes import (
     jobs,
     models,
     static,
+    websockets,
 )
+from local_operator.server.utils.websocket_manager import WebSocketManager
 
 logger = logging.getLogger("local_operator.server")
 
@@ -56,12 +58,14 @@ async def lifespan(app: FastAPI):
     # changes made by child processes are quickly reflected in the parent process
     app.state.agent_registry = AgentRegistry(config_dir=agents_dir, refresh_interval=3.0)
     app.state.job_manager = JobManager()
+    app.state.websocket_manager = WebSocketManager()
     yield
     # Clean up on shutdown
     app.state.credential_manager = None
     app.state.config_manager = None
     app.state.agent_registry = None
     app.state.job_manager = None
+    app.state.websocket_manager = None
 
 
 app = FastAPI(
@@ -131,4 +135,9 @@ app.include_router(
 # /v1/static
 app.include_router(
     static.router,
+)
+
+# /v1/ws
+app.include_router(
+    websockets.router,
 )

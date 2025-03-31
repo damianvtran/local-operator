@@ -17,6 +17,7 @@ from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.jobs import JobContext, JobContextRecord, JobManager, JobStatus
 from local_operator.server.utils.operator import create_operator
+from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import ConversationRecord
 
 logger = logging.getLogger("local_operator.server.utils.job_processor_queue")
@@ -31,10 +32,10 @@ def run_job_in_process_with_queue(
     credential_manager: CredentialManager,
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
-    job_manager_id: str,  # Pass job_manager_id instead of job_manager
     context: Optional[list[ConversationRecord]] = None,
     options: Optional[dict[str, object]] = None,
     status_queue: Optional[Queue] = None,  # type: ignore
+    websocket_manager: Optional[WebSocketManager] = None,
 ):
     """
     Run a chat job in a separate process, using a queue to communicate status updates.
@@ -88,6 +89,7 @@ def run_job_in_process_with_queue(
                     agent_registry=agent_registry,
                     job_manager=job_manager,
                     job_id=job_id,
+                    websocket_manager=websocket_manager,
                 )
 
                 # Set the status queue on the executor for execution state updates
@@ -165,10 +167,10 @@ def run_agent_job_in_process_with_queue(
     credential_manager: CredentialManager,
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
-    job_manager_id: str,  # Pass job_manager_id instead of job_manager
     persist_conversation: bool = False,
     user_message_id: Optional[str] = None,
     status_queue: Optional[Queue] = None,  # type: ignore
+    websocket_manager: Optional[WebSocketManager] = None,
 ):
     """
     Run an agent chat job in a separate process, using a queue to communicate status updates.
@@ -236,6 +238,7 @@ def run_agent_job_in_process_with_queue(
                     persist_conversation=persist_conversation,
                     job_manager=job_manager,
                     job_id=job_id,
+                    websocket_manager=websocket_manager,
                 )
 
                 # Set the status queue on the executor for execution state updates
@@ -329,6 +332,30 @@ def create_and_start_job_process_with_queue(
                                 await job_manager.update_job_execution_state(
                                     received_job_id, execution_state
                                 )
+
+                                # Broadcast the update via WebSocket if available
+                                try:
+                                    from fastapi.concurrency import run_in_threadpool
+
+                                    from local_operator.server.app import app
+
+                                    # Get the WebSocket manager from the app state
+                                    websocket_manager = app.state.websocket_manager
+                                    if websocket_manager:
+                                        # Run in threadpool to avoid blocking the event loop
+                                        await run_in_threadpool(
+                                            websocket_manager.broadcast_update,
+                                            execution_state.id,
+                                            execution_state,
+                                        )
+                                except ImportError:
+                                    # WebSocket manager not available, skip broadcasting
+                                    pass
+                                except Exception as e:
+                                    error_msg = (
+                                        "Failed to broadcast execution state update via WebSocket"
+                                    )
+                                    logger.error(f"{error_msg}: {e}")
                         elif len(message) == 3:
                             # Legacy format: (job_id, status, result)
                             received_job_id, status, result = message

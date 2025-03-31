@@ -80,6 +80,7 @@ def create_operator(
     persist_conversation: bool = False,
     job_manager: Optional[JobManager] = None,
     job_id: Optional[str] = None,
+    websocket_manager=None,
 ) -> Operator:
     """Create a LocalCodeExecutor for a single chat request using the provided managers
     and the hosting/model provided in the request.
@@ -175,6 +176,7 @@ def create_operator(
         persist_conversation=persist_conversation,
         job_manager=job_manager,
         job_id=job_id,
+        websocket_manager=websocket_manager,
     )
 
     operator = Operator(
