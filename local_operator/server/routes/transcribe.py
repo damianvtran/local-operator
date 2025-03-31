@@ -6,22 +6,14 @@ import base64
 import logging
 import io
 
-from fastapi import APIRouter, Request, HTTPException
-import whisper
+from fastapi import APIRouter, Request, HTTPException, Depends
 
+from local_operator.server.dependencies import get_whisper_model
 from local_operator.server.models.schemas import CRUDResponse, TranscribeResponse
 
 router = APIRouter(tags=["Transcribe"])
 logger = logging.getLogger("local_operator.server.routes.transcribe")
 
-# Lazy load model when needed
-_model = None
-
-def get_model():
-    global _model
-    if _model is None:
-        _model = whisper.load_model("small")
-    return _model
 
 @router.post(
     "/v1/transcribe",
@@ -29,7 +21,7 @@ def get_model():
     description="Transcribe audio file and return transcription",
     response_model=CRUDResponse[TranscribeResponse],
 )
-async def transcribe_endpoint(request: Request):
+async def transcribe_endpoint(request: Request, model=Depends(get_whisper_model)):
     try:
         req_json = await request.json()
         audio_base64 = req_json.get("data")
@@ -63,7 +55,6 @@ async def transcribe_endpoint(request: Request):
 
         # Transcribe
         logger.info(f"Transcribing audio file: {temp_audio_path}")
-        model = get_model()
         result = model.transcribe(temp_audio_path, language="en")
         logger.info(f"Transcription result: {result}")
 

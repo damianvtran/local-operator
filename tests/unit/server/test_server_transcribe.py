@@ -1,7 +1,7 @@
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 import base64
 import io
 import os
@@ -9,12 +9,29 @@ import tempfile
 import asyncio
 
 from local_operator.server.app import app  # Import your FastAPI app instance
+from local_operator.server.dependencies import get_whisper_model
 import numpy as np
 import wave
 import struct
 
 # Create a test client
 client = TestClient(app)
+
+# Setup a default mock for all tests
+@pytest.fixture(autouse=True)
+def setup_whisper_mock():
+    # Create a default mock model for all tests
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = {"text": "default test transcription", "segments": []}
+    
+    # Override the dependency for all tests
+    app.dependency_overrides = {}  # Clear any existing overrides
+    app.dependency_overrides[get_whisper_model] = lambda: mock_model
+    
+    yield
+    
+    # Clean up after all tests
+    app.dependency_overrides = {}
 
 def generate_test_audio_data():
     # Generate a dummy audio file
@@ -43,13 +60,14 @@ def generate_test_audio_data():
 
 @pytest.fixture
 def mock_whisper():
-    # Reset the _model to None to ensure get_model() will load a new model
-    with patch("local_operator.server.routes.transcribe._model", None):
-        # Mock the whisper.load_model function
-        with patch("local_operator.server.routes.transcribe.whisper.load_model") as mock_load_model:
-            mock_model = mock_load_model.return_value
-            mock_model.transcribe.return_value = {"text": "test transcription", "segments": []}
-            yield mock_model
+    # Create a specific mock model for tests that need more control
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = {"text": "test transcription", "segments": []}
+    
+    # Override the dependency with this specific mock
+    app.dependency_overrides[get_whisper_model] = lambda: mock_model
+    
+    yield mock_model
 
 def test_transcribe_endpoint(mock_whisper):
     # Create a test audio file

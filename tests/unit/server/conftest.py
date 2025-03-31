@@ -194,6 +194,10 @@ def test_app_client(temp_dir):
     # Use a shorter refresh interval for tests to ensure changes are quickly reflected
     mock_agent_registry = AgentRegistry(config_dir=temp_dir, refresh_interval=1.0)
     mock_job_manager = JobManager()
+    
+    # Create a mock Whisper model for testing
+    mock_whisper_model = MagicMock()
+    mock_whisper_model.transcribe.return_value = {"text": "test transcription", "segments": []}
 
     mock_credential_manager.get_credential = lambda key: SecretStr("test-credential")
 
@@ -201,6 +205,7 @@ def test_app_client(temp_dir):
     app.state.config_manager = mock_config_manager
     app.state.agent_registry = mock_agent_registry
     app.state.job_manager = mock_job_manager
+    app.state.whisper_model = mock_whisper_model
 
     # Create and yield the test client
     transport = ASGITransport(app=app)
@@ -210,6 +215,10 @@ def test_app_client(temp_dir):
     # Restore original state
     for key, value in original_state.items():
         setattr(app.state, key, value)
+    
+    # Clean up the whisper model
+    if hasattr(app.state, "whisper_model"):
+        app.state.whisper_model = None
 
 
 @pytest.fixture
