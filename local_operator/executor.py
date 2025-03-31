@@ -2390,13 +2390,16 @@ Current time: {current_time}
         execution_result: CodeExecutionResult,
         response: ResponseJsonSchema | None,
         classification: RequestClassification | None,
-    ) -> None:
+    ) -> CodeExecutionResult:
         """Add a code execution result to the code history.
 
         Args:
             execution_result (CodeExecutionResult): The execution result to add
             response (ResponseJsonSchema | None): The response from the model
             classification (RequestClassification | None): The classification of the task
+
+        Returns:
+            CodeExecutionResult: The updated code execution result
         """
         new_code_record = execution_result
 
@@ -2410,6 +2413,35 @@ Current time: {current_time}
             new_code_record.task_classification = classification.type
 
         self.agent_state.execution_history.append(new_code_record)
+
+        return new_code_record
+
+    async def update_code_history(self, id: str, new_code_record: CodeExecutionResult) -> None:
+        """Update the code history.
+
+        Args:
+            id (str): The id of the code execution result to update
+            new_code_record (CodeExecutionResult): The new code execution result to
+            update the code history with.
+        """
+        for index, record in enumerate(self.agent_state.execution_history):
+            if record.id == id:
+                self.agent_state.execution_history[index] = new_code_record
+                break
+
+    async def broadcast_message_update(self, id: str, new_code_record: CodeExecutionResult) -> None:
+        """Broadcast the update via WebSocket if available.
+
+        Args:
+            id (str): The id of the code execution result to update
+            new_code_record (CodeExecutionResult): The new code execution result to
+            update the code history with.
+        """
+        try:
+            if self.websocket_manager:
+                await self.websocket_manager.broadcast_update(id, new_code_record)
+        except Exception as e:
+            print(f"Failed to broadcast execution state update via WebSocket: {e}")
 
     async def update_job_execution_state(self, new_code_record: CodeExecutionResult) -> None:
         """Update the job execution state.

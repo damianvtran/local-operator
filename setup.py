@@ -28,6 +28,7 @@ setup(
         "pyreadline3>=3.5.4",
         "jsonlines>=4.0.0",
         "python-multipart==0.0.20",
+        "websockets>=15.0.1",
     ],
     python_requires=">=3.12",
     extras_require={

@@ -23,10 +23,10 @@ def websocket_manager():
     return WebSocketManager()
 
 
-# Mock the get_websocket_manager dependency
+# Mock the get_websocket_manager_ws dependency
 @pytest.fixture
 def mock_get_websocket_manager(monkeypatch):
-    """Mock the get_websocket_manager dependency."""
+    """Mock the get_websocket_manager_ws dependency."""
     mock_manager = MagicMock(spec=WebSocketManager)
 
     # Mock the async methods
@@ -37,13 +37,10 @@ def mock_get_websocket_manager(monkeypatch):
     mock_manager.broadcast = AsyncMock()
     mock_manager.broadcast_update = AsyncMock()
 
-    # Create a patched version of get_websocket_manager that doesn't require a request
-    async def mock_get_websocket_manager_func(*args, **kwargs):
-        return mock_manager
-
     # Apply the patch
     with patch(
-        "local_operator.server.routes.websockets.get_websocket_manager", return_value=mock_manager
+        "local_operator.server.routes.websockets.get_websocket_manager_ws",
+        return_value=mock_manager,
     ):
         yield mock_manager
 

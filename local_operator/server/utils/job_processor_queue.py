@@ -303,14 +303,23 @@ def create_and_start_job_process_with_queue(
     # Create a process for the job, adding the status queue to the arguments
     process_args = args + (status_queue,)
     process = Process(target=process_func, args=process_args)
-    process.start()
 
-    # Register the process with the job manager
+    # Register the process with the job manager before starting it
+    # This avoids any potential issues with asyncio.Task objects being pickled
     job_manager.register_process(job_id, process)
+
+    # Start the process after registration
+    process.start()
 
     # Create a task to monitor the status queue
     async def monitor_status_queue():
         current_job_id = job_id  # Capture job_id in closure to avoid unbound variable issue
+        # Get the websocket_manager from the args
+        websocket_manager_arg = None
+        for arg in args:
+            if isinstance(arg, WebSocketManager):
+                websocket_manager_arg = arg
+                break
         try:
             while process.is_alive() or not status_queue.empty():
                 if not status_queue.empty():
@@ -335,27 +344,54 @@ def create_and_start_job_process_with_queue(
 
                                 # Broadcast the update via WebSocket if available
                                 try:
-                                    from fastapi.concurrency import run_in_threadpool
-
-                                    from local_operator.server.app import app
-
-                                    # Get the WebSocket manager from the app state
-                                    websocket_manager = app.state.websocket_manager
-                                    if websocket_manager:
-                                        # Run in threadpool to avoid blocking the event loop
-                                        await run_in_threadpool(
-                                            websocket_manager.broadcast_update,
-                                            execution_state.id,
+                                    # First try to use the WebSocket manager passed to the function
+                                    if websocket_manager_arg:
+                                        state_id = execution_state.id
+                                        await websocket_manager_arg.broadcast_update(
+                                            state_id,
                                             execution_state,
                                         )
-                                except ImportError:
-                                    # WebSocket manager not available, skip broadcasting
-                                    pass
+                                        logger.debug(
+                                            "Successfully broadcast update for ID: "
+                                            f"{state_id} using WebSocket manager"
+                                        )
+                                    else:
+                                        # Fall back to getting the WebSocket manager
+                                        # from the app state
+                                        try:
+                                            from local_operator.server.app import app
+
+                                            # Get the WebSocket manager from the app state
+                                            app_websocket_manager = app.state.websocket_manager
+                                            if app_websocket_manager:
+                                                # Call the async method directly
+                                                state_id = execution_state.id
+                                                await app_websocket_manager.broadcast_update(
+                                                    state_id,
+                                                    execution_state,
+                                                )
+                                                logger.debug(
+                                                    f"Successfully broadcast update for ID: "
+                                                    f"{state_id} using app WebSocket manager"
+                                                )
+                                        except ImportError:
+                                            # WebSocket manager not available, skip broadcasting
+                                            logger.debug(
+                                                "App WebSocket manager not available, skipping"
+                                            )
+                                        except Exception as app_e:
+                                            # Log error with shorter message
+                                            logger.error(
+                                                "Broadcast failed using app WebSocket manager: %s",
+                                                app_e,
+                                            )
                                 except Exception as e:
-                                    error_msg = (
-                                        "Failed to broadcast execution state update via WebSocket"
+                                    # Log error with shorter message and more details
+                                    logger.error("Broadcast failed: %s (%s)", e, type(e).__name__)
+                                    logger.debug(
+                                        f"Broadcast failure details - message ID: "
+                                        f"{execution_state.id}, exception: {e}"
                                     )
-                                    logger.error(f"{error_msg}: {e}")
                         elif len(message) == 3:
                             # Legacy format: (job_id, status, result)
                             received_job_id, status, result = message
@@ -373,8 +409,12 @@ def create_and_start_job_process_with_queue(
     monitor_task = asyncio.create_task(monitor_status_queue())
 
     # Register the task with the job manager
+    # Use a separate function to avoid capturing the monitor_task in the closure
+    async def register_monitor_task():
+        await job_manager.register_task(job_id, monitor_task)
+
     # Create a separate task for registration to avoid pickling issues
-    asyncio.create_task(job_manager.register_task(job_id, monitor_task))
+    asyncio.create_task(register_monitor_task())
 
     # Return only the process to avoid pickling the asyncio.Task
     return process
