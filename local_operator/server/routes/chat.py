@@ -20,6 +20,7 @@ from local_operator.server.dependencies import (
     get_config_manager,
     get_credential_manager,
     get_job_manager,
+    get_websocket_manager,
 )
 from local_operator.server.models.schemas import (
     AgentChatRequest,
@@ -37,6 +38,7 @@ from local_operator.server.utils.job_processor_queue import (
     run_job_in_process_with_queue,
 )
 from local_operator.server.utils.operator import create_operator
+from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import ConversationRecord
 
 router = APIRouter(tags=["Chat"])
@@ -310,6 +312,7 @@ async def chat_async_endpoint(
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     job_manager: JobManager = Depends(get_job_manager),
+    websocket_manager: WebSocketManager = Depends(get_websocket_manager),
 ):
     """
     Process a chat request asynchronously and return a job ID.
@@ -324,6 +327,7 @@ async def chat_async_endpoint(
         config_manager: Dependency for managing configuration
         agent_registry: Dependency for accessing agent registry
         job_manager: Dependency for managing asynchronous jobs
+        websocket_manager: Dependency for managing WebSocket connections
 
     Returns:
         A response containing the job ID and status
@@ -354,9 +358,9 @@ async def chat_async_endpoint(
                 credential_manager,
                 config_manager,
                 agent_registry,
-                "job_manager",  # Pass a string ID instead of the actual job_manager object
                 request.context if request.context else None,
                 request.options.model_dump() if request.options else None,
+                websocket_manager,
             ),
             job_manager=job_manager,
         )
@@ -425,6 +429,7 @@ async def chat_with_agent_async(
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     job_manager: JobManager = Depends(get_job_manager),
+    websocket_manager: WebSocketManager = Depends(get_websocket_manager),
     agent_id: str = Path(
         ..., description="ID of the agent to use for the chat", examples=["agent123"]
     ),
@@ -443,6 +448,7 @@ async def chat_with_agent_async(
         config_manager: Dependency for managing configuration
         agent_registry: Dependency for accessing agent registry
         job_manager: Dependency for managing asynchronous jobs
+        websocket_manager: Dependency for managing WebSocket connections
         agent_id: ID of the agent to use for the chat
 
     Returns:
@@ -481,9 +487,9 @@ async def chat_with_agent_async(
                 credential_manager,
                 config_manager,
                 agent_registry,
-                "job_manager",  # Pass a string ID instead of the actual job_manager object
                 request.persist_conversation,
                 request.user_message_id,
+                websocket_manager,
             ),
             job_manager=job_manager,
         )

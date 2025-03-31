@@ -48,6 +48,8 @@ from local_operator.prompts import (
     SafetyCheckUserPrompt,
     create_system_prompt,
 )
+
+from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.tools import ToolRegistry, list_working_directory
 from local_operator.types import (
     ActionType,
@@ -410,6 +412,7 @@ class LocalCodeExecutor:
     persist_conversation: bool
     agent_state: AgentState
     status_queue: Optional[Queue] = None  # type: ignore
+    websocket_manager: Optional[WebSocketManager] = None
 
     def __init__(
         self,
@@ -433,6 +436,7 @@ class LocalCodeExecutor:
         persist_conversation: bool = False,
         job_manager: Optional["JobManager"] = None,
         job_id: Optional[str] = None,
+        websocket_manager: Optional[WebSocketManager] = None,
     ):
         """Initialize the LocalCodeExecutor with a language model.
 
@@ -471,6 +475,7 @@ class LocalCodeExecutor:
         self.persist_conversation = persist_conversation
         self.job_manager = job_manager
         self.job_id = job_id
+        self.websocket_manager = websocket_manager
 
         # Load agent context if agent and agent_registry are provided
         if self.agent and self.agent_registry:
@@ -2413,6 +2418,21 @@ Current time: {current_time}
             new_code_record (CodeExecutionResult): The new code execution result to
             update the job execution state with.
         """
+        # Set streamable flag based on execution type
+        if new_code_record.execution_type in [
+            ExecutionType.PLAN,
+            ExecutionType.REFLECTION,
+            ExecutionType.RESPONSE,
+        ]:
+            new_code_record.is_streamable = True
+
+        # Set complete flag based on status
+        if new_code_record.status not in [
+            ProcessResponseStatus.IN_PROGRESS,
+            ProcessResponseStatus.NONE,
+        ]:
+            new_code_record.is_complete = True
+
         # Update job execution state if job manager and job ID are provided
         if self.job_manager and self.job_id:
             try:
@@ -2425,3 +2445,10 @@ Current time: {current_time}
                     self.status_queue.put(("execution_update", self.job_id, new_code_record))
             except Exception as e:
                 print(f"Failed to update job execution state: {e}")
+
+        # Broadcast the update via WebSocket if available
+        try:
+            if self.websocket_manager:
+                await self.websocket_manager.broadcast_update(new_code_record.id, new_code_record)
+        except Exception as e:
+            print(f"Failed to broadcast execution state update via WebSocket: {e}")
