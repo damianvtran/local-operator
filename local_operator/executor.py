@@ -11,7 +11,7 @@ from enum import Enum
 from multiprocessing import Queue
 from pathlib import Path
 from traceback import format_exception
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 from langchain_community.callbacks.manager import get_openai_callback
 from langchain_core.messages import BaseMessage
@@ -737,15 +737,17 @@ class LocalCodeExecutor:
 
         return blocks
 
-    async def _convert_and_invoke(self, messages: List[ConversationRecord]) -> BaseMessage:
-        """Convert the messages to a list of dictionaries and invoke the model.
+    async def _convert_and_invoke(
+        self, messages: List[ConversationRecord]
+    ) -> AsyncGenerator[BaseMessage, None]:
+        """Convert the messages to a list of dictionaries and invoke the model with streaming.
 
         Args:
             messages (List[ConversationRecord]): A list of conversation records to send to the
             model.
 
-        Returns:
-            BaseMessage: The model's response.
+        Yields:
+            BaseMessage: Chunks of the model's response.
 
         Raises:
             Exception: If there is an error during model invocation.
@@ -794,28 +796,41 @@ class LocalCodeExecutor:
         # Use get_openai_callback for OpenAI models to track token usage and cost
         if isinstance(model_instance, ChatOpenAI):
             with get_openai_callback() as cb:
-                response = await model_instance.ainvoke(messages_list)
+                async for chunk in model_instance.astream(messages_list):
+                    # Increment completion tokens (approximate for now)
+                    if (
+                        hasattr(chunk, "content")
+                        and chunk.content
+                        and isinstance(chunk.content, str)
+                    ):
+                        # Very rough approximation of token count
+                        new_tokens_completion += len(chunk.content.split()) / 2
+
+                    yield chunk
+
                 if cb is not None:
                     new_tokens_prompt = cb.prompt_tokens
                     new_tokens_completion = cb.completion_tokens
         else:
-            # For other models, invoke the model directly
+            # For other models, use direct streaming
             new_tokens_prompt = self.get_invoke_token_count(messages)
-            new_tokens_completion = 0
-            response = await model_instance.ainvoke(messages_list)
 
+            async for chunk in model_instance.astream(messages_list):
+                # Increment completion tokens (approximate for now)
+                if hasattr(chunk, "content") and chunk.content and isinstance(chunk.content, str):
+                    # Very rough approximation of token count
+                    new_tokens_completion += len(chunk.content.split()) / 2
+
+                yield chunk
+
+        # Update token metrics and cost after streaming is complete
         self.token_metrics.total_prompt_tokens += new_tokens_prompt
-        self.token_metrics.total_completion_tokens += new_tokens_completion
-
-        # Use the lookup table to get the cost per million tokens since the openai callback
-        # doesn't always return cost information.
+        self.token_metrics.total_completion_tokens += int(new_tokens_completion)
         self.token_metrics.total_cost += calculate_cost(
             self.model_configuration.info,
             new_tokens_prompt,
-            new_tokens_completion,
+            int(new_tokens_completion),
         )
-
-        return response
 
     async def invoke_model(
         self, messages: List[ConversationRecord], max_attempts: int = 3
@@ -842,7 +857,22 @@ class LocalCodeExecutor:
 
         while attempt < max_attempts:
             try:
-                return await self._convert_and_invoke(messages)
+                # Use streaming but collect the full response
+                full_response = None
+                async for chunk in self._convert_and_invoke(messages):
+                    if full_response is None:
+                        full_response = chunk
+                    else:
+                        # Append content if it's a string
+                        if isinstance(full_response.content, str) and isinstance(
+                            chunk.content, str
+                        ):
+                            full_response.content += chunk.content
+
+                if full_response is None:
+                    raise Exception("No response received from model")
+
+                return full_response
             except Exception as e:
                 last_error = e
                 attempt += 1
