@@ -26,6 +26,7 @@ from local_operator.server.routes import (
     jobs,
     models,
     static,
+    transcribe,
 )
 
 logger = logging.getLogger("local_operator.server")
@@ -131,4 +132,9 @@ app.include_router(
 # /v1/static
 app.include_router(
     static.router,
+)
+
+# /v1/transcribe
+app.include_router(
+    transcribe.router,
 )

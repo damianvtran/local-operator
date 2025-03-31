@@ -695,3 +695,13 @@ class HealthCheckResponse(BaseModel):
     """
 
     version: str = Field(..., description="Version of the Local Operator")
+
+
+class TranscribeResponse(BaseModel):
+    """Response from whisper API endpoint.
+
+    Attributes:
+        text: The transcribed text response
+    """
+
+    text: str
