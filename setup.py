@@ -28,6 +28,7 @@ setup(
         "pyreadline3>=3.5.4",
         "jsonlines>=4.0.0",
         "python-multipart==0.0.20",
+        "openai-whisper==20240930",
     ],
     python_requires=">=3.12",
     extras_require={
