@@ -275,6 +275,7 @@ def create_and_start_job_process_with_queue(
     process_func: Callable[..., None],
     args: tuple[object, ...],
     job_manager: JobManager,
+    websocket_manager: WebSocketManager,
 ) -> Process:
     """
     Create and start a process for a job, and set up a queue monitor to update the job status.
@@ -308,12 +309,6 @@ def create_and_start_job_process_with_queue(
     # Create a task to monitor the status queue
     async def monitor_status_queue():
         current_job_id = job_id  # Capture job_id in closure to avoid unbound variable issue
-        # Get the websocket_manager from the args
-        websocket_manager_arg = None
-        for arg in args:
-            if isinstance(arg, WebSocketManager):
-                websocket_manager_arg = arg
-                break
         try:
             while process.is_alive() or not status_queue.empty():
                 if not status_queue.empty():
@@ -339,10 +334,7 @@ def create_and_start_job_process_with_queue(
                                 # Message update: (type, job_id, message)
                                 _, received_job_id, message = message
 
-                                if websocket_manager_arg:
-                                    await websocket_manager_arg.broadcast_update(
-                                        received_job_id, message
-                                    )
+                                await websocket_manager.broadcast_update(received_job_id, message)
                         elif len(message) == 3:
                             # Legacy format: (job_id, status, result)
                             received_job_id, status, result = message
