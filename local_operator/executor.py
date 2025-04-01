@@ -2437,7 +2437,10 @@ Current time: {current_time}
             update the code history with.
         """
         try:
-            if self.websocket_manager:
+            if self.status_queue:
+                self.status_queue.put(("message_update", id, new_code_record))
+            elif self.websocket_manager:
+
                 # Check if the ID exists in execution history
                 id_exists = any(record.id == id for record in self.agent_state.execution_history)
                 if not id_exists:
@@ -2474,19 +2477,11 @@ Current time: {current_time}
         # Update job execution state if job manager and job ID are provided
         if self.job_manager and self.job_id:
             try:
-                # First, try to update directly in the current process
-                await self.job_manager.update_job_execution_state(self.job_id, new_code_record)
-
                 # If we're in a multiprocessing context with a status queue
                 if self.status_queue:
                     # Send execution state update through the queue to the parent process
                     self.status_queue.put(("execution_update", self.job_id, new_code_record))
+                else:
+                    await self.job_manager.update_job_execution_state(self.job_id, new_code_record)
             except Exception as e:
                 print(f"Failed to update job execution state: {e}")
-
-        # Broadcast the update via WebSocket if available
-        try:
-            if self.websocket_manager:
-                await self.websocket_manager.broadcast_update(new_code_record.id, new_code_record)
-        except Exception as e:
-            print(f"Failed to broadcast execution state update via WebSocket: {e}")

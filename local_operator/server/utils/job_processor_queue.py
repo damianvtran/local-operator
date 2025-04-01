@@ -341,56 +341,13 @@ def create_and_start_job_process_with_queue(
                                 await job_manager.update_job_execution_state(
                                     received_job_id, execution_state
                                 )
+                            elif msg_type == "message_update" and len(message) == 3:
+                                # Message update: (type, job_id, message)
+                                _, received_job_id, message = message
 
-                                # Broadcast the update via WebSocket if available
-                                try:
-                                    # First try to use the WebSocket manager passed to the function
-                                    if websocket_manager_arg:
-                                        state_id = execution_state.id
-                                        await websocket_manager_arg.broadcast_update(
-                                            state_id,
-                                            execution_state,
-                                        )
-                                        logger.debug(
-                                            "Successfully broadcast update for ID: "
-                                            f"{state_id} using WebSocket manager"
-                                        )
-                                    else:
-                                        # Fall back to getting the WebSocket manager
-                                        # from the app state
-                                        try:
-                                            from local_operator.server.app import app
-
-                                            # Get the WebSocket manager from the app state
-                                            app_websocket_manager = app.state.websocket_manager
-                                            if app_websocket_manager:
-                                                # Call the async method directly
-                                                state_id = execution_state.id
-                                                await app_websocket_manager.broadcast_update(
-                                                    state_id,
-                                                    execution_state,
-                                                )
-                                                logger.debug(
-                                                    f"Successfully broadcast update for ID: "
-                                                    f"{state_id} using app WebSocket manager"
-                                                )
-                                        except ImportError:
-                                            # WebSocket manager not available, skip broadcasting
-                                            logger.debug(
-                                                "App WebSocket manager not available, skipping"
-                                            )
-                                        except Exception as app_e:
-                                            # Log error with shorter message
-                                            logger.error(
-                                                "Broadcast failed using app WebSocket manager: %s",
-                                                app_e,
-                                            )
-                                except Exception as e:
-                                    # Log error with shorter message and more details
-                                    logger.error("Broadcast failed: %s (%s)", e, type(e).__name__)
-                                    logger.debug(
-                                        f"Broadcast failure details - message ID: "
-                                        f"{execution_state.id}, exception: {e}"
+                                if websocket_manager_arg:
+                                    await websocket_manager_arg.broadcast_update(
+                                        received_job_id, message
                                     )
                         elif len(message) == 3:
                             # Legacy format: (job_id, status, result)
