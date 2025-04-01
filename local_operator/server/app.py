@@ -6,6 +6,7 @@ through HTTP requests instead of CLI.
 """
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from importlib.metadata import version
 from pathlib import Path
@@ -30,6 +31,21 @@ from local_operator.server.routes import (
 )
 from local_operator.server.utils.websocket_manager import WebSocketManager
 
+ENV_LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+LOG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+
+if ENV_LOG_LEVEL not in LOG_LEVELS:
+    print(f"Invalid log level: {ENV_LOG_LEVEL}, using INFO")
+    ENV_LOG_LEVEL = "INFO"
+
+logging.basicConfig(level=LOG_LEVELS[ENV_LOG_LEVEL])
 logger = logging.getLogger("local_operator.server")
 
 
