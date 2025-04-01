@@ -972,6 +972,21 @@ class LocalCodeExecutor:
 
         agent_security_prompt = self.agent.security_prompt if self.agent else ""
 
+        await self.update_job_execution_state(
+            CodeExecutionResult(
+                status=ProcessResponseStatus.IN_PROGRESS,
+                message="Reviewing action for safety and security",
+                role=ConversationRole.ASSISTANT,
+                execution_type=ExecutionType.SECURITY_CHECK,
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                files=[],
+            )
+        )
+
         if prompt_user:
             safety_prompt = SafetyCheckSystemPrompt.format(security_prompt=agent_security_prompt)
 
@@ -1824,6 +1839,21 @@ class LocalCodeExecutor:
         )
 
         self.step_counter += 1
+
+        await self.update_job_execution_state(
+            CodeExecutionResult(
+                status=ProcessResponseStatus.IN_PROGRESS,
+                message="Summarizing conversation",
+                role=ConversationRole.ASSISTANT,
+                execution_type=ExecutionType.ACTION,
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                files=[],
+            )
+        )
 
         # Phase 4: Summarize old conversation steps
         async with spinner_context(

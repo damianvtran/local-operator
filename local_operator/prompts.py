@@ -745,9 +745,6 @@ Given the above information about how you will need to operate in execution mode
 think aloud about what you will need to do.  What tools do you need to use, which
 files do you need to read, what websites do you need to visit, etc.  Be specific.  What is the best final format to present the information to the user?  Have they asked for a specific format or should you choose one?
 
-Determine if there are any clarifying questions that you need to ask the user before
-you proceed.  If so, come up with the questions that you need to ask here, and then you will ask them to the user in an upcoming conversation turn before getting started.  Potentially you will need to update or revise the plan based on the user's answers to these questions before you start.
-
 Respond in natural language, without XML tags or code.  Do not include any code here or markdown code formatting, you will do that after you reflect.  No action tags or actions will be interpreted in the planning message.
 """  # noqa: E501
 
@@ -770,7 +767,7 @@ If you think you have enough information gathered to complete the user's request
 
 Don't try to synthesize or summarize information in the context history using code actions, if you think that the raw data has enough information to complete the task then you should mark the task as complete now, and then you will be given a chance to provide a final response to the user and write out the summary in full details manually.
 
-This is just a question to help you think.  Writing your thoughts aloud will help you think through next steps and perform better.  Respond ONLY in natural language, without XML tags or code.  Stop before generating the actions for the next step, you will be asked to do that on the next step.  Do not include any code here or markdown code formatting.
+This is just a question to help you think.  Writing your thoughts aloud will help you think through next steps and perform better.  Respond ONLY in natural language, without XML tags or code.  Stop before generating the actions for the next step, you will be asked to do that on the next step.  Do not include any code here or markdown code formatting.  Any action tags that you provide here will be ignored.
 """  # noqa: E501
 
 ActionInterpreterSystemPrompt: str = """
