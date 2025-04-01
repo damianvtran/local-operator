@@ -48,7 +48,6 @@ from local_operator.prompts import (
     SafetyCheckUserPrompt,
     create_system_prompt,
 )
-
 from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.tools import ToolRegistry, list_working_directory
 from local_operator.types import (
@@ -2439,6 +2438,13 @@ Current time: {current_time}
         """
         try:
             if self.websocket_manager:
+                # Check if the ID exists in execution history
+                id_exists = any(record.id == id for record in self.agent_state.execution_history)
+                if not id_exists:
+                    logging.warning(
+                        f"Attempted to broadcast update for non-existent execution ID: {id}"
+                    )
+
                 await self.websocket_manager.broadcast_update(id, new_code_record)
         except Exception as e:
             print(f"Failed to broadcast execution state update via WebSocket: {e}")
