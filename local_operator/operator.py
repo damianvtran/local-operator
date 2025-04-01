@@ -506,6 +506,11 @@ class Operator:
             new_message,
         )
 
+        await self.executor.broadcast_message_update(
+            new_message.id,
+            new_message,
+        )
+
         self.executor.set_current_plan(response_content)
 
         # Save the conversation history and code execution history to the agent registry
