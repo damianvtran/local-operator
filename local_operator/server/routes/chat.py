@@ -362,6 +362,7 @@ async def chat_async_endpoint(
                 request.options.model_dump() if request.options else None,
             ),
             job_manager=job_manager,
+            websocket_manager=websocket_manager,
         )
 
         # Return job information
@@ -490,6 +491,7 @@ async def chat_with_agent_async(
                 request.user_message_id,
             ),
             job_manager=job_manager,
+            websocket_manager=websocket_manager,
         )
 
         # Return job information
