@@ -424,21 +424,6 @@ class Operator:
             )
         )
 
-        await self.executor.update_job_execution_state(
-            CodeExecutionResult(
-                stdout="",
-                stderr="",
-                logging="",
-                formatted_print="",
-                code="",
-                message="",
-                role=ConversationRole.ASSISTANT,
-                status=ProcessResponseStatus.IN_PROGRESS,
-                files=[],
-                execution_type=ExecutionType.PLAN,
-            )
-        )
-
         new_message = self.executor.add_to_code_history(
             CodeExecutionResult(
                 stdout="",
@@ -456,6 +441,24 @@ class Operator:
             ),
             None,
             current_task_classification,
+        )
+
+        await self.executor.update_job_execution_state(
+            CodeExecutionResult(
+                id=new_message.id,
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message="",
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.IN_PROGRESS,
+                files=[],
+                execution_type=ExecutionType.PLAN,
+                is_streamable=True,
+                is_complete=False,
+            )
         )
 
         if self.persist_agent_conversation and self.agent_registry and self.current_agent:
@@ -507,6 +510,24 @@ class Operator:
         await self.executor.broadcast_message_update(
             new_message.id,
             new_message,
+        )
+
+        await self.executor.update_job_execution_state(
+            CodeExecutionResult(
+                id=new_message.id,
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message="",
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.IN_PROGRESS,
+                files=[],
+                execution_type=ExecutionType.PLAN,
+                is_streamable=True,
+                is_complete=True,
+            )
         )
 
         self.executor.set_current_plan(new_message.message)
@@ -644,21 +665,6 @@ class Operator:
             )
         )
 
-        await self.executor.update_job_execution_state(
-            CodeExecutionResult(
-                stdout="",
-                stderr="",
-                logging="",
-                formatted_print="",
-                code="",
-                message="",
-                role=ConversationRole.ASSISTANT,
-                status=ProcessResponseStatus.IN_PROGRESS,
-                files=[],
-                execution_type=ExecutionType.RESPONSE,
-            )
-        )
-
         new_message = self.executor.add_to_code_history(
             CodeExecutionResult(
                 stdout="",
@@ -676,6 +682,24 @@ class Operator:
             ),
             None,
             current_task_classification,
+        )
+
+        await self.executor.update_job_execution_state(
+            CodeExecutionResult(
+                id=new_message.id,
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message="",
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.IN_PROGRESS,
+                files=[],
+                execution_type=ExecutionType.RESPONSE,
+                is_streamable=True,
+                is_complete=False,
+            )
         )
 
         if self.persist_agent_conversation and self.agent_registry and self.current_agent:
@@ -726,6 +750,24 @@ class Operator:
         await self.executor.broadcast_message_update(
             new_message.id,
             new_message,
+        )
+
+        await self.executor.update_job_execution_state(
+            CodeExecutionResult(
+                id=new_message.id,
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message="",
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.IN_PROGRESS,
+                files=[],
+                execution_type=ExecutionType.RESPONSE,
+                is_streamable=True,
+                is_complete=True,
+            )
         )
 
         # Persist conversation if enabled
