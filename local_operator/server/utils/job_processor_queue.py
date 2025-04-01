@@ -32,7 +32,6 @@ def run_job_in_process_with_queue(
     credential_manager: CredentialManager,
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
-    websocket_manager: Optional[WebSocketManager] = None,
     context: Optional[list[ConversationRecord]] = None,
     options: Optional[dict[str, object]] = None,
     status_queue: Optional[Queue] = None,  # type: ignore
@@ -87,9 +86,7 @@ def run_job_in_process_with_queue(
                     credential_manager=credential_manager,
                     config_manager=config_manager,
                     agent_registry=agent_registry,
-                    job_manager=job_manager,
                     job_id=job_id,
-                    websocket_manager=websocket_manager,
                 )
 
                 # Set the status queue on the executor for execution state updates
@@ -167,7 +164,6 @@ def run_agent_job_in_process_with_queue(
     credential_manager: CredentialManager,
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
-    websocket_manager: Optional[WebSocketManager] = None,
     persist_conversation: bool = False,
     user_message_id: Optional[str] = None,
     status_queue: Optional[Queue] = None,  # type: ignore
@@ -236,9 +232,7 @@ def run_agent_job_in_process_with_queue(
                     agent_registry=agent_registry,
                     current_agent=agent_obj,
                     persist_conversation=persist_conversation,
-                    job_manager=job_manager,
                     job_id=job_id,
-                    websocket_manager=websocket_manager,
                 )
 
                 # Set the status queue on the executor for execution state updates

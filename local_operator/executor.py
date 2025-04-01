@@ -39,7 +39,6 @@ from local_operator.helpers import (
     clean_plain_text_response,
     remove_think_tags,
 )
-from local_operator.jobs import JobManager
 from local_operator.model.configure import ModelConfiguration, calculate_cost
 from local_operator.prompts import (
     AgentHeadsUpDisplayPrompt,
@@ -48,8 +47,6 @@ from local_operator.prompts import (
     SafetyCheckUserPrompt,
     create_system_prompt,
 )
-from local_operator.server.models.schemas import WebsocketConnectionType
-from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.tools import ToolRegistry, list_working_directory
 from local_operator.types import (
     ActionType,
@@ -412,7 +409,6 @@ class LocalCodeExecutor:
     persist_conversation: bool
     agent_state: AgentState
     status_queue: Optional[Queue] = None  # type: ignore
-    websocket_manager: Optional[WebSocketManager] = None
 
     def __init__(
         self,
@@ -434,9 +430,7 @@ class LocalCodeExecutor:
         max_learnings_history: int = 50,
         verbosity_level: VerbosityLevel = VerbosityLevel.VERBOSE,
         persist_conversation: bool = False,
-        job_manager: Optional["JobManager"] = None,
         job_id: Optional[str] = None,
-        websocket_manager: Optional[WebSocketManager] = None,
     ):
         """Initialize the LocalCodeExecutor with a language model.
 
@@ -457,7 +451,6 @@ class LocalCodeExecutor:
             verbosity_level: Controls the level of detail in executor output
             persist_conversation: Whether to automatically persist conversation and execution
                 history to the agent registry after each step
-            job_manager: Optional manager for handling background or scheduled jobs
             job_id: Optional identifier for the current job being processed
         """
         self.context = {}
@@ -473,9 +466,7 @@ class LocalCodeExecutor:
         self.verbosity_level = verbosity_level
         self.agent_registry = agent_registry
         self.persist_conversation = persist_conversation
-        self.job_manager = job_manager
         self.job_id = job_id
-        self.websocket_manager = websocket_manager
 
         # Load agent context if agent and agent_registry are provided
         if self.agent and self.agent_registry:
@@ -2470,18 +2461,6 @@ Current time: {current_time}
         try:
             if self.status_queue:
                 self.status_queue.put(("message_update", id, new_code_record))
-            elif self.websocket_manager:
-
-                # Check if the ID exists in execution history
-                id_exists = any(record.id == id for record in self.agent_state.execution_history)
-                if not id_exists:
-                    logging.warning(
-                        f"Attempted to broadcast update for non-existent execution ID: {id}"
-                    )
-
-                await self.websocket_manager.broadcast_update(
-                    id, new_code_record, WebsocketConnectionType.MESSAGE
-                )
         except Exception as e:
             print(f"Failed to broadcast execution state update via WebSocket: {e}")
 
@@ -2507,14 +2486,12 @@ Current time: {current_time}
         ]:
             new_code_record.is_complete = True
 
-        # Update job execution state if job manager and job ID are provided
-        if self.job_manager and self.job_id:
+        if self.job_id:
+            # Update job execution state if job manager and job ID are provided
             try:
                 # If we're in a multiprocessing context with a status queue
                 if self.status_queue:
                     # Send execution state update through the queue to the parent process
                     self.status_queue.put(("execution_update", self.job_id, new_code_record))
-                else:
-                    await self.job_manager.update_job_execution_state(self.job_id, new_code_record)
             except Exception as e:
                 print(f"Failed to update job execution state: {e}")

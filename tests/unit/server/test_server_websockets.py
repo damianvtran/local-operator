@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import WebSocketDisconnect
 
+from local_operator.server.models.schemas import WebsocketConnectionType
+from local_operator.server.routes.websockets import websocket_message_endpoint
 from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import (
     CodeExecutionResult,
@@ -55,16 +57,15 @@ async def test_websocket_manager_connect(websocket_manager):
 
     # Connect the WebSocket to a message ID
     message_id = "test-message-id"
-    await websocket_manager.connect(websocket, message_id)
+    connection_type = WebsocketConnectionType.MESSAGE
+    await websocket_manager.connect(websocket, message_id, connection_type)
 
-    # Check that the WebSocket was accepted
-    websocket.accept.assert_called_once()
+    # The WebSocket is not accepted by the manager, but by the endpoint
+    # Check that the WebSocket was added to the connections
+    assert websocket in websocket_manager.connections[connection_type][message_id]
 
-    # Check that the WebSocket was added to the message connections
-    assert websocket in websocket_manager.message_connections[message_id]
-
-    # Check that the message ID was added to the connection messages
-    assert message_id in websocket_manager.connection_messages[websocket]
+    # Check that the message ID was added to the connection subscriptions
+    assert message_id in websocket_manager.connection_subscriptions[websocket][connection_type]
 
 
 @pytest.mark.asyncio
@@ -74,22 +75,23 @@ async def test_websocket_manager_disconnect(websocket_manager):
     websocket = MagicMock()
     websocket.accept = AsyncMock()
     websocket.send_text = AsyncMock()
+    websocket.close = AsyncMock()
 
     # Connect the WebSocket to a message ID
     message_id = "test-message-id"
-    await websocket_manager.connect(websocket, message_id)
+    connection_type = WebsocketConnectionType.MESSAGE
+    await websocket_manager.connect(websocket, message_id, connection_type)
 
     # Disconnect the WebSocket
     await websocket_manager.disconnect(websocket)
 
-    # Check that the WebSocket was removed from the message connections
-    assert (
-        message_id not in websocket_manager.message_connections
-        or websocket not in websocket_manager.message_connections[message_id]
-    )
+    # Check that the WebSocket was removed from the connections
+    assert message_id not in websocket_manager.connections[
+        connection_type
+    ] or websocket not in websocket_manager.connections[connection_type].get(message_id, set())
 
-    # Check that the message ID was removed from the connection messages
-    assert websocket not in websocket_manager.connection_messages
+    # Check that the WebSocket was removed from the connection subscriptions
+    assert websocket not in websocket_manager.connection_subscriptions
 
 
 @pytest.mark.asyncio
@@ -102,35 +104,35 @@ async def test_websocket_manager_subscribe_unsubscribe(websocket_manager):
 
     # Connect the WebSocket to a message ID
     message_id1 = "test-message-id-1"
-    await websocket_manager.connect(websocket, message_id1)
+    connection_type = WebsocketConnectionType.MESSAGE
+    await websocket_manager.connect(websocket, message_id1, connection_type)
 
     # Subscribe to another message ID
     message_id2 = "test-message-id-2"
-    await websocket_manager.subscribe(websocket, message_id2)
+    await websocket_manager.subscribe(websocket, message_id2, connection_type)
 
-    # Check that the WebSocket was added to the message connections for both message IDs
-    assert websocket in websocket_manager.message_connections[message_id1]
-    assert websocket in websocket_manager.message_connections[message_id2]
+    # Check that the WebSocket was added to the connections for both message IDs
+    assert websocket in websocket_manager.connections[connection_type][message_id1]
+    assert websocket in websocket_manager.connections[connection_type][message_id2]
 
-    # Check that both message IDs were added to the connection messages
-    assert message_id1 in websocket_manager.connection_messages[websocket]
-    assert message_id2 in websocket_manager.connection_messages[websocket]
+    # Check that both message IDs were added to the connection subscriptions
+    assert message_id1 in websocket_manager.connection_subscriptions[websocket][connection_type]
+    assert message_id2 in websocket_manager.connection_subscriptions[websocket][connection_type]
 
     # Unsubscribe from the first message ID
-    await websocket_manager.unsubscribe(websocket, message_id1)
+    await websocket_manager.unsubscribe(websocket, message_id1, connection_type)
 
-    # Check that the WebSocket was removed from the message connections for the first message ID
-    assert (
-        message_id1 not in websocket_manager.message_connections
-        or websocket not in websocket_manager.message_connections[message_id1]
-    )
+    # Check that the WebSocket was removed from the connections for the first message ID
+    assert message_id1 not in websocket_manager.connections[
+        connection_type
+    ] or websocket not in websocket_manager.connections[connection_type].get(message_id1, set())
 
-    # Check that the first message ID was removed from the connection messages
-    assert message_id1 not in websocket_manager.connection_messages[websocket]
+    # Check that the first message ID was removed from the connection subscriptions
+    assert message_id1 not in websocket_manager.connection_subscriptions[websocket][connection_type]
 
     # Check that the WebSocket is still subscribed to the second message ID
-    assert websocket in websocket_manager.message_connections[message_id2]
-    assert message_id2 in websocket_manager.connection_messages[websocket]
+    assert websocket in websocket_manager.connections[connection_type][message_id2]
+    assert message_id2 in websocket_manager.connection_subscriptions[websocket][connection_type]
 
 
 @pytest.mark.asyncio
@@ -227,9 +229,6 @@ async def test_websocket_endpoint(mock_get_websocket_manager):
     websocket.receive_text = AsyncMock(return_value=json.dumps({"type": "ping"}))
     websocket.send_text = AsyncMock()
 
-    # Import the websocket_endpoint function
-    from local_operator.server.routes.websockets import websocket_endpoint
-
     # Call the endpoint with our mocked objects
     # Set up the mock to raise WebSocketDisconnect after one iteration
     websocket.receive_text.side_effect = [
@@ -239,10 +238,12 @@ async def test_websocket_endpoint(mock_get_websocket_manager):
         WebSocketDisconnect(),
     ]
 
-    await websocket_endpoint(websocket, "test-message-id", mock_get_websocket_manager)
+    await websocket_message_endpoint(websocket, "test-message-id", mock_get_websocket_manager)
 
-    # Verify the WebSocket was connected
-    mock_get_websocket_manager.connect.assert_called_once_with(websocket, "test-message-id")
+    # Verify the WebSocket was connected with the correct connection type
+    mock_get_websocket_manager.connect.assert_called_once_with(
+        websocket, "test-message-id", WebsocketConnectionType.MESSAGE
+    )
 
     # Verify ping was responded to with pong
     websocket.send_text.assert_any_call(json.dumps({"type": "pong"}))
@@ -260,17 +261,16 @@ async def test_websocket_error_handling(mock_get_websocket_manager):
     websocket.receive_text = AsyncMock()
     websocket.send_text = AsyncMock()
 
-    # Import the websocket_endpoint function
-    from local_operator.server.routes.websockets import websocket_endpoint
-
     # Set up the mock to raise an exception after one iteration
     websocket.receive_text.side_effect = ["invalid json", WebSocketDisconnect()]
 
     # Call the endpoint with our mocked objects
-    await websocket_endpoint(websocket, "test-message-id", mock_get_websocket_manager)
+    await websocket_message_endpoint(websocket, "test-message-id", mock_get_websocket_manager)
 
-    # Verify the WebSocket was connected
-    mock_get_websocket_manager.connect.assert_called_once_with(websocket, "test-message-id")
+    # Verify the WebSocket was connected with the correct connection type
+    mock_get_websocket_manager.connect.assert_called_once_with(
+        websocket, "test-message-id", WebsocketConnectionType.MESSAGE
+    )
 
     # Verify disconnect was called
     mock_get_websocket_manager.disconnect.assert_called_once_with(websocket)
