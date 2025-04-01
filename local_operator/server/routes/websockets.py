@@ -36,7 +36,7 @@ async def websocket_endpoint(
         # First accept the connection at the transport level
         await websocket.accept()
         connection_accepted = True
-        logger.debug(f"WebSocket connection accepted for message ID: {message_id}")
+        logger.info(f"WebSocket connection accepted for message ID: {message_id}")
 
         # Then register the connection with the WebSocket manager
         try:
@@ -63,7 +63,7 @@ async def websocket_endpoint(
             # Still set connection_established to ensure cleanup in finally block
             connection_established = True
 
-        logger.debug(f"WebSocket connection established for message ID: {message_id}")
+        logger.info(f"WebSocket connection established for message ID: {message_id}")
 
         # Main message processing loop
         while True:

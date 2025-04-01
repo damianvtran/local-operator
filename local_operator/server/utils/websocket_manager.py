@@ -56,6 +56,11 @@ class WebSocketManager:
                 self.message_connections[message_id] = set()
             self.message_connections[message_id].add(websocket)
 
+            logger.info(
+                f"Connected WebSocket to message ID: {message_id} "
+                f"({len(self.message_connections[message_id])} connections)"
+            )
+
             # Add the message ID to the connection messages
             if websocket not in self.connection_messages:
                 self.connection_messages[websocket] = set()
