@@ -1032,7 +1032,7 @@ class Operator:
                     logging="",
                     formatted_print="",
                     code="",
-                    message="Thinking about the action to take",
+                    message="Thinking about my next action",
                     role=ConversationRole.ASSISTANT,
                     status=ProcessResponseStatus.IN_PROGRESS,
                     files=[],
