@@ -439,8 +439,6 @@ class Operator:
             )
         )
 
-        response_content = ""
-
         new_message = self.executor.add_to_code_history(
             CodeExecutionResult(
                 stdout="",
@@ -511,7 +509,7 @@ class Operator:
             new_message,
         )
 
-        self.executor.set_current_plan(response_content)
+        self.executor.set_current_plan(new_message.message)
 
         # Save the conversation history and code execution history to the agent registry
         # if the persist_conversation flag is set.
@@ -661,51 +659,73 @@ class Operator:
             )
         )
 
-        response_content = ""
-
-        # Invoke the model to generate the response
-        async for chunk in self.executor.stream_model(messages):
-            chunk_content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
-            response_content += chunk_content
-            yield chunk_content
-
-        # Add content to the response if it is empty to prevent invoke errors
-        # from the source.
-        if not response_content:
-            response_content = "No response from the agent"
-
-        # Clean up the response
-        response_content = remove_think_tags(response_content)
-
-        # Add the response to conversation history
-        self.executor.agent_state.conversation.extend(
-            [
-                ConversationRecord(
-                    role=ConversationRole.ASSISTANT,
-                    content=response_content,
-                    should_summarize=True,
-                ),
-            ]
-        )
-
-        # Add to code history
-        self.executor.add_to_code_history(
+        new_message = self.executor.add_to_code_history(
             CodeExecutionResult(
                 stdout="",
                 stderr="",
                 logging="",
                 formatted_print="",
                 code="",
-                message=response_content,
+                message="",
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.SUCCESS,
                 files=[],
                 execution_type=ExecutionType.RESPONSE,
-                action=result.action,
-                task_classification=current_task_classification.type,
+                is_streamable=True,
+                is_complete=False,
             ),
             None,
             current_task_classification,
+        )
+
+        if self.persist_agent_conversation and self.agent_registry and self.current_agent:
+            self.agent_registry.update_agent_state(
+                agent_id=self.current_agent.id,
+                agent_state=self.executor.agent_state,
+            )
+
+        # Invoke the model to generate the response
+        async for chunk in self.executor.stream_model(messages):
+            chunk_content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+            new_message.message += chunk_content
+
+            await self.executor.broadcast_message_update(
+                new_message.id,
+                new_message,
+            )
+
+            yield chunk_content
+
+        # Add content to the response if it is empty to prevent invoke errors
+        # from the source.
+        if not new_message.message:
+            new_message.message = "No response from the agent"
+
+        # Clean up the response
+        new_message.message = remove_think_tags(new_message.message)
+
+        # Add the response to conversation history
+        self.executor.agent_state.conversation.extend(
+            [
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content=new_message.message,
+                    should_summarize=True,
+                ),
+            ]
+        )
+
+        # Update the code history
+        new_message.is_complete = True
+
+        await self.executor.update_code_history(
+            new_message.id,
+            new_message,
+        )
+
+        await self.executor.broadcast_message_update(
+            new_message.id,
+            new_message,
         )
 
         # Persist conversation if enabled
@@ -769,7 +789,7 @@ class Operator:
                 logging="",
                 formatted_print="",
                 code="",
-                message="",
+                message="Cleaning up the action response",
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.IN_PROGRESS,
                 files=[],
@@ -1012,7 +1032,7 @@ class Operator:
                     logging="",
                     formatted_print="",
                     code="",
-                    message="",
+                    message="Thinking about the action to take",
                     role=ConversationRole.ASSISTANT,
                     status=ProcessResponseStatus.IN_PROGRESS,
                     files=[],
@@ -1088,10 +1108,11 @@ class Operator:
                 else:
                     final_response = ""
 
-                    print(
-                        f"\n\033[1;36m╭─ Agent Response (Step {self.executor.step_counter}) "
-                        "──────────────────────────\033[0m"
-                    )
+                    if self.verbosity_level >= VerbosityLevel.VERBOSE:
+                        print(
+                            f"\n\033[1;36m╭─ Agent Response (Step {self.executor.step_counter}) "
+                            "──────────────────────────\033[0m"
+                        )
 
                     async for chunk in self.generate_response(response_json, classification):
                         final_response += chunk
@@ -1099,7 +1120,10 @@ class Operator:
                         if self.verbosity_level >= VerbosityLevel.VERBOSE:
                             print(chunk, end="", flush=True)
 
-                    print("\033[1;36m╰══════════════════════════════════════════════════╯\033[0m")
+                    if self.verbosity_level >= VerbosityLevel.VERBOSE:
+                        print(
+                            "\033[1;36m╰══════════════════════════════════════════════════╯\033[0m"
+                        )
 
             # Auto-save on each step if enabled
             if self.auto_save_conversation:
