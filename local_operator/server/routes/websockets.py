@@ -10,20 +10,21 @@ import logging
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 
 from local_operator.server.dependencies import get_websocket_manager_ws
+from local_operator.server.models.schemas import WebsocketConnectionType
 from local_operator.server.utils.websocket_manager import WebSocketManager
 
 router = APIRouter(prefix="/v1/ws", tags=["WebSockets"])
 logger = logging.getLogger("local_operator.server.routes.websockets")
 
 
-@router.websocket("/{message_id}")
-async def websocket_endpoint(
+@router.websocket("/messages/{message_id}")
+async def websocket_message_endpoint(
     websocket: WebSocket,
     message_id: str,
     websocket_manager: WebSocketManager = Depends(get_websocket_manager_ws),
 ):
     """
-    WebSocket endpoint for subscribing to updates for a specific message ID.
+    WebSocket endpoint for subscribing to message updates for a specific message ID.
 
     Args:
         websocket (WebSocket): The WebSocket connection.
@@ -40,7 +41,9 @@ async def websocket_endpoint(
 
         # Then register the connection with the WebSocket manager
         try:
-            connection_established = await websocket_manager.connect(websocket, message_id)
+            connection_established = await websocket_manager.connect(
+                websocket, message_id, WebsocketConnectionType.MESSAGE
+            )
 
             if not connection_established:
                 logger.warning(
@@ -83,18 +86,32 @@ async def websocket_endpoint(
                             break
                     elif message_type == "subscribe":
                         subscribe_message_id = message.get("message_id")
+                        connection_type_str = message.get("connection_type", "message")
+                        try:
+                            connection_type = WebsocketConnectionType(connection_type_str)
+                        except ValueError:
+                            connection_type = WebsocketConnectionType.MESSAGE
+
                         if subscribe_message_id:
                             try:
-                                await websocket_manager.subscribe(websocket, subscribe_message_id)
+                                await websocket_manager.subscribe(
+                                    websocket, subscribe_message_id, connection_type
+                                )
                             except Exception as e:
                                 logger.error(f"Error subscribing to {subscribe_message_id}: {e}")
                                 # Don't break the loop for subscription errors
                     elif message_type == "unsubscribe":
                         unsubscribe_message_id = message.get("message_id")
+                        connection_type_str = message.get("connection_type", "message")
+                        try:
+                            connection_type = WebsocketConnectionType(connection_type_str)
+                        except ValueError:
+                            connection_type = WebsocketConnectionType.MESSAGE
+
                         if unsubscribe_message_id:
                             try:
                                 await websocket_manager.unsubscribe(
-                                    websocket, unsubscribe_message_id
+                                    websocket, unsubscribe_message_id, connection_type
                                 )
                             except Exception as e:
                                 logger.error(

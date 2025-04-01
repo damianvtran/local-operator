@@ -48,6 +48,7 @@ from local_operator.prompts import (
     SafetyCheckUserPrompt,
     create_system_prompt,
 )
+from local_operator.server.models.schemas import WebsocketConnectionType
 from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.tools import ToolRegistry, list_working_directory
 from local_operator.types import (
@@ -2448,7 +2449,9 @@ Current time: {current_time}
                         f"Attempted to broadcast update for non-existent execution ID: {id}"
                     )
 
-                await self.websocket_manager.broadcast_update(id, new_code_record)
+                await self.websocket_manager.broadcast_update(
+                    id, new_code_record, WebsocketConnectionType.MESSAGE
+                )
         except Exception as e:
             print(f"Failed to broadcast execution state update via WebSocket: {e}")
 

@@ -695,3 +695,10 @@ class HealthCheckResponse(BaseModel):
     """
 
     version: str = Field(..., description="Version of the Local Operator")
+
+
+class WebsocketConnectionType(str, Enum):
+    """Types of websocket connections."""
+
+    MESSAGE = "message"
+    HEALTH = "health"

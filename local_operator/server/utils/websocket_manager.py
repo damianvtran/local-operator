@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional, Set
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+from local_operator.server.models.schemas import WebsocketConnectionType
 from local_operator.types import CodeExecutionResult
 
 logger = logging.getLogger("local_operator.server.utils.websocket_manager")
@@ -24,26 +25,36 @@ class WebSocketManager:
     updates to connected clients.
 
     Attributes:
-        message_connections (Dict[str, Set[WebSocket]]): Maps message IDs to a set of
-            connected WebSockets.
-        connection_messages (Dict[WebSocket, Set[str]]): Maps WebSockets to a set of
-            message IDs they are subscribed to.
+        connections (Dict[WebsocketConnectionType, Dict[str, Set[WebSocket]]]):
+            Maps connection types to message IDs to a set of connected WebSockets.
+        connection_subscriptions (Dict[WebSocket, Dict[WebsocketConnectionType, Set[str]]]):
+            Maps WebSockets to connection types to a set of message IDs they are
+            subscribed to.
     """
 
     def __init__(self):
         """Initialize the WebSocketManager."""
-        # Maps message IDs to a set of connected WebSockets
-        self.message_connections: Dict[str, Set[WebSocket]] = {}
-        # Maps WebSockets to a set of message IDs they are subscribed to
-        self.connection_messages: Dict[WebSocket, Set[str]] = {}
+        # Maps connection types to message IDs to a set of connected WebSockets
+        self.connections: Dict[WebsocketConnectionType, Dict[str, Set[WebSocket]]] = {
+            conn_type: {} for conn_type in WebsocketConnectionType
+        }
+        # Maps WebSockets to connection types to a set of message IDs they are subscribed to
+        self.connection_subscriptions: Dict[WebSocket, Dict[WebsocketConnectionType, Set[str]]] = {}
 
-    async def connect(self, websocket: WebSocket, message_id: str) -> bool:
+    async def connect(
+        self,
+        websocket: WebSocket,
+        message_id: str,
+        connection_type: WebsocketConnectionType = WebsocketConnectionType.MESSAGE,
+    ) -> bool:
         """
-        Connect a WebSocket to a message ID.
+        Connect a WebSocket to a message ID with a specific connection type.
 
         Args:
             websocket (WebSocket): The WebSocket to connect.
             message_id (str): The message ID to connect to.
+            connection_type (ConnectionType): The type of connection to establish.
+                Defaults to ConnectionType.MESSAGE.
 
         Returns:
             bool: True if the connection was successful, False otherwise.
@@ -51,20 +62,23 @@ class WebSocketManager:
         # The websocket should already be accepted by the caller
         # This method just registers the connection in our tracking system
         try:
-            # Add the WebSocket to the message connections
-            if message_id not in self.message_connections:
-                self.message_connections[message_id] = set()
-            self.message_connections[message_id].add(websocket)
+            # Add the WebSocket to the connections for this type
+            if message_id not in self.connections[connection_type]:
+                self.connections[connection_type][message_id] = set()
+            self.connections[connection_type][message_id].add(websocket)
 
             logger.info(
-                f"Connected WebSocket to message ID: {message_id} "
-                f"({len(self.message_connections[message_id])} connections)"
+                f"Connected WebSocket to message ID: {message_id} with "
+                f"type: {connection_type.value} "
+                f"({len(self.connections[connection_type][message_id])} connections)"
             )
 
-            # Add the message ID to the connection messages
-            if websocket not in self.connection_messages:
-                self.connection_messages[websocket] = set()
-            self.connection_messages[websocket].add(message_id)
+            # Add the message ID to the connection subscriptions
+            if websocket not in self.connection_subscriptions:
+                self.connection_subscriptions[websocket] = {
+                    conn_type: set() for conn_type in WebsocketConnectionType
+                }
+            self.connection_subscriptions[websocket][connection_type].add(message_id)
 
             # Send a connection established message
             try:
@@ -76,6 +90,7 @@ class WebSocketManager:
                             {
                                 "type": "connection_established",
                                 "message_id": message_id,
+                                "connection_type": connection_type.value,
                                 "status": "connected",
                             }
                         )
@@ -85,10 +100,10 @@ class WebSocketManager:
                     # Client disconnected immediately after connecting
                     logger.warning(
                         "Client disconnected immediately after connecting "
-                        f"for message ID: {message_id}"
+                        f"for message ID: {message_id} with type: {connection_type.value}"
                     )
                     # Clean up the connection state
-                    self._remove_connection_tracking(websocket, message_id)
+                    self._remove_connection_tracking(websocket, message_id, connection_type)
                     return False
             except Exception as e:
                 logger.warning(f"Failed to send connection confirmation: {e}")
@@ -98,16 +113,19 @@ class WebSocketManager:
                 )
 
                 # Clean up the connection state but don't try to close the websocket
-                self._remove_connection_tracking(websocket, message_id)
+                self._remove_connection_tracking(websocket, message_id, connection_type)
                 return False
         except Exception as e:
             logger.error(f"Error connecting WebSocket: {e}")
             # Ensure we clean up any partial connection state
-            self._remove_connection_tracking(websocket, message_id)
+            self._remove_connection_tracking(websocket, message_id, connection_type)
             return False
 
     def _remove_connection_tracking(
-        self, websocket: WebSocket, message_id: Optional[str] = None
+        self,
+        websocket: WebSocket,
+        message_id: Optional[str] = None,
+        connection_type: Optional[WebsocketConnectionType] = None,
     ) -> None:
         """
         Remove a WebSocket from our tracking system without trying to close it.
@@ -118,30 +136,72 @@ class WebSocketManager:
             websocket (WebSocket): The WebSocket to remove from tracking.
             message_id (str, optional): A specific message ID to remove. If None,
                                         removes from all message IDs.
+            connection_type (WebsocketConnectionType, optional):
+                A specific connection type to remove. If None, removes from all
+                connection types.
         """
         try:
-            # If a specific message ID is provided, only remove from that one
-            if message_id is not None:
-                if message_id in self.message_connections:
-                    self.message_connections[message_id].discard(websocket)
-                    if not self.message_connections[message_id]:
-                        del self.message_connections[message_id]
+            # If a specific message ID and connection type are provided, only remove from that one
+            if message_id is not None and connection_type is not None:
+                if message_id in self.connections[connection_type]:
+                    self.connections[connection_type][message_id].discard(websocket)
+                    if not self.connections[connection_type][message_id]:
+                        del self.connections[connection_type][message_id]
 
-                if websocket in self.connection_messages:
-                    self.connection_messages[websocket].discard(message_id)
-                    if not self.connection_messages[websocket]:
-                        del self.connection_messages[websocket]
+                if websocket in self.connection_subscriptions:
+                    self.connection_subscriptions[websocket][connection_type].discard(message_id)
+                    if not any(
+                        subscriptions
+                        for subscriptions in self.connection_subscriptions[websocket].values()
+                    ):
+                        del self.connection_subscriptions[websocket]
+            elif message_id is not None:
+                # Remove from all connection types for this message ID
+                for conn_type in WebsocketConnectionType:
+                    if message_id in self.connections[conn_type]:
+                        self.connections[conn_type][message_id].discard(websocket)
+                        if not self.connections[conn_type][message_id]:
+                            del self.connections[conn_type][message_id]
+
+                if websocket in self.connection_subscriptions:
+                    for conn_type in WebsocketConnectionType:
+                        self.connection_subscriptions[websocket][conn_type].discard(message_id)
+                    if not any(
+                        subscriptions
+                        for subscriptions in self.connection_subscriptions[websocket].values()
+                    ):
+                        del self.connection_subscriptions[websocket]
+            elif connection_type is not None:
+                # Remove from all message IDs for this connection type
+                for msg_id in list(
+                    self.connection_subscriptions.get(websocket, {}).get(connection_type, set())
+                ):
+                    if msg_id in self.connections[connection_type]:
+                        self.connections[connection_type][msg_id].discard(websocket)
+                        if not self.connections[connection_type][msg_id]:
+                            del self.connections[connection_type][msg_id]
+
+                if websocket in self.connection_subscriptions:
+                    self.connection_subscriptions[websocket][connection_type].clear()
+                    if not any(
+                        subscriptions
+                        for subscriptions in self.connection_subscriptions[websocket].values()
+                    ):
+                        del self.connection_subscriptions[websocket]
             else:
-                # Remove the WebSocket from all message connections
-                for msg_id in list(self.connection_messages.get(websocket, set())):
-                    if msg_id in self.message_connections:
-                        self.message_connections[msg_id].discard(websocket)
-                        if not self.message_connections[msg_id]:
-                            del self.message_connections[msg_id]
+                # Remove the WebSocket from all connections
+                for conn_type in WebsocketConnectionType:
+                    for msg_id in list(
+                        self.connection_subscriptions.get(websocket, {}).get(conn_type, set())
+                    ):
+                        if msg_id in self.connections[conn_type]:
+                            self.connections[conn_type][msg_id].discard(websocket)
+                            if not self.connections[conn_type][msg_id]:
+                                del self.connections[conn_type][msg_id]
 
-                # Remove the WebSocket from the connection messages
-                if websocket in self.connection_messages:
-                    del self.connection_messages[websocket]
+                # Remove the WebSocket from the connection subscriptions
+                if websocket in self.connection_subscriptions:
+                    del self.connection_subscriptions[websocket]
         except Exception as e:
             logger.error(f"Error removing WebSocket from tracking: {e}")
 
@@ -166,24 +226,33 @@ class WebSocketManager:
             # Always clean up the connection state regardless of whether close() succeeds
             self._remove_connection_tracking(websocket)
 
-    async def subscribe(self, websocket: WebSocket, message_id: str) -> None:
+    async def subscribe(
+        self,
+        websocket: WebSocket,
+        message_id: str,
+        connection_type: WebsocketConnectionType = WebsocketConnectionType.MESSAGE,
+    ) -> None:
         """
-        Subscribe a WebSocket to a message ID.
+        Subscribe a WebSocket to a message ID with a specific connection type.
 
         Args:
             websocket (WebSocket): The WebSocket to subscribe.
             message_id (str): The message ID to subscribe to.
+            connection_type (ConnectionType): The type of connection to establish.
+                Defaults to ConnectionType.MESSAGE.
         """
         try:
-            # Add the WebSocket to the message connections
-            if message_id not in self.message_connections:
-                self.message_connections[message_id] = set()
-            self.message_connections[message_id].add(websocket)
+            # Add the WebSocket to the connections for this type
+            if message_id not in self.connections[connection_type]:
+                self.connections[connection_type][message_id] = set()
+            self.connections[connection_type][message_id].add(websocket)
 
-            # Add the message ID to the connection messages
-            if websocket not in self.connection_messages:
-                self.connection_messages[websocket] = set()
-            self.connection_messages[websocket].add(message_id)
+            # Add the message ID to the connection subscriptions
+            if websocket not in self.connection_subscriptions:
+                self.connection_subscriptions[websocket] = {
+                    conn_type: set() for conn_type in WebsocketConnectionType
+                }
+            self.connection_subscriptions[websocket][connection_type].add(message_id)
 
             # Send a subscription confirmation message
             try:
@@ -192,6 +261,7 @@ class WebSocketManager:
                         {
                             "type": "subscription",
                             "message_id": message_id,
+                            "connection_type": connection_type.value,
                             "status": "subscribed",
                         }
                     )
@@ -201,28 +271,41 @@ class WebSocketManager:
                 # If we can't send the confirmation, the client might have disconnected
                 # We'll keep the subscription active but log the issue
         except Exception as e:
-            logger.error(f"Error subscribing WebSocket to {message_id}: {e}")
+            logger.error(
+                f"Error subscribing WebSocket to {message_id} with type "
+                f"{connection_type.value}: {e}"
+            )
 
-    async def unsubscribe(self, websocket: WebSocket, message_id: str) -> None:
+    async def unsubscribe(
+        self,
+        websocket: WebSocket,
+        message_id: str,
+        connection_type: WebsocketConnectionType = WebsocketConnectionType.MESSAGE,
+    ) -> None:
         """
-        Unsubscribe a WebSocket from a message ID.
+        Unsubscribe a WebSocket from a message ID with a specific connection type.
 
         Args:
             websocket (WebSocket): The WebSocket to unsubscribe.
             message_id (str): The message ID to unsubscribe from.
+            connection_type (ConnectionType): The type of connection to unsubscribe from.
+                Defaults to ConnectionType.MESSAGE.
         """
         try:
-            # Remove the WebSocket from the message connections
-            if message_id in self.message_connections:
-                self.message_connections[message_id].discard(websocket)
-                if not self.message_connections[message_id]:
-                    del self.message_connections[message_id]
+            # Remove the WebSocket from the connections for this type
+            if message_id in self.connections[connection_type]:
+                self.connections[connection_type][message_id].discard(websocket)
+                if not self.connections[connection_type][message_id]:
+                    del self.connections[connection_type][message_id]
 
-            # Remove the message ID from the connection messages
-            if websocket in self.connection_messages:
-                self.connection_messages[websocket].discard(message_id)
-                if not self.connection_messages[websocket]:
-                    del self.connection_messages[websocket]
+            # Remove the message ID from the connection subscriptions
+            if websocket in self.connection_subscriptions:
+                self.connection_subscriptions[websocket][connection_type].discard(message_id)
+                if not any(
+                    subscriptions
+                    for subscriptions in self.connection_subscriptions[websocket].values()
+                ):
+                    del self.connection_subscriptions[websocket]
 
             # Send an unsubscription confirmation message
             try:
@@ -231,6 +314,7 @@ class WebSocketManager:
                         {
                             "type": "unsubscription",
                             "message_id": message_id,
+                            "connection_type": connection_type.value,
                             "status": "unsubscribed",
                         }
                     )
@@ -240,22 +324,36 @@ class WebSocketManager:
                 # If we can't send the confirmation, the client might have disconnected
                 # The unsubscription was still processed, so we just log the issue
         except Exception as e:
-            logger.error(f"Error unsubscribing WebSocket from {message_id}: {e}")
+            logger.error(
+                f"Error unsubscribing WebSocket from {message_id} with "
+                f"type: {connection_type.value}: {e}"
+            )
 
-    async def broadcast(self, message_id: str, data: Dict[str, Any]) -> None:
+    async def broadcast(
+        self,
+        message_id: str,
+        data: Dict[str, Any],
+        connection_type: WebsocketConnectionType = WebsocketConnectionType.MESSAGE,
+    ) -> None:
         """
-        Broadcast a message to all WebSockets subscribed to a message ID.
+        Broadcast a message to all WebSockets subscribed to a message ID with a
+        specific connection type.
 
         Args:
             message_id (str): The message ID to broadcast to.
             data (Dict[str, Any]): The data to broadcast.
+            connection_type (WebsocketConnectionType): The type of connection to broadcast to.
+                Defaults to WebsocketConnectionType.MESSAGE.
         """
-        if message_id not in self.message_connections:
-            logger.debug(f"No connections for message ID: {message_id}")
+        if message_id not in self.connections[connection_type]:
+            logger.debug(
+                f"No connections for message ID: {message_id} with type: {connection_type.value}"
+            )
             return
 
-        # Add the message ID to the data
+        # Add the message ID and connection type to the data
         data["message_id"] = message_id
+        data["connection_type"] = connection_type.value
 
         # Convert the data to JSON
         try:
@@ -265,28 +363,41 @@ class WebSocketManager:
             return
 
         # Broadcast the message to all WebSockets subscribed to the message ID
+        # with the specified type
         disconnected_websockets = set()
 
-        # Check if there are any connections for this message ID
-        if message_id not in self.message_connections:
-            logger.debug(f"No connections found for message ID: {message_id}")
+        # Check if there are any connections for this message ID and type
+        if message_id not in self.connections[connection_type]:
+            logger.debug(
+                f"No connections found for message ID: {message_id} with "
+                f"type: {connection_type.value}"
+            )
             return
 
         # Make a copy to avoid modification during iteration
-        connections = self.message_connections[message_id].copy()
+        connections = self.connections[connection_type][message_id].copy()
 
         if not connections:
-            logger.debug(f"Empty connection set for message ID: {message_id}")
+            logger.debug(
+                f"Empty connection set for message ID: {message_id} with "
+                f"type: {connection_type.value}"
+            )
             return
 
         for websocket in connections:
             try:
                 # Check if the WebSocket is still in our tracking
                 if (
-                    websocket not in self.connection_messages
-                    or message_id not in self.connection_messages.get(websocket, set())
+                    websocket not in self.connection_subscriptions
+                    or message_id
+                    not in self.connection_subscriptions.get(websocket, {}).get(
+                        connection_type, set()
+                    )
                 ):
-                    logger.debug(f"WebSocket no longer tracked for message ID: {message_id}")
+                    logger.debug(
+                        f"WebSocket no longer tracked for message ID: {message_id} with "
+                        f"type: {connection_type.value}"
+                    )
                     disconnected_websockets.add(websocket)
                     continue
 
@@ -298,42 +409,49 @@ class WebSocketManager:
 
         # Disconnect any WebSockets that failed to receive the message
         for websocket in disconnected_websockets:
-            logger.debug(f"Disconnecting failed WebSocket for message ID: {message_id}")
+            logger.debug(
+                f"Disconnecting failed WebSocket for message ID: {message_id} with "
+                f"type: {connection_type.value}"
+            )
             try:
                 await self.disconnect(websocket)
             except Exception as e:
                 logger.error(f"Error disconnecting WebSocket: {e}")
                 # Even if disconnect fails, make sure we remove the connection from our tracking
                 try:
-                    # Remove the WebSocket from all message connections
-                    for msg_id in self.connection_messages.get(websocket, set()):
-                        if msg_id in self.message_connections:
-                            self.message_connections[msg_id].discard(websocket)
-                            if not self.message_connections[msg_id]:
-                                del self.message_connections[msg_id]
-
-                    # Remove the WebSocket from the connection messages
-                    if websocket in self.connection_messages:
-                        del self.connection_messages[websocket]
+                    # Remove the WebSocket from all connections
+                    self._remove_connection_tracking(websocket)
                 except Exception as cleanup_error:
                     logger.error(f"Error cleaning up WebSocket state: {cleanup_error}")
 
     async def broadcast_update(
-        self, message_id: str, execution_result: CodeExecutionResult
+        self,
+        message_id: str,
+        execution_result: CodeExecutionResult,
+        connection_type: WebsocketConnectionType = WebsocketConnectionType.MESSAGE,
     ) -> None:
         """
-        Broadcast an execution result update to all WebSockets subscribed to a message ID.
+        Broadcast an execution result update to all WebSockets subscribed to a
+        message ID with a specific connection type.
 
         Args:
             message_id (str): The message ID to broadcast to.
             execution_result (CodeExecutionResult): The execution result to broadcast.
+            connection_type (WebsocketConnectionType): The type of connection to broadcast to.
+                Defaults to WebsocketConnectionType.MESSAGE.
         """
         try:
             # Convert the execution result to a dictionary
             data = execution_result.model_dump()
 
             # Broadcast the update
-            logger.debug(f"Broadcasting update for message ID: {message_id}")
-            await self.broadcast(message_id, data)
+            logger.debug(
+                f"Broadcasting update for message ID: {message_id} with "
+                f"type: {connection_type.value}"
+            )
+            await self.broadcast(message_id, data, connection_type)
         except Exception as e:
-            logger.error(f"Error broadcasting update for message ID {message_id}: {e}")
+            logger.error(
+                f"Error broadcasting update for message ID {message_id} with "
+                f"type: {connection_type.value}: {e}"
+            )
