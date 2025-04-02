@@ -22,6 +22,7 @@ from local_operator.mocks import ChatMock
 from local_operator.model.configure import ModelConfiguration
 from local_operator.model.registry import ModelInfo
 from local_operator.server.app import app
+from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import (
     ActionType,
     AgentState,
@@ -187,6 +188,10 @@ def test_app_client(temp_dir):
         original_state["config_manager"] = app.state.config_manager
     if hasattr(app.state, "agent_registry"):
         original_state["agent_registry"] = app.state.agent_registry
+    if hasattr(app.state, "job_manager"):
+        original_state["job_manager"] = app.state.job_manager
+    if hasattr(app.state, "websocket_manager"):
+        original_state["websocket_manager"] = app.state.websocket_manager
 
     # Set up test-specific state
     mock_credential_manager = CredentialManager(config_dir=temp_dir)
@@ -194,6 +199,7 @@ def test_app_client(temp_dir):
     # Use a shorter refresh interval for tests to ensure changes are quickly reflected
     mock_agent_registry = AgentRegistry(config_dir=temp_dir, refresh_interval=1.0)
     mock_job_manager = JobManager()
+    mock_websocket_manager = WebSocketManager()
 
     mock_credential_manager.get_credential = lambda key: SecretStr("test-credential")
 
@@ -201,6 +207,7 @@ def test_app_client(temp_dir):
     app.state.config_manager = mock_config_manager
     app.state.agent_registry = mock_agent_registry
     app.state.job_manager = mock_job_manager
+    app.state.websocket_manager = mock_websocket_manager
 
     # Create and yield the test client
     transport = ASGITransport(app=app)
