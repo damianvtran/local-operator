@@ -963,21 +963,6 @@ class LocalCodeExecutor:
 
         agent_security_prompt = self.agent.security_prompt if self.agent else ""
 
-        await self.update_job_execution_state(
-            CodeExecutionResult(
-                status=ProcessResponseStatus.IN_PROGRESS,
-                message="Reviewing action for safety and security",
-                role=ConversationRole.ASSISTANT,
-                execution_type=ExecutionType.SECURITY_CHECK,
-                stdout="",
-                stderr="",
-                logging="",
-                formatted_print="",
-                code="",
-                files=[],
-            )
-        )
-
         if prompt_user:
             safety_prompt = SafetyCheckSystemPrompt.format(security_prompt=agent_security_prompt)
 
@@ -1655,22 +1640,6 @@ class LocalCodeExecutor:
                 message="Action completed",
             )
 
-        await self.update_job_execution_state(
-            CodeExecutionResult(
-                stdout="",
-                stderr="",
-                logging="",
-                formatted_print="",
-                code=response.code,
-                message=response.response,
-                role=ConversationRole.ASSISTANT,
-                status=ProcessResponseStatus.IN_PROGRESS,
-                files=[],
-                execution_type=ExecutionType.ACTION,
-                action=response.action,
-            )
-        )
-
         print_execution_section(
             ExecutionSection.HEADER,
             step=self.step_counter,
@@ -1698,10 +1667,42 @@ class LocalCodeExecutor:
                         )
 
                         # First check code safety
+
+                        await self.update_job_execution_state(
+                            CodeExecutionResult(
+                                status=ProcessResponseStatus.IN_PROGRESS,
+                                message="Reviewing action for safety and security",
+                                role=ConversationRole.ASSISTANT,
+                                execution_type=ExecutionType.SECURITY_CHECK,
+                                stdout="",
+                                stderr="",
+                                logging="",
+                                formatted_print="",
+                                code="",
+                                files=[],
+                            )
+                        )
+
                         safety_result = await self.check_and_confirm_safety(response)
                         execution_result = await self.handle_safety_result(safety_result, response)
 
                         if not execution_result:
+                            await self.update_job_execution_state(
+                                CodeExecutionResult(
+                                    stdout="",
+                                    stderr="",
+                                    logging="",
+                                    formatted_print="",
+                                    code=response.code,
+                                    message=response.response,
+                                    role=ConversationRole.ASSISTANT,
+                                    status=ProcessResponseStatus.IN_PROGRESS,
+                                    files=[],
+                                    execution_type=ExecutionType.ACTION,
+                                    action=response.action,
+                                )
+                            )
+
                             execution_result = await self.write_file(file_path, content)
 
                         print_execution_section(
@@ -1726,10 +1727,41 @@ class LocalCodeExecutor:
                         )
 
                         # First check code safety
+                        await self.update_job_execution_state(
+                            CodeExecutionResult(
+                                status=ProcessResponseStatus.IN_PROGRESS,
+                                message="Reviewing action for safety and security",
+                                role=ConversationRole.ASSISTANT,
+                                execution_type=ExecutionType.SECURITY_CHECK,
+                                stdout="",
+                                stderr="",
+                                logging="",
+                                formatted_print="",
+                                code="",
+                                files=[],
+                            )
+                        )
+
                         safety_result = await self.check_and_confirm_safety(response)
                         execution_result = await self.handle_safety_result(safety_result, response)
 
                         if not execution_result:
+                            await self.update_job_execution_state(
+                                CodeExecutionResult(
+                                    stdout="",
+                                    stderr="",
+                                    logging="",
+                                    formatted_print="",
+                                    code=response.code,
+                                    message=response.response,
+                                    role=ConversationRole.ASSISTANT,
+                                    status=ProcessResponseStatus.IN_PROGRESS,
+                                    files=[],
+                                    execution_type=ExecutionType.ACTION,
+                                    action=response.action,
+                                )
+                            )
+
                             execution_result = await self.edit_file(file_path, replacements)
 
                         print_execution_section(
@@ -1752,10 +1784,41 @@ class LocalCodeExecutor:
                         )
 
                         # First check code safety
+                        await self.update_job_execution_state(
+                            CodeExecutionResult(
+                                status=ProcessResponseStatus.IN_PROGRESS,
+                                message="Reviewing action for safety and security",
+                                role=ConversationRole.ASSISTANT,
+                                execution_type=ExecutionType.SECURITY_CHECK,
+                                stdout="",
+                                stderr="",
+                                logging="",
+                                formatted_print="",
+                                code="",
+                                files=[],
+                            )
+                        )
+
                         safety_result = await self.check_and_confirm_safety(response)
                         execution_result = await self.handle_safety_result(safety_result, response)
 
                         if not execution_result:
+                            await self.update_job_execution_state(
+                                CodeExecutionResult(
+                                    stdout="",
+                                    stderr="",
+                                    logging="",
+                                    formatted_print="",
+                                    code=response.code,
+                                    message=response.response,
+                                    role=ConversationRole.ASSISTANT,
+                                    status=ProcessResponseStatus.IN_PROGRESS,
+                                    files=[],
+                                    execution_type=ExecutionType.ACTION,
+                                    action=response.action,
+                                )
+                            )
+
                             execution_result = await self.read_file(file_path)
                     else:
                         raise ValueError("File path is required for READ action")
@@ -1771,10 +1834,41 @@ class LocalCodeExecutor:
                         )
 
                         # First check code safety
+                        await self.update_job_execution_state(
+                            CodeExecutionResult(
+                                status=ProcessResponseStatus.IN_PROGRESS,
+                                message="Reviewing action for safety and security",
+                                role=ConversationRole.ASSISTANT,
+                                execution_type=ExecutionType.SECURITY_CHECK,
+                                stdout="",
+                                stderr="",
+                                logging="",
+                                formatted_print="",
+                                code="",
+                                files=[],
+                            )
+                        )
+
                         safety_result = await self.check_and_confirm_safety(response)
                         execution_result = await self.handle_safety_result(safety_result, response)
 
                         if not execution_result:
+                            await self.update_job_execution_state(
+                                CodeExecutionResult(
+                                    stdout="",
+                                    stderr="",
+                                    logging="",
+                                    formatted_print="",
+                                    code=response.code,
+                                    message=response.response,
+                                    role=ConversationRole.ASSISTANT,
+                                    status=ProcessResponseStatus.IN_PROGRESS,
+                                    files=[],
+                                    execution_type=ExecutionType.ACTION,
+                                    action=response.action,
+                                )
+                            )
+
                             execution_result = await self.execute_code(response)
 
                         if "code execution cancelled by user" in execution_result.message:
