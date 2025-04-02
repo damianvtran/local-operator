@@ -6,6 +6,7 @@ through HTTP requests instead of CLI.
 """
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from importlib.metadata import version
 from pathlib import Path
@@ -26,8 +27,25 @@ from local_operator.server.routes import (
     jobs,
     models,
     static,
+    websockets,
 )
+from local_operator.server.utils.websocket_manager import WebSocketManager
 
+ENV_LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+LOG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+
+if ENV_LOG_LEVEL not in LOG_LEVELS:
+    print(f"Invalid log level: {ENV_LOG_LEVEL}, using INFO")
+    ENV_LOG_LEVEL = "INFO"
+
+logging.basicConfig(level=LOG_LEVELS[ENV_LOG_LEVEL])
 logger = logging.getLogger("local_operator.server")
 
 
@@ -56,12 +74,14 @@ async def lifespan(app: FastAPI):
     # changes made by child processes are quickly reflected in the parent process
     app.state.agent_registry = AgentRegistry(config_dir=agents_dir, refresh_interval=3.0)
     app.state.job_manager = JobManager()
+    app.state.websocket_manager = WebSocketManager()
     yield
     # Clean up on shutdown
     app.state.credential_manager = None
     app.state.config_manager = None
     app.state.agent_registry = None
     app.state.job_manager = None
+    app.state.websocket_manager = None
 
 
 app = FastAPI(
@@ -131,4 +151,9 @@ app.include_router(
 # /v1/static
 app.include_router(
     static.router,
+)
+
+# /v1/ws
+app.include_router(
+    websockets.router,
 )

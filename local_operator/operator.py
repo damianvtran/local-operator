@@ -6,7 +6,7 @@ import signal
 import uuid
 from enum import Enum
 from pathlib import Path
-from typing import List
+from typing import AsyncGenerator, List
 
 from langchain_core.messages import BaseMessage
 from pydantic import ValidationError
@@ -15,7 +15,6 @@ from local_operator.agents import AgentData, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.console import (
     VerbosityLevel,
-    format_agent_output,
     print_agent_response,
     print_cli_banner,
     spinner_context,
@@ -378,7 +377,9 @@ class Operator:
             f"Last error: {last_error}"
         )
 
-    async def generate_plan(self, current_task_classification: RequestClassification) -> str:
+    async def generate_plan(
+        self, current_task_classification: RequestClassification
+    ) -> AsyncGenerator[str, None]:
         """Generate a plan for the agent to follow.
 
         This method constructs a conversation with the agent to generate a plan. It
@@ -393,7 +394,7 @@ class Operator:
         history.
 
         Returns:
-            str: The generated plan or an empty string if planning is skipped.
+            AsyncGenerator[str, None]: The generated plan or an empty string if planning is skipped.
         """
         # Clear any existing plans from the previous invocation
         if current_task_classification.type != RequestType.CONTINUE:
@@ -423,8 +424,28 @@ class Operator:
             )
         )
 
+        new_message = self.executor.add_to_code_history(
+            CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message="",
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.SUCCESS,
+                files=[],
+                execution_type=ExecutionType.PLAN,
+                is_streamable=True,
+                is_complete=False,
+            ),
+            None,
+            current_task_classification,
+        )
+
         await self.executor.update_job_execution_state(
             CodeExecutionResult(
+                id=new_message.id,
                 stdout="",
                 stderr="",
                 logging="",
@@ -435,23 +456,36 @@ class Operator:
                 status=ProcessResponseStatus.IN_PROGRESS,
                 files=[],
                 execution_type=ExecutionType.PLAN,
+                is_streamable=True,
+                is_complete=False,
             )
         )
 
-        response = await self.executor.invoke_model(messages)
+        if self.persist_agent_conversation and self.agent_registry and self.current_agent:
+            self.agent_registry.update_agent_state(
+                agent_id=self.current_agent.id,
+                agent_state=self.executor.agent_state,
+            )
 
-        response_content = (
-            response.content if isinstance(response.content, str) else str(response.content)
-        )
+        async for chunk in self.executor.stream_model(messages):
+            chunk_content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+            new_message.message += chunk_content
+
+            await self.executor.broadcast_message_update(
+                new_message.id,
+                new_message,
+            )
+
+            yield chunk_content
 
         # Remove think tags for reasoning models
-        response_content = remove_think_tags(response_content)
+        new_message.message = remove_think_tags(new_message.message)
 
         self.executor.agent_state.conversation.extend(
             [
                 ConversationRecord(
                     role=ConversationRole.ASSISTANT,
-                    content=response_content,
+                    content=new_message.message,
                     should_summarize=False,
                 ),
                 ConversationRecord(
@@ -466,23 +500,37 @@ class Operator:
             ]
         )
 
-        self.executor.set_current_plan(response_content)
-        self.executor.add_to_code_history(
+        new_message.is_complete = True
+
+        await self.executor.update_code_history(
+            new_message.id,
+            new_message,
+        )
+
+        await self.executor.broadcast_message_update(
+            new_message.id,
+            new_message,
+        )
+
+        await self.executor.update_job_execution_state(
             CodeExecutionResult(
+                id=new_message.id,
                 stdout="",
                 stderr="",
                 logging="",
                 formatted_print="",
                 code="",
-                message=response_content,
+                message="",
                 role=ConversationRole.ASSISTANT,
-                status=ProcessResponseStatus.SUCCESS,
+                status=ProcessResponseStatus.IN_PROGRESS,
                 files=[],
                 execution_type=ExecutionType.PLAN,
-            ),
-            None,
-            current_task_classification,
+                is_streamable=True,
+                is_complete=True,
+            )
         )
+
+        self.executor.set_current_plan(new_message.message)
 
         # Save the conversation history and code execution history to the agent registry
         # if the persist_conversation flag is set.
@@ -492,9 +540,9 @@ class Operator:
                 agent_state=self.executor.agent_state,
             )
 
-        return response_content
-
-    async def generate_reflection(self, current_task_classification: RequestClassification) -> str:
+    async def generate_reflection(
+        self, current_task_classification: RequestClassification
+    ) -> AsyncGenerator[str, None]:
         """Generate a reflection for the agent.
 
         This method constructs a conversation with the agent to generate a reflection.
@@ -540,11 +588,12 @@ class Operator:
             )
         )
 
-        response = await self.executor.invoke_model(messages)
+        response_content = ""
 
-        response_content = (
-            response.content if isinstance(response.content, str) else str(response.content)
-        )
+        async for chunk in self.executor.stream_model(messages):
+            chunk_content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+            response_content += chunk_content
+            yield chunk_content
 
         # Remove think tags for reasoning models
         response_content = remove_think_tags(response_content)
@@ -587,11 +636,9 @@ class Operator:
                 agent_state=self.executor.agent_state,
             )
 
-        return response_content
-
     async def generate_response(
         self, result: ResponseJsonSchema, current_task_classification: RequestClassification
-    ) -> str:
+    ) -> AsyncGenerator[str, None]:
         """Generate a final response for the user based on the conversation history.
 
         This method constructs a conversation with the agent to generate a well-structured
@@ -602,7 +649,7 @@ class Operator:
             current_task_classification: Classification of the current request/task
 
         Returns:
-            str: The generated response content
+            AsyncGenerator[str, str]: The generated response content
 
         Raises:
             Exception: If there's an error during model invocation
@@ -618,8 +665,28 @@ class Operator:
             )
         )
 
+        new_message = self.executor.add_to_code_history(
+            CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message="",
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.SUCCESS,
+                files=[],
+                execution_type=ExecutionType.RESPONSE,
+                is_streamable=True,
+                is_complete=False,
+            ),
+            None,
+            current_task_classification,
+        )
+
         await self.executor.update_job_execution_state(
             CodeExecutionResult(
+                id=new_message.id,
                 stdout="",
                 stderr="",
                 logging="",
@@ -630,53 +697,77 @@ class Operator:
                 status=ProcessResponseStatus.IN_PROGRESS,
                 files=[],
                 execution_type=ExecutionType.RESPONSE,
+                is_streamable=True,
+                is_complete=False,
             )
         )
 
-        # Invoke the model to generate the response
-        response = await self.executor.invoke_model(messages)
+        if self.persist_agent_conversation and self.agent_registry and self.current_agent:
+            self.agent_registry.update_agent_state(
+                agent_id=self.current_agent.id,
+                agent_state=self.executor.agent_state,
+            )
 
-        response_content = (
-            response.content if isinstance(response.content, str) else str(response.content)
-        )
+        # Invoke the model to generate the response
+        async for chunk in self.executor.stream_model(messages):
+            chunk_content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+            new_message.message += chunk_content
+
+            await self.executor.broadcast_message_update(
+                new_message.id,
+                new_message,
+            )
+
+            yield chunk_content
 
         # Add content to the response if it is empty to prevent invoke errors
         # from the source.
-        if not response_content:
-            response_content = "No response from the agent"
+        if not new_message.message:
+            new_message.message = "No response from the agent"
 
         # Clean up the response
-        response_content = remove_think_tags(response_content)
+        new_message.message = remove_think_tags(new_message.message)
 
         # Add the response to conversation history
         self.executor.agent_state.conversation.extend(
             [
                 ConversationRecord(
                     role=ConversationRole.ASSISTANT,
-                    content=response_content,
+                    content=new_message.message,
                     should_summarize=True,
                 ),
             ]
         )
 
-        # Add to code history
-        self.executor.add_to_code_history(
+        # Update the code history
+        new_message.is_complete = True
+
+        await self.executor.update_code_history(
+            new_message.id,
+            new_message,
+        )
+
+        await self.executor.broadcast_message_update(
+            new_message.id,
+            new_message,
+        )
+
+        await self.executor.update_job_execution_state(
             CodeExecutionResult(
+                id=new_message.id,
                 stdout="",
                 stderr="",
                 logging="",
                 formatted_print="",
                 code="",
-                message=response_content,
+                message="",
                 role=ConversationRole.ASSISTANT,
-                status=ProcessResponseStatus.SUCCESS,
+                status=ProcessResponseStatus.IN_PROGRESS,
                 files=[],
                 execution_type=ExecutionType.RESPONSE,
-                action=result.action,
-                task_classification=current_task_classification.type,
-            ),
-            None,
-            current_task_classification,
+                is_streamable=True,
+                is_complete=True,
+            )
         )
 
         # Persist conversation if enabled
@@ -685,8 +776,6 @@ class Operator:
                 agent_id=self.current_agent.id,
                 agent_state=self.executor.agent_state,
             )
-
-        return response_content
 
     def add_task_instructions(self, request_classification: RequestClassification) -> None:
         """
@@ -742,7 +831,7 @@ class Operator:
                 logging="",
                 formatted_print="",
                 code="",
-                message="",
+                message="Cleaning up the action response",
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.IN_PROGRESS,
                 files=[],
@@ -950,17 +1039,20 @@ class Operator:
 
         # Perform planning for more complex tasks
         if classification.planning_required:
-            async with spinner_context(
-                "Coming up with a plan",
-                verbosity_level=self.verbosity_level,
-            ):
-                plan = await self.generate_plan(classification)
+            plan = ""
 
-                if plan and self.verbosity_level >= VerbosityLevel.VERBOSE:
-                    formatted_plan = format_agent_output(plan)
-                    print("\n\033[1;36m╭─ Agent Plan ──────────────────────────────────────\033[0m")
-                    print(f"\033[1;36m│\033[0m {formatted_plan}")
-                    print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
+            if self.verbosity_level >= VerbosityLevel.VERBOSE:
+                print("\n\033[1;36m╭─ Agent Plan ──────────────────────────────────────\033[0m")
+
+            async for chunk in self.generate_plan(classification):
+                plan += chunk
+
+                if self.verbosity_level >= VerbosityLevel.VERBOSE:
+                    print(chunk, end="", flush=True)
+
+            if self.verbosity_level >= VerbosityLevel.VERBOSE:
+                print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
+
         elif classification.type != RequestType.CONTINUE:
             self.executor.set_current_plan("")
 
@@ -982,7 +1074,7 @@ class Operator:
                     logging="",
                     formatted_print="",
                     code="",
-                    message="",
+                    message="Thinking about my next action",
                     role=ConversationRole.ASSISTANT,
                     status=ProcessResponseStatus.IN_PROGRESS,
                     files=[],
@@ -1036,31 +1128,44 @@ class Operator:
                 if not is_terminal_response:
                     self.executor.update_ephemeral_messages()
 
-                    # Reflect on the results of the last operation
-                    async with spinner_context(
-                        "Reflecting on the last step",
-                        verbosity_level=self.verbosity_level,
-                    ):
-                        reflection = await self.generate_reflection(classification)
+                    reflection = ""
 
-                        if reflection and self.verbosity_level >= VerbosityLevel.VERBOSE:
-                            formatted_reflection = format_agent_output(reflection)
-                            print(
-                                "\n\033[1;36m╭─ Agent Reflection "
-                                "──────────────────────────────\033[0m"
-                            )
-                            print(f"\033[1;36m│\033[0m {formatted_reflection}")
-                            print(
-                                "\033[1;36m╰────────────────────────────────"
-                                "──────────────────\033[0m\n"
-                            )
+                    if self.verbosity_level >= VerbosityLevel.VERBOSE:
+                        print(
+                            "\n\033[1;36m╭─ Agent Reflection ──────────────────────────────\033[0m"
+                        )
+
+                    # Reflect on the results of the last operation
+                    async for chunk in self.generate_reflection(classification):
+                        reflection += chunk
+                        if self.verbosity_level >= VerbosityLevel.VERBOSE:
+                            print(chunk, end="", flush=True)
+
+                    if self.verbosity_level >= VerbosityLevel.VERBOSE:
+                        print(
+                            "\n\033[1;36m╰────────────────────────────────"
+                            "──────────────────\033[0m\n"
+                        )
 
                 else:
-                    final_response = await self.generate_response(response_json, classification)
+                    final_response = ""
 
-                    print_agent_response(
-                        self.executor.step_counter, final_response, self.verbosity_level
-                    )
+                    if self.verbosity_level >= VerbosityLevel.VERBOSE:
+                        print(
+                            f"\n\033[1;36m╭─ Agent Response (Step {self.executor.step_counter}) "
+                            "──────────────────────────\033[0m"
+                        )
+
+                    async for chunk in self.generate_response(response_json, classification):
+                        final_response += chunk
+
+                        if self.verbosity_level >= VerbosityLevel.VERBOSE:
+                            print(chunk, end="", flush=True)
+
+                    if self.verbosity_level >= VerbosityLevel.VERBOSE:
+                        print(
+                            "\033[1;36m╰══════════════════════════════════════════════════╯\033[0m"
+                        )
 
             # Auto-save on each step if enabled
             if self.auto_save_conversation:

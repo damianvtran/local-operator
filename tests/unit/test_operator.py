@@ -1,6 +1,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain_core.messages import BaseMessage
 from pydantic import ValidationError
 
 from local_operator.executor import LocalCodeExecutor
@@ -25,6 +26,7 @@ def mock_model_config():
     model_configuration = MagicMock()
     model_configuration.instance = AsyncMock()
     model_configuration.instance.ainvoke = AsyncMock()
+    model_configuration.instance.astream = AsyncMock()
     yield model_configuration
 
 
@@ -120,7 +122,11 @@ async def test_cli_operator_chat(cli_operator, mock_model_config):
     patch("builtins.input", return_value="exit").start()
 
     # Set up the mock response
-    mock_model_config.instance.ainvoke.return_value.content = mock_response.model_dump_json()
+    async def mock_astream(*args, **kwargs):
+        message = BaseMessage(content=mock_response.model_dump_json(), type="assistant")
+        yield message
+
+    mock_model_config.instance.astream = mock_astream
 
     # Execute the test
     await cli_operator.chat()

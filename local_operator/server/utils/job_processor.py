@@ -21,6 +21,7 @@ from local_operator.jobs import (
     JobStatus,
 )
 from local_operator.server.utils.operator import create_operator
+from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import ConversationRecord
 
 logger = logging.getLogger("local_operator.server.utils.job_processor")
@@ -35,6 +36,7 @@ def run_job_in_process(
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
     job_manager: JobManager,
+    websocket_manager: Optional[WebSocketManager] = None,
     context: Optional[list[ConversationRecord]] = None,
     options: Optional[dict[str, object]] = None,
 ):
@@ -69,6 +71,8 @@ def run_job_in_process(
                 # Update job status to processing
                 await job_manager.update_job_status(job_id, JobStatus.PROCESSING)
 
+                # Use the WebSocket manager passed as a parameter
+
                 # Create a new operator for this process
                 process_operator = create_operator(
                     request_hosting=hosting,
@@ -76,7 +80,6 @@ def run_job_in_process(
                     credential_manager=credential_manager,
                     config_manager=config_manager,
                     agent_registry=agent_registry,
-                    job_manager=job_manager,
                     job_id=job_id,
                 )
 
@@ -149,6 +152,7 @@ def run_agent_job_in_process(
     job_manager: JobManager,
     persist_conversation: bool = False,
     user_message_id: Optional[str] = None,
+    websocket_manager: Optional[WebSocketManager] = None,
 ):
     """
     Run an agent chat job in a separate process.
@@ -201,7 +205,6 @@ def run_agent_job_in_process(
                     agent_registry=agent_registry,
                     current_agent=agent_obj,
                     persist_conversation=persist_conversation,
-                    job_manager=job_manager,
                     job_id=job_id,
                 )
 
@@ -272,17 +275,28 @@ def create_and_start_job_process(
     """
     # Create a process for the job
     process = Process(target=process_func, args=args)
-    process.start()
 
-    # Register the process with the job manager
+    # Register the process with the job manager before starting it
+    # This avoids any potential issues with asyncio.Task objects being pickled
     job_manager.register_process(job_id, process)
+
+    # Start the process after registration
+    process.start()
 
     # Create a task to monitor the process
     async def monitor_process():
         # This task just exists to allow cancellation via asyncio
         pass
 
+    # Start the monitor task
     task = asyncio.create_task(monitor_process())
-    asyncio.create_task(job_manager.register_task(job_id, task))
+
+    # Register the task with the job manager
+    # Use a separate function to avoid capturing the task in the closure
+    async def register_monitor_task():
+        await job_manager.register_task(job_id, task)
+
+    # Create a separate task for registration to avoid pickling issues
+    asyncio.create_task(register_monitor_task())
 
     return process

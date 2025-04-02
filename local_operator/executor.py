@@ -11,7 +11,7 @@ from enum import Enum
 from multiprocessing import Queue
 from pathlib import Path
 from traceback import format_exception
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 from langchain_community.callbacks.manager import get_openai_callback
 from langchain_core.messages import BaseMessage
@@ -39,7 +39,6 @@ from local_operator.helpers import (
     clean_plain_text_response,
     remove_think_tags,
 )
-from local_operator.jobs import JobManager
 from local_operator.model.configure import ModelConfiguration, calculate_cost
 from local_operator.prompts import (
     AgentHeadsUpDisplayPrompt,
@@ -431,7 +430,6 @@ class LocalCodeExecutor:
         max_learnings_history: int = 50,
         verbosity_level: VerbosityLevel = VerbosityLevel.VERBOSE,
         persist_conversation: bool = False,
-        job_manager: Optional["JobManager"] = None,
         job_id: Optional[str] = None,
     ):
         """Initialize the LocalCodeExecutor with a language model.
@@ -453,7 +451,6 @@ class LocalCodeExecutor:
             verbosity_level: Controls the level of detail in executor output
             persist_conversation: Whether to automatically persist conversation and execution
                 history to the agent registry after each step
-            job_manager: Optional manager for handling background or scheduled jobs
             job_id: Optional identifier for the current job being processed
         """
         self.context = {}
@@ -469,7 +466,6 @@ class LocalCodeExecutor:
         self.verbosity_level = verbosity_level
         self.agent_registry = agent_registry
         self.persist_conversation = persist_conversation
-        self.job_manager = job_manager
         self.job_id = job_id
 
         # Load agent context if agent and agent_registry are provided
@@ -737,15 +733,17 @@ class LocalCodeExecutor:
 
         return blocks
 
-    async def _convert_and_invoke(self, messages: List[ConversationRecord]) -> BaseMessage:
-        """Convert the messages to a list of dictionaries and invoke the model.
+    async def _convert_and_stream(
+        self, messages: List[ConversationRecord]
+    ) -> AsyncGenerator[BaseMessage, None]:
+        """Convert the messages to a list of dictionaries and invoke the model with streaming.
 
         Args:
             messages (List[ConversationRecord]): A list of conversation records to send to the
             model.
 
-        Returns:
-            BaseMessage: The model's response.
+        Yields:
+            BaseMessage: Chunks of the model's response.
 
         Raises:
             Exception: If there is an error during model invocation.
@@ -794,28 +792,41 @@ class LocalCodeExecutor:
         # Use get_openai_callback for OpenAI models to track token usage and cost
         if isinstance(model_instance, ChatOpenAI):
             with get_openai_callback() as cb:
-                response = await model_instance.ainvoke(messages_list)
+                async for chunk in model_instance.astream(messages_list):
+                    # Increment completion tokens (approximate for now)
+                    if (
+                        hasattr(chunk, "content")
+                        and chunk.content
+                        and isinstance(chunk.content, str)
+                    ):
+                        # Very rough approximation of token count
+                        new_tokens_completion += len(chunk.content.split()) / 2
+
+                    yield chunk
+
                 if cb is not None:
                     new_tokens_prompt = cb.prompt_tokens
                     new_tokens_completion = cb.completion_tokens
         else:
-            # For other models, invoke the model directly
+            # For other models, use direct streaming
             new_tokens_prompt = self.get_invoke_token_count(messages)
-            new_tokens_completion = 0
-            response = await model_instance.ainvoke(messages_list)
 
+            async for chunk in model_instance.astream(messages_list):
+                # Increment completion tokens (approximate for now)
+                if hasattr(chunk, "content") and chunk.content and isinstance(chunk.content, str):
+                    # Very rough approximation of token count
+                    new_tokens_completion += len(chunk.content.split()) / 2
+
+                yield chunk
+
+        # Update token metrics and cost after streaming is complete
         self.token_metrics.total_prompt_tokens += new_tokens_prompt
-        self.token_metrics.total_completion_tokens += new_tokens_completion
-
-        # Use the lookup table to get the cost per million tokens since the openai callback
-        # doesn't always return cost information.
+        self.token_metrics.total_completion_tokens += int(new_tokens_completion)
         self.token_metrics.total_cost += calculate_cost(
             self.model_configuration.info,
             new_tokens_prompt,
-            new_tokens_completion,
+            int(new_tokens_completion),
         )
-
-        return response
 
     async def invoke_model(
         self, messages: List[ConversationRecord], max_attempts: int = 3
@@ -842,7 +853,22 @@ class LocalCodeExecutor:
 
         while attempt < max_attempts:
             try:
-                return await self._convert_and_invoke(messages)
+                # Use streaming but collect the full response
+                full_response = None
+                async for chunk in self._convert_and_stream(messages):
+                    if full_response is None:
+                        full_response = chunk
+                    else:
+                        # Append content if it's a string
+                        if isinstance(full_response.content, str) and isinstance(
+                            chunk.content, str
+                        ):
+                            full_response.content += chunk.content
+
+                if full_response is None:
+                    raise Exception("No response received from model")
+
+                return full_response
             except Exception as e:
                 last_error = e
                 attempt += 1
@@ -868,6 +894,59 @@ class LocalCodeExecutor:
             raise last_error
         else:
             raise Exception("Failed to invoke model")
+
+    async def stream_model(
+        self, messages: List[ConversationRecord], max_attempts: int = 3
+    ) -> AsyncGenerator[BaseMessage, None]:
+        """Stream responses from the language model with a list of messages.
+
+        Similar to invoke_model but yields each chunk as it arrives instead of collecting
+        the full response.
+
+        Args:
+            messages: List of message dictionaries containing 'role' and 'content' keys
+            max_attempts: Maximum number of retry attempts on failure (default: 3)
+
+        Yields:
+            BaseMessage: Chunks of the model's response message
+
+        Raises:
+            Exception: If all retry attempts fail or model invocation fails
+        """
+        attempt = 0
+        last_error: Exception | None = None
+        base_delay = 1  # Base delay in seconds
+
+        while attempt < max_attempts:
+            try:
+                async for chunk in self._convert_and_stream(messages):
+                    yield chunk
+                return
+            except Exception as e:
+                last_error = e
+                attempt += 1
+                if attempt < max_attempts:
+                    # Obey rate limit headers if present
+                    if (
+                        hasattr(e, "__dict__")
+                        and isinstance(getattr(e, "status_code", None), int)
+                        and getattr(e, "status_code") == 429
+                        and isinstance(getattr(e, "headers", None), dict)
+                    ):
+                        # Get retry-after time from headers, default to 3 seconds if not found
+                        headers = getattr(e, "headers")
+                        retry_after = int(headers.get("retry-after", 3))
+                        await asyncio.sleep(retry_after)
+                    else:
+                        # Regular exponential backoff for other errors
+                        delay = base_delay * (2 ** (attempt - 1))
+                        await asyncio.sleep(delay)
+
+        # If we've exhausted all attempts, raise the last error
+        if last_error:
+            raise last_error
+        else:
+            raise Exception("Failed to stream model response")
 
     async def check_response_safety(
         self, response: ResponseJsonSchema, conversation_length: int = 8, prompt_user: bool = True
@@ -1561,22 +1640,6 @@ class LocalCodeExecutor:
                 message="Action completed",
             )
 
-        await self.update_job_execution_state(
-            CodeExecutionResult(
-                stdout="",
-                stderr="",
-                logging="",
-                formatted_print="",
-                code=response.code,
-                message=response.response,
-                role=ConversationRole.ASSISTANT,
-                status=ProcessResponseStatus.IN_PROGRESS,
-                files=[],
-                execution_type=ExecutionType.ACTION,
-                action=response.action,
-            )
-        )
-
         print_execution_section(
             ExecutionSection.HEADER,
             step=self.step_counter,
@@ -1604,10 +1667,42 @@ class LocalCodeExecutor:
                         )
 
                         # First check code safety
+
+                        await self.update_job_execution_state(
+                            CodeExecutionResult(
+                                status=ProcessResponseStatus.IN_PROGRESS,
+                                message="Reviewing action for safety and security",
+                                role=ConversationRole.ASSISTANT,
+                                execution_type=ExecutionType.SECURITY_CHECK,
+                                stdout="",
+                                stderr="",
+                                logging="",
+                                formatted_print="",
+                                code="",
+                                files=[],
+                            )
+                        )
+
                         safety_result = await self.check_and_confirm_safety(response)
                         execution_result = await self.handle_safety_result(safety_result, response)
 
                         if not execution_result:
+                            await self.update_job_execution_state(
+                                CodeExecutionResult(
+                                    stdout="",
+                                    stderr="",
+                                    logging="",
+                                    formatted_print="",
+                                    code=response.code,
+                                    message=response.response,
+                                    role=ConversationRole.ASSISTANT,
+                                    status=ProcessResponseStatus.IN_PROGRESS,
+                                    files=[],
+                                    execution_type=ExecutionType.ACTION,
+                                    action=response.action,
+                                )
+                            )
+
                             execution_result = await self.write_file(file_path, content)
 
                         print_execution_section(
@@ -1632,10 +1727,41 @@ class LocalCodeExecutor:
                         )
 
                         # First check code safety
+                        await self.update_job_execution_state(
+                            CodeExecutionResult(
+                                status=ProcessResponseStatus.IN_PROGRESS,
+                                message="Reviewing action for safety and security",
+                                role=ConversationRole.ASSISTANT,
+                                execution_type=ExecutionType.SECURITY_CHECK,
+                                stdout="",
+                                stderr="",
+                                logging="",
+                                formatted_print="",
+                                code="",
+                                files=[],
+                            )
+                        )
+
                         safety_result = await self.check_and_confirm_safety(response)
                         execution_result = await self.handle_safety_result(safety_result, response)
 
                         if not execution_result:
+                            await self.update_job_execution_state(
+                                CodeExecutionResult(
+                                    stdout="",
+                                    stderr="",
+                                    logging="",
+                                    formatted_print="",
+                                    code=response.code,
+                                    message=response.response,
+                                    role=ConversationRole.ASSISTANT,
+                                    status=ProcessResponseStatus.IN_PROGRESS,
+                                    files=[],
+                                    execution_type=ExecutionType.ACTION,
+                                    action=response.action,
+                                )
+                            )
+
                             execution_result = await self.edit_file(file_path, replacements)
 
                         print_execution_section(
@@ -1658,10 +1784,41 @@ class LocalCodeExecutor:
                         )
 
                         # First check code safety
+                        await self.update_job_execution_state(
+                            CodeExecutionResult(
+                                status=ProcessResponseStatus.IN_PROGRESS,
+                                message="Reviewing action for safety and security",
+                                role=ConversationRole.ASSISTANT,
+                                execution_type=ExecutionType.SECURITY_CHECK,
+                                stdout="",
+                                stderr="",
+                                logging="",
+                                formatted_print="",
+                                code="",
+                                files=[],
+                            )
+                        )
+
                         safety_result = await self.check_and_confirm_safety(response)
                         execution_result = await self.handle_safety_result(safety_result, response)
 
                         if not execution_result:
+                            await self.update_job_execution_state(
+                                CodeExecutionResult(
+                                    stdout="",
+                                    stderr="",
+                                    logging="",
+                                    formatted_print="",
+                                    code=response.code,
+                                    message=response.response,
+                                    role=ConversationRole.ASSISTANT,
+                                    status=ProcessResponseStatus.IN_PROGRESS,
+                                    files=[],
+                                    execution_type=ExecutionType.ACTION,
+                                    action=response.action,
+                                )
+                            )
+
                             execution_result = await self.read_file(file_path)
                     else:
                         raise ValueError("File path is required for READ action")
@@ -1677,10 +1834,41 @@ class LocalCodeExecutor:
                         )
 
                         # First check code safety
+                        await self.update_job_execution_state(
+                            CodeExecutionResult(
+                                status=ProcessResponseStatus.IN_PROGRESS,
+                                message="Reviewing action for safety and security",
+                                role=ConversationRole.ASSISTANT,
+                                execution_type=ExecutionType.SECURITY_CHECK,
+                                stdout="",
+                                stderr="",
+                                logging="",
+                                formatted_print="",
+                                code="",
+                                files=[],
+                            )
+                        )
+
                         safety_result = await self.check_and_confirm_safety(response)
                         execution_result = await self.handle_safety_result(safety_result, response)
 
                         if not execution_result:
+                            await self.update_job_execution_state(
+                                CodeExecutionResult(
+                                    stdout="",
+                                    stderr="",
+                                    logging="",
+                                    formatted_print="",
+                                    code=response.code,
+                                    message=response.response,
+                                    role=ConversationRole.ASSISTANT,
+                                    status=ProcessResponseStatus.IN_PROGRESS,
+                                    files=[],
+                                    execution_type=ExecutionType.ACTION,
+                                    action=response.action,
+                                )
+                            )
+
                             execution_result = await self.execute_code(response)
 
                         if "code execution cancelled by user" in execution_result.message:
@@ -1736,6 +1924,21 @@ class LocalCodeExecutor:
         )
 
         self.step_counter += 1
+
+        await self.update_job_execution_state(
+            CodeExecutionResult(
+                status=ProcessResponseStatus.IN_PROGRESS,
+                message="Summarizing conversation",
+                role=ConversationRole.ASSISTANT,
+                execution_type=ExecutionType.ACTION,
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                files=[],
+            )
+        )
 
         # Phase 4: Summarize old conversation steps
         async with spinner_context(
@@ -2302,13 +2505,16 @@ Current time: {current_time}
         execution_result: CodeExecutionResult,
         response: ResponseJsonSchema | None,
         classification: RequestClassification | None,
-    ) -> None:
+    ) -> CodeExecutionResult:
         """Add a code execution result to the code history.
 
         Args:
             execution_result (CodeExecutionResult): The execution result to add
             response (ResponseJsonSchema | None): The response from the model
             classification (RequestClassification | None): The classification of the task
+
+        Returns:
+            CodeExecutionResult: The updated code execution result
         """
         new_code_record = execution_result
 
@@ -2323,6 +2529,35 @@ Current time: {current_time}
 
         self.agent_state.execution_history.append(new_code_record)
 
+        return new_code_record
+
+    async def update_code_history(self, id: str, new_code_record: CodeExecutionResult) -> None:
+        """Update the code history.
+
+        Args:
+            id (str): The id of the code execution result to update
+            new_code_record (CodeExecutionResult): The new code execution result to
+            update the code history with.
+        """
+        for index, record in enumerate(self.agent_state.execution_history):
+            if record.id == id:
+                self.agent_state.execution_history[index] = new_code_record
+                break
+
+    async def broadcast_message_update(self, id: str, new_code_record: CodeExecutionResult) -> None:
+        """Broadcast the update via WebSocket if available.
+
+        Args:
+            id (str): The id of the code execution result to update
+            new_code_record (CodeExecutionResult): The new code execution result to
+            update the code history with.
+        """
+        try:
+            if self.status_queue:
+                self.status_queue.put(("message_update", id, new_code_record))
+        except Exception as e:
+            print(f"Failed to broadcast execution state update via WebSocket: {e}")
+
     async def update_job_execution_state(self, new_code_record: CodeExecutionResult) -> None:
         """Update the job execution state.
 
@@ -2330,12 +2565,24 @@ Current time: {current_time}
             new_code_record (CodeExecutionResult): The new code execution result to
             update the job execution state with.
         """
-        # Update job execution state if job manager and job ID are provided
-        if self.job_manager and self.job_id:
-            try:
-                # First, try to update directly in the current process
-                await self.job_manager.update_job_execution_state(self.job_id, new_code_record)
+        # Set streamable flag based on execution type
+        if new_code_record.execution_type in [
+            ExecutionType.PLAN,
+            ExecutionType.REFLECTION,
+            ExecutionType.RESPONSE,
+        ]:
+            new_code_record.is_streamable = True
 
+        # Set complete flag based on status
+        if new_code_record.status not in [
+            ProcessResponseStatus.IN_PROGRESS,
+            ProcessResponseStatus.NONE,
+        ]:
+            new_code_record.is_complete = True
+
+        if self.job_id:
+            # Update job execution state if job manager and job ID are provided
+            try:
                 # If we're in a multiprocessing context with a status queue
                 if self.status_queue:
                     # Send execution state update through the queue to the parent process

@@ -1,5 +1,6 @@
 import asyncio
 import json
+from typing import AsyncGenerator
 
 from langchain_core.messages import BaseMessage
 
@@ -146,7 +147,7 @@ class ChatMock:
         response = self.invoke(messages)
         yield response
 
-    async def astream(self, messages):
+    async def astream(self, messages) -> AsyncGenerator[BaseMessage, None]:
         """Mock astream method that asynchronously yields chunks of the response."""
         response = await self.ainvoke(messages)
         yield response

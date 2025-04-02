@@ -17,6 +17,7 @@ from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.jobs import JobContext, JobContextRecord, JobManager, JobStatus
 from local_operator.server.utils.operator import create_operator
+from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import ConversationRecord
 
 logger = logging.getLogger("local_operator.server.utils.job_processor_queue")
@@ -31,7 +32,6 @@ def run_job_in_process_with_queue(
     credential_manager: CredentialManager,
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
-    job_manager_id: str,  # Pass job_manager_id instead of job_manager
     context: Optional[list[ConversationRecord]] = None,
     options: Optional[dict[str, object]] = None,
     status_queue: Optional[Queue] = None,  # type: ignore
@@ -86,7 +86,6 @@ def run_job_in_process_with_queue(
                     credential_manager=credential_manager,
                     config_manager=config_manager,
                     agent_registry=agent_registry,
-                    job_manager=job_manager,
                     job_id=job_id,
                 )
 
@@ -165,7 +164,6 @@ def run_agent_job_in_process_with_queue(
     credential_manager: CredentialManager,
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
-    job_manager_id: str,  # Pass job_manager_id instead of job_manager
     persist_conversation: bool = False,
     user_message_id: Optional[str] = None,
     status_queue: Optional[Queue] = None,  # type: ignore
@@ -234,7 +232,6 @@ def run_agent_job_in_process_with_queue(
                     agent_registry=agent_registry,
                     current_agent=agent_obj,
                     persist_conversation=persist_conversation,
-                    job_manager=job_manager,
                     job_id=job_id,
                 )
 
@@ -278,6 +275,7 @@ def create_and_start_job_process_with_queue(
     process_func: Callable[..., None],
     args: tuple[object, ...],
     job_manager: JobManager,
+    websocket_manager: WebSocketManager,
 ) -> Process:
     """
     Create and start a process for a job, and set up a queue monitor to update the job status.
@@ -300,10 +298,13 @@ def create_and_start_job_process_with_queue(
     # Create a process for the job, adding the status queue to the arguments
     process_args = args + (status_queue,)
     process = Process(target=process_func, args=process_args)
-    process.start()
 
-    # Register the process with the job manager
+    # Register the process with the job manager before starting it
+    # This avoids any potential issues with asyncio.Task objects being pickled
     job_manager.register_process(job_id, process)
+
+    # Start the process after registration
+    process.start()
 
     # Create a task to monitor the status queue
     async def monitor_status_queue():
@@ -329,6 +330,11 @@ def create_and_start_job_process_with_queue(
                                 await job_manager.update_job_execution_state(
                                     received_job_id, execution_state
                                 )
+                            elif msg_type == "message_update" and len(message) == 3:
+                                # Message update: (type, job_id, message)
+                                _, received_job_id, message = message
+
+                                await websocket_manager.broadcast_update(received_job_id, message)
                         elif len(message) == 3:
                             # Legacy format: (job_id, status, result)
                             received_job_id, status, result = message
@@ -346,8 +352,12 @@ def create_and_start_job_process_with_queue(
     monitor_task = asyncio.create_task(monitor_status_queue())
 
     # Register the task with the job manager
+    # Use a separate function to avoid capturing the monitor_task in the closure
+    async def register_monitor_task():
+        await job_manager.register_task(job_id, monitor_task)
+
     # Create a separate task for registration to avoid pickling issues
-    asyncio.create_task(job_manager.register_task(job_id, monitor_task))
+    asyncio.create_task(register_monitor_task())
 
     # Return only the process to avoid pickling the asyncio.Task
     return process
