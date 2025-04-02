@@ -14,7 +14,6 @@ from fastapi import WebSocket, WebSocketDisconnect
 from local_operator.server.models.schemas import WebsocketConnectionType
 from local_operator.types import CodeExecutionResult
 
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("local_operator.server.utils.websocket_manager")
 
 
