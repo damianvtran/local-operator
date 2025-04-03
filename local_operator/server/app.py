@@ -61,7 +61,6 @@ async def lifespan(app: FastAPI):
     """
     # Initialize on startup by setting up the credential and config managers
     config_dir = Path.home() / ".local-operator"
-    agents_dir = config_dir / "agents"
     agent_home_dir = Path.home() / "local-operator-home"
 
     # Create the agent home directory if it doesn't exist
@@ -72,7 +71,7 @@ async def lifespan(app: FastAPI):
     app.state.config_manager = ConfigManager(config_dir=config_dir)
     # Initialize AgentRegistry with a refresh interval of 3 seconds to ensure
     # changes made by child processes are quickly reflected in the parent process
-    app.state.agent_registry = AgentRegistry(config_dir=agents_dir, refresh_interval=3.0)
+    app.state.agent_registry = AgentRegistry(config_dir=config_dir, refresh_interval=3.0)
     app.state.job_manager = JobManager()
     app.state.websocket_manager = WebSocketManager()
     yield
