@@ -3,7 +3,7 @@ Utility functions for creating and managing operators in the Local Operator API.
 """
 
 import logging
-from typing import Optional, cast
+from typing import Optional
 
 from local_operator.admin import add_admin_tools
 from local_operator.agents import AgentRegistry
@@ -100,8 +100,6 @@ def create_operator(
     Raises:
         ValueError: If hosting is not set or model configuration fails
     """
-    agent_registry = cast(AgentRegistry, agent_registry)
-
     if not request_hosting:
         raise ValueError("Hosting is not set")
 
