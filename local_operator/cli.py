@@ -531,7 +531,6 @@ def main() -> int:
         os.environ["LOCAL_OPERATOR_DEBUG"] = "true" if args.debug else "false"
 
         config_dir = Path.home() / ".local-operator"
-        agents_dir = config_dir / "agents"
         agent_home_dir = Path.home() / "local-operator-home"
 
         # Create the agent home directory if it doesn't exist
@@ -557,7 +556,7 @@ def main() -> int:
             else:
                 parser.error(f"Invalid config command: {args.config_command}")
         elif args.subcommand == "agents":
-            agent_registry = AgentRegistry(agents_dir)
+            agent_registry = AgentRegistry(config_dir)
             if args.agents_command == "list":
                 return agents_list_command(args, agent_registry)
             elif args.agents_command == "create":
@@ -572,7 +571,7 @@ def main() -> int:
 
         config_manager = ConfigManager(config_dir)
         credential_manager = CredentialManager(config_dir)
-        agent_registry = AgentRegistry(agents_dir)
+        agent_registry = AgentRegistry(config_dir)
 
         # Override config with CLI args where provided
         config_manager.update_config_from_args(args)
