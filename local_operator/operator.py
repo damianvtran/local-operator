@@ -1056,9 +1056,6 @@ class Operator:
         elif classification.type != RequestType.CONTINUE:
             self.executor.set_current_plan("")
 
-        if self.verbosity_level >= VerbosityLevel.VERBOSE:
-            print("\n")
-
         while (
             not self._agent_is_done(response_json)
             and not self._agent_requires_user_input(response_json)
@@ -1081,6 +1078,9 @@ class Operator:
                     execution_type=ExecutionType.ACTION,
                 )
             )
+
+            if self.verbosity_level >= VerbosityLevel.VERBOSE:
+                print("\n")
 
             async with spinner_context(
                 "Formulating a response",
@@ -1164,7 +1164,8 @@ class Operator:
 
                     if self.verbosity_level >= VerbosityLevel.VERBOSE:
                         print(
-                            "\033[1;36m╰══════════════════════════════════════════════════╯\033[0m"
+                            "\n\033[1;"
+                            "36m╰══════════════════════════════════════════════════╯\033[0m"
                         )
 
             # Auto-save on each step if enabled
