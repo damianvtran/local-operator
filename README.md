@@ -13,9 +13,11 @@
 
 <br />
 
-<video src="https://github.com/user-attachments/assets/1ed151f4-8765-4037-a762-b63d8f6965d6" alt="Local Operator UI Dashboard Example" autoplay loop muted playsinline></video>
+<div style="display: flex; justify-content: center; border-radius: 8px; overflow: hidden;">
+  <img src="./static/preview-example-ui.gif" alt="Local Operator UI Dashboard Example" style="width: 100%; max-width: 800px;">
+</div>
 
-<p align="center"><i>Local Operator server powering an open source UI.  The frontend is optional and available <a href="https://github.com/damianvtran/local-operator-ui">here</a></i></p>
+<p align="center"><i>Local Operator server powering the open source UI.  The frontend is optional and available <a href="https://github.com/damianvtran/local-operator-ui">here</a></i> or by downloading from the <a href="https://local-operator.com">website</a></p>
 
 <br />
 
@@ -65,7 +67,7 @@ Visit the [Local Operator website](https://local-operator.com) for visualization
 
 ## 💻 Requirements
 
-- Python 3.12+
+- Python 3.12+ with `pip` installed
 - For 3rd party hosting: [OpenRouter](https://openrouter.ai/keys), [OpenAI](https://platform.openai.com/api-keys), [DeepSeek](https://platform.deepseek.ai/), [Anthropic](https://console.anthropic.com/), [Google](https://ai.google.dev/), or other API key (prompted for on first run)
 - For local hosting: [Ollama](https://ollama.com/download) model installed and running
 
