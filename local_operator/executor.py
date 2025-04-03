@@ -791,6 +791,7 @@ class LocalCodeExecutor:
 
         # Use get_openai_callback for OpenAI models to track token usage and cost
         if isinstance(model_instance, ChatOpenAI):
+
             with get_openai_callback() as cb:
                 async for chunk in model_instance.astream(messages_list):
                     # Increment completion tokens (approximate for now)

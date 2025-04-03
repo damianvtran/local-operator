@@ -354,6 +354,7 @@ def configure_model(
             "api_key": api_key,
             "temperature": model_temperature,
             "model": model_name,
+            "stream_usage": True,
         }
 
         # top_p not supported for o1 and o3 models
