@@ -185,6 +185,7 @@ class AgentRegistry:
         self._refresh_interval = refresh_interval
 
         # Migrate old agents if needed
+        self.migrate_agents_dir()
         self.migrate_legacy_agents()
 
         # Load agent metadata
@@ -1067,6 +1068,41 @@ class AgentRegistry:
 
         # No context found
         return None
+
+    def migrate_agents_dir(self) -> None:
+        """
+        Migrate nested agents into the right directory.
+
+        This method checks for agents in a nested 'agents/agents' directory structure
+        and moves them to the correct location in the agents directory.
+        """
+        nested_dir = self.agents_dir / "agents"
+        if not nested_dir.exists():
+            return
+
+        for agent_dir in nested_dir.iterdir():
+            if agent_dir.is_dir():
+                agent_id = agent_dir.name
+                target_dir = self.agents_dir / agent_id
+
+                # Skip if the target directory already exists
+                if target_dir.exists():
+                    continue
+
+                try:
+                    # Create the target directory
+                    target_dir.mkdir(parents=True, exist_ok=True)
+
+                    # Move all files from nested directory to the target directory
+                    for file_path in agent_dir.glob("*"):
+                        target_file = target_dir / file_path.name
+                        shutil.copy2(file_path, target_file)
+
+                    # Remove the original directory after successful migration
+                    shutil.rmtree(agent_dir)
+                    logging.info(f"Migrated agent {agent_id} from nested directory")
+                except Exception as e:
+                    logging.error(f"Failed to migrate agent {agent_id}: {str(e)}")
 
     def migrate_legacy_agents(self) -> List[str]:
         """

@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import ssl
 import uuid
 from datetime import datetime, timezone
@@ -1609,3 +1610,107 @@ def test_set_agent_system_prompt(temp_agents_dir: Path):
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("builtins.open", mock_open_that_fails)
             registry.set_agent_system_prompt(agent.id, "This should fail")
+
+
+def test_migrate_agents_dir(temp_agents_dir: Path):
+    """Test migration of agents from nested directory structure."""
+    registry = AgentRegistry(temp_agents_dir)
+
+    # Create a nested agents directory structure
+    nested_dir = temp_agents_dir / "agents" / "agents"
+    nested_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create a test agent in the nested directory
+    test_agent_id = "test-nested-agent"
+    test_agent_dir = nested_dir / test_agent_id
+    test_agent_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create some test files in the nested agent directory
+    test_agent_yml = test_agent_dir / "agent.yml"
+    test_agent_yml.write_text("name: Test Nested Agent")
+
+    test_conversation = test_agent_dir / "conversation.jsonl"
+    test_conversation.write_text('{"role": "user", "content": "Hello"}\n')
+
+    # Run the migration
+    registry.migrate_agents_dir()
+
+    # Verify the agent was migrated to the correct location
+    migrated_dir = temp_agents_dir / "agents" / test_agent_id
+    assert migrated_dir.exists()
+    assert (migrated_dir / "agent.yml").exists()
+    assert (migrated_dir / "conversation.jsonl").exists()
+
+    # Verify the content was preserved
+    assert (migrated_dir / "agent.yml").read_text() == "name: Test Nested Agent"
+    assert (
+        migrated_dir / "conversation.jsonl"
+    ).read_text() == '{"role": "user", "content": "Hello"}\n'
+
+    # Verify the original nested directory no longer contains the agent
+    assert not (nested_dir / test_agent_id).exists()
+
+
+def test_migrate_agents_dir_with_existing_target(temp_agents_dir: Path):
+    """Test migration when target directory already exists."""
+    registry = AgentRegistry(temp_agents_dir)
+
+    # Create a nested agents directory structure
+    nested_dir = temp_agents_dir / "agents" / "agents"
+    nested_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create a test agent in the nested directory
+    test_agent_id = "test-existing-agent"
+    test_agent_dir = nested_dir / test_agent_id
+    test_agent_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create a file in the nested agent directory
+    (test_agent_dir / "agent.yml").write_text("name: Nested Agent")
+
+    # Create the same agent directory in the target location
+    target_dir = temp_agents_dir / "agents" / test_agent_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "agent.yml").write_text("name: Existing Agent")
+
+    # Run the migration
+    registry.migrate_agents_dir()
+
+    # Verify the existing agent was not overwritten
+    assert (target_dir / "agent.yml").read_text() == "name: Existing Agent"
+
+    # The nested directory should still exist since we skip migration when target exists
+    assert (nested_dir / test_agent_id).exists()
+
+
+def test_migrate_agents_dir_error_handling(temp_agents_dir: Path, monkeypatch):
+    """Test error handling during migration."""
+    registry = AgentRegistry(temp_agents_dir)
+
+    # Create a nested agents directory structure
+    nested_dir = temp_agents_dir / "agents" / "agents"
+    nested_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create a test agent in the nested directory
+    test_agent_id = "test-error-agent"
+    test_agent_dir = nested_dir / test_agent_id
+    test_agent_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create a file in the nested agent directory
+    (test_agent_dir / "agent.yml").write_text("name: Error Agent")
+
+    # Mock shutil.copy2 to raise an exception
+    def mock_copy2_error(src, dst):
+        raise IOError("Simulated copy error")
+
+    monkeypatch.setattr(shutil, "copy2", mock_copy2_error)
+
+    # Run the migration - should not raise exception but log error
+    registry.migrate_agents_dir()
+
+    # The nested directory should still exist since migration failed
+    assert (nested_dir / test_agent_id).exists()
+
+    # Target directory should be created but empty
+    target_dir = temp_agents_dir / "agents" / test_agent_id
+    assert target_dir.exists()
+    assert not (target_dir / "agent.yml").exists()
