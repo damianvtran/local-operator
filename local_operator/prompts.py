@@ -561,8 +561,9 @@ If provided, these are guidelines to help provide additional context to user ins
 - Pay close attention to the user's instruction.  The user may switch goals or ask you a new question without notice.  In this case you will need to prioritize the user's new request over the previous goal.
 - Use sys.executable for installs.
 - Always capture output when running subprocess and print the output to the console.
+    - Example: `subprocess.run(['somecommand', 'somearg'], capture_output=True, text=True, input="y", stdout=subprocess.PIPE, stderr=subprocess.PIPE)`
+    - Note the use of `input="y"` to automatically answer yes to prompts, otherwise you will get stuck waiting for user input.
 - You will not be able to read any information in future steps that is not printed to the console.
-    - `subprocess.run(['somecommand', 'somearg'], capture_output=True, text=True, input="y", stdout=subprocess.PIPE, stderr=subprocess.PIPE)`
 - Test and verify that you have achieved the user's goal correctly before finishing.
 - System code execution printing to console consumes tokens.  Do not print more than
   25000 tokens at once in the code output.
@@ -1556,6 +1557,19 @@ Always make sure to proof-read your end work and do not report the task as compl
 # Specialized instructions for media tasks
 MediaInstructions: str = """
 ## Media Processing Guidelines
+
+For this task you will need to work with media files.
+
+Use the following tools to help you process the media files:
+- For video and gif files, use the `ffmpeg` and related tools.
+- For audio files, use the `ffmpeg` and related tools.
+- For image files and pngs, use the `Pillow` library.
+- For markdown, docx, and pdf conversions, use `pandoc`.
+- For other types of media, use an appropriate library or tool at your own discretion.  Research and look up appropriate free and open source tools for the task as needed.
+
+If there are any libraries or tools that need to be installed outside of python, such as `ffmpeg`, and provide exact instructions and commands to help me install them on my own.  Assume that I don't have much technical expertise, so provide exact instructions and commands to help me install them on my own.
+
+Guidelines:
 - Understand the specific requirements and constraints of the media task
 - Consider resolution, format, and quality requirements
 - Use appropriate libraries and tools for efficient processing
@@ -1566,7 +1580,10 @@ MediaInstructions: str = """
 - Consider accessibility needs (alt text, captions, etc.)
 - Respect copyright and licensing restrictions
 - Save outputs in appropriate formats with descriptive filenames
-"""
+
+Additional tool guidelines:
+- For `ffmpeg`, make sure to pass the `-y` flag, otherwise it will prompt for confirmation in interactive mode and you will get stuck.
+"""  # noqa: E501
 
 # Specialized instructions for competitive coding tasks
 CompetitiveCodingInstructions: str = """
@@ -1643,6 +1660,7 @@ Follow the general flow below for software development tasks:
     - `yes | npm install -g package-name`
     - `apt-get install -y package-name`
     - `brew install package-name --quiet`
+    - `ffmpeg -y -i input.mp4 -vf "scale=iw:ih" output.mp4`
 - ALWAYS use a linter to check your code after each write and edit.  Use a suitable
   linter for the language you are using and the project.  If a linter is not available,
   then install it in the project.  If a linter is already available, then use it after
