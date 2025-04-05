@@ -387,29 +387,6 @@ class AgentRegistry:
             except Exception as e:
                 raise Exception(f"Failed to delete agent directory: {str(e)}")
 
-        # For backward compatibility, delete old files
-        conversation_file = self.config_dir / f"{agent_id}_conversation.json"
-        if conversation_file.exists():
-            try:
-                conversation_file.unlink()
-            except Exception as e:
-                logging.warning(f"Failed to delete old conversation file: {str(e)}")
-
-        context_file = self.config_dir / f"{agent_id}_context.pkl"
-        if context_file.exists():
-            try:
-                context_file.unlink()
-            except Exception as e:
-                logging.warning(f"Failed to delete old context file: {str(e)}")
-
-        # Update agents.json for backward compatibility
-        agents_list = [agent.model_dump() for agent in self._agents.values()]
-        try:
-            with self.agents_file.open("w", encoding="utf-8") as f:
-                json.dump(agents_list, f, indent=2, default=str)
-        except Exception as e:
-            logging.warning(f"Failed to update agents.json for backward compatibility: {str(e)}")
-
     def clone_agent(self, agent_id: str, new_name: str) -> AgentData:
         """
         Clone an existing agent with a new name, copying over all its files.
@@ -536,26 +513,6 @@ class AgentRegistry:
                     logging.error(
                         f"Error refreshing agent metadata from {agent_dir.name}: {str(e)}"
                     )
-
-        # For backward compatibility, also check agents.json
-        if self.agents_file.exists():
-            try:
-                with self.agents_file.open("r", encoding="utf-8") as f:
-                    data = json.load(f)
-
-                # Process each agent in the file
-                for item in data:
-                    try:
-                        agent = AgentData.model_validate(item)
-                        # Only add if not already loaded from agent.yml
-                        if agent.id not in refreshed_agents:
-                            refreshed_agents[agent.id] = agent
-                    except Exception as e:
-                        # Log the error but continue processing other agents
-                        logging.error(f"Error refreshing agent metadata from agents.json: {str(e)}")
-            except Exception as e:
-                # Log the error but don't crash
-                logging.error(f"Error refreshing agents metadata from agents.json: {str(e)}")
 
         # Update the in-memory agents dictionary
         self._agents = refreshed_agents
