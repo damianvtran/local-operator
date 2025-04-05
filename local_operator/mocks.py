@@ -123,8 +123,8 @@ class ChatMock:
                 max_match_length = len(key_lower)
 
         if not best_match:
-            if len(user_message) > 100:
-                truncated_user_message = user_message[:100] + "..."
+            if len(user_message) > 300:
+                truncated_user_message = user_message[:300] + "..."
             else:
                 truncated_user_message = user_message
 
