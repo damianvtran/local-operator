@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Local Operator - Document Upload</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            color: #2c3e50;
+            margin-bottom: 20px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input[type="file"],
+        input[type="text"],
+        select,
+        textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 16px;
+        }
+        textarea {
+            height: 150px;
+            resize: vertical;
+        }
+        button {
+            background-color: #3498db;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #2980b9;
+        }
+        .alert {
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        .alert-success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .alert-danger {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .document-list {
+            margin-top: 30px;
+        }
+        .document-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+        }
+        .document-item:last-child {
+            border-bottom: none;
+        }
+        .document-actions {
+            display: flex;
+            gap: 10px;
+        }
+        .btn-sm {
+            padding: 5px 10px;
+            font-size: 14px;
+        }
+        .btn-danger {
+            background-color: #e74c3c;
+        }
+        .btn-danger:hover {
+            background-color: #c0392b;
+        }
+        .btn-info {
+            background-color: #17a2b8;
+        }
+        .btn-info:hover {
+            background-color: #138496;
+        }
+        .btn-success {
+            background-color: #28a745;
+        }
+        .btn-success:hover {
+            background-color: #218838;
+        }
+        .tabs {
+            display: flex;
+            margin-bottom: 20px;
+            border-bottom: 1px solid #ddd;
+        }
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            border: 1px solid transparent;
+            border-bottom: none;
+            margin-right: 5px;
+            border-radius: 4px 4px 0 0;
+        }
+        .tab.active {
+            background-color: #fff;
+            border-color: #ddd;
+            border-bottom-color: #fff;
+            margin-bottom: -1px;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+        .processing-result {
+            white-space: pre-wrap;
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+            margin-top: 10px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Local Operator - Document Processing</h1>
+        
+        <div class="tabs">
+            <div class="tab active" data-tab="upload">Upload Document</div>
+            <div class="tab" data-tab="list">Document List</div>
+            <div class="tab" data-tab="process">Process Document</div>
+        </div>
+        
+        <div id="alert" style="display: none;"></div>
+        
+        <div id="upload-tab" class="tab-content active">
+            <h2>Upload a Document</h2>
+            <form id="upload-form">
+                <div class="form-group">
+                    <label for="document">Select Document:</label>
+                    <input type="file" id="document" name="file" required>
+                </div>
+                <button type="submit">Upload Document</button>
+            </form>
+        </div>
+        
+        <div id="list-tab" class="tab-content">
+            <h2>Document List</h2>
+            <div id="document-list" class="document-list">
+                <p>Loading documents...</p>
+            </div>
+        </div>
+        
+        <div id="process-tab" class="tab-content">
+            <h2>Process Document</h2>
+            <form id="process-form">
+                <div class="form-group">
+                    <label for="filename">Document:</label>
+                    <select id="filename" name="filename" required>
+                        <option value="">Select a document</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="instructions">Processing Instructions:</label>
+                    <textarea id="instructions" name="instructions" placeholder="Enter instructions for processing the document..." required></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="hosting">Hosting:</label>
+                    <input type="text" id="hosting" name="hosting" value="openrouter" required>
+                </div>
+                <div class="form-group">
+                    <label for="model">Model:</label>
+                    <input type="text" id="model" name="model" value="openai/gpt-4o-mini" required>
+                </div>
+                <button type="submit">Process Document</button>
+            </form>
+            
+            <div id="processing-status" style="display: none;">
+                <h3>Processing Status</h3>
+                <p id="status-message">Processing...</p>
+                <div id="processing-result" class="processing-result" style="display: none;"></div>
+                <button id="check-status" style="display: none;">Check Status</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // DOM Elements
+        const uploadForm = document.getElementById('upload-form');
+        const processForm = document.getElementById('process-form');
+        const documentList = document.getElementById('document-list');
+        const filenameSelect = document.getElementById('filename');
+        const alertDiv = document.getElementById('alert');
+        const processingStatus = document.getElementById('processing-status');
+        const statusMessage = document.getElementById('status-message');
+        const processingResult = document.getElementById('processing-result');
+        const checkStatusButton = document.getElementById('check-status');
+        const tabs = document.querySelectorAll('.tab');
+        const tabContents = document.querySelectorAll('.tab-content');
+        
+        // API Base URL
+        const API_BASE_URL = window.location.origin;
+        
+        // Tab Switching
+        tabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                // Remove active class from all tabs and contents
+                tabs.forEach(t => t.classList.remove('active'));
+                tabContents.forEach(c => c.classList.remove('active'));
+                
+                // Add active class to clicked tab
+                tab.classList.add('active');
+                
+                // Show corresponding content
+                const tabId = tab.getAttribute('data-tab');
+                document.getElementById(`${tabId}-tab`).classList.add('active');
+                
+                // Refresh document list if list tab is selected
+                if (tabId === 'list' || tabId === 'process') {
+                    fetchDocuments();
+                }
+            });
+        });
+        
+        // Show Alert
+        function showAlert(message, type) {
+            alertDiv.className = `alert alert-${type}`;
+            alertDiv.textContent = message;
+            alertDiv.style.display = 'block';
+            
+            // Auto hide after 5 seconds
+            setTimeout(() => {
+                alertDiv.style.display = 'none';
+            }, 5000);
+        }
+        
+        // Fetch Documents
+        async function fetchDocuments() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/v1/documents/list`);
+                const data = await response.json();
+                
+                if (data.status === 200) {
+                    // Update document list
+                    if (data.result && data.result.length > 0) {
+                        let listHtml = '';
+                        
+                        data.result.forEach(doc => {
+                            const fileSize = formatFileSize(doc.size);
+                            const uploadDate = new Date(doc.uploaded_at).toLocaleString();
+                            
+                            listHtml += `
+                                <div class="document-item">
+                                    <div>
+                                        <strong>${doc.filename}</strong>
+                                        <div>Size: ${fileSize} | Uploaded: ${uploadDate}</div>
+                                    </div>
+                                    <div class="document-actions">
+                                        <button class="btn-sm btn-info" onclick="downloadDocument('${doc.filename}')">Download</button>
+                                        <button class="btn-sm btn-danger" onclick="deleteDocument('${doc.filename}')">Delete</button>
+                                    </div>
+                                </div>
+                            `;
+                        });
+                        
+                        documentList.innerHTML = listHtml;
+                        
+                        // Update filename select in process form
+                        filenameSelect.innerHTML = '<option value="">Select a document</option>';
+                        data.result.forEach(doc => {
+                            const option = document.createElement('option');
+                            option.value = doc.filename;
+                            option.textContent = doc.filename;
+                            filenameSelect.appendChild(option);
+                        });
+                    } else {
+                        documentList.innerHTML = '<p>No documents found.</p>';
+                        filenameSelect.innerHTML = '<option value="">No documents available</option>';
+                    }
+                } else {
+                    showAlert(`Error fetching documents: ${data.message}`, 'danger');
+                }
+            } catch (error) {
+                showAlert(`Error fetching documents: ${error.message}`, 'danger');
+            }
+        }
+        
+        // Format File Size
+        function formatFileSize(bytes) {
+            if (bytes < 1024) {
+                return bytes + ' bytes';
+            } else if (bytes < 1024 * 1024) {
+                return (bytes / 1024).toFixed(2) + ' KB';
+            } else if (bytes < 1024 * 1024 * 1024) {
+                return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+            } else {
+                return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+            }
+        }
+        
+        // Download Document
+        function downloadDocument(filename) {
+            window.open(`${API_BASE_URL}/v1/documents/download/${filename}`, '_blank');
+        }
+        
+        // Delete Document
+        async function deleteDocument(filename) {
+            if (confirm(`Are you sure you want to delete ${filename}?`)) {
+                try {
+                    const response = await fetch(`${API_BASE_URL}/v1/documents/${filename}`, {
+                        method: 'DELETE'
+                    });
+                    const data = await response.json();
+                    
+                    if (data.status === 200) {
+                        showAlert(`Document deleted: ${filename}`, 'success');
+                        fetchDocuments();
+                    } else {
+                        showAlert(`Error deleting document: ${data.message}`, 'danger');
+                    }
+                } catch (error) {
+                    showAlert(`Error deleting document: ${error.message}`, 'danger');
+                }
+            }
+        }
+        
+        // Check Processing Status
+        async function checkProcessingStatus(taskId) {
+            try {
+                const response = await fetch(`${API_BASE_URL}/v1/documents/status/${taskId}`);
+                const data = await response.json();
+                
+                if (data.status === 200) {
+                    const result = data.result;
+                    statusMessage.textContent = `Status: ${result.status}`;
+                    
+                    if (result.status === 'completed') {
+                        processingResult.textContent = result.result;
+                        processingResult.style.display = 'block';
+                        checkStatusButton.style.display = 'none';
+                    } else if (result.status === 'failed') {
+                        statusMessage.textContent = `Processing failed: ${result.result || 'Unknown error'}`;
+                        checkStatusButton.style.display = 'none';
+                    } else {
+                        // Still processing
+                        checkStatusButton.style.display = 'block';
+                    }
+                } else {
+                    showAlert(`Error checking status: ${data.message}`, 'danger');
+                }
+            } catch (error) {
+                showAlert(`Error checking status: ${error.message}`, 'danger');
+            }
+        }
+        
+        // Upload Form Submit
+        uploadForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const formData = new FormData(uploadForm);
+            
+            try {
+                const response = await fetch(`${API_BASE_URL}/v1/documents/upload`, {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+                
+                if (data.status === 200) {
+                    showAlert('Document uploaded successfully!', 'success');
+                    uploadForm.reset();
+                    fetchDocuments();
+                } else {
+                    showAlert(`Error uploading document: ${data.message}`, 'danger');
+                }
+            } catch (error) {
+                showAlert(`Error uploading document: ${error.message}`, 'danger');
+            }
+        });
+        
+        // Process Form Submit
+        processForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const formData = new FormData(processForm);
+            const requestData = {
+                filename: formData.get('filename'),
+                instructions: formData.get('instructions'),
+                hosting: formData.get('hosting'),
+                model: formData.get('model')
+            };
+            
+            try {
+                const response = await fetch(`${API_BASE_URL}/v1/documents/process`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(requestData)
+                });
+                const data = await response.json();
+                
+                if (data.status === 200) {
+                    showAlert('Document processing started!', 'success');
+                    
+                    // Show processing status
+                    processingStatus.style.display = 'block';
+                    statusMessage.textContent = 'Processing...';
+                    processingResult.style.display = 'none';
+                    
+                    // Store task ID
+                    const taskId = data.result.task_id;
+                    
+                    // Check status button
+                    checkStatusButton.style.display = 'block';
+                    checkStatusButton.onclick = () => checkProcessingStatus(taskId);
+                    
+                    // Initial status check
+                    setTimeout(() => {
+                        checkProcessingStatus(taskId);
+                    }, 2000);
+                } else {
+                    showAlert(`Error processing document: ${data.message}`, 'danger');
+                }
+            } catch (error) {
+                showAlert(`Error processing document: ${error.message}`, 'danger');
+            }
+        });
+        
+        // Initial document fetch
+        fetchDocuments();
+    </script>
+</body>
+</html>

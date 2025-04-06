@@ -117,6 +117,52 @@ class CRUDResponse(BaseModel, Generic[T]):
     result: Optional[T] = None
 
 
+class DocumentUploadResponse(BaseModel):
+    """Response for document upload endpoint.
+    
+    Attributes:
+        filename: The name of the uploaded file
+        size: The size of the uploaded file in bytes
+        content_type: The content type of the uploaded file
+        task_id: Optional ID of the task created to process the document
+    """
+    
+    filename: str
+    size: int
+    content_type: str
+    task_id: Optional[str] = None
+    
+class DocumentProcessRequest(BaseModel):
+    """Request to process an uploaded document.
+    
+    Attributes:
+        filename: The name of the uploaded file to process
+        instructions: Instructions for processing the document
+        hosting: Name of the hosting service to use for generation
+        model: Name of the model to use for generation
+        options: Optional generation parameters to override defaults
+    """
+    
+    filename: str
+    instructions: str
+    hosting: str
+    model: str
+    options: Optional[ChatOptions] = None
+    
+class DocumentProcessResponse(BaseModel):
+    """Response from document processing endpoint.
+    
+    Attributes:
+        task_id: ID of the task created to process the document
+        status: Status of the document processing task
+        result: Optional result of the document processing task
+    """
+    
+    task_id: str
+    status: str
+    result: Optional[str] = None
+
+
 class Agent(BaseModel):
     """Representation of an Agent."""
 

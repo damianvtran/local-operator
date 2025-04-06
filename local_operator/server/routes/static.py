@@ -1,159 +1,110 @@
 """
-Static file hosting endpoints for the Local Operator API.
+Static file serving endpoints for the Local Operator API.
 
 This module contains the FastAPI route handlers for serving static files.
 """
 
 import logging
-import mimetypes
-import os
 from pathlib import Path
-from typing import List
 
-from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse
 
 router = APIRouter(tags=["Static"])
 logger = logging.getLogger("local_operator.server.routes.static")
 
-# List of allowed image MIME types
-ALLOWED_IMAGE_TYPES: List[str] = [
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-    "image/bmp",
-    "image/svg+xml",
-    "image/tiff",
-    "image/x-icon",
-    "image/heic",
-    "image/heif",
-    "image/avif",
-    "image/pjpeg",
-]
-
-# List of allowed video MIME types
-ALLOWED_VIDEO_TYPES: List[str] = [
-    "video/mp4",
-    "video/webm",
-    "video/ogg",
-    "video/quicktime",
-    "video/x-msvideo",
-    "video/x-matroska",
-    "video/mpeg",
-    "video/3gpp",
-    "video/3gpp2",
-    "video/x-flv",
-]
+# Path to the static directory
+STATIC_DIR = Path(__file__).parent.parent / "static"
+HTML_DIR = STATIC_DIR / "html"
 
 
-@router.get(
-    "/v1/static/images",
-    summary="Serve image file",
-    description="Serves an image file from disk by path. Only image file types are allowed.",
-    response_class=FileResponse,
-)
-async def get_image(
-    path: str = Query(..., description="Path to the image file on disk"),
-):
+@router.get("/", response_class=HTMLResponse)
+async def get_index():
     """
-    Serve an image file from disk.
-
-    Args:
-        path: Path to the image file on disk
-
+    Serve the index page.
+    
     Returns:
-        The image file as a response
-
-    Raises:
-        HTTPException: If the file doesn't exist, is not accessible, or is not an image file
+        HTMLResponse: The index page HTML
     """
     try:
-        # Validate the path exists
-        file_path = Path(path)
+        with open(HTML_DIR / "index.html", "r") as f:
+            return f.read()
+    except FileNotFoundError:
+        # If index.html doesn't exist, return a simple HTML page
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Local Operator</title>
+            <style>
+                body {
+                    font-family: Arial, sans-serif;
+                    line-height: 1.6;
+                    margin: 0;
+                    padding: 20px;
+                    max-width: 800px;
+                    margin: 0 auto;
+                }
+                h1 {
+                    color: #2c3e50;
+                }
+                ul {
+                    list-style-type: none;
+                    padding: 0;
+                }
+                li {
+                    margin-bottom: 10px;
+                }
+                a {
+                    color: #3498db;
+                    text-decoration: none;
+                }
+                a:hover {
+                    text-decoration: underline;
+                }
+            </style>
+        </head>
+        <body>
+            <h1>Local Operator</h1>
+            <p>Welcome to the Local Operator API server.</p>
+            <h2>Available Pages:</h2>
+            <ul>
+                <li><a href="/docs">API Documentation</a></li>
+                <li><a href="/redoc">ReDoc API Documentation</a></li>
+                <li><a href="/documents">Document Upload Interface</a></li>
+            </ul>
+        </body>
+        </html>
+        """
 
-        expanded_path = file_path.expanduser().resolve()
 
-        if not expanded_path.exists():
-            raise HTTPException(status_code=404, detail=f"File not found: {path}")
-
-        if not expanded_path.is_file():
-            raise HTTPException(status_code=400, detail=f"Not a file: {path}")
-
-        # Check if the file is readable
-        if not os.access(expanded_path, os.R_OK):
-            raise HTTPException(status_code=403, detail=f"File not accessible: {path}")
-
-        # Determine the file's MIME type
-        mime_type, _ = mimetypes.guess_type(expanded_path)
-        if not mime_type or mime_type not in ALLOWED_IMAGE_TYPES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"File is not an allowed image type: {mime_type or 'unknown'}",
-            )
-
-        # Return the file
-        return FileResponse(path=expanded_path, media_type=mime_type, filename=expanded_path.name)
-
-    except HTTPException:
-        # Re-raise HTTP exceptions to preserve their status code and detail
-        raise
-    except Exception as e:
-        logger.exception(f"Error serving image file: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
-
-
-@router.get(
-    "/v1/static/videos",
-    summary="Serve video file",
-    description="Serves a video file from disk by path. Only video file types are allowed.",
-    response_class=FileResponse,
-)
-async def get_video(
-    path: str = Query(..., description="Path to the video file on disk"),
-):
+@router.get("/documents", response_class=HTMLResponse)
+async def get_document_upload_page():
     """
-    Serve a video file from disk.
-
-    Args:
-        path: Path to the video file on disk
-
+    Serve the document upload page.
+    
     Returns:
-        The video file as a response
-
-    Raises:
-        HTTPException: If the file doesn't exist, is not accessible, or is not a video file
+        HTMLResponse: The document upload page HTML
     """
     try:
-        # Validate the path exists
-        file_path = Path(path)
+        with open(HTML_DIR / "document_upload.html", "r") as f:
+            return f.read()
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Document upload page not found")
 
-        expanded_path = file_path.expanduser().resolve()
 
-        if not expanded_path.exists():
-            raise HTTPException(status_code=404, detail=f"File not found: {path}")
-
-        if not expanded_path.is_file():
-            raise HTTPException(status_code=400, detail=f"Not a file: {path}")
-
-        # Check if the file is readable
-        if not os.access(expanded_path, os.R_OK):
-            raise HTTPException(status_code=403, detail=f"File not accessible: {path}")
-
-        # Determine the file's MIME type
-        mime_type, _ = mimetypes.guess_type(expanded_path)
-        if not mime_type or mime_type not in ALLOWED_VIDEO_TYPES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"File is not an allowed video type: {mime_type or 'unknown'}",
-            )
-
-        # Return the file
-        return FileResponse(path=expanded_path, media_type=mime_type, filename=expanded_path.name)
-
-    except HTTPException:
-        # Re-raise HTTP exceptions to preserve their status code and detail
-        raise
-    except Exception as e:
-        logger.exception(f"Error serving video file: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+@router.get("/static/{file_path:path}")
+async def get_static_file(file_path: str):
+    """
+    Serve static files.
+    
+    Args:
+        file_path: Path to the static file
+        
+    Returns:
+        FileResponse: The requested file
+    """
+    file = STATIC_DIR / file_path
+    if not file.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+    return FileResponse(file)

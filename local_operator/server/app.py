@@ -13,6 +13,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
@@ -23,6 +24,7 @@ from local_operator.server.routes import (
     chat,
     config,
     credentials,
+    documents,
     health,
     jobs,
     models,
@@ -102,6 +104,7 @@ app = FastAPI(
         {"name": "Models", "description": "Model management endpoints"},
         {"name": "Static", "description": "Static file hosting endpoints"},
         {"name": "Slack", "description": "Slack integration endpoints"},
+        {"name": "Documents", "description": "Document upload and processing endpoints"},
     ],
 )
 
@@ -163,3 +166,11 @@ app.include_router(
 app.include_router(
     slack.router,
 )
+
+# /v1/documents
+app.include_router(
+    documents.router,
+)
+
+# Mount static files for uploads
+app.mount("/uploads", StaticFiles(directory=Path(__file__).parent / "static" / "uploads"), name="uploads")

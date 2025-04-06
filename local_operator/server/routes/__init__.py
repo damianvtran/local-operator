@@ -1,5 +1,5 @@
 """
-Routes package for the Local Operator API.
-
-This package contains the route handlers for the Local Operator API.
+Routes for the Local Operator API.
 """
+
+from . import agents, chat, config, credentials, documents, health, jobs, models, slack, static, websockets
