@@ -1,6 +1,7 @@
 import base64
 import fnmatch
 import os
+import subprocess
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -696,6 +697,98 @@ def search_web_tool(
     return search_web
 
 
+def execute_wsl_command(
+    command: str, 
+    distribution: str = "Ubuntu", 
+    username: Optional[str] = None, 
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """Execute a command in a WSL2 distribution.
+    
+    This tool allows the agent to execute commands in a WSL2 distribution on Windows.
+    It can be used to interact with Linux environments from a Windows host.
+    
+    Args:
+        command (str): The command to execute in the WSL2 distribution
+        distribution (str, optional): The name of the WSL2 distribution. Defaults to "Ubuntu".
+        username (str, optional): Username for the WSL2 distribution. If provided, will use this for login.
+        password (str, optional): Password for the WSL2 distribution. Only used if username is provided.
+        
+    Returns:
+        Dict[str, Any]: A dictionary containing the command output, return code, and error (if any)
+        
+    Raises:
+        RuntimeError: If WSL2 is not available or the command fails to execute
+    """
+    try:
+        # Check if WSL is available
+        wsl_check = subprocess.run(
+            ["wsl.exe", "--status"], 
+            capture_output=True, 
+            text=True
+        )
+        
+        if wsl_check.returncode != 0:
+            return {
+                "success": False,
+                "output": "",
+                "error": "WSL2 is not available on this system",
+                "return_code": wsl_check.returncode
+            }
+        
+        # Prepare the command
+        wsl_cmd = ["wsl.exe"]
+        
+        # Add distribution if specified
+        if distribution:
+            wsl_cmd.extend(["-d", distribution])
+            
+        # Add username if specified
+        if username:
+            wsl_cmd.extend(["-u", username])
+            
+        # Add the command to execute
+        wsl_cmd.append(command)
+        
+        # Execute the command
+        # If password is provided, we need to handle it securely
+        if username and password:
+            # This is a simplified approach - in production, you'd want a more secure method
+            # Create a process with stdin piped
+            process = subprocess.Popen(
+                wsl_cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            # Send password to stdin if prompted
+            stdout, stderr = process.communicate(input=f"{password}\n")
+            return_code = process.returncode
+        else:
+            # Execute without password
+            result = subprocess.run(wsl_cmd, capture_output=True, text=True)
+            stdout = result.stdout
+            stderr = result.stderr
+            return_code = result.returncode
+        
+        return {
+            "success": return_code == 0,
+            "output": stdout,
+            "error": stderr,
+            "return_code": return_code
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "output": "",
+            "error": str(e),
+            "return_code": -1
+        }
+
+
 class ToolRegistry:
     """Registry for tools that can be used by agents.
 
@@ -749,10 +842,12 @@ class ToolRegistry:
         - get_page_text_content: Browse a URL and get page text content
         - list_working_directory: Index files in current directory
         - search_web: Search the web using SERP API
+        - execute_wsl_command: Execute commands in WSL2 distributions
         """
         self.add_tool("get_page_html_content", get_page_html_content)
         self.add_tool("get_page_text_content", get_page_text_content)
         self.add_tool("list_working_directory", list_working_directory)
+        self.add_tool("execute_wsl_command", execute_wsl_command)
 
         if self.serp_api_client or self.tavily_client:
             self.add_tool("search_web", search_web_tool(self.serp_api_client, self.tavily_client))
