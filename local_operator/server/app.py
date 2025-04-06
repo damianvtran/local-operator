@@ -26,6 +26,7 @@ from local_operator.server.routes import (
     health,
     jobs,
     models,
+    slack,
     static,
     websockets,
 )
@@ -100,6 +101,7 @@ app = FastAPI(
         {"name": "Credentials", "description": "Credential management endpoints"},
         {"name": "Models", "description": "Model management endpoints"},
         {"name": "Static", "description": "Static file hosting endpoints"},
+        {"name": "Slack", "description": "Slack integration endpoints"},
     ],
 )
 
@@ -155,4 +157,9 @@ app.include_router(
 # /v1/ws
 app.include_router(
     websockets.router,
+)
+
+# /v1/slack
+app.include_router(
+    slack.router,
 )

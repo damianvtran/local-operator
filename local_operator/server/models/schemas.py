@@ -702,3 +702,85 @@ class WebsocketConnectionType(str, Enum):
 
     MESSAGE = "message"
     HEALTH = "health"
+
+
+class SlackMessageEvent(BaseModel):
+    """Schema for Slack message events.
+    
+    Attributes:
+        type: The type of event (usually 'message')
+        user: The ID of the user who sent the message
+        text: The text content of the message
+        channel: The ID of the channel where the message was sent
+        ts: The timestamp of the message
+        team: The ID of the Slack workspace
+    """
+    type: str
+    user: str
+    text: str
+    channel: str
+    ts: str
+    team: str
+    thread_ts: Optional[str] = None
+    
+class SlackEventWrapper(BaseModel):
+    """Wrapper for Slack events.
+    
+    Attributes:
+        token: Verification token from Slack
+        team_id: The ID of the Slack workspace
+        api_app_id: The ID of the Slack app
+        event: The event data
+        type: The type of callback (usually 'event_callback')
+        event_id: The unique ID of this event
+        event_time: The time of the event
+    """
+    token: str
+    team_id: str
+    api_app_id: str
+    event: SlackMessageEvent
+    type: str
+    event_id: str
+    event_time: int
+    
+class SlackChallenge(BaseModel):
+    """Schema for Slack URL verification challenge.
+    
+    Attributes:
+        token: Verification token from Slack
+        challenge: The challenge string to be returned
+        type: The type of request (should be 'url_verification')
+    """
+    token: str
+    challenge: str
+    type: str
+    
+class SlackImplementationRequest(BaseModel):
+    """Schema for implementation requests from Slack.
+    
+    Attributes:
+        user_id: The ID of the user who sent the request
+        channel_id: The ID of the channel where the request was sent
+        text: The text content of the implementation request
+        team_id: The ID of the Slack workspace
+        response_url: URL to send delayed responses
+        thread_ts: The timestamp of the thread, if in a thread
+    """
+    user_id: str
+    channel_id: str
+    text: str
+    team_id: str
+    response_url: Optional[str] = None
+    thread_ts: Optional[str] = None
+    
+class SlackResponse(BaseModel):
+    """Schema for responses to Slack.
+    
+    Attributes:
+        text: The text content of the response
+        response_type: The type of response (in_channel or ephemeral)
+        thread_ts: The timestamp of the thread to reply to
+    """
+    text: str
+    response_type: str = "in_channel"
+    thread_ts: Optional[str] = None
