@@ -1179,9 +1179,7 @@ RequestClassificationSystemPrompt: str = (
 
 For this task, you must analyze my request and classify it into an XML tag format with:
 <request_classification_schema>
-- type: conversation | creative_writing | data_science | mathematics | accounting |
-  research | deep_research | media | competitive_coding | software_development |
-  finance | news_report | console_command | continue | other
+- type: conversation | creative_writing | data_science | mathematics | accounting | legal | medical | research | deep_research | media | competitive_coding | software_development | finance | news_report | console_command | personal_assistance | continue | translation | other
 - planning_required: true | false
 - relative_effort: low | medium | high
 - subject_change: true | false
@@ -1193,7 +1191,7 @@ Respond only with the JSON object, no other text.
 
 You will then use this classification in further steps to determine how to respond to me and how to perform the task if there is some work associated with the request.
 
-Here are the request types and how to think about classifying them:
+Here are the request types and how to think about classifying them.  You MUST use only the types listed below, do not create or make up new types.  If you are not sure what the type is, then respond with the type "other" and apply your best judgement to handle the request.
 
 <request_types>
 conversation: General chat, questions, discussions that don't require complex analysis or processing, role playing, etc.
@@ -1214,13 +1212,9 @@ reporting: Use this for casual requests for news information.  Use deep_research
 more complex news analysis and deeper research tasks.
 console_command: Command line operations, shell scripting, system administration tasks
 personal_assistance: Desktop assistance, file management, application management, note taking, scheduling, calendar, trip planning, and other personal assistance tasks
-continue: Continue with the current task, no need to classify.  Do this if I am providing you with some refinement or more information, or has interrupted a previous
-task and then asked you to continue.  Only use this if the course of the conversation has not changed and you don't need to perform any different actions.  If you are in a regular conversation and then you need to suddenly do a task, even if the subject is the same it is not "continue" and you will need to classify the task.
+continue: Continue with the current task, no need to classify.  Do this if I am providing you with some refinement or more information, or has interrupted a previous task and then asked you to continue.  Only use this if the course of the conversation has not changed and you don't need to perform any different actions.  If you are in a regular conversation and then you need to suddenly do a task, even if the subject is the same it is not "continue" and you will need to classify the task.
 translation: Translate text from one language to another.  Use this for requests to translate text from one language to another.  This could be a request to translate a message on the spot, a document, or other text formats.
-other: Anything else that doesn't fit into the above categories, you will need to
-determine how to respond to this best based on your intuition.  If you're not sure
-what the category is, then it's best to respond with other and then you can think
-through the solution in following steps.
+other: Anything else that doesn't fit into the above categories, you will need to determine how to respond to this best based on your intuition.  If you're not sure what the category is, then it's best to respond with other and then you can think through the solution in following steps.
 </request_types>
 
 Planning is required for:
@@ -1263,8 +1257,7 @@ Hey, how are you doing today?
 <subject_change>false</subject_change>
 </example_response>
 
-Remember, respond in XML format for this next message otherwise your response will
-fail to be parsed.
+Remember, respond in XML format for this next message otherwise your response will fail to be parsed.
 """  # noqa: E501
 )
 
