@@ -727,11 +727,24 @@ def test_delete_agent_not_found(temp_agents_dir: Path):
 def test_create_agent_save_failure(temp_agents_dir: Path, monkeypatch):
     registry = AgentRegistry(temp_agents_dir)
 
-    # Monkey-patch the open method on the Path type to simulate a write failure for agents.json
+    # Create a test agent directory path
+    agent_dir = registry.agents_dir / "test-agent-id"
+    if not agent_dir.exists():
+        agent_dir.mkdir(parents=True, exist_ok=True)
+
+    # Monkey-patch the open method on the Path type to simulate a write failure
     def fake_open(*args, **kwargs):
         raise Exception("Fake write failure")
 
-    monkeypatch.setattr(type(registry.agents_file), "open", fake_open)
+    # Patch the open method for agent.yml
+    agent_yml_path = agent_dir / "agent.yml"
+    monkeypatch.setattr(type(agent_yml_path), "open", fake_open)
+
+    # Mock uuid.uuid4 to return a predictable ID
+    def mock_uuid4():
+        return "test-agent-id"
+
+    monkeypatch.setattr(uuid, "uuid4", mock_uuid4)
 
     with pytest.raises(Exception) as exc_info:
         registry.create_agent(
@@ -1268,160 +1281,139 @@ def test_update_agent_unpickleable_context(temp_agents_dir: Path):
 
 def test_migrate_legacy_agents(temp_agents_dir: Path):
     """Test migration of agents from old format to new format."""
-    # Create agents.json with test data
-    agents_data = [
+    # Since legacy migration has been removed, we'll create an agent directly in the new format
+    # to verify the basic functionality still works
+
+    agent_id = "test-agent-1"
+    agent_name = "Test Agent 1"
+
+    # Create agent directory
+    agents_dir = temp_agents_dir / "agents"
+    agent_dir = agents_dir / agent_id
+    agent_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create agent.yml file
+    agent_data = {
+        "id": agent_id,
+        "name": agent_name,
+        "created_date": datetime.now(timezone.utc).isoformat(),
+        "version": "0.1.0",
+        "security_prompt": "test security prompt",
+        "hosting": "test-hosting",
+        "model": "test-model",
+        "description": "test description",
+        "last_message": "test last message",
+        "last_message_datetime": datetime.now(timezone.utc).isoformat(),
+        "temperature": 0.7,
+        "top_p": 1.0,
+        "top_k": 20,
+        "max_tokens": 2048,
+        "stop": ["stop"],
+        "frequency_penalty": 0.12,
+        "presence_penalty": 0.34,
+        "seed": 42,
+        "current_working_directory": "/tmp/path",
+    }
+
+    agent_yml_file = agent_dir / "agent.yml"
+    with agent_yml_file.open("w", encoding="utf-8") as f:
+        yaml.dump(agent_data, f, default_flow_style=False)
+
+    # Create conversation data
+    timestamp = datetime.now(timezone.utc).isoformat()
+    conversation = [
         {
-            "id": "test-agent-1",
-            "name": "Test Agent 1",
-            "created_date": datetime.now(timezone.utc).isoformat(),
-            "version": "0.1.0",
-            "security_prompt": "test security prompt",
-            "hosting": "test-hosting",
-            "model": "test-model",
-            "description": "test description",
-            "last_message": "test last message",
-            "last_message_datetime": datetime.now(timezone.utc).isoformat(),
-            "temperature": 0.7,
-            "top_p": 1.0,
-            "top_k": 20,
-            "max_tokens": 2048,
-            "stop": ["stop"],
-            "frequency_penalty": 0.12,
-            "presence_penalty": 0.34,
-            "seed": 42,
-            "current_working_directory": "/tmp/path",
+            "role": "user",
+            "content": "Hello",
+            "timestamp": timestamp,
+        },
+        {
+            "role": "assistant",
+            "content": "Hi there!",
+            "timestamp": timestamp,
+        },
+    ]
+
+    # Save conversation to conversation.jsonl
+    conversation_file = agent_dir / "conversation.jsonl"
+    with open(conversation_file, "w", encoding="utf-8") as f:
+        for record in conversation:
+            f.write(json.dumps(record) + "\n")
+
+    # Create execution history
+    execution_history = [
+        {
+            "stdout": "",
+            "stderr": "",
+            "logging": "",
+            "message": "This is a test code execution result",
+            "code": "print('Hello, world!')",
+            "formatted_print": "Hello, world!",
+            "role": "assistant",
+            "status": "success",
+            "timestamp": timestamp,
+            "files": [],
         }
     ]
 
-    # Create agents.json
-    agents_file = temp_agents_dir / "agents.json"
-    with agents_file.open("w", encoding="utf-8") as f:
-        json.dump(agents_data, f, indent=2)
+    # Save execution history to execution_history.jsonl
+    execution_history_file = agent_dir / "execution_history.jsonl"
+    with open(execution_history_file, "w", encoding="utf-8") as f:
+        for record in execution_history:
+            f.write(json.dumps(record) + "\n")
 
-    # Create old conversation file
-    agent_id = "test-agent-1"
-    old_conversation_file = temp_agents_dir / f"{agent_id}_conversation.json"
+    # Create learnings
+    learnings = ["Test learning 1", "Test learning 2"]
 
-    # Create test conversation data
-    conversation_data = {
-        "version": "0.1.0",
-        "conversation": [
-            {
-                "role": "user",
-                "content": "Hello",
-                "should_summarize": "true",
-                "ephemeral": "false",
-                "summarized": "false",
-                "is_system_prompt": "false",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "files": None,
-                "should_cache": "true",
-            },
-            {
-                "role": "assistant",
-                "content": "Hi there!",
-                "should_summarize": "true",
-                "ephemeral": "false",
-                "summarized": "false",
-                "is_system_prompt": "false",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "files": None,
-                "should_cache": "true",
-            },
-        ],
-        "execution_history": [
-            {
-                "id": str(uuid.uuid4()),
-                "stdout": "",
-                "stderr": "",
-                "logging": "",
-                "message": "This is a test code execution result",
-                "code": "print('Hello, world!')",
-                "formatted_print": "Hello, world!",
-                "role": "assistant",
-                "status": "success",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "files": [],
-                "action": "CODE",
-                "execution_type": "action",
-                "task_classification": "",
-            }
-        ],
-        "learnings": ["Test learning 1", "Test learning 2"],
-        "current_plan": "Test current plan",
-        "instruction_details": "Test instruction details",
-    }
+    # Save learnings to learnings.jsonl
+    learnings_file = agent_dir / "learnings.jsonl"
+    with open(learnings_file, "w", encoding="utf-8") as f:
+        for learning in learnings:
+            f.write(json.dumps({"learning": learning}) + "\n")
 
-    with old_conversation_file.open("w", encoding="utf-8") as f:
-        json.dump(conversation_data, f, indent=2)
+    # Create plan and instruction files
+    current_plan = "Test current plan"
+    plan_file = agent_dir / "current_plan.txt"
+    with plan_file.open("w", encoding="utf-8") as f:
+        f.write(current_plan)
 
-    # Create old context file
-    old_context_file = temp_agents_dir / f"{agent_id}_context.pkl"
+    instruction_details = "Test instruction details"
+    instruction_file = agent_dir / "instruction_details.txt"
+    with instruction_file.open("w", encoding="utf-8") as f:
+        f.write(instruction_details)
+
+    # Create context file
     test_context = {"variables": {"x": 10, "y": 20}}
-    with old_context_file.open("wb") as f:
+    context_file = agent_dir / "context.pkl"
+    with context_file.open("wb") as f:
         dill.dump(test_context, f)
 
-    # Initialize registry which should trigger migration
+    # Initialize registry
     registry = AgentRegistry(temp_agents_dir)
-
-    # Verify agent was migrated
-    agent_dir = temp_agents_dir / "agents" / agent_id
-    assert agent_dir.exists()
-
-    # Verify agent.yml was created
-    agent_yml_file = agent_dir / "agent.yml"
-    assert agent_yml_file.exists()
-
-    # Verify conversation files were created
-    conversation_file = agent_dir / "conversation.jsonl"
-    assert conversation_file.exists()
-    assert conversation_file.stat().st_size > 0
-
-    execution_history_file = agent_dir / "execution_history.jsonl"
-    assert execution_history_file.exists()
-    assert execution_history_file.stat().st_size > 0
-
-    learnings_file = agent_dir / "learnings.jsonl"
-    assert learnings_file.exists()
-    assert learnings_file.stat().st_size > 0
-
-    # Verify plan and instruction files were created
-    plan_file = agent_dir / "current_plan.txt"
-    assert plan_file.exists()
-    with plan_file.open("r") as f:
-        assert f.read() == "Test current plan"
-
-    instruction_file = agent_dir / "instruction_details.txt"
-    assert instruction_file.exists()
-    with instruction_file.open("r") as f:
-        assert f.read() == "Test instruction details"
-
-    # Verify context was migrated
-    context_file = agent_dir / "context.pkl"
-    assert context_file.exists()
-    with context_file.open("rb") as f:
-        migrated_context = dill.load(f)
-    assert migrated_context["variables"]["x"] == 10
-    assert migrated_context["variables"]["y"] == 20
 
     # Verify agent can be loaded
     agent = registry.get_agent(agent_id)
     assert agent.id == agent_id
-    assert agent.name == "Test Agent 1"
+    assert agent.name == agent_name
 
     # Verify conversation can be loaded
-    conversation = registry.load_agent_state(agent_id)
-    assert len(conversation.conversation) == 2
-    assert conversation.conversation[0].role == ConversationRole.USER
-    assert conversation.conversation[0].content == "Hello"
-    assert conversation.conversation[1].role == ConversationRole.ASSISTANT
-    assert conversation.conversation[1].content == "Hi there!"
-    assert len(conversation.execution_history) == 1
-    assert conversation.execution_history[0].message == "This is a test code execution result"
-    assert len(conversation.learnings) == 2
-    assert conversation.learnings[0] == "Test learning 1"
-    assert conversation.current_plan == "Test current plan"
-    assert conversation.instruction_details == "Test instruction details"
+    agent_state = registry.load_agent_state(agent_id)
+    assert len(agent_state.conversation) == 2
+    assert agent_state.conversation[0].role == ConversationRole.USER
+    assert agent_state.conversation[0].content == "Hello"
+    assert agent_state.conversation[1].role == ConversationRole.ASSISTANT
+    assert agent_state.conversation[1].content == "Hi there!"
+    assert len(agent_state.execution_history) == 1
+    assert agent_state.execution_history[0].message == "This is a test code execution result"
+    assert len(agent_state.learnings) == 2
+    assert agent_state.learnings[0] == "Test learning 1"
+    assert agent_state.current_plan == current_plan
+    assert agent_state.instruction_details == instruction_details
+
+    # Verify context can be loaded
+    loaded_context = registry.load_agent_context(agent_id)
+    assert loaded_context["variables"]["x"] == 10
+    assert loaded_context["variables"]["y"] == 20
 
 
 def test_migrate_legacy_agents_no_migration_needed(temp_agents_dir: Path):
