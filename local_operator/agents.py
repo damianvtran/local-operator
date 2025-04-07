@@ -434,45 +434,22 @@ class AgentRegistry:
         source_dir = self.agents_dir / agent_id
         target_dir = self.agents_dir / new_agent.id
 
-        if source_dir.exists():
-            try:
-                # Copy all files from source directory to target directory
-                for source_file in source_dir.iterdir():
-                    if source_file.is_file() and source_file.name != "agent.yml":
-                        # For JSONL files, only copy if they have content
-                        if source_file.suffix == ".jsonl" and source_file.stat().st_size == 0:
-                            continue
+        try:
+            # Copy all files from source directory to target directory
+            for source_file in source_dir.iterdir():
+                if source_file.is_file() and source_file.name != "agent.yml":
+                    # For JSONL files, only copy if they have content
+                    if source_file.suffix == ".jsonl" and source_file.stat().st_size == 0:
+                        continue
 
-                        target_file = target_dir / source_file.name
-                        shutil.copy2(source_file, target_file)
+                    target_file = target_dir / source_file.name
+                    shutil.copy2(source_file, target_file)
 
-                return new_agent
-            except Exception as e:
-                # Clean up if file copy fails
-                self.delete_agent(new_agent.id)
-                raise Exception(f"Failed to copy agent files: {str(e)}")
-        else:
-            # For backward compatibility, copy from old format files
-            try:
-                # Load conversation data from old format
-                source_state = self.load_agent_state(agent_id)
-
-                # Save to new format
-                self.save_agent_state(
-                    new_agent.id,
-                    source_state,
-                )
-
-                # Copy context if it exists
-                context = self.load_agent_context(agent_id)
-                if context is not None:
-                    self.save_agent_context(new_agent.id, context)
-
-                return new_agent
-            except Exception as e:
-                # Clean up if conversation copy fails
-                self.delete_agent(new_agent.id)
-                raise Exception(f"Failed to copy agent data: {str(e)}")
+            return new_agent
+        except Exception as e:
+            # Clean up if file copy fails
+            self.delete_agent(new_agent.id)
+            raise Exception(f"Failed to copy agent files: {str(e)}")
 
     def _refresh_if_needed(self) -> None:
         """
@@ -601,7 +578,6 @@ class AgentRegistry:
         instruction_details = None
         agent_system_prompt = ""
 
-        # Check for new format files
         if agent_dir.exists():
             # Load conversation records
             conversation_file = agent_dir / "conversation.jsonl"
@@ -659,26 +635,6 @@ class AgentRegistry:
                 agent_system_prompt = self.get_agent_system_prompt(agent_id)
             except Exception as e:
                 logging.error(f"Failed to load agent system prompt: {str(e)}")
-
-        # Check for old format file for backward compatibility
-        else:
-            old_conversation_file = self.config_dir / f"{agent_id}_conversation.json"
-            if old_conversation_file.exists():
-                try:
-                    with old_conversation_file.open("r", encoding="utf-8") as f:
-                        raw_data = json.load(f)
-                        try:
-                            old_data = AgentState.model_validate(raw_data)
-                            conversation_records = old_data.conversation
-                            execution_history_records = old_data.execution_history
-                            learnings_list = old_data.learnings
-                            current_plan = old_data.current_plan
-                            instruction_details = old_data.instruction_details
-                            agent_system_prompt = ""
-                        except Exception as e:
-                            logging.error(f"Failed to load old conversation format: {str(e)}")
-                except Exception as e:
-                    logging.error(f"Failed to open old conversation file: {str(e)}")
 
         # Create and return the conversation data
         return AgentState(
@@ -1004,24 +960,13 @@ class AgentRegistry:
                 except Exception:
                     return obj
 
-        # Check if the new format file exists
         if context_file.exists():
             try:
                 with context_file.open("rb") as f:
                     loaded_context = dill.load(f)
                     return reconstruct_objects(loaded_context)
             except Exception as e:
-                logging.error(f"Failed to load agent context from new format: {str(e)}")
-
-        # Check for old format file for backward compatibility
-        old_context_file = self.config_dir / f"{agent_id}_context.pkl"
-        if old_context_file.exists():
-            try:
-                with old_context_file.open("rb") as f:
-                    loaded_context = dill.load(f)
-                    return reconstruct_objects(loaded_context)
-            except Exception as e:
-                logging.error(f"Failed to load agent context from old format: {str(e)}")
+                logging.error(f"Failed to load agent context: {str(e)}")
 
         # No context found
         return None
