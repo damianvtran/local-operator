@@ -5,10 +5,12 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import playwright.async_api as pw
+from pydantic import SecretStr
 
 from local_operator.clients.fal import FalClient, FalImageGenerationResponse, ImageSize
 from local_operator.clients.serpapi import SerpApiClient, SerpApiResponse
 from local_operator.clients.tavily import TavilyClient, TavilyResponse
+from local_operator.credentials import CredentialManager
 
 
 def _get_git_ignored_files(gitignore_path: str) -> Set[str]:
@@ -696,6 +698,38 @@ def search_web_tool(
     return search_web
 
 
+def get_credential_tool(credential_manager: CredentialManager) -> Callable[..., SecretStr]:
+    """Create a tool function to retrieve a credential as a SecretStr."""
+
+    def get_credential(name: str) -> SecretStr:
+        """Retrieve a credential by name as a SecretStr.  This tool is used to get the pydantic SecretStr for a credential, which should then be used in code that you write that requires the credential.  Never try to print the credential, and never send the credential anywhere other than the intended providers.
+
+        Args:
+            name (str): The credential name
+
+        Returns:
+            SecretStr: The secret credential value
+        """  # noqa: E501
+        secret_value = credential_manager.get_credential(name)
+        return secret_value
+
+    return get_credential
+
+
+def list_credentials_tool(credential_manager: CredentialManager) -> Callable[..., List[str]]:
+    """Create a tool function to list available credential names."""
+
+    def list_credentials() -> List[str]:
+        """List all available credential names.  Use this to check what the available credentials are if you are being asked to do something that might require a credential that has been added by the user through the configuration settings.  Never try to print the credential, and never send the credential anywhere other than the intended providers.
+
+        Returns:
+            List[str]: List of credential names
+        """  # noqa: E501
+        return credential_manager.list_credential_keys()
+
+    return list_credentials
+
+
 class ToolRegistry:
     """Registry for tools that can be used by agents.
 
@@ -711,6 +745,7 @@ class ToolRegistry:
     serp_api_client: SerpApiClient | None = None
     tavily_client: TavilyClient | None = None
     fal_client: FalClient | None = None
+    credential_manager: CredentialManager | None = None
 
     def __init__(self):
         """Initialize an empty tool registry."""
@@ -741,6 +776,14 @@ class ToolRegistry:
         """
         self.fal_client = fal_client
 
+    def set_credential_manager(self, credential_manager: CredentialManager):
+        """Set the credential manager for the registry.
+
+        Args:
+            credential_manager (CredentialManager): The credential manager to set
+        """
+        self.credential_manager = credential_manager
+
     def init_tools(self):
         """Initialize the registry with default tools.
 
@@ -749,6 +792,8 @@ class ToolRegistry:
         - get_page_text_content: Browse a URL and get page text content
         - list_working_directory: Index files in current directory
         - search_web: Search the web using SERP API
+        - get_credential: Retrieve a secret credential
+        - list_credentials: List available credentials
         """
         self.add_tool("get_page_html_content", get_page_html_content)
         self.add_tool("get_page_text_content", get_page_text_content)
@@ -760,6 +805,10 @@ class ToolRegistry:
         if self.fal_client:
             self.add_tool("generate_image", generate_image_tool(self.fal_client))
             self.add_tool("generate_altered_image", generate_altered_image_tool(self.fal_client))
+
+        if self.credential_manager:
+            self.add_tool("get_credential", get_credential_tool(self.credential_manager))
+            self.add_tool("list_credentials", list_credentials_tool(self.credential_manager))
 
     def add_tool(self, name: str, tool: Callable[..., Any]):
         """Add a new tool to the registry.
