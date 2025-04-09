@@ -516,6 +516,7 @@ def build_tool_registry(
         fal_client = FalClient(fal_api_key)
         tool_registry.set_fal_client(fal_client)
 
+    tool_registry.set_credential_manager(credential_manager)
     tool_registry.init_tools()
 
     add_admin_tools(tool_registry, executor, agent_registry, config_manager)
