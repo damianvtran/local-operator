@@ -7,7 +7,7 @@ name = "local-operator"
 version = "0.7.4"
 description = "A Python-based agent for local command execution"
 readme = "README.md"
-authors = [{ name = "Damian Tran", email = "damianvtran@gmail.com" }]
+authors = [{ name = "Damian Tran", email = "damian@local-operator.com" }]
 license = { file = "LICENSE" }
 classifiers = [
     "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
