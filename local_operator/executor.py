@@ -61,7 +61,9 @@ from local_operator.types import (
     ResponseJsonSchema,
 )
 
-MAX_FILE_READ_SIZE_BYTES = 1024 * 24
+CHARS_PER_TOKEN = 4
+MAX_FILE_READ_TOKENS = 50000
+MAX_FILE_READ_SIZE_BYTES = CHARS_PER_TOKEN * MAX_FILE_READ_TOKENS
 """The maximum file size to read in bytes.
 
 This is used to prevent reading large files into context, which can cause
