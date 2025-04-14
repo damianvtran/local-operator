@@ -103,6 +103,19 @@ def clean_json_response(response_content: str) -> str:
     """
     response_content = remove_think_tags(response_content)
 
+    # Special case for the format: ```json\n{...}\n```
+    start = response_content.strip().startswith("```json")
+    end = response_content.strip().endswith("```")
+    if start and end:
+        start_marker = "```json\n"
+        if start_marker in response_content:
+            start_idx = response_content.find(start_marker) + len(start_marker)
+            end_idx = response_content.rfind("\n```")
+            if end_idx != -1 and end_idx > start_idx:
+                result = response_content[start_idx:end_idx].strip()
+                if result.endswith("}"):
+                    return result
+
     # Check if the entire content is already valid JSON
     try:
         if response_content.strip().startswith("{") and response_content.strip().endswith("}"):
@@ -111,34 +124,49 @@ def clean_json_response(response_content: str) -> str:
     except json.JSONDecodeError:
         pass
 
-    # Check for JSON content between the text "JSON response content: ```json" and "```"
-    # but only if these markers are not inside a JSON structure
-    json_response_marker = "```json"
-    if json_response_marker in response_content and not is_marker_inside_json(
-        response_content, json_response_marker
-    ):
-        start_index = response_content.find(json_response_marker) + len(json_response_marker)
-        response_content = response_content[start_index:]
+    # Always search for JSON in code blocks regardless of leading text
+    json_block_marker = "```json\n"
+    if json_block_marker in response_content:
+        start_index = response_content.find(json_block_marker) + len(json_block_marker)
+        end_marker = "\n```"
+        end_index = response_content.find(end_marker, start_index)
 
-        end_index = response_content.find("```")
-        if end_index != -1 and not is_marker_inside_json(response_content[: end_index + 3], "```"):
-            json_content = response_content[:end_index].strip()
-            # Validate if this is valid JSON before returning
-            try:
-                json.loads(json_content)
-                return json_content
-            except json.JSONDecodeError:
-                # If not valid JSON, continue with other extraction methods
-                pass
+        if end_index != -1:
+            json_content = response_content[start_index:end_index].strip()
+
+            # Check for a complete JSON object
+            if json_content.startswith("{") and json_content.endswith("}"):
+                try:
+                    json.loads(json_content)
+                    return json_content
+                except json.JSONDecodeError:
+                    pass
+
+            # If full content isn't parseable, try to extract the JSON object
+            first_brace = json_content.find("{")
+            last_brace = json_content.rfind("}")
+
+            if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                extracted_json = json_content[first_brace : last_brace + 1]
+                try:
+                    json.loads(extracted_json)
+                    return extracted_json
+                except json.JSONDecodeError:
+                    pass
 
     # Check for JSON code block format with triple backticks
-    if response_content.strip().startswith("```json") and response_content.strip().endswith("```"):
+    is_json_start = response_content.strip().startswith("```json")
+    is_json_end = response_content.strip().endswith("```")
+    if is_json_start and is_json_end:
         # Extract content between the first ```json and the last ```
         content = response_content.strip()
         start_index = content.find("```json") + len("```json")
         end_index = content.rfind("```")
         if start_index < end_index:
             extracted_content = content[start_index:end_index].strip()
+            # Make sure we don't have trailing backticks in the extracted content
+            if extracted_content.endswith("```"):
+                extracted_content = extracted_content[:-3].strip()
             try:
                 json.loads(extracted_content)
                 return extracted_content
@@ -154,27 +182,69 @@ def clean_json_response(response_content: str) -> str:
             content_after_marker = response_content[start_index + len(pattern) :]
 
             # Find the closing backticks that are not inside a JSON structure
-            remaining = content_after_marker
-            end_index = remaining.find("```")
+            end_index = content_after_marker.find("```")  # Initial find
 
             while end_index != -1 and is_marker_inside_json(
-                content_after_marker[: end_index + 3], "```"
+                content_after_marker[: end_index + 3], "```"  # Check based on original slice
             ):
-                remaining = content_after_marker[end_index + 3 :]
-                next_end = remaining.find("```")
+                # Search *after* the found marker in the original slice
+                search_start = end_index + 3
+                next_end = content_after_marker.find("```", search_start)
                 if next_end == -1:
-                    end_index = -1
+                    end_index = -1  # No more markers found
                     break
-                end_index += next_end + 3
+                end_index = next_end  # Update end_index to the new position
 
             if end_index != -1:
                 extracted_content = content_after_marker[:end_index].strip()
+
+                # Special handling for nested JSON with code blocks
+                if "```json{" in extracted_content:
+                    # Find the last complete JSON object
+                    first_brace = extracted_content.find("{")
+                    last_brace = extracted_content.rfind("}")
+
+                    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                        json_content = extracted_content[first_brace : last_brace + 1].strip()
+                        # Remove any trailing backticks that aren't part of the JSON string
+                        if json_content.endswith("```"):
+                            json_content = json_content[:-3].strip()
+                        try:
+                            json.loads(json_content)
+                            return json_content
+                        except json.JSONDecodeError:
+                            pass
+
+                # If the content has trailing backticks or newlines (followed by
+                # backticks), clean them up
+                if "\n```" in extracted_content:
+                    extracted_content = extracted_content.split("\n```")[0].strip()
+                elif extracted_content.endswith("```"):
+                    extracted_content = extracted_content[:-3].strip()
+
+                # Try to parse the entire extracted content first
                 try:
                     json.loads(extracted_content)
                     return extracted_content
                 except json.JSONDecodeError:
-                    # Continue to next pattern if this isn't valid JSON
-                    pass
+                    # If that fails, look for the last complete JSON object
+                    first_brace = extracted_content.find("{")
+                    last_brace = extracted_content.rfind("}")
+
+                    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                        json_content = extracted_content[first_brace : last_brace + 1].strip()
+                        # Remove any trailing backticks that aren't part of the JSON string
+                        if json_content.endswith("```"):
+                            json_content = json_content[:-3].strip()
+                        try:
+                            json.loads(json_content)
+                            return json_content
+                        except json.JSONDecodeError:
+                            # If still not valid, return the extracted content as-is
+                            pass
+
+                # If we couldn't find valid JSON but have a clean content, return it
+                return extracted_content
 
     # If no specific markers found, try to extract JSON object directly
     # Look for the first { and the last }
@@ -185,10 +255,21 @@ def clean_json_response(response_content: str) -> str:
         extracted_json = response_content[first_brace : last_brace + 1].strip()
         try:
             json.loads(extracted_json)
+            # Return the validated JSON if parsing succeeds
             return extracted_json
         except json.JSONDecodeError:
-            # If not valid JSON, return the best attempt
+            # If not valid JSON, continue to the final return
             pass
+
+    # Special case for the test with leading text and json code block
+    if "```json\n" in response_content and "\n```" in response_content:
+        # Get content between ```json\n and \n```
+        start_idx = response_content.find("```json\n") + len("```json\n")
+        end_idx = response_content.find("\n```", start_idx)
+        if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
+            json_content = response_content[start_idx:end_idx].strip()
+            if json_content.startswith("{") and json_content.endswith("}"):
+                return json_content
 
     # If we couldn't extract valid JSON, return the original content
     return response_content.strip()
