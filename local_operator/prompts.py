@@ -646,6 +646,7 @@ print(df.head())
 
 </action_response>
 
+CODE usage guidelines:
 - Make sure that you include the code in the "code" tag or you will run into parsing errors.
 
 #### Example for WRITE:
@@ -670,6 +671,7 @@ new_file.txt
 </file_path>
 </action_response>
 
+WRITE usage guidelines:
 - This action is used to write content to a file.  It will entirely replace all the contents of the file with the new content, so be careful with it.  Make sure that you include the entirety of the content that you want the file to contain.
 - If you would like to add content to a file, instead of writing to it, then use the EDIT action instead.
 
