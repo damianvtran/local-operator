@@ -788,7 +788,7 @@ The actions are:
 - ASK: The agent has asked a question and needs information from the user.  Only use this if there is an explicit ASK action tag in the response.  Otherwise, use DONE to indicate that this is a question asked in a conversation message.
 - BYE: The agent has interpreted the user's request as a request to exit the program and quit.  On the CLI, this will terminate the program entirely.
 
-You will need to interpret the actions and provide the correct JSON response for each action type.
+You will need to interpret the actions and provide the correct JSON response for each action type.  Make sure to properly escape characters that will cause JSON parsing errors such as backslashes, quotes, and control characters.
 
 You must reinterpret the agent's response purely in JSON format with the following fields:
 <action_json_fields>
@@ -797,13 +797,12 @@ You must reinterpret the agent's response purely in JSON format with the followi
 - response: Short description of what the agent is doing at this time.  Written in the present continuous tense.  Empty string if there is nothing to note down for this action.
 - code: The code that the agent has written.  An empty string if the action is not CODE.
 - content: The content that the agent has written to a file.  An empty string if the action is not WRITE.
-- file_path: The path to the file that the agent has read/wrote/edited.  An empty
-  string if the action is not READ/WRITE/EDIT.
+- file_path: The path to the file that the agent has read/wrote/edited.  An empty string if the action is not READ/WRITE/EDIT.
 - mentioned_files: The files that the agent has references in CODE.  Include the paths to the files exactly as mentioned in the code.  Make sure that all the files are included in the list.  If there are file names that are programatically assigned,  infer the values and include them in the list as well.  An empty list if there are no files referenced in the code or if the action is not CODE.
-- replacements: The replacements that the agent has made to a file.  This field must  be non-empty for EDIT actions and an empty list otherwise.
+- replacements: The replacements that the agent has made to a file.  This field must be non-empty for EDIT actions and an empty list otherwise.  Be careful to double-check and proofread the diffs that the agent is requesting and properly convert them into the correct find and replace values, escaping any quotes or special characters that will cause JSON parsing errors.
 </action_json_fields>
 
-Do not include any other text or formatting in your response outside of the JSON object.
+Do not include any other text or formatting in your response outside of the JSON object.  Make sure to properly escape any quotes in the JSON object so that it is valid JSON.
 
 Example of an action to interpret:
 <action_response>
@@ -868,9 +867,7 @@ You must format the response in JSON format, following the schema:
 }}
 </json_response>
 
-Make sure to follow the format exactly.  Any incorrect fields will cause parsing
-errors and you will be asked to fix them and provide the correct JSON format.  Include
-all fields, and use empty values for any that don't apply for the particular action.
+Make sure to follow the format exactly.  Any incorrect fields will cause parsing errors and you will be asked to fix them and provide the correct JSON format.  Include all fields, and use empty values for any that don't apply for the particular action.
 
 For CODE actions, you may need to revise or clean up the code before you return it in the JSON response.  Notably, look out for the following issues and revise them:
 - Indentation errors
@@ -899,8 +896,7 @@ search_results = tools.search_web("what is Local Operator?")
 print(search_results)
 </code>
 
-Particularly, make sure that tools that don't return a coroutine are not awaited,
-or you will waste cycles needing to resubmit the same request without awaiting.
+Particularly, make sure that tools that don't return a coroutine are not awaited, or you will waste cycles needing to resubmit the same request without awaiting.
 """  # noqa: E501
 
 JsonResponseFormatSchema: str = """

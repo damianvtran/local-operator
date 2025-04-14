@@ -112,6 +112,11 @@ def test_clean_plain_text_response(response_content, expected_output):
             '{"action": "WRITE", "learnings": "I learned...", "response": "Writing the first 10 Fibonacci numbers to a markdown file in a readable format.", "code": "", "content": "# First 10 Fibonacci Numbers\\n\\nThe following are the first 10 Fibonacci numbers, starting with F(0) = 0 and F(1) = 1. Each subsequent number is the sum of the two preceding numbers.\\n\\n```\\n0, 1, 1, 2, 3, 5, 8, 13, 21, 34\\n```", "file_path": "fibonacci_numbers.md", "mentioned_files": [], "replacements": []}',  # noqa: E501
             id="json_response_content_marker",
         ),
+        pytest.param(
+            '{"find": "old_content", "replace": "```json{"new_content": "value"}```"}',
+            '{"find": "old_content", "replace": "```json{"new_content": "value"}```"}',
+            id="json_in_replace_block_with_newlines",
+        ),
     ],
 )
 def test_clean_json_response(response_content: str, expected_output: str) -> None:
