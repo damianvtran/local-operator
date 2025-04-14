@@ -2124,13 +2124,13 @@ class LocalCodeExecutor:
                 role=ConversationRole.USER,
                 content=(
                     f"Your edits have been applied to the file: {file_path}\n\n"
-                    "Here are the contents of the edited file with line numbers and "
-                    "lengths, please review and determine if your edit worked as expected:\n\n"
+                    "Here are the contents of the edited file with line numbers and lengths, please review and determine if your edit worked as expected:\n\n"  # noqa: E501
                     "Line | Length | Content\n"
                     "----------------------\n"
                     "BEGIN\n"
                     f"{annotate_code(file_content)}\n"
-                    "END"
+                    "END\n\n"
+                    "Based on this result, if your edit did not work as expected, please adjust your response to fix the issue and try another edit.  If you are unable to fix the issue, please try to WRITE the file from scratch instead, making sure to stay accurate to the original file content."  # noqa: E501
                 ),
                 should_summarize=True,
                 should_cache=True,
@@ -2185,22 +2185,19 @@ class LocalCodeExecutor:
             ValueError: If the conversation record is not of the expected type.
         """
         summary_prompt = """
-        You are a conversation summarizer. Your task is to summarize what happened in the given
-        conversation step in a single concise sentence. Focus only on capturing critical details
-        that may be relevant for future reference, such as:
-        - Key actions taken
-        - Important changes made
-        - Significant results or outcomes
-        - Any errors or issues encountered
-        - Key variable names, headers, or other identifiers
-        - Transformations or calculations performed that need to be remembered for
-          later reference
-        - Shapes and dimensions of data structures
-        - Key numbers or values
+You are a conversation summarizer. Your task is to summarize what happened in the given conversation step in a single concise sentence. Focus only on capturing critical details that may be relevant for future reference, such as:
+- Key actions taken
+- Important changes made
+- Significant results or outcomes
+- Any errors or issues encountered
+- Key variable names, headers, or other identifiers
+- Transformations or calculations performed that need to be remembered for later reference
+- Shapes and dimensions of data structures
+- Key numbers or values
 
-        Format your response as a single sentence with the format:
-        "[SUMMARY] {summary}"
-        """
+Format your response as a single sentence with the format:
+"[SUMMARY] {summary}"
+        """  # noqa: E501
 
         step_info = "Please summarize the following conversation step:\n" + "\n".join(
             f"{msg.role}: {msg.content}"
