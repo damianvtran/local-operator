@@ -103,14 +103,25 @@ def clean_json_response(response_content: str) -> str:
     """
     response_content = remove_think_tags(response_content)
 
+    # Check if the entire content is already valid JSON
+    try:
+        if response_content.strip().startswith("{") and response_content.strip().endswith("}"):
+            json.loads(response_content.strip())
+            return response_content.strip()
+    except json.JSONDecodeError:
+        pass
+
     # Check for JSON content between the text "JSON response content: ```json" and "```"
+    # but only if these markers are not inside a JSON structure
     json_response_marker = "```json"
-    if json_response_marker in response_content:
+    if json_response_marker in response_content and not is_marker_inside_json(
+        response_content, json_response_marker
+    ):
         start_index = response_content.find(json_response_marker) + len(json_response_marker)
         response_content = response_content[start_index:]
 
         end_index = response_content.find("```")
-        if end_index != -1:
+        if end_index != -1 and not is_marker_inside_json(response_content[: end_index + 3], "```"):
             json_content = response_content[:end_index].strip()
             # Validate if this is valid JSON before returning
             try:
@@ -120,22 +131,41 @@ def clean_json_response(response_content: str) -> str:
                 # If not valid JSON, continue with other extraction methods
                 pass
 
-    # Check if the entire content is already valid JSON
-    try:
-        if response_content.strip().startswith("{") and response_content.strip().endswith("}"):
-            json.loads(response_content.strip())
-            return response_content.strip()
-    except json.JSONDecodeError:
-        pass
+    # Check for JSON code block format with triple backticks
+    if response_content.strip().startswith("```json") and response_content.strip().endswith("```"):
+        # Extract content between the first ```json and the last ```
+        content = response_content.strip()
+        start_index = content.find("```json") + len("```json")
+        end_index = content.rfind("```")
+        if start_index < end_index:
+            extracted_content = content[start_index:end_index].strip()
+            try:
+                json.loads(extracted_content)
+                return extracted_content
+            except json.JSONDecodeError:
+                pass
 
     # Check for JSON code block format with triple backticks
     json_block_patterns = ["```json\n", "```\n"]
 
     for pattern in json_block_patterns:
-        if pattern in response_content:
+        if pattern in response_content and not is_marker_inside_json(response_content, pattern):
             start_index = response_content.find(pattern)
             content_after_marker = response_content[start_index + len(pattern) :]
-            end_index = content_after_marker.find("```")
+
+            # Find the closing backticks that are not inside a JSON structure
+            remaining = content_after_marker
+            end_index = remaining.find("```")
+
+            while end_index != -1 and is_marker_inside_json(
+                content_after_marker[: end_index + 3], "```"
+            ):
+                remaining = content_after_marker[end_index + 3 :]
+                next_end = remaining.find("```")
+                if next_end == -1:
+                    end_index = -1
+                    break
+                end_index += next_end + 3
 
             if end_index != -1:
                 extracted_content = content_after_marker[:end_index].strip()
@@ -162,3 +192,27 @@ def clean_json_response(response_content: str) -> str:
 
     # If we couldn't extract valid JSON, return the original content
     return response_content.strip()
+
+
+def is_marker_inside_json(text: str, marker: str) -> bool:
+    """
+    Check if a marker is inside a JSON structure by analyzing the string.
+
+    Args:
+        text (str): The text to analyze
+        marker (str): The marker to check
+
+    Returns:
+        bool: True if the marker appears to be inside a JSON structure, False otherwise
+    """
+    marker_pos = text.find(marker)
+    if marker_pos == -1:
+        return False
+
+    # Count opening and closing braces before the marker
+    open_braces = text[:marker_pos].count("{")
+    close_braces = text[:marker_pos].count("}")
+
+    # If we have more opening braces than closing ones before the marker,
+    # the marker is likely inside a JSON structure
+    return open_braces > close_braces
