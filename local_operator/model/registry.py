@@ -117,17 +117,16 @@ The supported providers are:
 """
 
 RecommendedOpenRouterModelIds = [
-    "google/gemini-2.0-flash-001",
     "anthropic/claude-3.7-sonnet",
     "anthropic/claude-3.5-sonnet",
-    "openai/chatgpt-4o-latest",
     "openai/gpt-4o-2024-11-20",
     "openai/gpt-4o",
-    "qwen/qwen-plus",
-    "qwen/qwen-max",
     "mistralai/mistral-large-2411",
     "mistralai/mistral-large-2407",
     "mistralai/mistral-large",
+    "x-ai/grok-3-beta",
+    "google/gemini-2.5-pro-preview-03-25",
+    "deepseek/deepseek-chat-v3-0324",
 ]
 """List of recommended model IDs from OpenRouter.
 
