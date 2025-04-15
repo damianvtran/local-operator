@@ -15,6 +15,7 @@ from typing import Callable, List, Optional
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
+from local_operator.env import get_env_config
 from local_operator.jobs import JobContext, JobContextRecord, JobManager, JobStatus
 from local_operator.server.utils.operator import create_operator
 from local_operator.server.utils.websocket_manager import WebSocketManager
@@ -79,6 +80,9 @@ def run_job_in_process_with_queue(
                         id=job_id, prompt=prompt, model=model, hosting=hosting
                     )
 
+                # Get environment configuration
+                env_config = get_env_config()
+
                 # Create a new operator for this process
                 process_operator = create_operator(
                     request_hosting=hosting,
@@ -87,6 +91,7 @@ def run_job_in_process_with_queue(
                     config_manager=config_manager,
                     agent_registry=agent_registry,
                     job_id=job_id,
+                    env_config=env_config,
                 )
 
                 # Set the status queue on the executor for execution state updates
@@ -223,6 +228,9 @@ def run_agent_job_in_process_with_queue(
                         id=job_id, prompt=prompt, model=model, hosting=hosting, agent_id=agent_id
                     )
 
+                # Get environment configuration
+                env_config = get_env_config()
+
                 # Create a new operator for this process
                 process_operator = create_operator(
                     request_hosting=hosting,
@@ -233,6 +241,7 @@ def run_agent_job_in_process_with_queue(
                     current_agent=agent_obj,
                     persist_conversation=persist_conversation,
                     job_id=job_id,
+                    env_config=env_config,
                 )
 
                 # Set the status queue on the executor for execution state updates

@@ -19,6 +19,7 @@ from local_operator.server.dependencies import (
     get_agent_registry,
     get_config_manager,
     get_credential_manager,
+    get_env_config,
     get_job_manager,
     get_websocket_manager,
 )
@@ -77,6 +78,7 @@ async def chat_endpoint(
     credential_manager: CredentialManager = Depends(get_credential_manager),
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
+    env_config=Depends(get_env_config),
 ):
     """
     Process a chat request and return the response with context.
@@ -98,6 +100,7 @@ async def chat_endpoint(
             credential_manager,
             config_manager,
             agent_registry,
+            env_config=env_config,
         )
 
         model_instance = operator.executor.model_configuration.instance
@@ -201,6 +204,7 @@ async def chat_with_agent(
     credential_manager: CredentialManager = Depends(get_credential_manager),
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
+    env_config=Depends(get_env_config),
     agent_id: str = Path(
         ..., description="ID of the agent to use for the chat", examples=["agent123"]
     ),
@@ -226,6 +230,7 @@ async def chat_with_agent(
             agent_registry,
             current_agent=agent_obj,
             persist_conversation=request.persist_conversation,
+            env_config=env_config,
         )
         model_instance = operator.executor.model_configuration.instance
 

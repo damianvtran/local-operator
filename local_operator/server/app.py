@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
+from local_operator.env import get_env_config
 from local_operator.jobs import JobManager
 from local_operator.server.routes import (
     agents,
@@ -74,6 +75,7 @@ async def lifespan(app: FastAPI):
     app.state.agent_registry = AgentRegistry(config_dir=config_dir, refresh_interval=3.0)
     app.state.job_manager = JobManager()
     app.state.websocket_manager = WebSocketManager()
+    app.state.env_config = get_env_config()
     yield
     # Clean up on shutdown
     app.state.credential_manager = None
@@ -81,6 +83,7 @@ async def lifespan(app: FastAPI):
     app.state.agent_registry = None
     app.state.job_manager = None
     app.state.websocket_manager = None
+    app.state.env_config = None
 
 
 app = FastAPI(

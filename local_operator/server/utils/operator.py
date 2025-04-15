@@ -3,17 +3,19 @@ Utility functions for creating and managing operators in the Local Operator API.
 """
 
 import logging
-from typing import Optional
+from typing import Optional, Union
 
 from local_operator.admin import add_admin_tools
 from local_operator.agents import AgentRegistry
 from local_operator.clients.fal import FalClient
 from local_operator.clients.openrouter import OpenRouterClient
+from local_operator.clients.radient import RadientClient
 from local_operator.clients.serpapi import SerpApiClient
 from local_operator.clients.tavily import TavilyClient
 from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel
 from local_operator.credentials import CredentialManager
+from local_operator.env import EnvConfig
 from local_operator.executor import LocalCodeExecutor
 from local_operator.model.configure import configure_model
 from local_operator.operator import Operator, OperatorType
@@ -79,6 +81,7 @@ def create_operator(
     current_agent=None,
     persist_conversation: bool = False,
     job_id: Optional[str] = None,
+    env_config: Optional[EnvConfig] = None,
 ) -> Operator:
     """Create a LocalCodeExecutor for a single chat request using the provided managers
     and the hosting/model provided in the request.
@@ -139,18 +142,21 @@ def create_operator(
             agent_system_prompt=None,
         )
 
-    model_info_client: Optional[OpenRouterClient] = None
+    model_info_client: Optional[Union[OpenRouterClient, RadientClient]] = None
 
     if request_hosting == "openrouter":
         model_info_client = OpenRouterClient(
             credential_manager.get_credential("OPENROUTER_API_KEY")
         )
+    elif request_hosting == "radient":
+        model_info_client = RadientClient(credential_manager.get_credential("RADIENT_API_KEY"))
 
     model_configuration = configure_model(
         hosting=request_hosting,
         model_name=request_model,
         credential_manager=credential_manager,
         model_info_client=model_info_client,
+        env_config=env_config,
         **chat_args,
     )
 
