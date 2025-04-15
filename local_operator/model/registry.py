@@ -118,9 +118,8 @@ The supported providers are:
 
 RecommendedOpenRouterModelIds = [
     "anthropic/claude-3.7-sonnet",
-    "anthropic/claude-3.5-sonnet",
-    "openai/gpt-4o-2024-11-20",
-    "openai/gpt-4o",
+    "openai/gpt-4.1",
+    "openai/gpt-4.1-mini",
     "mistralai/mistral-large-2411",
     "mistralai/mistral-large-2407",
     "mistralai/mistral-large",
