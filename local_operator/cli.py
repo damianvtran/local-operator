@@ -36,6 +36,7 @@ from local_operator.clients.serpapi import SerpApiClient
 from local_operator.clients.tavily import TavilyClient
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
+from local_operator.env import get_env_config
 from local_operator.executor import LocalCodeExecutor
 from local_operator.model.configure import configure_model, validate_model
 from local_operator.operator import Operator, OperatorType
@@ -532,6 +533,9 @@ def main() -> int:
 
         os.environ["LOCAL_OPERATOR_DEBUG"] = "true" if args.debug else "false"
 
+        # Load environment configuration
+        env_config = get_env_config()
+
         config_dir = Path.home() / ".local-operator"
         agent_home_dir = Path.home() / "local-operator-home"
 
@@ -672,7 +676,12 @@ def main() -> int:
             )
 
         model_configuration = configure_model(
-            hosting, model_name, credential_manager, model_info_client, **chat_args
+            hosting,
+            model_name,
+            credential_manager,
+            model_info_client,
+            env_config=env_config,
+            **chat_args,
         )
 
         if not model_configuration.instance:

@@ -10,6 +10,7 @@ from pydantic import SecretStr
 from local_operator.clients.openrouter import OpenRouterClient
 from local_operator.clients.radient import RadientClient
 from local_operator.credentials import CredentialManager
+from local_operator.env import EnvConfig
 from local_operator.mocks import ChatMock, ChatNoop
 from local_operator.model.registry import (
     ModelInfo,
@@ -265,6 +266,7 @@ def configure_model(
     model_name: str,
     credential_manager: CredentialManager,
     model_info_client: Optional[Union[OpenRouterClient, RadientClient]] = None,
+    env_config: Optional[EnvConfig] = None,
     temperature: float = DEFAULT_TEMPERATURE,
     top_p: float = DEFAULT_TOP_P,
     top_k: Optional[int] = None,
@@ -349,7 +351,13 @@ def configure_model(
     api_key: Optional[SecretStr] = None
 
     if hosting == "radient":
-        base_url = "https://api.radienthq.com/v1"
+        # Use custom base URL from env if provided, otherwise use default
+        base_url = (
+            env_config.radient_api_base_url
+            if env_config and env_config.radient_api_base_url
+            else "https://api.radienthq.com/v1"
+        )
+
         if not model_name:
             model_name = "auto"
         api_key = credential_manager.get_credential("RADIENT_API_KEY")
