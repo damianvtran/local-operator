@@ -211,7 +211,9 @@ def get_model_info(hosting: str, model: str) -> ModelInfo:
     """
     model_info = unknown_model_info
 
-    if hosting == "anthropic":
+    if hosting == "radient":
+        return radient_default_model_info
+    elif hosting == "anthropic":
         if model in anthropic_models:
             model_info = anthropic_models[model]
     elif hosting == "ollama":
@@ -369,7 +371,6 @@ ollama_default_model_info: ModelInfo = ModelInfo(
     recommended=False,
 )
 
-# TODO: Add fetch for token, context window, image support
 openrouter_default_model_info: ModelInfo = ModelInfo(
     max_tokens=-1,
     context_window=-1,
@@ -382,6 +383,21 @@ openrouter_default_model_info: ModelInfo = ModelInfo(
     description="Access to various AI models from different providers through a single API",
     id="openrouter",
     name="OpenRouter",
+    recommended=False,
+)
+
+radient_default_model_info: ModelInfo = ModelInfo(
+    max_tokens=-1,
+    context_window=-1,
+    supports_images=False,
+    supports_prompt_cache=False,
+    input_price=0.0,
+    output_price=0.0,
+    cache_writes_price=0.0,
+    cache_reads_price=0.0,
+    description="Access to Radient AI models through their API",
+    id="radient",
+    name="Radient",
     recommended=False,
 )
 

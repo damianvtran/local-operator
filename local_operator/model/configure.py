@@ -8,12 +8,14 @@ from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
 from local_operator.clients.openrouter import OpenRouterClient
+from local_operator.clients.radient import RadientClient
 from local_operator.credentials import CredentialManager
 from local_operator.mocks import ChatMock, ChatNoop
 from local_operator.model.registry import (
     ModelInfo,
     get_model_info,
     openrouter_default_model_info,
+    radient_default_model_info,
 )
 
 ModelType = Union[ChatOpenAI, ChatOllama, ChatAnthropic, ChatGoogleGenerativeAI, ChatMock, ChatNoop]
@@ -159,6 +161,11 @@ def validate_model(hosting: str, model: str, api_key: SecretStr) -> bool:
             "https://openrouter.ai/api/v1/models",
             headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
         )
+    elif hosting == "radient":
+        response = requests.get(
+            "https://api.radienthq.com/v1/models",
+            headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
+        )
     elif hosting == "anthropic":
         response = requests.get(
             "https://api.anthropic.com/v1/models",
@@ -224,11 +231,40 @@ def get_model_info_from_openrouter(client: OpenRouterClient, model_name: str) ->
     raise ValueError(f"Model not found from openrouter models API: {model_name}")
 
 
+def get_model_info_from_radient(client: RadientClient, model_name: str) -> ModelInfo:
+    """
+    Retrieves model information from Radient based on the model name.
+
+    Args:
+        client (RadientClient): The Radient client instance.
+        model_name (str): The name of the model to retrieve information for.
+
+    Returns:
+        ModelInfo: The model information retrieved from Radient.
+
+    Raises:
+        ValueError: If the model is not found on Radient.
+        RuntimeError: If there is an error retrieving the model information.
+    """
+    models = client.list_models()
+    for model in models.data:
+        if model.id == model_name:
+            model_info = radient_default_model_info
+            # Radient returns the price per million tokens, so we need to convert it to
+            # the price per token.
+            model_info.input_price = model.pricing.prompt * 1_000_000
+            model_info.output_price = model.pricing.completion * 1_000_000
+            model_info.description = model.description
+            return model_info
+
+    raise ValueError(f"Model not found from radient models API: {model_name}")
+
+
 def configure_model(
     hosting: str,
     model_name: str,
     credential_manager: CredentialManager,
-    model_info_client: Optional[OpenRouterClient] = None,
+    model_info_client: Optional[Union[OpenRouterClient, RadientClient]] = None,
     temperature: float = DEFAULT_TEMPERATURE,
     top_p: float = DEFAULT_TOP_P,
     top_k: Optional[int] = None,
@@ -584,8 +620,10 @@ def configure_model(
     model_info: ModelInfo
 
     if model_info_client:
-        if hosting == "openrouter":
+        if hosting == "openrouter" and isinstance(model_info_client, OpenRouterClient):
             model_info = get_model_info_from_openrouter(model_info_client, model_name)
+        elif hosting == "radient" and isinstance(model_info_client, RadientClient):
+            model_info = get_model_info_from_radient(model_info_client, model_name)
         else:
             raise ValueError(f"Model info client not supported for hosting: {hosting}")
     else:
