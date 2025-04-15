@@ -78,10 +78,10 @@ def create_operator(
     credential_manager: CredentialManager,
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
+    env_config: EnvConfig,
     current_agent=None,
     persist_conversation: bool = False,
     job_id: Optional[str] = None,
-    env_config: Optional[EnvConfig] = None,
 ) -> Operator:
     """Create a LocalCodeExecutor for a single chat request using the provided managers
     and the hosting/model provided in the request.
@@ -149,7 +149,10 @@ def create_operator(
             credential_manager.get_credential("OPENROUTER_API_KEY")
         )
     elif request_hosting == "radient":
-        model_info_client = RadientClient(credential_manager.get_credential("RADIENT_API_KEY"))
+        model_info_client = RadientClient(
+            credential_manager.get_credential("RADIENT_API_KEY"),
+            env_config.radient_api_base_url,
+        )
 
     model_configuration = configure_model(
         hosting=request_hosting,
