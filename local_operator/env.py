@@ -10,9 +10,9 @@ EnvConfig currently supports:
 
 import os
 from dataclasses import dataclass
-from typing import Optional
 
 from dotenv import load_dotenv
+from pydantic import Field
 
 # Load environment variables from .env file if present
 load_dotenv()
@@ -24,10 +24,13 @@ class EnvConfig:
     Typed environment configuration for the application.
 
     Attributes:
-        radient_api_base_url: Optional base URL for the Radient API.
+        radient_api_base_url: Base URL for the Radient API.
     """
 
-    radient_api_base_url: Optional[str] = None
+    radient_api_base_url: str = Field(
+        default="",
+        description="Base URL for the Radient API.",
+    )
 
 
 def get_env_config() -> EnvConfig:
@@ -37,4 +40,6 @@ def get_env_config() -> EnvConfig:
     Returns:
         EnvConfig: The loaded environment configuration.
     """
-    return EnvConfig(radient_api_base_url=os.getenv("RADIENT_API_BASE_URL"))
+    return EnvConfig(
+        radient_api_base_url=os.getenv("RADIENT_API_BASE_URL", "https://api.radienthq.com")
+    )

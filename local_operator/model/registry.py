@@ -27,6 +27,18 @@ class ProviderDetail(BaseModel):
 
 SupportedHostingProviders = [
     ProviderDetail(
+        id="radient",
+        name="Radient",
+        description=(
+            "Your Radient Pass provides you unified access to a variety of high end AI "
+            "models and tools.  Radient makes using agentic AI simple and easy with "
+            "transparent pricing, and helps you pick the best model for your use case."
+        ),
+        url="https://radienthq.com/",
+        requiredCredentials=["RADIENT_API_KEY"],
+        recommended=True,
+    ),
+    ProviderDetail(
         id="openai",
         name="OpenAI",
         description="OpenAI's API provides access to GPT-4o and other models",
@@ -96,7 +108,7 @@ SupportedHostingProviders = [
         description="Alibaba's Qwen models for natural language processing",
         url="https://www.alibabacloud.com/",
         requiredCredentials=["ALIBABA_CLOUD_API_KEY"],
-        recommended=True,
+        recommended=False,
     ),
 ]
 """List of supported model hosting providers.
@@ -130,6 +142,21 @@ RecommendedOpenRouterModelIds = [
 """List of recommended model IDs from OpenRouter.
 
 This list contains the model IDs of recommended models available through the OpenRouter
+provider. These models are selected based on performance, reliability, and community
+feedback. The IDs follow the format 'provider/model-name' as used by OpenRouter's API.
+
+The list includes models from various providers:
+- Google's Gemini models
+- Anthropic's Claude models
+- OpenAI's GPT models
+- Qwen models
+- Mistral AI models
+"""
+
+RecommendedRadientModelIds = RecommendedOpenRouterModelIds + ["auto"]
+"""List of recommended model IDs from Radient.
+
+This list contains the model IDs of recommended models available through the Radient
 provider. These models are selected based on performance, reliability, and community
 feedback. The IDs follow the format 'provider/model-name' as used by OpenRouter's API.
 

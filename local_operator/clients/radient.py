@@ -66,7 +66,7 @@ class RadientClient:
     This client is used to fetch model pricing information from Radient.
     """
 
-    def __init__(self, api_key: SecretStr, base_url: str = "https://api.radienthq.com/v1") -> None:
+    def __init__(self, api_key: SecretStr, base_url: str) -> None:
         """Initializes the RadientClient.
 
         Args:
