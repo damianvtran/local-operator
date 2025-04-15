@@ -885,13 +885,16 @@ class Operator:
                         ConversationRecord(
                             role=ConversationRole.USER,
                             content=(
-                                "Your attempted response failed JSON schema "
+                                "Your interpretation of the action response failed JSON schema "
                                 f"validation (attempt {attempts}/{max_attempts}). "
                                 "Please review the validation errors and generate a "
                                 "valid response:\n\n"
                                 f"{error_details}\n\n"
                                 "Your response must exactly match the expected JSON format: "
-                                f"{JsonResponseFormatSchema}"
+                                f"{JsonResponseFormatSchema}\n\n"
+                                "Check for syntax errors, unescaped quotes or special characters, "
+                                "invalid formatting, or other formatting issues that may cause "
+                                "the error."
                             ),
                             should_summarize=True,
                         ),
