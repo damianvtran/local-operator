@@ -312,7 +312,35 @@ def configure_model(
     configured_model = None
     api_key: Optional[SecretStr] = None
 
-    if hosting == "deepseek":
+    if hosting == "radient":
+        base_url = "https://api.radienthq.com/v1"
+        if not model_name:
+            model_name = "auto"
+        api_key = credential_manager.get_credential("RADIENT_API_KEY")
+        if not api_key:
+            api_key = credential_manager.prompt_for_credential("RADIENT_API_KEY")
+
+        model_kwargs = {
+            "api_key": api_key,
+            "temperature": temperature,
+            "top_p": top_p,
+            "model": model_name,
+            "base_url": base_url,
+        }
+        if max_tokens is not None:
+            model_kwargs["max_tokens"] = max_tokens
+        if frequency_penalty is not None:
+            model_kwargs["frequency_penalty"] = frequency_penalty
+        if presence_penalty is not None:
+            model_kwargs["presence_penalty"] = presence_penalty
+        if stop is not None:
+            model_kwargs["stop"] = stop
+        if seed is not None:
+            model_kwargs["seed"] = seed
+
+        configured_model = ChatOpenAI(**model_kwargs)
+
+    elif hosting == "deepseek":
         base_url = "https://api.deepseek.com/v1"
         if not model_name:
             model_name = "deepseek-chat"

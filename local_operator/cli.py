@@ -98,6 +98,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--hosting",
         type=str,
         choices=[
+            "radient",
             "deepseek",
             "openai",
             "anthropic",
@@ -109,8 +110,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "openrouter",
             "test",
         ],
-        help="Hosting platform to use (deepseek, openai, anthropic, ollama, kimi, alibaba, "
-        "google, mistral, test, openrouter)",
+        help="Hosting platform to use (radient, deepseek, openai, anthropic, ollama, kimi, "
+        "alibaba, google, mistral, test, openrouter)",
     )
     parser.add_argument(
         "--model",
@@ -142,7 +143,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
 
     credential_key_help = (
-        "Credential key to manage (e.g., DEEPSEEK_API_KEY, OPENAI_API_KEY, "
+        "Credential key to manage (e.g., RADIENT_API_KEY,DEEPSEEK_API_KEY, OPENAI_API_KEY, "
         "ANTHROPIC_API_KEY, KIMI_API_KEY, ALIBABA_CLOUD_API_KEY, GOOGLE_AI_STUDIO_API_KEY, "
         "MISTRAL_API_KEY, OPENROUTER_API_KEY)"
     )
@@ -352,7 +353,7 @@ def config_list_command() -> int:
 
     # Configuration descriptions
     descriptions = {
-        "hosting": "AI provider platform (e.g., openai, deepseek, anthropic, openrouter)",
+        "hosting": "AI provider platform (e.g., radient, openai, deepseek, anthropic, openrouter)",
         "model_name": "The specific model to use for interactions",
         "conversation_length": "Maximum number of messages to keep in conversation history",
         "detail_length": "Number of recent messages to leave unsummarized in conversation history",
