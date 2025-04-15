@@ -16,6 +16,7 @@ from pydantic import SecretStr
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
+from local_operator.env import EnvConfig
 from local_operator.executor import ExecutorInitError
 from local_operator.jobs import JobManager
 from local_operator.mocks import ChatMock
@@ -192,6 +193,8 @@ def test_app_client(temp_dir):
         original_state["job_manager"] = app.state.job_manager
     if hasattr(app.state, "websocket_manager"):
         original_state["websocket_manager"] = app.state.websocket_manager
+    if hasattr(app.state, "env_config"):
+        original_state["env_config"] = app.state.env_config
 
     # Set up test-specific state
     mock_credential_manager = CredentialManager(config_dir=temp_dir)
@@ -208,6 +211,9 @@ def test_app_client(temp_dir):
     app.state.agent_registry = mock_agent_registry
     app.state.job_manager = mock_job_manager
     app.state.websocket_manager = mock_websocket_manager
+    app.state.env_config = EnvConfig(
+        radient_api_base_url="https://api.radienthq.com",
+    )
 
     # Create and yield the test client
     transport = ASGITransport(app=app)
