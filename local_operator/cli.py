@@ -32,6 +32,7 @@ from local_operator.admin import add_admin_tools
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.clients.fal import FalClient
 from local_operator.clients.openrouter import OpenRouterClient
+from local_operator.clients.radient import RadientClient
 from local_operator.clients.serpapi import SerpApiClient
 from local_operator.clients.tavily import TavilyClient
 from local_operator.config import ConfigManager
@@ -505,6 +506,7 @@ def build_tool_registry(
     serp_api_key = credential_manager.get_credential("SERP_API_KEY")
     tavily_api_key = credential_manager.get_credential("TAVILY_API_KEY")
     fal_api_key = credential_manager.get_credential("FAL_API_KEY")
+    radient_api_key = credential_manager.get_credential("RADIENT_API_KEY")
 
     if serp_api_key:
         serp_api_client = SerpApiClient(serp_api_key)
@@ -517,6 +519,13 @@ def build_tool_registry(
     if fal_api_key:
         fal_client = FalClient(fal_api_key)
         tool_registry.set_fal_client(fal_client)
+
+    if radient_api_key:
+        # Get the base URL from env_config if available, otherwise use default
+        env_config = get_env_config()
+        base_url = env_config.radient_api_base_url if env_config else "https://api.radienthq.com/v1"
+        radient_client = RadientClient(radient_api_key, base_url)
+        tool_registry.set_radient_client(radient_client)
 
     tool_registry.set_credential_manager(credential_manager)
     tool_registry.init_tools()
