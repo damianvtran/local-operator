@@ -445,23 +445,24 @@ class RadientClient:
         url = f"{self.base_url}/tools/search"
         headers = self._get_headers()
 
-        payload = {
+        # Build query parameters
+        params = {
             "query": query,
             "max_results": max_results,
-            "include_raw": include_raw,
+            "include_raw": str(include_raw).lower(),
         }
 
         if provider:
-            payload["provider"] = provider
+            params["provider"] = provider
 
         if search_depth:
-            payload["search_depth"] = search_depth
+            params["search_depth"] = search_depth
 
         if domains:
-            payload["domains"] = domains
+            params["domains"] = ",".join(domains)
 
         try:
-            response = requests.post(url, headers=headers, json=payload)
+            response = requests.get(url, headers=headers, params=params)
             response.raise_for_status()
             data = response.json()
             return RadientSearchResponse.model_validate(data)
