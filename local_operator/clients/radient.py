@@ -360,15 +360,13 @@ class RadientClient:
         url = f"{self.base_url}/tools/images/status"
         headers = self._get_headers()
 
-        payload = {
-            "request_id": request_id,
-        }
+        params = {"request_id": request_id}
 
         if provider:
-            payload["provider"] = provider
+            params["provider"] = provider
 
         try:
-            response = requests.post(url, headers=headers, json=payload)
+            response = requests.get(url, headers=headers, params=params)
             response.raise_for_status()
             data = response.json()
             return RadientImageGenerationResponse.model_validate(data)

@@ -429,15 +429,15 @@ def test_get_image_generation_status_success(
         mock_image_generation_response (Dict[str, Any]): Mock JSON response.
         base_url (str): Base URL for the Radient API.
     """
-    mock_requests_post = MagicMock()
-    mock_requests_post.return_value.status_code = 200
-    mock_requests_post.return_value.json.return_value = mock_image_generation_response
+    mock_requests_get = MagicMock()
+    mock_requests_get.return_value.status_code = 200
+    mock_requests_get.return_value.json.return_value = mock_image_generation_response
 
-    with patch("requests.post", mock_requests_post):
+    with patch("requests.get", mock_requests_get):
         response = radient_client.get_image_generation_status(request_id="test-request-id")
 
     # Verify the request was made with the correct parameters
-    mock_requests_post.assert_called_once_with(
+    mock_requests_get.assert_called_once_with(
         f"{base_url}/tools/images/status",
         headers={
             "Authorization": "Bearer test_api_key",
@@ -445,7 +445,7 @@ def test_get_image_generation_status_success(
             "X-Title": "Local Operator",
             "HTTP-Referer": "https://local-operator.com",
         },
-        json={
+        params={
             "request_id": "test-request-id",
         },
     )
@@ -468,18 +468,18 @@ def test_get_image_generation_status_with_provider(
         mock_image_generation_response (Dict[str, Any]): Mock JSON response.
         base_url (str): Base URL for the Radient API.
     """
-    mock_requests_post = MagicMock()
-    mock_requests_post.return_value.status_code = 200
-    mock_requests_post.return_value.json.return_value = mock_image_generation_response
+    mock_requests_get = MagicMock()
+    mock_requests_get.return_value.status_code = 200
+    mock_requests_get.return_value.json.return_value = mock_image_generation_response
 
-    with patch("requests.post", mock_requests_post):
+    with patch("requests.get", mock_requests_get):
         response = radient_client.get_image_generation_status(
             request_id="test-request-id",
             provider="test_provider",
         )
 
     # Verify the request was made with the correct parameters
-    mock_requests_post.assert_called_once_with(
+    mock_requests_get.assert_called_once_with(
         f"{base_url}/tools/images/status",
         headers={
             "Authorization": "Bearer test_api_key",
@@ -487,7 +487,7 @@ def test_get_image_generation_status_with_provider(
             "X-Title": "Local Operator",
             "HTTP-Referer": "https://local-operator.com",
         },
-        json={
+        params={
             "request_id": "test-request-id",
             "provider": "test_provider",
         },
