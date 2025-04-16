@@ -212,7 +212,7 @@ def test_app_client(temp_dir):
     app.state.job_manager = mock_job_manager
     app.state.websocket_manager = mock_websocket_manager
     app.state.env_config = EnvConfig(
-        radient_api_base_url="https://api.radienthq.com",
+        radient_api_base_url="https://api.radienthq.com/v1",
     )
 
     # Create and yield the test client
