@@ -552,13 +552,15 @@ def generate_altered_image_tool(
         # Try Radient first if available
         if radient_client:
             try:
-                # Generate the image with image-to-image mode using Radient
+                # Generate the image with image-to-image mode using Radient with polling
                 response = radient_client.generate_image(
                     prompt=prompt,
                     source_url=data_uri,  # Pass the base64 data URI as the source_url
                     strength=strength,
                     num_images=num_images,
-                    sync_mode=True,
+                    sync_mode=False,  # Force async mode to get a request_id for polling
+                    max_wait_time=60,
+                    poll_interval=2,
                 )
                 return response
             except Exception as e:
@@ -620,14 +622,13 @@ def generate_image_tool(
         guidance_scale: float = 5.0,
         num_images: int = 1,
     ) -> FalImageGenerationResponse | RadientImageGenerationResponse:
-        """Generate an image from a text prompt using the FAL or Radient API. This tool allows you to generate images from text descriptions. You must come up with a detailed prompt to describe the image that you want to generate. When using this tool, save the image to a file so that the user can access it on their computer.
+        """Generate an image from a text prompt using the FAL or Radient API. This tool allows you to generate images from text descriptions. You must come up with a detailed prompt to describe the image that you want to generate. When using this tool, save the image to a file so that the user can access it on their computer.  The supported image sizes are: "square_hd", "square", "portrait_4_3", "portrait_16_9", "landscape_4_3", "landscape_16_9". Defaults to "landscape_4_3".
 
         Args:
             prompt (str): The text description to generate an image from
             image_size (str, optional): Size/aspect ratio of the generated image.
-                For FAL: "square_hd", "square", "portrait_4_3", "portrait_16_9",
-                "landscape_4_3", "landscape_16_9". For Radient: dimensions like "1024x1024".
-                Defaults to "landscape_4_3" for FAL or "1024x1024" for Radient.
+                Allowed values: "square_hd", "square", "portrait_4_3", "portrait_16_9",
+                "landscape_4_3", "landscape_16_9". Defaults to "landscape_4_3".
             num_inference_steps (int, optional): Number of inference steps. Higher values
                 may produce better quality but take longer. Defaults to 28.
             seed (Optional[int], optional): Seed for reproducible generation. Defaults to None.
@@ -644,21 +645,14 @@ def generate_image_tool(
         # Try Radient first if available
         if radient_client:
             try:
-                # Convert FAL image size format to Radient format if needed
-                radient_image_size = image_size
-                if image_size in ["square_hd", "square"]:
-                    radient_image_size = "1024x1024"
-                elif image_size in ["portrait_4_3", "portrait_16_9"]:
-                    radient_image_size = "768x1024"
-                elif image_size in ["landscape_4_3", "landscape_16_9"]:
-                    radient_image_size = "1024x768"
-
-                # Generate the image using Radient
+                # Generate the image using Radient with polling
                 response = radient_client.generate_image(
                     prompt=prompt,
-                    image_size=radient_image_size,
+                    image_size=image_size,
                     num_images=num_images,
-                    sync_mode=True,
+                    sync_mode=False,  # Force async mode to get a request_id for polling
+                    max_wait_time=60,
+                    poll_interval=2,
                 )
                 return response
             except Exception as e:
