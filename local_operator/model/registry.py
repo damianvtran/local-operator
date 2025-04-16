@@ -117,6 +117,7 @@ This list contains the names of all supported AI model hosting providers that ca
 with the Local Operator API. Each provider has its own set of available models and pricing.
 
 The supported providers are:
+- radient: Radient Pass model hosting with automatic model selection and unified tool access
 - anthropic: Anthropic's Claude models
 - ollama: Local model hosting with Ollama
 - deepseek: DeepSeek's language models
