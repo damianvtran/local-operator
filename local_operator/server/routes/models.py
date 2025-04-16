@@ -17,6 +17,7 @@ from local_operator.env import EnvConfig
 from local_operator.model.registry import (
     ProviderDetail,
     RecommendedOpenRouterModelIds,
+    RecommendedRadientModelIds,
     SupportedHostingProviders,
     anthropic_models,
     deepseek_models,
@@ -411,7 +412,7 @@ async def list_models(
                                 supports_prompt_cache=False,
                                 cache_writes_price=None,
                                 cache_reads_price=None,
-                                recommended=model.id in RecommendedOpenRouterModelIds,
+                                recommended=model.id in RecommendedRadientModelIds,
                                 description=(
                                     model.description
                                     if hasattr(model, "description") and model.description
