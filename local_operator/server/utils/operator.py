@@ -15,7 +15,7 @@ from local_operator.clients.tavily import TavilyClient
 from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel
 from local_operator.credentials import CredentialManager
-from local_operator.env import EnvConfig
+from local_operator.env import EnvConfig, get_env_config
 from local_operator.executor import LocalCodeExecutor
 from local_operator.model.configure import configure_model
 from local_operator.operator import Operator, OperatorType
@@ -51,6 +51,7 @@ def build_tool_registry(
     serp_api_key = credential_manager.get_credential("SERP_API_KEY")
     tavily_api_key = credential_manager.get_credential("TAVILY_API_KEY")
     fal_api_key = credential_manager.get_credential("FAL_API_KEY")
+    radient_api_key = credential_manager.get_credential("RADIENT_API_KEY")
 
     if serp_api_key:
         serp_api_client = SerpApiClient(serp_api_key)
@@ -63,6 +64,12 @@ def build_tool_registry(
     if fal_api_key:
         fal_client = FalClient(fal_api_key)
         tool_registry.set_fal_client(fal_client)
+
+    if radient_api_key:
+        # Get the base URL from env_config
+        env_config = get_env_config()
+        radient_client = RadientClient(radient_api_key, env_config.radient_api_base_url)
+        tool_registry.set_radient_client(radient_client)
 
     tool_registry.set_credential_manager(credential_manager)
     tool_registry.init_tools()
