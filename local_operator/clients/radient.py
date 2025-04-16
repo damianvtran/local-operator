@@ -1,7 +1,20 @@
+import time
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 import requests
 from pydantic import BaseModel, SecretStr
+
+
+class ImageSize(str, Enum):
+    """Image size options for the FAL API."""
+
+    SQUARE_HD = "square_hd"
+    SQUARE = "square"
+    PORTRAIT_4_3 = "portrait_4_3"
+    PORTRAIT_16_9 = "portrait_16_9"
+    LANDSCAPE_4_3 = "landscape_4_3"
+    LANDSCAPE_16_9 = "landscape_16_9"
 
 
 # Image Generation Models
@@ -281,39 +294,49 @@ class RadientClient:
         self,
         prompt: str,
         num_images: int = 1,
-        image_size: str = "1024x1024",
+        image_size: str = "landscape_4_3",
         source_url: Optional[str] = None,
         strength: Optional[float] = None,
-        sync_mode: bool = True,
+        sync_mode: bool = True,  # This parameter is passed to the Radient API
         provider: Optional[str] = None,
+        max_wait_time: int = 60,
+        poll_interval: int = 2,
     ) -> RadientImageGenerationResponse:
         """Generate an image using the Radient API.
 
         Args:
             prompt (str): The prompt to generate an image from
             num_images (int, optional): Number of images to generate. Defaults to 1.
-            image_size (str, optional): Size of the generated image. Defaults to "1024x1024".
+            image_size (str, optional): Size of the generated image. Defaults to
+                "landscape_4_3".
             source_url (Optional[str], optional): URL of the image to use as a base for
                 image-to-image generation. Defaults to None.
             strength (Optional[float], optional): Strength parameter for image-to-image generation.
                 Defaults to None.
-            sync_mode (bool, optional): Whether to wait for the result. Defaults to True.
+            sync_mode (bool, optional): Whether to use sync_mode in the Radient API request.
+                This affects how the Radient API handles the request but our function
+                will always wait for the result. Defaults to True.
             provider (Optional[str], optional): The provider to use. Defaults to None.
+            max_wait_time (int, optional): Maximum time to wait for image generation in seconds.
+                Defaults to 60.
+            poll_interval (int, optional): Time between status checks in seconds. Defaults to 2.
 
         Returns:
-            RadientImageGenerationResponse: The generated image information
+            RadientImageGenerationResponse: The generated image information with complete image data
 
         Raises:
-            RuntimeError: If the API request fails
+            RuntimeError: If the API request fails or times out
         """
         url = f"{self.base_url}/tools/images/generate"
         headers = self._get_headers()
 
+        # Always use sync_mode=False to get a request_id for polling
+        # This ensures we can poll for the result ourselves
         payload = {
             "prompt": prompt,
             "num_images": num_images,
             "image_size": image_size,
-            "sync_mode": sync_mode,
+            "sync_mode": False,  # Force async mode to get a request_id
         }
 
         if source_url:
@@ -326,10 +349,43 @@ class RadientClient:
             payload["provider"] = provider
 
         try:
+            # Submit the initial request
             response = requests.post(url, headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()
-            return RadientImageGenerationResponse.model_validate(data)
+            result = RadientImageGenerationResponse.model_validate(data)
+
+            # If the result already has images, return it immediately
+            if result.images and len(result.images) > 0:
+                return result
+
+            # Otherwise, poll for the result
+            request_id = result.request_id
+            start_time = time.time()
+
+            while time.time() - start_time < max_wait_time:
+                # Get the current status
+                status_response = self.get_image_generation_status(
+                    request_id=request_id, provider=provider
+                )
+
+                # If the status is completed and we have images, return the result
+                if status_response.status.upper() == "COMPLETED" and status_response.images:
+                    return status_response
+
+                # If the status is failed, raise an error
+                if status_response.status.upper() == "FAILED":
+                    raise RuntimeError(f"Radient API image generation failed: {request_id}")
+
+                # Wait before polling again
+                time.sleep(poll_interval)
+
+            # If we get here, the request timed out
+            raise RuntimeError(
+                f"Radient API image generation timed out after {max_wait_time} seconds: "
+                f"{request_id}"
+            )
+
         except requests.exceptions.RequestException as e:
             error_body = (
                 e.response.content.decode()
