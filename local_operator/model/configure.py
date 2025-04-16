@@ -370,6 +370,11 @@ def configure_model(
             "top_p": top_p,
             "model": model_name,
             "base_url": base_url,
+            "default_headers": {
+                "HTTP-Referer": "https://local-operator.com",
+                "X-Title": "Local Operator",
+                "X-Description": "AI agents doing work for you on your own device",
+            },
         }
         if max_tokens is not None:
             model_kwargs["max_tokens"] = max_tokens
