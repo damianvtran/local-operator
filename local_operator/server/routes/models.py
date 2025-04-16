@@ -338,12 +338,19 @@ async def list_models(
 
                         # Add OpenRouter models
                         for model in openrouter_models.data:
+                            model_pricing_prompt = model.pricing.prompt
+                            model_pricing_completion = model.pricing.completion
+                            if model_pricing_prompt is None or model_pricing_prompt < 0.0:
+                                model_pricing_prompt = 0.0
+                            if model_pricing_completion is None or model_pricing_completion < 0.0:
+                                model_pricing_completion = 0.0
+
                             # Get model info
                             model_info = ModelInfo(
                                 id=model.id,
                                 name=model.name,
-                                input_price=model.pricing.prompt * 1_000_000,
-                                output_price=model.pricing.completion * 1_000_000,
+                                input_price=model_pricing_prompt * 1_000_000,
+                                output_price=model_pricing_completion * 1_000_000,
                                 max_tokens=None,
                                 context_window=None,
                                 supports_images=None,
@@ -385,12 +392,19 @@ async def list_models(
 
                         # Add Radient models
                         for model in radient_models.data:
+                            model_pricing_prompt = model.pricing.prompt
+                            model_pricing_completion = model.pricing.completion
+                            if model_pricing_prompt is None or model_pricing_prompt < 0.0:
+                                model_pricing_prompt = 0.0
+                            if model_pricing_completion is None or model_pricing_completion < 0.0:
+                                model_pricing_completion = 0.0
+
                             # Get model info
                             model_info = ModelInfo(
                                 id=model.id,
                                 name=model.name,
-                                input_price=model.pricing.prompt * 1_000_000,
-                                output_price=model.pricing.completion * 1_000_000,
+                                input_price=model_pricing_prompt * 1_000_000,
+                                output_price=model_pricing_completion * 1_000_000,
                                 max_tokens=None,
                                 context_window=None,
                                 supports_images=None,
