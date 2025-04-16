@@ -555,15 +555,15 @@ def test_search_success(
         mock_search_response (Dict[str, Any]): Mock JSON response.
         base_url (str): Base URL for the Radient API.
     """
-    mock_requests_post = MagicMock()
-    mock_requests_post.return_value.status_code = 200
-    mock_requests_post.return_value.json.return_value = mock_search_response
+    mock_requests_get = MagicMock()
+    mock_requests_get.return_value.status_code = 200
+    mock_requests_get.return_value.json.return_value = mock_search_response
 
-    with patch("requests.post", mock_requests_post):
+    with patch("requests.get", mock_requests_get):
         response = radient_client.search(query="test query")
 
     # Verify the request was made with the correct parameters
-    mock_requests_post.assert_called_once_with(
+    mock_requests_get.assert_called_once_with(
         f"{base_url}/tools/search",
         headers={
             "Authorization": "Bearer test_api_key",
@@ -571,10 +571,10 @@ def test_search_success(
             "X-Title": "Local Operator",
             "HTTP-Referer": "https://local-operator.com",
         },
-        json={
+        params={
             "query": "test query",
             "max_results": 10,
-            "include_raw": False,
+            "include_raw": "false",
         },
     )
 
@@ -601,11 +601,11 @@ def test_search_with_options(
         mock_search_response (Dict[str, Any]): Mock JSON response.
         base_url (str): Base URL for the Radient API.
     """
-    mock_requests_post = MagicMock()
-    mock_requests_post.return_value.status_code = 200
-    mock_requests_post.return_value.json.return_value = mock_search_response
+    mock_requests_get = MagicMock()
+    mock_requests_get.return_value.status_code = 200
+    mock_requests_get.return_value.json.return_value = mock_search_response
 
-    with patch("requests.post", mock_requests_post):
+    with patch("requests.get", mock_requests_get):
         response = radient_client.search(
             query="test query",
             max_results=5,
@@ -616,7 +616,7 @@ def test_search_with_options(
         )
 
     # Verify the request was made with the correct parameters
-    mock_requests_post.assert_called_once_with(
+    mock_requests_get.assert_called_once_with(
         f"{base_url}/tools/search",
         headers={
             "Authorization": "Bearer test_api_key",
@@ -624,13 +624,13 @@ def test_search_with_options(
             "X-Title": "Local Operator",
             "HTTP-Referer": "https://local-operator.com",
         },
-        json={
+        params={
             "query": "test query",
             "max_results": 5,
-            "include_raw": True,
+            "include_raw": "true",
             "provider": "test_provider",
             "search_depth": "deep",
-            "domains": ["example.com", "test.com"],
+            "domains": "example.com,test.com",
         },
     )
 
@@ -647,12 +647,12 @@ def test_search_api_error(radient_client: RadientClient) -> None:
     mock_response = MagicMock()
     mock_response.content = b"Error message from API"
 
-    mock_requests_post = MagicMock()
-    mock_requests_post.return_value.raise_for_status.side_effect = requests.exceptions.HTTPError(
+    mock_requests_get = MagicMock()
+    mock_requests_get.return_value.raise_for_status.side_effect = requests.exceptions.HTTPError(
         "Bad Request", response=mock_response
     )
 
-    with patch("requests.post", mock_requests_post):
+    with patch("requests.get", mock_requests_get):
         with pytest.raises(RuntimeError) as exc_info:
             radient_client.search(query="test query")
         assert "Failed to execute search" in str(exc_info.value)
