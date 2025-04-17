@@ -13,6 +13,7 @@ from typing import Callable, Optional
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
+from local_operator.env import EnvConfig
 from local_operator.jobs import (
     JobContext,
     JobContextRecord,
@@ -35,6 +36,7 @@ def run_job_in_process(
     credential_manager: CredentialManager,
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
+    env_config: EnvConfig,
     job_manager: JobManager,
     websocket_manager: Optional[WebSocketManager] = None,
     context: Optional[list[ConversationRecord]] = None,
@@ -71,8 +73,6 @@ def run_job_in_process(
                 # Update job status to processing
                 await job_manager.update_job_status(job_id, JobStatus.PROCESSING)
 
-                # Use the WebSocket manager passed as a parameter
-
                 # Create a new operator for this process
                 process_operator = create_operator(
                     request_hosting=hosting,
@@ -81,6 +81,7 @@ def run_job_in_process(
                     config_manager=config_manager,
                     agent_registry=agent_registry,
                     job_id=job_id,
+                    env_config=env_config,
                 )
 
                 # Initialize conversation history
@@ -149,6 +150,7 @@ def run_agent_job_in_process(
     credential_manager: CredentialManager,
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
+    env_config: EnvConfig,
     job_manager: JobManager,
     persist_conversation: bool = False,
     user_message_id: Optional[str] = None,
@@ -206,6 +208,7 @@ def run_agent_job_in_process(
                     current_agent=agent_obj,
                     persist_conversation=persist_conversation,
                     job_id=job_id,
+                    env_config=env_config,
                 )
 
                 # Configure model options if provided
