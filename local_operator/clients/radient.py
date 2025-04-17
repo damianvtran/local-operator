@@ -294,7 +294,7 @@ class RadientClient:
         self,
         prompt: str,
         num_images: int = 1,
-        image_size: str = "landscape_4_3",
+        image_size: str = "square_hd",
         source_url: Optional[str] = None,
         strength: Optional[float] = None,
         sync_mode: bool = True,  # This parameter is passed to the Radient API
@@ -308,7 +308,7 @@ class RadientClient:
             prompt (str): The prompt to generate an image from
             num_images (int, optional): Number of images to generate. Defaults to 1.
             image_size (str, optional): Size of the generated image. Defaults to
-                "landscape_4_3".
+                "square_hd".
             source_url (Optional[str], optional): URL of the image to use as a base for
                 image-to-image generation. Defaults to None.
             strength (Optional[float], optional): Strength parameter for image-to-image generation.
@@ -330,13 +330,12 @@ class RadientClient:
         url = f"{self.base_url}/tools/images/generate"
         headers = self._get_headers()
 
-        # Always use sync_mode=False to get a request_id for polling
-        # This ensures we can poll for the result ourselves
+        # Use the sync_mode parameter as provided
         payload = {
             "prompt": prompt,
             "num_images": num_images,
             "image_size": image_size,
-            "sync_mode": False,  # Force async mode to get a request_id
+            "sync_mode": sync_mode,
         }
 
         if source_url:
