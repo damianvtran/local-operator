@@ -14,6 +14,7 @@ from tiktoken import encoding_for_model
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
+from local_operator.env import EnvConfig
 from local_operator.jobs import JobManager
 from local_operator.server.dependencies import (
     get_agent_registry,
@@ -318,6 +319,7 @@ async def chat_async_endpoint(
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     job_manager: JobManager = Depends(get_job_manager),
     websocket_manager: WebSocketManager = Depends(get_websocket_manager),
+    env_config: EnvConfig = Depends(get_env_config),
 ):
     """
     Process a chat request asynchronously and return a job ID.
@@ -363,6 +365,7 @@ async def chat_async_endpoint(
                 credential_manager,
                 config_manager,
                 agent_registry,
+                env_config,
                 request.context if request.context else None,
                 request.options.model_dump() if request.options else None,
             ),
@@ -435,6 +438,7 @@ async def chat_with_agent_async(
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     job_manager: JobManager = Depends(get_job_manager),
     websocket_manager: WebSocketManager = Depends(get_websocket_manager),
+    env_config: EnvConfig = Depends(get_env_config),
     agent_id: str = Path(
         ..., description="ID of the agent to use for the chat", examples=["agent123"]
     ),
@@ -492,6 +496,7 @@ async def chat_with_agent_async(
                 credential_manager,
                 config_manager,
                 agent_registry,
+                env_config,
                 request.persist_conversation,
                 request.user_message_id,
             ),
