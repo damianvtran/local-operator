@@ -273,7 +273,7 @@ def test_generate_image_success(
         response = radient_client.generate_image(
             prompt="test prompt",
             num_images=1,
-            image_size="1024x1024",
+            image_size="square_hd",
             sync_mode=True,
         )
 
@@ -289,7 +289,7 @@ def test_generate_image_success(
         json={
             "prompt": "test prompt",
             "num_images": 1,
-            "image_size": "1024x1024",
+            "image_size": "square_hd",
             "sync_mode": True,
         },
     )
@@ -340,7 +340,7 @@ def test_generate_image_with_provider(
         json={
             "prompt": "test prompt",
             "num_images": 1,
-            "image_size": "1024x1024",
+            "image_size": "square_hd",
             "sync_mode": True,
             "provider": "test_provider",
         },
@@ -385,7 +385,7 @@ def test_generate_image_with_source_url(
         json={
             "prompt": "test prompt",
             "num_images": 1,
-            "image_size": "1024x1024",
+            "image_size": "square_hd",
             "sync_mode": True,
             "source_url": "https://example.com/source.jpg",
             "strength": 0.7,
