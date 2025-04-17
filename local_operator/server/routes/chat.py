@@ -14,11 +14,13 @@ from tiktoken import encoding_for_model
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
+from local_operator.env import EnvConfig
 from local_operator.jobs import JobManager
 from local_operator.server.dependencies import (
     get_agent_registry,
     get_config_manager,
     get_credential_manager,
+    get_env_config,
     get_job_manager,
     get_websocket_manager,
 )
@@ -77,6 +79,7 @@ async def chat_endpoint(
     credential_manager: CredentialManager = Depends(get_credential_manager),
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
+    env_config=Depends(get_env_config),
 ):
     """
     Process a chat request and return the response with context.
@@ -98,6 +101,7 @@ async def chat_endpoint(
             credential_manager,
             config_manager,
             agent_registry,
+            env_config=env_config,
         )
 
         model_instance = operator.executor.model_configuration.instance
@@ -201,6 +205,7 @@ async def chat_with_agent(
     credential_manager: CredentialManager = Depends(get_credential_manager),
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
+    env_config=Depends(get_env_config),
     agent_id: str = Path(
         ..., description="ID of the agent to use for the chat", examples=["agent123"]
     ),
@@ -226,6 +231,7 @@ async def chat_with_agent(
             agent_registry,
             current_agent=agent_obj,
             persist_conversation=request.persist_conversation,
+            env_config=env_config,
         )
         model_instance = operator.executor.model_configuration.instance
 
@@ -313,6 +319,7 @@ async def chat_async_endpoint(
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     job_manager: JobManager = Depends(get_job_manager),
     websocket_manager: WebSocketManager = Depends(get_websocket_manager),
+    env_config: EnvConfig = Depends(get_env_config),
 ):
     """
     Process a chat request asynchronously and return a job ID.
@@ -358,6 +365,7 @@ async def chat_async_endpoint(
                 credential_manager,
                 config_manager,
                 agent_registry,
+                env_config,
                 request.context if request.context else None,
                 request.options.model_dump() if request.options else None,
             ),
@@ -430,6 +438,7 @@ async def chat_with_agent_async(
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     job_manager: JobManager = Depends(get_job_manager),
     websocket_manager: WebSocketManager = Depends(get_websocket_manager),
+    env_config: EnvConfig = Depends(get_env_config),
     agent_id: str = Path(
         ..., description="ID of the agent to use for the chat", examples=["agent123"]
     ),
@@ -487,6 +496,7 @@ async def chat_with_agent_async(
                 credential_manager,
                 config_manager,
                 agent_registry,
+                env_config,
                 request.persist_conversation,
                 request.user_message_id,
             ),

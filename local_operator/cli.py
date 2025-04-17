@@ -32,10 +32,12 @@ from local_operator.admin import add_admin_tools
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.clients.fal import FalClient
 from local_operator.clients.openrouter import OpenRouterClient
+from local_operator.clients.radient import RadientClient
 from local_operator.clients.serpapi import SerpApiClient
 from local_operator.clients.tavily import TavilyClient
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
+from local_operator.env import get_env_config
 from local_operator.executor import LocalCodeExecutor
 from local_operator.model.configure import configure_model, validate_model
 from local_operator.operator import Operator, OperatorType
@@ -98,6 +100,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--hosting",
         type=str,
         choices=[
+            "radient",
             "deepseek",
             "openai",
             "anthropic",
@@ -109,8 +112,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "openrouter",
             "test",
         ],
-        help="Hosting platform to use (deepseek, openai, anthropic, ollama, kimi, alibaba, "
-        "google, mistral, test, openrouter)",
+        help="Hosting platform to use (radient, deepseek, openai, anthropic, ollama, kimi, "
+        "alibaba, google, mistral, test, openrouter)",
     )
     parser.add_argument(
         "--model",
@@ -142,7 +145,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
 
     credential_key_help = (
-        "Credential key to manage (e.g., DEEPSEEK_API_KEY, OPENAI_API_KEY, "
+        "Credential key to manage (e.g., RADIENT_API_KEY,DEEPSEEK_API_KEY, OPENAI_API_KEY, "
         "ANTHROPIC_API_KEY, KIMI_API_KEY, ALIBABA_CLOUD_API_KEY, GOOGLE_AI_STUDIO_API_KEY, "
         "MISTRAL_API_KEY, OPENROUTER_API_KEY)"
     )
@@ -352,7 +355,7 @@ def config_list_command() -> int:
 
     # Configuration descriptions
     descriptions = {
-        "hosting": "AI provider platform (e.g., openai, deepseek, anthropic, openrouter)",
+        "hosting": "AI provider platform (e.g., radient, openai, deepseek, anthropic, openrouter)",
         "model_name": "The specific model to use for interactions",
         "conversation_length": "Maximum number of messages to keep in conversation history",
         "detail_length": "Number of recent messages to leave unsummarized in conversation history",
@@ -503,6 +506,7 @@ def build_tool_registry(
     serp_api_key = credential_manager.get_credential("SERP_API_KEY")
     tavily_api_key = credential_manager.get_credential("TAVILY_API_KEY")
     fal_api_key = credential_manager.get_credential("FAL_API_KEY")
+    radient_api_key = credential_manager.get_credential("RADIENT_API_KEY")
 
     if serp_api_key:
         serp_api_client = SerpApiClient(serp_api_key)
@@ -515,6 +519,13 @@ def build_tool_registry(
     if fal_api_key:
         fal_client = FalClient(fal_api_key)
         tool_registry.set_fal_client(fal_client)
+
+    if radient_api_key:
+        # Get the base URL from env_config if available, otherwise use default
+        env_config = get_env_config()
+        base_url = env_config.radient_api_base_url if env_config else "https://api.radienthq.com/v1"
+        radient_client = RadientClient(radient_api_key, base_url)
+        tool_registry.set_radient_client(radient_client)
 
     tool_registry.set_credential_manager(credential_manager)
     tool_registry.init_tools()
@@ -530,6 +541,9 @@ def main() -> int:
         args = parser.parse_args()
 
         os.environ["LOCAL_OPERATOR_DEBUG"] = "true" if args.debug else "false"
+
+        # Load environment configuration
+        env_config = get_env_config()
 
         config_dir = Path.home() / ".local-operator"
         agent_home_dir = Path.home() / "local-operator-home"
@@ -671,7 +685,12 @@ def main() -> int:
             )
 
         model_configuration = configure_model(
-            hosting, model_name, credential_manager, model_info_client, **chat_args
+            hosting,
+            model_name,
+            credential_manager,
+            model_info_client,
+            env_config=env_config,
+            **chat_args,
         )
 
         if not model_configuration.instance:

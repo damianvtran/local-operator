@@ -27,6 +27,18 @@ class ProviderDetail(BaseModel):
 
 SupportedHostingProviders = [
     ProviderDetail(
+        id="radient",
+        name="Radient",
+        description=(
+            "Your Radient Pass provides you unified access to a variety of high end AI "
+            "models and tools.  Radient makes using agentic AI simple and easy with "
+            "transparent pricing, and helps you pick the best model for your use case."
+        ),
+        url="https://radienthq.com/",
+        requiredCredentials=["RADIENT_API_KEY"],
+        recommended=True,
+    ),
+    ProviderDetail(
         id="openai",
         name="OpenAI",
         description="OpenAI's API provides access to GPT-4o and other models",
@@ -96,7 +108,7 @@ SupportedHostingProviders = [
         description="Alibaba's Qwen models for natural language processing",
         url="https://www.alibabacloud.com/",
         requiredCredentials=["ALIBABA_CLOUD_API_KEY"],
-        recommended=True,
+        recommended=False,
     ),
 ]
 """List of supported model hosting providers.
@@ -105,6 +117,7 @@ This list contains the names of all supported AI model hosting providers that ca
 with the Local Operator API. Each provider has its own set of available models and pricing.
 
 The supported providers are:
+- radient: Radient Pass model hosting with automatic model selection and unified tool access
 - anthropic: Anthropic's Claude models
 - ollama: Local model hosting with Ollama
 - deepseek: DeepSeek's language models
@@ -130,6 +143,21 @@ RecommendedOpenRouterModelIds = [
 """List of recommended model IDs from OpenRouter.
 
 This list contains the model IDs of recommended models available through the OpenRouter
+provider. These models are selected based on performance, reliability, and community
+feedback. The IDs follow the format 'provider/model-name' as used by OpenRouter's API.
+
+The list includes models from various providers:
+- Google's Gemini models
+- Anthropic's Claude models
+- OpenAI's GPT models
+- Qwen models
+- Mistral AI models
+"""
+
+RecommendedRadientModelIds = RecommendedOpenRouterModelIds + ["auto"]
+"""List of recommended model IDs from Radient.
+
+This list contains the model IDs of recommended models available through the Radient
 provider. These models are selected based on performance, reliability, and community
 feedback. The IDs follow the format 'provider/model-name' as used by OpenRouter's API.
 
@@ -211,7 +239,9 @@ def get_model_info(hosting: str, model: str) -> ModelInfo:
     """
     model_info = unknown_model_info
 
-    if hosting == "anthropic":
+    if hosting == "radient":
+        return radient_default_model_info
+    elif hosting == "anthropic":
         if model in anthropic_models:
             model_info = anthropic_models[model]
     elif hosting == "ollama":
@@ -369,7 +399,6 @@ ollama_default_model_info: ModelInfo = ModelInfo(
     recommended=False,
 )
 
-# TODO: Add fetch for token, context window, image support
 openrouter_default_model_info: ModelInfo = ModelInfo(
     max_tokens=-1,
     context_window=-1,
@@ -382,6 +411,21 @@ openrouter_default_model_info: ModelInfo = ModelInfo(
     description="Access to various AI models from different providers through a single API",
     id="openrouter",
     name="OpenRouter",
+    recommended=False,
+)
+
+radient_default_model_info: ModelInfo = ModelInfo(
+    max_tokens=-1,
+    context_window=-1,
+    supports_images=False,
+    supports_prompt_cache=False,
+    input_price=0.0,
+    output_price=0.0,
+    cache_writes_price=0.0,
+    cache_reads_price=0.0,
+    description="Access to Radient AI models through their API",
+    id="radient",
+    name="Radient",
     recommended=False,
 )
 

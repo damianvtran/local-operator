@@ -15,6 +15,7 @@ from typing import Callable, List, Optional
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
+from local_operator.env import EnvConfig
 from local_operator.jobs import JobContext, JobContextRecord, JobManager, JobStatus
 from local_operator.server.utils.operator import create_operator
 from local_operator.server.utils.websocket_manager import WebSocketManager
@@ -32,6 +33,7 @@ def run_job_in_process_with_queue(
     credential_manager: CredentialManager,
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
+    env_config: EnvConfig,
     context: Optional[list[ConversationRecord]] = None,
     options: Optional[dict[str, object]] = None,
     status_queue: Optional[Queue] = None,  # type: ignore
@@ -87,6 +89,7 @@ def run_job_in_process_with_queue(
                     config_manager=config_manager,
                     agent_registry=agent_registry,
                     job_id=job_id,
+                    env_config=env_config,
                 )
 
                 # Set the status queue on the executor for execution state updates
@@ -164,6 +167,7 @@ def run_agent_job_in_process_with_queue(
     credential_manager: CredentialManager,
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
+    env_config: EnvConfig,
     persist_conversation: bool = False,
     user_message_id: Optional[str] = None,
     status_queue: Optional[Queue] = None,  # type: ignore
@@ -233,6 +237,7 @@ def run_agent_job_in_process_with_queue(
                     current_agent=agent_obj,
                     persist_conversation=persist_conversation,
                     job_id=job_id,
+                    env_config=env_config,
                 )
 
                 # Set the status queue on the executor for execution state updates
