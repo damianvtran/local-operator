@@ -15,7 +15,7 @@ from typing import Callable, List, Optional
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
-from local_operator.env import EnvConfig, get_env_config
+from local_operator.env import EnvConfig
 from local_operator.jobs import JobContext, JobContextRecord, JobManager, JobStatus
 from local_operator.server.utils.operator import create_operator
 from local_operator.server.utils.websocket_manager import WebSocketManager
@@ -33,6 +33,7 @@ def run_job_in_process_with_queue(
     credential_manager: CredentialManager,
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
+    env_config: EnvConfig,
     context: Optional[list[ConversationRecord]] = None,
     options: Optional[dict[str, object]] = None,
     status_queue: Optional[Queue] = None,  # type: ignore
@@ -79,9 +80,6 @@ def run_job_in_process_with_queue(
                     job_manager.jobs[job_id] = Job(
                         id=job_id, prompt=prompt, model=model, hosting=hosting
                     )
-
-                # Get environment configuration
-                env_config = get_env_config()
 
                 # Create a new operator for this process
                 process_operator = create_operator(
