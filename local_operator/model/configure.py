@@ -8,12 +8,15 @@ from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
 from local_operator.clients.openrouter import OpenRouterClient
+from local_operator.clients.radient import RadientClient
 from local_operator.credentials import CredentialManager
+from local_operator.env import EnvConfig
 from local_operator.mocks import ChatMock, ChatNoop
 from local_operator.model.registry import (
     ModelInfo,
     get_model_info,
     openrouter_default_model_info,
+    radient_default_model_info,
 )
 
 ModelType = Union[ChatOpenAI, ChatOllama, ChatAnthropic, ChatGoogleGenerativeAI, ChatMock, ChatNoop]
@@ -159,6 +162,11 @@ def validate_model(hosting: str, model: str, api_key: SecretStr) -> bool:
             "https://openrouter.ai/api/v1/models",
             headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
         )
+    elif hosting == "radient":
+        response = requests.get(
+            "https://api.radienthq.com/v1/models",
+            headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
+        )
     elif hosting == "anthropic":
         response = requests.get(
             "https://api.anthropic.com/v1/models",
@@ -224,11 +232,41 @@ def get_model_info_from_openrouter(client: OpenRouterClient, model_name: str) ->
     raise ValueError(f"Model not found from openrouter models API: {model_name}")
 
 
+def get_model_info_from_radient(client: RadientClient, model_name: str) -> ModelInfo:
+    """
+    Retrieves model information from Radient based on the model name.
+
+    Args:
+        client (RadientClient): The Radient client instance.
+        model_name (str): The name of the model to retrieve information for.
+
+    Returns:
+        ModelInfo: The model information retrieved from Radient.
+
+    Raises:
+        ValueError: If the model is not found on Radient.
+        RuntimeError: If there is an error retrieving the model information.
+    """
+    models = client.list_models()
+    for model in models.data:
+        if model.id == model_name:
+            model_info = radient_default_model_info
+            # Radient returns the price per million tokens, so we need to convert it to
+            # the price per token.
+            model_info.input_price = model.pricing.prompt * 1_000_000
+            model_info.output_price = model.pricing.completion * 1_000_000
+            model_info.description = model.description
+            return model_info
+
+    raise ValueError(f"Model not found from radient models API: {model_name}")
+
+
 def configure_model(
     hosting: str,
     model_name: str,
     credential_manager: CredentialManager,
-    model_info_client: Optional[OpenRouterClient] = None,
+    model_info_client: Optional[Union[OpenRouterClient, RadientClient]] = None,
+    env_config: Optional[EnvConfig] = None,
     temperature: float = DEFAULT_TEMPERATURE,
     top_p: float = DEFAULT_TOP_P,
     top_k: Optional[int] = None,
@@ -312,7 +350,46 @@ def configure_model(
     configured_model = None
     api_key: Optional[SecretStr] = None
 
-    if hosting == "deepseek":
+    if hosting == "radient":
+        # Use custom base URL from env if provided, otherwise use default
+        base_url = (
+            env_config.radient_api_base_url
+            if env_config and env_config.radient_api_base_url
+            else "https://api.radienthq.com/v1"
+        )
+
+        if not model_name:
+            model_name = "auto"
+        api_key = credential_manager.get_credential("RADIENT_API_KEY")
+        if not api_key:
+            api_key = credential_manager.prompt_for_credential("RADIENT_API_KEY")
+
+        model_kwargs = {
+            "api_key": api_key,
+            "temperature": temperature,
+            "top_p": top_p,
+            "model": model_name,
+            "base_url": base_url,
+            "default_headers": {
+                "HTTP-Referer": "https://local-operator.com",
+                "X-Title": "Local Operator",
+                "X-Description": "AI agents doing work for you on your own device",
+            },
+        }
+        if max_tokens is not None:
+            model_kwargs["max_tokens"] = max_tokens
+        if frequency_penalty is not None:
+            model_kwargs["frequency_penalty"] = frequency_penalty
+        if presence_penalty is not None:
+            model_kwargs["presence_penalty"] = presence_penalty
+        if stop is not None:
+            model_kwargs["stop"] = stop
+        if seed is not None:
+            model_kwargs["seed"] = seed
+
+        configured_model = ChatOpenAI(**model_kwargs)
+
+    elif hosting == "deepseek":
         base_url = "https://api.deepseek.com/v1"
         if not model_name:
             model_name = "deepseek-chat"
@@ -556,8 +633,10 @@ def configure_model(
     model_info: ModelInfo
 
     if model_info_client:
-        if hosting == "openrouter":
+        if hosting == "openrouter" and isinstance(model_info_client, OpenRouterClient):
             model_info = get_model_info_from_openrouter(model_info_client, model_name)
+        elif hosting == "radient" and isinstance(model_info_client, RadientClient):
+            model_info = get_model_info_from_radient(model_info_client, model_name)
         else:
             raise ValueError(f"Model info client not supported for hosting: {hosting}")
     else:

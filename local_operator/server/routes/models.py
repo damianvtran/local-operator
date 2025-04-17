@@ -11,10 +11,13 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from local_operator.clients.ollama import OllamaClient
 from local_operator.clients.openrouter import OpenRouterClient
+from local_operator.clients.radient import RadientClient
 from local_operator.credentials import CredentialManager
+from local_operator.env import EnvConfig
 from local_operator.model.registry import (
     ProviderDetail,
     RecommendedOpenRouterModelIds,
+    RecommendedRadientModelIds,
     SupportedHostingProviders,
     anthropic_models,
     deepseek_models,
@@ -25,7 +28,7 @@ from local_operator.model.registry import (
     openai_models,
     qwen_models,
 )
-from local_operator.server.dependencies import get_credential_manager
+from local_operator.server.dependencies import get_credential_manager, get_env_config
 from local_operator.server.models.schemas import (
     CRUDResponse,
     ModelEntry,
@@ -177,6 +180,7 @@ async def list_providers():
 async def list_models(
     credential_manager: CredentialManager = Depends(get_credential_manager),
     query_params: ModelListQueryParams = Depends(),
+    env_config: EnvConfig = Depends(get_env_config),
 ):
     """
     List all available models from all providers.
@@ -335,12 +339,19 @@ async def list_models(
 
                         # Add OpenRouter models
                         for model in openrouter_models.data:
+                            model_pricing_prompt = model.pricing.prompt
+                            model_pricing_completion = model.pricing.completion
+                            if model_pricing_prompt is None or model_pricing_prompt < 0.0:
+                                model_pricing_prompt = 0.0
+                            if model_pricing_completion is None or model_pricing_completion < 0.0:
+                                model_pricing_completion = 0.0
+
                             # Get model info
                             model_info = ModelInfo(
                                 id=model.id,
                                 name=model.name,
-                                input_price=model.pricing.prompt * 1_000_000,
-                                output_price=model.pricing.completion * 1_000_000,
+                                input_price=model_pricing_prompt * 1_000_000,
+                                output_price=model_pricing_completion * 1_000_000,
                                 max_tokens=None,
                                 context_window=None,
                                 supports_images=None,
@@ -363,8 +374,63 @@ async def list_models(
                                     info=model_info,
                                 )
                             )
-                    except Exception:
+                    except Exception as e:
                         # Continue without OpenRouter models
+                        logger.exception(f"Error fetching OpenRouter models: {e}")
+                        pass
+            elif provider_detail.id == "radient":
+                # Then try to get Radient models if API key is configured
+                api_key = credential_manager.get_credential("RADIENT_API_KEY")
+                if api_key:
+                    try:
+                        # Create the Radient client
+                        client = RadientClient(
+                            api_key=api_key, base_url=env_config.radient_api_base_url
+                        )
+
+                        # Get the list of models
+                        radient_models = client.list_models()
+
+                        # Add Radient models
+                        for model in radient_models.data:
+                            model_pricing_prompt = model.pricing.prompt
+                            model_pricing_completion = model.pricing.completion
+                            if model_pricing_prompt is None or model_pricing_prompt < 0.0:
+                                model_pricing_prompt = 0.0
+                            if model_pricing_completion is None or model_pricing_completion < 0.0:
+                                model_pricing_completion = 0.0
+
+                            # Get model info
+                            model_info = ModelInfo(
+                                id=model.id,
+                                name=model.name,
+                                input_price=model_pricing_prompt * 1_000_000,
+                                output_price=model_pricing_completion * 1_000_000,
+                                max_tokens=None,
+                                context_window=None,
+                                supports_images=None,
+                                supports_prompt_cache=False,
+                                cache_writes_price=None,
+                                cache_reads_price=None,
+                                recommended=model.id in RecommendedRadientModelIds,
+                                description=(
+                                    model.description
+                                    if hasattr(model, "description") and model.description
+                                    else f"Radient model: {model.name}"
+                                ),
+                            )
+
+                            models.append(
+                                ModelEntry(
+                                    id=model.id,
+                                    name=model.name,
+                                    provider="radient",
+                                    info=model_info,
+                                )
+                            )
+                    except Exception as e:
+                        # Continue without Radient models
+                        logger.exception(f"Error fetching Radient models: {e}")
                         pass
 
         # Sort the models based on the sort parameter and direction
