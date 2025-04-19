@@ -1133,22 +1133,25 @@ class Operator:
 
                     reflection = ""
 
-                    if self.verbosity_level >= VerbosityLevel.VERBOSE:
-                        print(
-                            "\n\033[1;36m╭─ Agent Reflection ──────────────────────────────\033[0m"
-                        )
-
-                    # Reflect on the results of the last operation
-                    async for chunk in self.generate_reflection(classification):
-                        reflection += chunk
+                    # Only generate reflection if the last action was CODE
+                    if response_json.action == ActionType.CODE:
                         if self.verbosity_level >= VerbosityLevel.VERBOSE:
-                            print(chunk, end="", flush=True)
+                            print(
+                                "\n\033[1;36m╭─ Agent Reflection "
+                                "──────────────────────────────\033[0m"
+                            )
 
-                    if self.verbosity_level >= VerbosityLevel.VERBOSE:
-                        print(
-                            "\n\033[1;36m╰────────────────────────────────"
-                            "──────────────────\033[0m\n"
-                        )
+                        # Reflect on the results of the last operation
+                        async for chunk in self.generate_reflection(classification):
+                            reflection += chunk
+                            if self.verbosity_level >= VerbosityLevel.VERBOSE:
+                                print(chunk, end="", flush=True)
+
+                        if self.verbosity_level >= VerbosityLevel.VERBOSE:
+                            print(
+                                "\n\033[1;36m╰────────────────────────────────"
+                                "──────────────────\033[0m\n"
+                            )
 
                 else:
                     final_response = ""
