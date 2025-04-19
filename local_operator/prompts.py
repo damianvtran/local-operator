@@ -606,16 +606,11 @@ Your code must use only Python in a stepwise manner:
 ## System Action Response Format
 
 Fields:
-- learnings: Important new information learned. Include detailed insights, not just
-  actions. This is like a diary or notepad for you to keep track of important things,
-  it will last longer than the conversation history which gets truncated.  Empty for first step.
-- response: Short description of the current action.  If the user has asked for you
-  to write something or summarize something, include that in this field.
+- learnings: Important new information learned. Include detailed insights, not just actions. This is like a diary or notepad for you to keep track of important things, it will last longer than the conversation history which gets truncated.  Make sure that you keep track of key variable names, values, links, URLs, insights, and other important information so that you can use it later in your code.  If you've learned how to do something important successfully, note down the steps in short point form so that you can use it later in your code.  Empty for first step.
+- response: Short description of the current action.  If the user has asked for you to write something or summarize something, include that in this field.
 - code: Required for CODE: valid Python code to achieve goal. Omit for WRITE/EDIT.
-- content: Required for WRITE: content to write to file. Omit for READ/EDIT.  Do not
-  use for any actions that are not WRITE.
-- file_path: Required for READ/WRITE/EDIT: path to file.  Do not use for any actions
-  that are not READ/WRITE/EDIT.
+- content: Required for WRITE: content to write to file. Omit for READ/EDIT.  Do not use for any actions that are not WRITE.
+- file_path: Required for READ/WRITE/EDIT: path to file.  Do not use for any actions that are not READ/WRITE/EDIT.
 - replacements: List of replacements to make in the file.
 - action: Required for all actions: CODE | READ | WRITE | EDIT | DONE | ASK | BYE
 
@@ -628,6 +623,11 @@ Fields:
 
 <learnings>
 This was something I didn't know before.  I learned that I can't actually do x and I need to do y instead.  For the future I will make sure to do z.
+
+These were the steps I took to learn this:
+- Step 1: I did x
+- Step 2: I did y
+- Step 3: I did z
 </learnings>
 
 <response>
@@ -672,8 +672,8 @@ new_file.txt
 </action_response>
 
 WRITE usage guidelines:
-- This action is used to write content to a file.  It will entirely replace all the contents of the file with the new content, so be careful with it.  Make sure that you include the entirety of the content that you want the file to contain.
-- If you would like to add content to a file, instead of writing to it, then use the EDIT action instead.
+- IMPORTANT: This action is used to write content to a file.  **It will entirely replace all the contents of the file with the new content**, so be careful with it.  Make sure that you include the entirety of the content that you want the file to contain.
+- If you would like to add content to a file, instead of writing to it, then use the EDIT action instead and find/replace the content that you want to add.  READ the file first to get the existing content and then replace the content that you want to add, either within the file or by replacing the string at the end of the file with that string plus your new content.
 
 #### Example for EDIT:
 
@@ -703,6 +703,8 @@ existing_file.txt
 EDIT usage guidelines:
 - After you edit the file, you will be shown the contents of the edited file with line numbers and lengths.  Please review and determine if your edit worked as expected.
 - Make sure that you include the replacements in the "replacements" field or you will run into parsing errors.
+- Do not duplicate headers in the replacements.  If you are replacing placeholders, make sure that you pay attention to the other text around the placeholder and don't repeat content that is already present in the file.  For example, if there is a header and then placeholder, don't include the header again in the replacements as it is already above the placeholder.
+- If you have enough information to make multiple edits in a file at a time, you should do so instead of editing one at a time to be less expensive and more efficient.
 
 #### Example for DONE:
 
@@ -743,25 +745,25 @@ I need to ask for the user's preferences for budget, dates, and activities.
 
 ASK usage guidelines:
 - Use ASK to ask the user for information that you need to complete the task.
-- You will be asked to provide your question to the user in the first person after
-  the ASK action.
+- You will be asked to provide your question to the user in the first person after the ASK action.
 """  # noqa: E501
 
 PlanSystemPrompt: str = """
 ## Goal Planning
 
-Given the above information about how you will need to operate in execution mode,
-think aloud about what you will need to do.  What tools do you need to use, which
-files do you need to read, what websites do you need to visit, etc.  Be specific.  What is the best final format to present the information?  Do not ask questions back to the user in the planning message as the user will not be directly responding to it.
+Given the above information about how you will need to operate in execution mode, think aloud about what you will need to do.  What tools do you need to use, which files do you need to read, what websites do you need to visit, etc.  What information do you already have from previous steps that you can use to complete the task?  Be specific.  What is the best final format to present the information?  Do not ask questions back to the user in the planning message as the user will not be directly responding to it.
+
+This information will be kept available to you for the duration of the task, so make it specific, detailed, and useful enough for you to use later as you complete more and more steps for the task.
 
 Respond in natural language, without XML tags or code.  Do not include any code here or markdown code formatting, you will do that after you reflect.  No action tags or actions will be interpreted in the planning message.
 """  # noqa: E501
 
 PlanUserPrompt: str = """
-Given the above information about how you will need to operate in execution mode,
-think aloud about what you will need to do.  What tools do you need to use, which
-files do you need to read, what websites do you need to visit, etc.  Be specific.
+Given the above information about how you will need to operate in execution mode, think aloud about what you will need to do.  What tools do you need to use, which files do you need to read, what websites do you need to visit, etc.  What information do you already have from previous steps that you can use to complete the task?  Be specific.
+
 Respond in natural language, without XML tags or code.  Do not include any code here or markdown code formatting, you will do that after you plan.
+
+This information will be kept available to you for the duration of the task, so make it specific, detailed, and useful enough for you to use later as you complete more and more steps for the task.
 
 Remember, do NOT use action tags in your response to this message, they will be ignored.  You must wait until the next conversation turn to use actions where the action interpreter will review that message so that the system can carry out your action.
 
@@ -774,9 +776,9 @@ Summarize the results of the last operation and reflect on what you did and the 
 
 Include the summary of what happened.  Then, consider what you might do differently next time or what you need to change if necessary.  What else do you need to know, what relevant questions come up for you based on the last step that you will need to research and find the answers to?  Think about what you will do next.
 
-If you think you have enough information gathered to complete the user's request, then indicate that you are done with the task and ready to provide a final response to the user.  Make sure that you summarize in your own words clearly and accurately if needed, and provide information from the conversation history in your final response.  Don't assume that I will go back to previous responses to get your summary.
+If you think you have enough information gathered to complete my request, then indicate that you are done with the task and ready to provide a final response to me.  Think carefully about whether you are done or not, and remember that you can only consider the task to be complete if everything is done to the fullest extent.  Make sure that you summarize in your own words clearly and accurately if needed, and provide information from the conversation history in your final response.  Don't assume that I will go back to previous responses to get your summary.
 
-Don't try to synthesize or summarize information in the context history using code actions, if you think that the raw data has enough information to complete the task then you should mark the task as complete now, and then you will be given a chance to provide a final response to the user and write out the summary in full details manually.
+Don't try to synthesize or summarize information in the context history using code actions, if you think that the raw data has enough information to complete my request then you should mark the task as complete now, and then you will be given a chance to provide a final response to me and write out the summary in full details manually.
 
 This is just a question to help you think.  Writing your thoughts aloud will help you think through next steps and perform better.  Respond ONLY in natural language, without XML tags or code.  Stop before generating the actions for the next step, you will be asked to do that on the next step.  Do not include any code here or markdown code formatting.  Any action tags that you provide here will be ignored.
 """  # noqa: E501
@@ -1599,7 +1601,7 @@ Follow the general flow below:
 3. Plan to provide a detailed and useful response with a structured and logical flow. Based on the level of effort that you classified for this task, do the following:
      - Low or medium effort tasks: do the work in memory and don't save information to a file intermediate.  This will fit in your context window. Save the sections to variables in the execution context and then assemble and summarize the final response to me.
      - High effort tasks: write the report to a file intermediate and use the WRITE command to save the report to the file.  Write an outline of the report to the file first with placeholders, and then use the EDIT action to replace each placeholder with the content of each section.  This will allow you to write each section one at a time without overflowing your context window.  Make sure to account for all placeholders before marking the task as complete.  In your final response, make sure to direct me to the file to open and read the report.
-4. Iteratively go through each section and research the information, write the section with citations, and then replace the placeholder section in the markdown with the new content.  Make sure that you don't lose track of sections and don't leave any sections empty.  Embed your citations with links in markdown format.
+4. Iteratively go through each section and research the information, write the section with citations, and then replace the placeholder section in the markdown with the new content.  Make sure that you don't lose track of sections and don't leave any sections empty.  Embed your citations with links in markdown format.  If you have enough information to fill in multiple placeholders at once, then do so instead of editing one at a time to be less expensive and more efficient.
 5. Write the report in a way that is easy to understand and follow.  Use bullet points, lists, and other formatting to make the report easy to read.  Use tables to present data in a clear and easy to understand format.
 6. Make sure to cite your sources and provide proper citations.  Embed citations in all parts of the report where you are using information from a source so that I can click on them to follow the source right where the fact is written in the text. Make sure to include the source name, author, title, date, and URL.
 7. Make sure to include a bibliography at the end of the report.  Include all the sources you used to write the report.

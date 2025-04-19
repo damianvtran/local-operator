@@ -2124,13 +2124,7 @@ class LocalCodeExecutor:
                 role=ConversationRole.USER,
                 content=(
                     f"Your edits have been applied to the file: {file_path}\n\n"
-                    "Here are the contents of the edited file with line numbers and lengths, please review and determine if your edit worked as expected:\n\n"  # noqa: E501
-                    "Line | Length | Content\n"
-                    "----------------------\n"
-                    "BEGIN\n"
-                    f"{annotate_code(file_content)}\n"
-                    "END\n\n"
-                    "Based on this result, if your edit did not work as expected, please adjust your response to fix the issue and try another edit.  If you are unable to fix the issue, please try to WRITE the file from scratch instead, making sure to stay accurate to the original file content."  # noqa: E501
+                    "Make sure to check the file content after all edits are complete to ensure that your edits were successful.  If your edit did not work as expected, please adjust your response to fix the issue and try another edit.  If you are unable to fix the issue, please try to WRITE the file from scratch instead, making sure to stay accurate to the original file content."  # noqa: E501
                 ),
                 should_summarize=True,
                 should_cache=True,
