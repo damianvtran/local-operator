@@ -12,9 +12,6 @@
           pkgs = import nixpkgs { inherit system; };
         in {
           devShells.default = pkgs.mkShell {
-            # Set zsh as the shell
-            shell = "${pkgs.zsh}/bin/zsh";
-
             packages = with pkgs; [
               python312Full
               python312Packages.pip
