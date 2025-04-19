@@ -10,12 +10,14 @@ EnvConfig currently supports:
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 from pydantic import Field
 
-# Load environment variables from .env file if present
-load_dotenv()
+# Always load .env from the project root, regardless of working directory
+dotenv_path = Path(__file__).parent.parent / ".env"
+load_dotenv(dotenv_path, override=True)
 
 
 @dataclass(frozen=True)
