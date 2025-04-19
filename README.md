@@ -71,6 +71,32 @@ Visit the [Local Operator website](https://local-operator.com) for visualization
 - For 3rd party hosting: [OpenRouter](https://openrouter.ai/keys), [OpenAI](https://platform.openai.com/api-keys), [DeepSeek](https://platform.deepseek.ai/), [Anthropic](https://console.anthropic.com/), [Google](https://ai.google.dev/), or other API key (prompted for on first run)
 - For local hosting: [Ollama](https://ollama.com/download) model installed and running
 
+## 🚀 Development with Nix Flake
+
+If you use [Nix](https://nixos.org/) for development, this project provides a `flake.nix` for easy, reproducible setup. The flake ensures all dependencies are available and configures a development environment with a single command.
+
+### Getting Started
+
+1. **Enter the development shell:**
+
+   ```bash
+   nix develop
+   ```
+
+   This will drop you into a shell with all required dependencies (Python, pip, etc.) set up for development.
+
+2. **Run the project as usual:**
+
+   You can now use the CLI or run scripts as described in the rest of this README.
+
+### Benefits
+
+- No need to manually install Python or other dependencies.
+- Ensures a consistent environment across all contributors.
+- Works on Linux, macOS, and (with [nix-darwin](https://github.com/LnL7/nix-darwin)) on macOS.
+
+For more information about Nix flakes, see the [NixOS flake documentation](https://nixos.wiki/wiki/Flakes).
+
 ## 🛠️ Setup
 
 To run Local Operator with a 3rd party cloud-hosted LLM model, you need to have an API key.  You can get one from OpenAI, DeepSeek, Anthropic, or other providers.
