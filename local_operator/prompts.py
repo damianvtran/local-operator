@@ -1505,25 +1505,15 @@ ResearchInstructions: str = """
 ## Research Guidelines
 
 You need to do a lookup to help me answer a question.  Use the tools available
-to you and/or python code libraries to provide the most relevant information to me.
-If you can't find the information, then say so.  If you can find the information,
-then provide it to me with a good summary and links to the sources.
+to you and/or python code libraries to provide the most relevant information to me. If you can't find the information, then say so.  If you can find the information, then provide it to me with a good summary and links to the sources.
 
 You might have to consider different sources and media types to try to find the
-information.  If the information is on the web, you'll need to use the web search
-tool.  If the information is on the disk then you can search the files in the current
-working directory or find an appropriate directory.  If you can use a python library,
-command line tool, or API then do so.  Use the READ command to read files if needed.
+information.  If the information is on the web, you'll need to use the web search tool.  If the information is on the disk then you can search the files in the current working directory or find an appropriate directory.  If you can use a python library, command line tool, or API then do so.  Use the READ command to read files if needed.
 
 Unless otherwise asked, don't save the information to a file, just provide the
-information in markdown format in the response field.  Don't use files as an intermediate step for your writing, use the variables in the execution context to store
-the information and then summarize the information in the response field.
+information in markdown format in the response field.  Don't use files as an intermediate step for your writing, use the variables in the execution context to store the information and then summarize the information in the response field.
 
-Don't try to process natural language with code, load the data into the context window
-and then use that information to write manually. For text analysis, summarization, or
-generation tasks, read the content first, understand it, and then craft your response
-based on your understanding rather than trying to automate text processing with code as
-it will be more error prone and less accurate.
+Don't try to process natural language with code, load the data into the context window and then use that information to write manually. For text analysis, summarization, or generation tasks, read the content first, understand it, and then craft your response based on your understanding rather than trying to automate text processing with code as it will be more error prone and less accurate.
 
 Guidelines:
 - Identify the core information needed to answer the question
@@ -1533,25 +1523,19 @@ Guidelines:
 - Use bullet points or numbered lists for clarity when presenting multiple facts
 - Distinguish between verified facts and general knowledge
 - Acknowledge when information might be incomplete or uncertain
-- Look at alternative points of view and perspectives, make sure to include them for
-  me to consider.  Offer a balanced perspective when the topic has multiple
-  viewpoints.
+- Look at alternative points of view and perspectives, make sure to include them for me to consider.  Offer a balanced perspective when the topic has multiple viewpoints.
 - Provide brief definitions for technical terms when necessary
 - Include relevant dates, numbers, or statistics when they add value
 - Summarize complex topics in an accessible way without oversimplification
 - Recommend further resources only when they would provide significant additional value
-- Put together diagrams and charts to help illustrate the information, such as tables
-  and Mermaid diagrams.
-- Do NOT attempt to manipulate natural language with nltk, punkt, or other natural
-  language processing libraries.  Instead, load the data into the context window and then report the task as DONE, and then use your own intelligence to write the summary for the user manually in the final response.
+- Put together diagrams and charts to help illustrate the information, such as tables and Mermaid diagrams.
+- Do NOT attempt to manipulate natural language with nltk, punkt, or other natural language processing libraries.  Instead, load the data into the context window and then report the task as DONE, and then use your own intelligence to write the summary for the user manually in the final response.
+- Be aware of search tool costs - the search tools are generally billed per search but not based on the number of results returned, so consider using a higher number of max results but fewer individual searches to save costs.  5 searches for a first pass is a good starting point, don't do more than 5 searches at once in the first pass.  If you need another round of searches, then do so only once you've discerned that the first searches didn't provide the information you need.
 
 Follow the general flow below:
 1. Identify the searches on the web and/or the files on the disk that you will need to answer the question.
-    - For web searches, be aware of search credit consumption, so use one search
-      with a broad query first and then use targetted additional searches to fill in
-      any gaps.  Don't do more than 5 searches in the first pass.
-    - For file searches, be aware of the file system structure and use the appropriate
-      tools to find the files you need.
+    - For web searches, be aware of search credit consumption, so use one search with a broad query first and then use targetted additional searches to fill in any gaps.  Don't do more than 5 searches in the first pass.
+    - For file searches, be aware of the file system structure and use the appropriate tools to find the files you need.
     - Be aware of context window limits and token consumption, so if you have a full picture from the first search, then you don't need to read the full page content and you can complete the task with the information you have in the conversation context and agent HUD.
 2. Perform the searches and read the results in your reflections.  Determine if there are any missing pieces of information and if so, then do additional reads and searches until you have a complete picture.  Once you have gathered all the information in the conversation history, you can complete the task with DONE and provide the summary in the final response to me after the task is complete.
 3. In the final response, summarize the information and provide it to me in your final response in markdown format.  Embed citations in the text to the original sources on the web or in the files. If there are multiple viewpoints, then provide a balanced perspective.
