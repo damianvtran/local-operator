@@ -132,6 +132,23 @@ Once you have the API key, install the operator CLI with the following command:
 pip install local-operator
 ```
 
+> ⚠️ **Linux Installs (Ubuntu 23.04+, Fedora 38+, Debian 12+)**  
+> Due to recent changes in how Python is managed on modern Linux distributions (see [PEP 668](https://peps.python.org/pep-0668/)), you **cannot use `pip install` globally** on system Python.  
+>
+> Instead, install packages in a **virtual environment**:
+>
+> ```bash
+> python3 -m venv .venv
+> source .venv/bin/activate
+> pip install local-operator
+> ```
+>
+> Alternatively you can use [`pipx`](https://pypa.github.io/pipx/):
+>
+> ```bash
+> pipx install local-operator
+> ```
+
 ## 🐋 Running Server in Docker
 
 To run Local Operator in docker, ensure docker is running and run
