@@ -41,6 +41,31 @@ This project is proudly open source under the GPL 3.0 license. We believe AI too
   <a href="#-examples">Examples</a>
 </div>
 
+## 📚 Table of Contents
+
+- [🔑 Key Features](#-key-features)
+- [💻 Requirements](#-requirements)
+- [🚀 Development with Nix Flake](#-development-with-nix-flake)
+  - [Getting Started](#getting-started)
+  - [Benefits](#benefits)
+- [🛠️ Setup](#-setup)
+- [Running Server in Docker](#running-server-in-docker)
+  - [Web Browsing](#web-browsing)
+  - [Web Search](#web-search)
+  - [Image Generation](#image-generation)
+- [🖥️ Usage (CLI)](#-usage-cli)
+  - [Run with a local Ollama model](#run-with-a-local-ollama-model)
+  - [Run with DeepSeek](#run-with-deepseek)
+  - [Run with OpenAI](#run-with-openai)
+- [🚀 Usage (Single Execution Mode)](#-usage-single-execution-mode)
+- [📡 Usage (Server)](#-usage-server)
+- [🧠 Usage (Agents)](#-usage-agents)
+- [🔑 Configuration](#-configuration)
+  - [Configuration Values](#configuration-values)
+  - [Configuration Options](#configuration-options)
+  - [Credentials](#credentials)
+- [📝 Examples](#-examples)
+
 ## 🔑 Key Features
 
 - **Interactive CLI Interface**: Chat with an AI assistant that can execute Python code locally
