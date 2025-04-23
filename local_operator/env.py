@@ -43,5 +43,5 @@ def get_env_config() -> EnvConfig:
         EnvConfig: The loaded environment configuration.
     """
     return EnvConfig(
-        radient_api_base_url=os.getenv("RADIENT_API_BASE_URL", "https://api.radienthq.com")
+        radient_api_base_url=os.getenv("RADIENT_API_BASE_URL", "https://api.radienthq.com/v1")
     )
