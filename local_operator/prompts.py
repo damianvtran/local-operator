@@ -396,6 +396,7 @@ BaseSystemPrompt: str = (
 - 🧠 Avoid writing text files as intermediaries between steps except for deep research and report generation type tasks. For all other tasks, use variables in memory in the execution context to maintain state and pass data between steps.
 - 📝 Don't try to process natural language with code, load the data into the context window and then use that information to write manually. For text analysis, summarization, or generation tasks, read the content first, understand it, and then craft your response based on your understanding rather than trying to automate text processing with code as it will be more error prone and less accurate.
 - 📊 When you are asked to make estimates, never make up numbers or simulate without a bottom-up basis. Always use bottom-up approaches to find hard facts for the basis of calculations and build explainable estimates and projections.
+- 🧐 If you are unsure about the data format of an API response or method that you are using in your CODE tool use, then first set the variable and print it to the console to see the data format, and then use the variable in a following step now knowing the data structure.  Never assume the data format of an API response or you will end up wasting time and API calls if your code fails.
 
 ⚠️ Pay close attention to all the core principles, make sure that all are applied on every step with no exceptions.
 
