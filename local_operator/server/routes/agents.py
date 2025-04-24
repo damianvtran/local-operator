@@ -132,30 +132,41 @@ async def list_agents(
         if sort == "name":
             agents_list.sort(key=lambda agent: agent.name.lower(), reverse=not is_ascending)
         elif sort == "created_date":
+            # Sort directly using the datetime object, fallback to min datetime
             agents_list.sort(
                 key=lambda agent: (
-                    datetime.fromisoformat(agent.created_date)
-                    if isinstance(agent.created_date, str)
-                    else agent.created_date
+                    agent.created_date
+                    if isinstance(agent.created_date, datetime)
+                    else datetime.min.replace(tzinfo=timezone.utc)
                 ),
                 reverse=not is_ascending,
             )
-        else:  # last_message_datetime
-            # Default to created_date if last_message_datetime is not available
-            agents_list.sort(
-                key=lambda agent: (
-                    datetime.fromisoformat(agent.last_message_datetime)
-                    if hasattr(agent, "last_message_datetime")
-                    and agent.last_message_datetime
-                    and isinstance(agent.last_message_datetime, str)
-                    else (
-                        datetime.fromisoformat(agent.created_date)
-                        if isinstance(agent.created_date, str)
-                        else agent.created_date
+        else:  # last_message_datetime (default)
+            # Sort directly using the datetime object, fallback to created_date, then min datetime
+            def get_sort_key(agent):
+                # Prefer last_message_datetime if it's a valid datetime
+                last_msg_dt = getattr(agent, "last_message_datetime", None)
+                if isinstance(last_msg_dt, datetime):
+                    # Ensure timezone awareness for comparison
+                    return (
+                        last_msg_dt
+                        if last_msg_dt.tzinfo
+                        else last_msg_dt.replace(tzinfo=timezone.utc)
                     )
-                ),
-                reverse=not is_ascending,
-            )
+
+                # Fallback to created_date if it's a valid datetime
+                created_dt = getattr(agent, "created_date", None)
+                if isinstance(created_dt, datetime):
+                    # Ensure timezone awareness for comparison
+                    return (
+                        created_dt if created_dt.tzinfo else created_dt.replace(tzinfo=timezone.utc)
+                    )
+
+                # Absolute fallback if neither date is valid
+                return datetime.min.replace(tzinfo=timezone.utc)
+
+            agents_list.sort(key=get_sort_key, reverse=not is_ascending)
+
     except Exception as e:
         logger.exception("Error retrieving agents")
         raise HTTPException(status_code=500, detail=f"Error retrieving agents: {e}")
@@ -163,16 +174,16 @@ async def list_agents(
     total = len(agents_list)
     start_idx = (page - 1) * per_page
     end_idx = start_idx + per_page
-    paginated = agents_list[start_idx:end_idx]
-    agents_serialized = [
-        agent.model_dump() if hasattr(agent, "model_dump") else agent for agent in paginated
-    ]
+    paginated_agents = agents_list[start_idx:end_idx]
+
+    # Explicitly construct Agent objects from AgentData fields for the response
+    agents_for_response = [Agent.model_validate(agent.model_dump()) for agent in paginated_agents]
 
     result = AgentListResult(
         total=total,
         page=page,
         per_page=per_page,
-        agents=[Agent.model_validate(agent) for agent in agents_serialized],
+        agents=agents_for_response,  # Pass the list of Agent objects
     )
 
     return CRUDResponse(
