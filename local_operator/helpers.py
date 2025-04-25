@@ -452,7 +452,7 @@ def get_posix_shell_path() -> str | None:
 
         full_path = result.stdout.strip()
         if full_path:
-            logger.info(f"Successfully retrieved PATH from login shell: {full_path}")
+            logger.debug(f"Successfully retrieved PATH from login shell: {full_path}")
         else:
             # If the shell command succeeded but returned empty, log a warning
             # and use current PATH as fallback
@@ -471,7 +471,7 @@ def get_posix_shell_path() -> str | None:
                 if local_bin not in path_list:
                     # Prepend ~/.local/bin for higher priority
                     full_path = local_bin + os.pathsep + full_path
-                    logger.info(f"Prepended {local_bin} to PATH.")
+                    logger.debug(f"Prepended {local_bin} to PATH.")
 
         return full_path
 
@@ -504,7 +504,7 @@ def setup_cross_platform_environment():
     logger.info(f"Setting up subprocess environment for OS: {platform.system()}...")
 
     original_path = os.environ.get("PATH", "")
-    logger.info(f"Initial PATH: {original_path}")
+    logger.debug(f"Initial PATH: {original_path}")
 
     user_effective_path = None
 
@@ -521,7 +521,7 @@ def setup_cross_platform_environment():
 
     # Update os.environ['PATH'] if a valid, different path was retrieved
     if user_effective_path and user_effective_path != original_path:
-        logger.info(f"Updating os.environ['PATH'] to: {user_effective_path}")
+        logger.debug(f"Updating os.environ['PATH'] to: {user_effective_path}")
         os.environ["PATH"] = user_effective_path
     elif user_effective_path is None:
         logger.warning(
@@ -529,7 +529,7 @@ def setup_cross_platform_environment():
             "Subprocess calls will use the initial PATH."
         )
     else:  # Path retrieved is same as original
-        logger.info("Retrieved effective PATH is the same as the initial PATH. No update needed.")
+        logger.debug("Retrieved effective PATH is the same as the initial PATH. No update needed.")
 
     # Optional: Verification step (example)
     # Try to find a common command expected to be in the user's path
