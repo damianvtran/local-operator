@@ -18,7 +18,7 @@ from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config
-from local_operator.helpers import setup_subprocess_environment
+from local_operator.helpers import setup_cross_platform_environment
 from local_operator.jobs import JobManager
 from local_operator.server.routes import (
     agents,
@@ -70,7 +70,7 @@ async def lifespan(app: FastAPI):
         agent_home_dir.mkdir(parents=True, exist_ok=True)
 
     # Set up the subprocess environment for accessing shell commands
-    setup_subprocess_environment()
+    setup_cross_platform_environment()
 
     app.state.credential_manager = CredentialManager(config_dir=config_dir)
     app.state.config_manager = ConfigManager(config_dir=config_dir)
