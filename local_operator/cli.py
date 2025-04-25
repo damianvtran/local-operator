@@ -34,6 +34,7 @@ from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel  # Import VerbosityLevel
 from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config
+from local_operator.helpers import setup_subprocess_environment
 from local_operator.operator import OperatorType
 
 CLI_DESCRIPTION = """
@@ -476,6 +477,9 @@ def main() -> int:
     try:
         parser = build_cli_parser()
         args = parser.parse_args()
+
+        # Set up the subprocess environment for accessing shell commands
+        setup_subprocess_environment()
 
         os.environ["LOCAL_OPERATOR_DEBUG"] = "true" if args.debug else "false"
 
