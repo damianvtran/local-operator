@@ -1,10 +1,10 @@
 from datetime import datetime
+from pathlib import Path  # Add Path import
 from unittest.mock import MagicMock, patch
 
 import pytest
-from pydantic import SecretStr
 
-from local_operator.agents import AgentData
+from local_operator.agents import AgentData  # Remove AgentEditFields import
 from local_operator.cli import (
     agents_create_command,
     agents_delete_command,
@@ -16,7 +16,8 @@ from local_operator.cli import (
     main,
     serve_command,
 )
-from local_operator.model.configure import ModelConfiguration
+from local_operator.console import VerbosityLevel
+from local_operator.operator import OperatorType
 from local_operator.types import AgentState
 
 
@@ -191,59 +192,96 @@ def test_serve_command():
         assert result == 0
 
 
-def test_main_success(mock_operator, mock_agent_registry, mock_model):
-    with (
-        patch("local_operator.cli.ConfigManager") as mock_config_manager_cls,
-        patch("local_operator.cli.CredentialManager"),
-        patch(
-            "local_operator.cli.configure_model",
-            return_value=ModelConfiguration(
-                hosting="deepseek",
-                name="deepseek-chat",
-                instance=mock_model,
-                info=mock_model.info,
-                api_key=SecretStr("test_key"),
-            ),
-        ) as mock_configure_model,
-        patch("local_operator.cli.LocalCodeExecutor"),
-        patch("local_operator.cli.Operator", return_value=mock_operator) as mock_operator_cls,
-        patch("local_operator.cli.AgentRegistry", return_value=mock_agent_registry),
-        patch("local_operator.cli.asyncio.run") as mock_asyncio_run,
-    ):
+def test_main_success(mock_operator, mock_agent_registry, mock_agent):
+    # Mock the get_env_config function
+    with patch("local_operator.cli.get_env_config") as mock_get_env_config:
+        # Configure the mock env_config object
+        mock_env_config = MagicMock()
+        mock_get_env_config.return_value = mock_env_config
 
-        mock_config_manager = mock_config_manager_cls.return_value
-        mock_config_manager.get_config_value.side_effect = lambda key, default=None: {
-            "hosting": "deepseek",
-            "model_name": "deepseek-chat",
-            "detail_length": 10,
-            "max_learnings_history": 50,
-            "max_conversation_history": 100,
-            "auto_save_conversation": True,
-        }.get(key, default)
+        with (
+            patch("local_operator.cli.ConfigManager") as mock_config_manager_cls,
+            patch("local_operator.cli.CredentialManager") as mock_credential_manager_cls,
+            patch(
+                "local_operator.cli.initialize_operator", return_value=mock_operator
+            ) as mock_initialize_operator,  # Patch initialize_operator
+            patch("local_operator.cli.AgentRegistry", return_value=mock_agent_registry),
+            patch("local_operator.cli.asyncio.run") as mock_asyncio_run,
+            patch("local_operator.cli.os.chdir") as mock_chdir,  # Mock os.chdir
+            patch("local_operator.cli.Path.is_dir", return_value=True),  # Mock Path.is_dir
+            patch("local_operator.cli.Path.resolve", return_value=Path("/test/dir")),
+        ):
+            mock_config_manager = mock_config_manager_cls.return_value
+            mock_credential_manager = mock_credential_manager_cls.return_value
 
-        with patch("sys.argv", ["program", "--hosting", "deepseek", "--agent", "test-agent"]):
-            result = main()
+            # Simulate config values
+            mock_config_manager.get_config_value.side_effect = lambda key, default=None: {
+                "auto_save_conversation": True,
+            }.get(key, default)
 
-            assert result == 0
-            mock_configure_model.assert_called_once()
-            mock_operator_cls.assert_called_once()
-            mock_agent_registry.get_agent_by_name.assert_called_once_with("test-agent")
-            mock_agent_registry.load_agent_state.assert_called_once_with("test-id")
-            mock_asyncio_run.assert_called_once_with(mock_operator.chat())
+            # Simulate agent found
+            mock_agent_registry.get_agent_by_name.return_value = mock_agent
+
+            with patch(
+                "sys.argv",
+                [
+                    "program",
+                    "--hosting",
+                    "deepseek",
+                    "--model",
+                    "deepseek-chat",
+                    "--agent",
+                    "TestAgent",
+                    "--train",
+                    "--run-in",
+                    "/test/dir",
+                ],
+            ):
+                result = main()
+
+                assert result == 0
+                mock_chdir.assert_called_once_with(Path("/test/dir"))
+                mock_agent_registry.get_agent_by_name.assert_called_once_with("TestAgent")
+                mock_agent_registry.create_autosave_agent.assert_called_once()
+                mock_initialize_operator.assert_called_once_with(
+                    operator_type=OperatorType.CLI,
+                    config_manager=mock_config_manager,
+                    credential_manager=mock_credential_manager,
+                    agent_registry=mock_agent_registry,
+                    env_config=mock_env_config,
+                    current_agent=mock_agent,
+                    persist_conversation=True,  # --train flag
+                    auto_save_conversation=True,  # auto_save_conversation is True
+                    verbosity_level=VerbosityLevel.VERBOSE,  # Default verbosity
+                )
+                mock_asyncio_run.assert_called_once_with(mock_operator.chat())
 
 
 def test_main_model_not_found():
-    with (
-        patch("local_operator.cli.ConfigManager") as mock_config_manager_cls,
-        patch("local_operator.cli.CredentialManager"),
-        patch("local_operator.cli.configure_model", return_value=None),
-    ):
-        mock_config_manager = mock_config_manager_cls.return_value
-        mock_config_manager.get_config_value.side_effect = ["invalid", "invalid"]
+    # Mock the get_env_config function
+    with patch("local_operator.cli.get_env_config") as mock_get_env_config:
+        # Configure the mock env_config object
+        mock_env_config = MagicMock()
+        mock_get_env_config.return_value = mock_env_config
 
-        with patch("sys.argv", ["program", "--hosting", "openai"]):
-            result = main()
-            assert result == -1
+        with (
+            patch("local_operator.cli.ConfigManager") as mock_config_manager_cls,
+            patch("local_operator.cli.CredentialManager"),
+            patch(
+                "local_operator.cli.initialize_operator", side_effect=ValueError("Model not found")
+            ) as mock_initialize_operator,  # Patch initialize_operator to raise error
+            patch("local_operator.cli.AgentRegistry"),
+        ):
+            mock_config_manager = mock_config_manager_cls.return_value
+            # Simulate config values needed before initialize_operator is called
+            mock_config_manager.get_config_value.return_value = False  # auto_save_conversation
+
+            # Use valid arguments for argparse, rely on side_effect for failure simulation
+            with patch("sys.argv", ["program", "--hosting", "openai", "--model", "gpt-4o"]):
+                result = main()
+                assert result == -1
+                # Check that initialize_operator was called, triggering the side_effect
+                mock_initialize_operator.assert_called_once()
 
 
 def test_main_exception():

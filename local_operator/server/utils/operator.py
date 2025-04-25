@@ -3,80 +3,19 @@ Utility functions for creating and managing operators in the Local Operator API.
 """
 
 import logging
-from typing import Optional, Union
+from typing import Optional
 
-from local_operator.admin import add_admin_tools
-from local_operator.agents import AgentRegistry
-from local_operator.clients.fal import FalClient
-from local_operator.clients.openrouter import OpenRouterClient
-from local_operator.clients.radient import RadientClient
-from local_operator.clients.serpapi import SerpApiClient
-from local_operator.clients.tavily import TavilyClient
+from local_operator.agents import AgentData, AgentRegistry  # Import AgentData
+from local_operator.bootstrap import initialize_operator  # Import the new function
 from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel
 from local_operator.credentials import CredentialManager
-from local_operator.env import EnvConfig, get_env_config
-from local_operator.executor import LocalCodeExecutor
-from local_operator.model.configure import configure_model
+from local_operator.env import EnvConfig
 from local_operator.operator import Operator, OperatorType
-from local_operator.tools import ToolRegistry
-from local_operator.types import AgentState
 
 logger = logging.getLogger("local_operator.server.utils")
 
-
-def build_tool_registry(
-    executor: LocalCodeExecutor,
-    agent_registry: AgentRegistry,
-    config_manager: ConfigManager,
-    credential_manager: CredentialManager,
-) -> ToolRegistry:
-    """Build and initialize the tool registry.
-
-    This function creates a new ToolRegistry instance, initializes default tools,
-    and adds admin tools for agent management. It also sets up SERP API and Tavily
-    API clients if the corresponding API keys are available.
-
-    Args:
-        executor (LocalCodeExecutor): The LocalCodeExecutor instance for conversation history.
-        agent_registry (AgentRegistry): The AgentRegistry for managing agents.
-        config_manager (ConfigManager): The ConfigManager for managing configuration.
-        credential_manager (CredentialManager): The CredentialManager for managing credentials.
-
-    Returns:
-        ToolRegistry: The initialized tool registry with all tools registered.
-    """
-    tool_registry = ToolRegistry()
-
-    serp_api_key = credential_manager.get_credential("SERP_API_KEY")
-    tavily_api_key = credential_manager.get_credential("TAVILY_API_KEY")
-    fal_api_key = credential_manager.get_credential("FAL_API_KEY")
-    radient_api_key = credential_manager.get_credential("RADIENT_API_KEY")
-
-    if serp_api_key:
-        serp_api_client = SerpApiClient(serp_api_key)
-        tool_registry.set_serp_api_client(serp_api_client)
-
-    if tavily_api_key:
-        tavily_client = TavilyClient(tavily_api_key)
-        tool_registry.set_tavily_client(tavily_client)
-
-    if fal_api_key:
-        fal_client = FalClient(fal_api_key)
-        tool_registry.set_fal_client(fal_client)
-
-    if radient_api_key:
-        # Get the base URL from env_config
-        env_config = get_env_config()
-        radient_client = RadientClient(radient_api_key, env_config.radient_api_base_url)
-        tool_registry.set_radient_client(radient_client)
-
-    tool_registry.set_credential_manager(credential_manager)
-    tool_registry.init_tools()
-
-    add_admin_tools(tool_registry, executor, agent_registry, config_manager)
-
-    return tool_registry
+# build_tool_registry is now handled within initialize_operator in bootstrap.py
 
 
 def create_operator(
@@ -86,127 +25,53 @@ def create_operator(
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
     env_config: EnvConfig,
-    current_agent=None,
+    current_agent: Optional[AgentData] = None,  # Use AgentData type hint
     persist_conversation: bool = False,
     job_id: Optional[str] = None,
 ) -> Operator:
-    """Create a LocalCodeExecutor for a single chat request using the provided managers
-    and the hosting/model provided in the request.
+    """Create an Operator instance for a server request using the centralized bootstrap logic.
 
     Args:
-        request_hosting: The hosting service to use
-        request_model: The model name to use
-        credential_manager: The credential manager for API keys
-        config_manager: The configuration manager
-        agent_registry: The agent registry for managing agents
-        current_agent: Optional current agent to use
-        persist_conversation: Whether to persist the conversation history by
-            continuously updating the agent's conversation history with each new message.
-            Default: False
-        job_manager: The job manager for the current conversation.
-        job_id: The job ID for the current conversation.
+        request_hosting: The hosting service requested for this specific operation.
+        request_model: The model name requested for this specific operation.
+        credential_manager: The credential manager instance.
+        config_manager: The configuration manager instance.
+        agent_registry: The agent registry instance.
+        env_config: The environment configuration instance.
+        current_agent: Optional agent to use for the session.
+        persist_conversation: Whether to persist conversation history during the session.
+        job_id: Optional job ID associated with the request.
+
     Returns:
-        Operator: The configured operator instance
+        The configured Operator instance.
 
     Raises:
-        ValueError: If hosting is not set or model configuration fails
+        ValueError: If operator initialization fails (e.g., invalid model/hosting).
     """
-    if not request_hosting:
-        raise ValueError("Hosting is not set")
-
-    agent_state = None
-
-    chat_args = {}
-
-    if current_agent:
-        agent_state = agent_registry.load_agent_state(current_agent.id)
-
-        if current_agent.temperature:
-            chat_args["temperature"] = current_agent.temperature
-        if current_agent.top_p:
-            chat_args["top_p"] = current_agent.top_p
-        if current_agent.top_k:
-            chat_args["top_k"] = current_agent.top_k
-        if current_agent.max_tokens:
-            chat_args["max_tokens"] = current_agent.max_tokens
-        if current_agent.stop:
-            chat_args["stop"] = current_agent.stop
-        if current_agent.frequency_penalty:
-            chat_args["frequency_penalty"] = current_agent.frequency_penalty
-        if current_agent.presence_penalty:
-            chat_args["presence_penalty"] = current_agent.presence_penalty
-        if current_agent.seed:
-            chat_args["seed"] = current_agent.seed
-
-    else:
-        agent_state = AgentState(
-            version="",
-            conversation=[],
-            execution_history=[],
-            learnings=[],
-            current_plan=None,
-            instruction_details=None,
-            agent_system_prompt=None,
+    logger.info(
+        f"Creating server operator for Hosting: {request_hosting}, Model: {request_model}, "
+        f"Agent: {current_agent.name if current_agent else 'None'}, Job ID: {job_id}"
+    )
+    try:
+        operator = initialize_operator(
+            operator_type=OperatorType.SERVER,
+            config_manager=config_manager,
+            credential_manager=credential_manager,
+            agent_registry=agent_registry,
+            env_config=env_config,
+            request_hosting=request_hosting,
+            request_model=request_model,
+            current_agent=current_agent,
+            persist_conversation=persist_conversation,
+            auto_save_conversation=False,  # Server typically doesn't auto-save this way
+            job_id=job_id,
+            verbosity_level=VerbosityLevel.QUIET,  # Server usually runs quietly
         )
-
-    model_info_client: Optional[Union[OpenRouterClient, RadientClient]] = None
-
-    if request_hosting == "openrouter":
-        model_info_client = OpenRouterClient(
-            credential_manager.get_credential("OPENROUTER_API_KEY")
-        )
-    elif request_hosting == "radient":
-        model_info_client = RadientClient(
-            credential_manager.get_credential("RADIENT_API_KEY"),
-            env_config.radient_api_base_url,
-        )
-
-    model_configuration = configure_model(
-        hosting=request_hosting,
-        model_name=request_model,
-        credential_manager=credential_manager,
-        model_info_client=model_info_client,
-        env_config=env_config,
-        **chat_args,
-    )
-
-    if not model_configuration.instance:
-        raise ValueError("No model instance configured")
-
-    executor = LocalCodeExecutor(
-        model_configuration=model_configuration,
-        max_conversation_history=config_manager.get_config_value("max_conversation_history", 100),
-        detail_conversation_length=config_manager.get_config_value(
-            "detail_conversation_length", 35
-        ),
-        max_learnings_history=config_manager.get_config_value("max_learnings_history", 50),
-        can_prompt_user=False,
-        agent=current_agent,
-        verbosity_level=VerbosityLevel.QUIET,
-        agent_registry=agent_registry,
-        agent_state=agent_state,
-        persist_conversation=persist_conversation,
-        job_id=job_id,
-    )
-
-    operator = Operator(
-        executor=executor,
-        credential_manager=credential_manager,
-        model_configuration=model_configuration,
-        config_manager=config_manager,
-        type=OperatorType.SERVER,
-        agent_registry=agent_registry,
-        current_agent=current_agent,
-        auto_save_conversation=False,
-        verbosity_level=VerbosityLevel.QUIET,
-        persist_agent_conversation=persist_conversation,
-    )
-
-    tool_registry = build_tool_registry(
-        executor, agent_registry, config_manager, credential_manager
-    )
-    executor.set_tool_registry(tool_registry)
-
-    executor.load_agent_state(agent_state)
+        logger.info("Server operator created successfully.")
+        return operator
+    except ValueError as e:
+        logger.error(f"Failed to create server operator: {e}", exc_info=True)
+        # Re-raise the error to be handled by the calling route/dependency
+        raise e
 
     return operator
