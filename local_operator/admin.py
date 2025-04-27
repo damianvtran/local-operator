@@ -34,10 +34,15 @@ from typing import Any, Callable, Dict, List, Optional
 
 from local_operator.agents import AgentData, AgentEditFields, AgentRegistry
 from local_operator.config import Config, ConfigManager
+from local_operator.credentials import CredentialManager  # Added import
+from local_operator.env import EnvConfig  # Added import
 from local_operator.executor import LocalCodeExecutor
 from local_operator.notebook import save_code_history_to_notebook
 from local_operator.operator import ConversationRole
-from local_operator.tools import ToolRegistry
+from local_operator.tools import (  # Added import
+    ToolRegistry,
+    send_message_to_agent_tool,
+)
 from local_operator.types import AgentState
 
 
@@ -661,6 +666,8 @@ def add_admin_tools(
     executor: LocalCodeExecutor,
     agent_registry: AgentRegistry,
     config_manager: ConfigManager,
+    credential_manager: CredentialManager,  # Added parameter
+    env_config: EnvConfig,  # Added parameter
 ) -> None:
     """Add admin tools to the tool registry.
 
@@ -726,4 +733,9 @@ def add_admin_tools(
     tool_registry.add_tool(
         "save_conversation_history_to_notebook",
         save_conversation_history_to_notebook_tool(executor),
+    )
+    # Add the send_message_to_agent tool
+    tool_registry.add_tool(
+        "send_message_to_agent",
+        send_message_to_agent_tool(agent_registry, config_manager, credential_manager, env_config),
     )
