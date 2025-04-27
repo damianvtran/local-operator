@@ -82,19 +82,10 @@ def build_tool_registry(
         tool_registry.set_radient_client(radient_client)
 
     tool_registry.set_credential_manager(credential_manager)
-    tool_registry.set_config_manager(config_manager)  # Set ConfigManager
-    tool_registry.set_env_config(env_config)  # Set EnvConfig
     tool_registry.init_tools()
 
     # Admin tools might depend on the executor state, ensure executor is passed
-    add_admin_tools(
-        tool_registry,
-        executor,
-        agent_registry,
-        config_manager,
-        credential_manager,  # Pass credential_manager
-        env_config,  # Pass env_config
-    )
+    add_admin_tools(tool_registry, executor, agent_registry, config_manager)
 
     return tool_registry
 
@@ -262,7 +253,7 @@ def initialize_operator(
     # --- Tool Registry Initialization ---
     # Pass env_config to build_tool_registry
     tool_registry = build_tool_registry(
-        executor, agent_registry, config_manager, credential_manager, env_config  # Pass env_config
+        executor, agent_registry, config_manager, credential_manager, env_config
     )
     executor.set_tool_registry(tool_registry)
     logger.info("ToolRegistry built and set on executor.")
