@@ -45,25 +45,27 @@ This project is proudly open source under the GPL 3.0 license. We believe AI too
 
 - [🔑 Key Features](#-key-features)
 - [💻 Requirements](#-requirements)
-- [🚀 Development with Nix Flake](#-development-with-nix-flake)
-  - [Getting Started](#getting-started)
-  - [Benefits](#benefits)
-- [🛠️ Setup](#️-setup)
-- [🐋 Running Server in Docker](#-running-server-in-docker)
-  - [Web Browsing](#web-browsing)
-  - [Web Search](#web-search)
-  - [Image Generation](#image-generation)
-- [🖥️ Usage (CLI)](#️-usage-cli)
-  - [Run with a local Ollama model](#run-with-a-local-ollama-model)
-  - [Run with DeepSeek](#run-with-deepseek)
-  - [Run with OpenAI](#run-with-openai)
-- [🚀 Usage (Single Execution Mode)](#-usage-single-execution-mode)
-- [📡 Usage (Server)](#-usage-server)
-- [🧠 Usage (Agents)](#-usage-agents)
-- [🔑 Configuration](#-configuration)
-  - [Configuration Values](#configuration-values)
-  - [Configuration Options](#configuration-options)
-  - [Credentials](#credentials)
+- [🚀 Getting Started]()
+  - [🛠️ Setup](#️-setup)
+  - [🖥️ Usage (CLI)](#️-usage-cli)
+    - [Run with a local Ollama model](#run-with-a-local-ollama-model)
+    - [Run with DeepSeek](#run-with-deepseek)
+    - [Run with OpenAI](#run-with-openai)
+  - [🚀 Usage (Single Execution Mode)](#-usage-single-execution-mode)
+  - [📡 Usage (Server)](#-usage-server)
+  - [🧠 Usage (Agents)](#-usage-agents)
+  - [🔑 Configuration](#-configuration)
+    - [Configuration Values](#configuration-values)
+    - [Configuration Options](#configuration-options)
+    - [Credentials](#credentials)
+    - [ Development with Nix Flake](#-development-with-nix-flake)
+      - [Getting Started](#getting-started)
+      - [Benefits](#benefits)
+
+  - [🐋 Running Server in Docker](#-running-server-in-docker)
+    - [Web Browsing](#web-browsing)
+    - [Web Search](#web-search)
+    - [Image Generation](#image-generation)
 - [📝 Examples](#-examples)
 
 ## 🔑 Key Features
@@ -96,11 +98,82 @@ Visit the [Local Operator website](https://local-operator.com) for visualization
 - For 3rd party hosting: [OpenRouter](https://openrouter.ai/keys), [OpenAI](https://platform.openai.com/api-keys), [DeepSeek](https://platform.deepseek.ai/), [Anthropic](https://console.anthropic.com/), [Google](https://ai.google.dev/), or other API key (prompted for on first run)
 - For local hosting: [Ollama](https://ollama.com/download) model installed and running
 
-## 🚀 Development with Nix Flake
+## 🚀 Getting Started
+
+### 🛠️ Installation
+   > ⚠️ **Linux Installs (Ubuntu 23.04+, Fedora 38+, Debian 12+)**  
+   > Due to recent changes in how Python is managed on modern Linux distributions (see [PEP 668](https://peps.python.org/pep-0668/)), you **cannot use `pip install` globally** on system Python.  
+
+1. Install local-operator
+
+   - MacOS & Windows
+
+      ```bash
+      pip install local-operator
+      ```
+
+    - Linux
+
+      ```bash
+      pipx install local-operator
+      ```
+
+    - (Optional) Virtual python
+      ```bash
+      python3 -m venv .venv
+      source .venv/bin/activate
+      pip install local-operator
+      ```
+1. (Optional) Enabling Web Browsing
+   > ℹ️ **Info:**  
+   > This is not necessary to use the web browsing tool, as the agent will automatically install the browsers when they are needed, but it can be faster to install them ahead of start up if you know you will need them.
+
+    ```bash
+    playwright install
+    ```
+1. (Optional) Enabling Web Search
+   > ℹ️ **Info:**  
+   > To enable web search, you will need to get a free SERP API key from [SerpApi](https://serpapi.com/users/sign_up).  On the free plan, you get 100 credits per month which is generally sufficient for light to moderate personal use. The agent uses a web search tool integrated with SERP API to fetch information from the web if you have the `SERP_API_KEY` set up in the Local Operator credentials.  The agent can still browse the web without it, though information access will be less efficient.
+
+   1. Get your API key and then configure the `SERP_API_KEY` credential:
+
+      ```bash
+      local-operator credential update SERP_API_KEY
+      ```
+
+      > ℹ️ **Info:**  
+      > After setting the credential, the agent will automatically be able to search the web using its web search tool on the next startup.
+
+1. (Optional) Enabling Image Generation
+    > ℹ️ **Info:**  
+    > To enable image generation capabilities, you'll need to get a FAL AI API key from [FAL AI](https://fal.ai/dashboard/keys). The Local Operator uses the FLUX.1 model from FAL AI to generate and modify images.
+
+    1. Get your API key and then configure the `FAL_API_KEY` credential:
+
+        ```bash
+        local-operator credential update FAL_API_KEY
+        ```
+
+  Once the credential is set, the agent will have access to two powerful image generation tools:
+
+  1. **Generate Image**: Create new images from text descriptions with customizable parameters like image size, guidance scale, and inference steps.
+
+  2. **Generate Altered Image**: Modify existing images based on text prompts, allowing you to transform images while maintaining their core structure.
+
+  Example usage in a conversation:
+
+  - "Generate an image of a mountain landscape at sunset"
+  - "Take this photo and make it look like it was taken in winter"
+
+  The agent will handle downloading and saving the generated images to your local machine.
+
+
+
+### Development with Nix Flake
 
 If you use [Nix](https://nixos.org/) for development, this project provides a `flake.nix` for easy, reproducible setup. The flake ensures all dependencies are available and configures a development environment with a single command.
 
-### Getting Started
+#### Getting Started
 
 1. **Enter the development shell:**
 
@@ -114,7 +187,7 @@ If you use [Nix](https://nixos.org/) for development, this project provides a `f
 
    You can now use the CLI or run scripts as described in the rest of this README.
 
-### Benefits
+#### Benefits
 
 - No need to manually install Python or other dependencies.
 - Ensures a consistent environment across all contributors.
@@ -122,32 +195,6 @@ If you use [Nix](https://nixos.org/) for development, this project provides a `f
 
 For more information about Nix flakes, see the [NixOS flake documentation](https://nixos.wiki/wiki/Flakes).
 
-## 🛠️ Setup
-
-To run Local Operator with a 3rd party cloud-hosted LLM model, you need to have an API key.  You can get one from OpenAI, DeepSeek, Anthropic, or other providers.
-
-Once you have the API key, install the operator CLI with the following command:
-
-```bash
-pip install local-operator
-```
-
-> ⚠️ **Linux Installs (Ubuntu 23.04+, Fedora 38+, Debian 12+)**  
-> Due to recent changes in how Python is managed on modern Linux distributions (see [PEP 668](https://peps.python.org/pep-0668/)), you **cannot use `pip install` globally** on system Python.  
->
-> Instead, install packages in a **virtual environment**:
->
-> ```bash
-> python3 -m venv .venv
-> source .venv/bin/activate
-> pip install local-operator
-> ```
->
-> Alternatively you can use [`pipx`](https://pypa.github.io/pipx/):
->
-> ```bash
-> pipx install local-operator
-> ```
 
 ## 🐋 Running Server in Docker
 
@@ -157,55 +204,7 @@ To run Local Operator in docker, ensure docker is running and run
 docker compose up --d
 ```
 
-### Web Browsing
 
-To enable web browsing, you can install the playwright browsers with the following command:
-
-```bash
-playwright install
-```
-
-This is not necessary to use the web browsing tool, as the agent will automatically install the browsers when they are needed, but it can be faster to install them ahead of start up if you know you will need them.
-
-If you would like to run with a local Ollama model, you will need to install Ollama first from [here](https://ollama.ai/download), and fetch a model using `ollama pull`.  Make sure that the ollama server is running with `ollama serve`.
-
-### Web Search
-
-To enable web search, you will need to get a free SERP API key from [SerpApi](https://serpapi.com/users/sign_up).  On the free plan, you get 100 credits per month which is generally sufficient for light to moderate personal use.  
-
-The agent uses a web search tool integrated with SERP API to fetch information from the web if you have the `SERP_API_KEY` set up in the Local Operator credentials.  The agent can still browse the web without it, though information access will be less efficient.
-
-Get your API key and then configure the `SERP_API_KEY` credential:
-
-```bash
-local-operator credential update SERP_API_KEY
-```
-
-Once the credential is set, the agent will be able to search the web for information
-using its web search tool on the next start up.
-
-### Image Generation
-
-To enable image generation capabilities, you'll need to get a FAL AI API key from [FAL AI](https://fal.ai/dashboard/keys). The Local Operator uses the FLUX.1 model from FAL AI to generate and modify images.
-
-Get your API key and then configure the `FAL_API_KEY` credential:
-
-```bash
-local-operator credential update FAL_API_KEY
-```
-
-Once the credential is set, the agent will have access to two powerful image generation tools:
-
-1. **Generate Image**: Create new images from text descriptions with customizable parameters like image size, guidance scale, and inference steps.
-
-2. **Generate Altered Image**: Modify existing images based on text prompts, allowing you to transform images while maintaining their core structure.
-
-Example usage in a conversation:
-
-- "Generate an image of a mountain landscape at sunset"
-- "Take this photo and make it look like it was taken in winter"
-
-The agent will handle downloading and saving the generated images to your local machine.
 
 ## 🖥️ Usage (CLI)
 
@@ -416,3 +415,11 @@ The system includes multiple layers of protection:
 ## 📝 License
 
 This project is licensed under the GPL 3.0 License - see the LICENSE file for details.
+
+
+
+**info here needs to go about radient**
+
+To run Local Operator with a 3rd party cloud-hosted LLM model, you need to have an API key.  You can get one from OpenAI, DeepSeek, Anthropic, or other providers.
+
+Once you have the API key, install the operator CLI with the following command:
