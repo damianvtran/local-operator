@@ -1242,10 +1242,9 @@ and research effort.
 Subject change:
 <subject_change>
 true: My request is about a new topic or subject that is different from the
-current flow of conversation.
+current flow of conversation.  Do not use this for my first request in the conversation.
 false: My request is about the same or similar topic or subject as the previous
-request and is part of the current task or flow of conversation.  If this is the
-first message or there was no previous subject, then use the false value.
+request and is part of the current task or flow of conversation.  If this is the first message or there was no previous subject, then use the false value.
 </subject_change>
 
 Example XML tags response:
