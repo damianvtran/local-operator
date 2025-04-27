@@ -141,9 +141,6 @@ Visit the [Local Operator website](https://local-operator.com) for visualization
       local-operator credential update SERP_API_KEY
       ```
 
-      > ℹ️ **Info:**  
-      > After setting the credential, the agent will automatically be able to search the web using its web search tool on the next startup.
-
 1. (Optional) Enabling Image Generation
     > ℹ️ **Info:**  
     > To enable image generation capabilities, you'll need to get a FAL AI API key from [FAL AI](https://fal.ai/dashboard/keys). The Local Operator uses the FLUX.1 model from FAL AI to generate and modify images.
@@ -153,21 +150,6 @@ Visit the [Local Operator website](https://local-operator.com) for visualization
         ```bash
         local-operator credential update FAL_API_KEY
         ```
-
-  Once the credential is set, the agent will have access to two powerful image generation tools:
-
-  1. **Generate Image**: Create new images from text descriptions with customizable parameters like image size, guidance scale, and inference steps.
-
-  2. **Generate Altered Image**: Modify existing images based on text prompts, allowing you to transform images while maintaining their core structure.
-
-  Example usage in a conversation:
-
-  - "Generate an image of a mountain landscape at sunset"
-  - "Take this photo and make it look like it was taken in winter"
-
-  The agent will handle downloading and saving the generated images to your local machine.
-
-
 
 ### Development with Nix Flake
 
