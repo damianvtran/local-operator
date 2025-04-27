@@ -46,27 +46,11 @@ This project is proudly open source under the GPL 3.0 license. We believe AI too
 - [🔑 Key Features](#-key-features)
 - [💻 Requirements](#-requirements)
 - [🚀 Getting Started]()
-  - [🛠️ Setup](#️-setup)
-  - [🖥️ Usage (CLI)](#️-usage-cli)
-    - [Run with a local Ollama model](#run-with-a-local-ollama-model)
-    - [Run with DeepSeek](#run-with-deepseek)
-    - [Run with OpenAI](#run-with-openai)
-  - [🚀 Usage (Single Execution Mode)](#-usage-single-execution-mode)
-  - [📡 Usage (Server)](#-usage-server)
-  - [🧠 Usage (Agents)](#-usage-agents)
-  - [🔑 Configuration](#-configuration)
-    - [Configuration Values](#configuration-values)
-    - [Configuration Options](#configuration-options)
-    - [Credentials](#credentials)
-    - [ Development with Nix Flake](#-development-with-nix-flake)
-      - [Getting Started](#getting-started)
-      - [Benefits](#benefits)
+  - [🛠️ Installing Local Operator]()
+    - [📦 Install via pip]()
+    - [📦 Install via Nix Flake]()
 
-  - [🐋 Running Server in Docker](#-running-server-in-docker)
-    - [Web Browsing](#web-browsing)
-    - [Web Search](#web-search)
-    - [Image Generation](#image-generation)
-- [📝 Examples](#-examples)
+
 
 ## 🔑 Key Features
 
@@ -100,58 +84,57 @@ Visit the [Local Operator website](https://local-operator.com) for visualization
 
 ## 🚀 Getting Started
 
-### 🛠️ Installation
+### 🛠️ Installing Local Operator
+
+###  📦 Install via pip
    > ⚠️ **Linux Installs (Ubuntu 23.04+, Fedora 38+, Debian 12+)**  
    > Due to recent changes in how Python is managed on modern Linux distributions (see [PEP 668](https://peps.python.org/pep-0668/)), you **cannot use `pip install` globally** on system Python.  
+- MacOS & Windows
 
-1. Install local-operator
+  ```bash
+  pip install local-operator
+  ```
 
-   - MacOS & Windows
+- Linux
 
-      ```bash
-      pip install local-operator
-      ```
+  ```bash
+  pipx install local-operator
+  ```
 
-    - Linux
-
-      ```bash
-      pipx install local-operator
-      ```
-
-    - (Optional) Virtual python
-      ```bash
-      python3 -m venv .venv
-      source .venv/bin/activate
-      pip install local-operator
-      ```
-1. (Optional) Enabling Web Browsing
-   > ℹ️ **Info:**  
-   > This is not necessary to use the web browsing tool, as the agent will automatically install the browsers when they are needed, but it can be faster to install them ahead of start up if you know you will need them.
+- (Optional) Virtual python
+  ```bash
+  python3 -m venv .venv
+  source .venv/bin/activate
+  pip install local-operator
+  ```
+1. 📌 (Optional) Enabling Web Browsing
+  > ℹ️ **Info:**  
+  > This is not necessary to use the web browsing tool, as the agent will automatically install the browsers when they are needed, but it can be faster to install them ahead of start up if you know you will need them.
 
     ```bash
     playwright install
     ```
-1. (Optional) Enabling Web Search
-   > ℹ️ **Info:**  
-   > To enable web search, you will need to get a free SERP API key from [SerpApi](https://serpapi.com/users/sign_up).  On the free plan, you get 100 credits per month which is generally sufficient for light to moderate personal use. The agent uses a web search tool integrated with SERP API to fetch information from the web if you have the `SERP_API_KEY` set up in the Local Operator credentials.  The agent can still browse the web without it, though information access will be less efficient.
+1. 📌 (Optional) Enabling Web Search
+    
+    To enable web search, you will need to get a free SERP API key from [SerpApi](https://serpapi.com/users/sign_up).  On the free plan, you get 100 credits per month which is generally sufficient for light to moderate personal use. The agent uses a web search tool integrated with SERP API to fetch information from the web if you have the `SERP_API_KEY` set up in the Local Operator credentials.  The agent can still browse the web without it, though information access will be less efficient.
 
    1. Get your API key and then configure the `SERP_API_KEY` credential:
 
       ```bash
-      local-operator credential update SERP_API_KEY
+      local-operator credential update <SERP_API_KEY>
       ```
 
 1. (Optional) Enabling Image Generation
-    > ℹ️ **Info:**  
-    > To enable image generation capabilities, you'll need to get a FAL AI API key from [FAL AI](https://fal.ai/dashboard/keys). The Local Operator uses the FLUX.1 model from FAL AI to generate and modify images.
+ 
+    To enable image generation capabilities, you'll need to get a FAL AI API key from [FAL AI](https://fal.ai/dashboard/keys). The Local Operator uses the FLUX.1 model from FAL AI to generate and modify images.
 
     1. Get your API key and then configure the `FAL_API_KEY` credential:
 
         ```bash
-        local-operator credential update FAL_API_KEY
+        local-operator credential update <FAL_API_KEY>
         ```
 
-### Development with Nix Flake
+### 📦 Install via Nix Flake
 
 If you use [Nix](https://nixos.org/) for development, this project provides a `flake.nix` for easy, reproducible setup. The flake ensures all dependencies are available and configures a development environment with a single command.
 
