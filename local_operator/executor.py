@@ -11,7 +11,7 @@ from enum import Enum
 from multiprocessing import Queue
 from pathlib import Path
 from traceback import format_exception
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from langchain_community.callbacks.manager import get_openai_callback
 from langchain_core.messages import BaseMessage
@@ -395,6 +395,8 @@ class LocalCodeExecutor:
             execution history, learnings, current plan, and instruction details.
         status_queue (Queue | None): A queue for status updates if this is part
             of a running job for a server operator.
+        delegate_callback (Optional[Callable[[str, str], Awaitable[ProcessResponseOutput]]]):
+            Callback for handling DELEGATE actions, set by the Operator.
     """
 
     context: Dict[str, Any]
@@ -411,6 +413,7 @@ class LocalCodeExecutor:
     persist_conversation: bool
     agent_state: AgentState
     status_queue: Optional[Queue] = None  # type: ignore
+    delegate_callback: Optional[Callable[[str, str], Awaitable[ProcessResponseOutput]]] = None
 
     def __init__(
         self,
@@ -1657,6 +1660,18 @@ class LocalCodeExecutor:
             verbosity_level=self.verbosity_level,
         ):
             try:
+                if response.action == ActionType.DELEGATE:
+                    # Handle delegation to another agent via callback
+                    agent = getattr(response, "agent", None)
+                    message = getattr(response, "message", None)
+                    if not agent or not message:
+                        raise ValueError("DELEGATE action requires 'agent' and 'message' fields")
+                    if self.delegate_callback is None:
+                        raise RuntimeError(
+                            "No delegate_callback set on executor for DELEGATE action"
+                        )
+                    return await self.delegate_callback(agent, message)
+
                 if response.action == ActionType.WRITE:
                     file_path = response.file_path
                     content = response.content if response.content else response.code

@@ -38,6 +38,7 @@ class ActionType(str, Enum):
     ASK = "ASK"
     BYE = "BYE"
     READ = "READ"
+    DELEGATE = "DELEGATE"  # Delegate task to another agent
 
     def __str__(self) -> str:
         """Return the string representation of the ActionType enum.
@@ -72,6 +73,7 @@ class ExecutionType(str, Enum):
     CLASSIFICATION = "classification"
     SYSTEM = "system"
     USER_INPUT = "user_input"
+    DELEGATE = "delegate"
     NONE = "none"
 
 

@@ -409,6 +409,7 @@ BaseSystemPrompt: str = (
         - READ: read the contents of a file.  Specify the file path to read, this will be printed to the console.  Always read files before writing or editing if they exist.
         - WRITE: write text to a file.  Specify the file path and the content to write, this will replace the file if it already exists.  Include the file content as-is in the "content" field.
         - EDIT: edit a file.  Specify the file path to edit and the search strings to find. Each search string should be accompanied by a replacement string.
+        - DELEGATE: send a message to another agent.  Specify the agent name to send the message to in the "agent" field.  Include the message to send in the "message" field.
         - DONE: mark the entire plan and completed, or user cancelled task.  Summarize the results.  Do not include code with a DONE command.  The DONE command should be used to summarize the results of the task only after the task is complete and verified. Do not respond with DONE if the plan is not completely executed.
         - ASK: request additional details.
         - BYE: end the session and exit.  Don't use this unless the user has explicitly asked to exit.
@@ -419,6 +420,7 @@ BaseSystemPrompt: str = (
         - Always verify your progress and the results of your work with CODE.
         - Do not respond with DONE if the plan is not completely executed beginning to end.
         - Only pick ONE action at a time, any other actions in the response will be ignored.
+        - If some part of your work is better suited for another agent, then use the DELEGATE action to send a message to another agent.  Specify the agent name to send the message to in the "agent" field.  Include the message to send in the "message" field.
         - When choosing an action, avoid providing other text or formatting in the response.  Only pick one action and provide it in the action XML tags schema.  Any other text outside of the action XML tags will be ignored.
         - ONLY use action tags when it is the turn for you to pick an action.  Never use action tags in planning, reflection, or final response steps.
     </action_guidelines>
@@ -528,6 +530,38 @@ print(search_api_results)
 web_page_data = await tools.browse_single_url("https://www.google.com")
 print(web_page_data)
 </code>
+</action_response>
+
+## Delegating to Other Agents
+
+If the task that you are working on might be better suited for another agent, then you can use the `send_message_to_agent` tool to send a message to another agent.  The agent will respond to the message and then you can use the response in your next steps.
+
+<action_response>
+<action>DELEGATE</action>
+<agent>agent_name</agent>
+<message>message_to_send</message>
+</action_response>
+
+Use the DELEGATE action for more complex tasks that could require specialized knowledge or skills that you don't have.  The agent that you delegate to will return a response to you, and you can use that response in your next steps.
+
+Don't use this for simple tasks that you can handle yourself.
+
+### Examples of Delegating to Another Agent
+
+<action_response>
+<action>DELEGATE</action>
+<agent>gitbot</agent>
+<message>
+Make a PR from the latest changes on this branch.
+</message>
+</action_response>
+
+<action_response>
+<action>DELEGATE</action>
+<agent>stockbot</agent>
+<message>
+Summarize the latest news on the stock market.
+</message>
 </action_response>
 
 ## Additional User Notes
@@ -794,13 +828,14 @@ The actions are:
 - EDIT: The agent wants to edit a file to change, revise, or update it.
 - DONE: The agent has marked the task as complete and wants to respond to the user, or the user has responded in a conversation turn which doesn't require any actions.
 - ASK: The agent has asked a question and needs information from the user.  Only use this if there is an explicit ASK action tag in the response.  Otherwise, use DONE to indicate that this is a question asked in a conversation message.
+- DELEGATE: The agent wants to delegate a part or whole of the task to another agent.
 - BYE: The agent has interpreted the user's request as a request to exit the program and quit.  On the CLI, this will terminate the program entirely.
 
 You will need to interpret the actions and provide the correct JSON response for each action type.  Make sure to properly escape characters that will cause JSON parsing errors such as backslashes, quotes, and control characters.
 
 You must reinterpret the agent's response purely in JSON format with the following fields:
 <action_json_fields>
-- action: The action that the agent wants to take.  One of: CODE | READ | WRITE | EDIT | DONE | ASK | BYE.  Must not be empty.
+- action: The action that the agent wants to take.  One of: CODE | READ | WRITE | EDIT | DONE | ASK | BYE | DELEGATE.  Must not be empty.
 - learnings: The learnings from the action, such as how to do new things or information from the web or data files that will be useful for the agent to know and retrieve later.  Empty string if there is nothing to note down for this action.
 - response: Short description of what the agent is doing at this time.  Written in the present continuous tense.  Empty string if there is nothing to note down for this action.
 - code: The code that the agent has written.  An empty string if the action is not CODE.
@@ -808,6 +843,8 @@ You must reinterpret the agent's response purely in JSON format with the followi
 - file_path: The path to the file that the agent has read/wrote/edited.  An empty string if the action is not READ/WRITE/EDIT.
 - mentioned_files: The files that the agent is referencing in CODE that the user should be able to see.  Include the paths to the files as mentioned in the code.  Make sure that all the files are included in the list, otherwise the user will not be able to see them.  If there are file names that are programatically assigned,  infer the values accurately based on the code and include them in the list as well.  If the files are generated in code, you will need to review the way that the filenames are created from the variables and include them in the list as well so that the user can see them.  Make sure that all files here are valid addresses to a file on the user's computer or a resource on the internet.  Do not include incorrect file paths or invalid names, or names that are not files.  An empty list if there are no files referenced in the code or if the action is not CODE.
 - replacements: The replacements that the agent has made to a file.  This field must be non-empty for EDIT actions and an empty list otherwise.  Be careful to double-check and proofread the diffs that the agent is requesting and properly convert them into the correct find and replace values, escaping any quotes or special characters that will cause JSON parsing errors.  Make sure to replace the entire contents with the new contents properly and don't duplicate the old contents or create any unclean edits.
+- agent: The name of the agent to delegate to.
+- prom
 </action_json_fields>
 
 Do not include any other text or formatting in your response outside of the JSON object.  Make sure to properly escape any quotes in the JSON object so that it is valid JSON.
