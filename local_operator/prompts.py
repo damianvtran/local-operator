@@ -2142,3 +2142,47 @@ def create_system_prompt(
     )
 
     return base_system_prompt
+
+
+def get_agents_str(agent_manager) -> str:
+    """
+    Generate a string listing all agents managed by the agent_manager.
+
+    Args:
+        agent_manager: The agent manager instance that provides a list_agents() method.
+
+    Returns:
+        str: A formatted string listing each agent's name and description.
+
+    Raises:
+        AttributeError: If agent_manager does not have a list_agents() method.
+        Exception: For any unexpected errors during agent listing.
+    """
+    try:
+        agents = agent_manager.list_agents()
+    except AttributeError as e:
+        raise AttributeError(
+            "The provided agent_manager does not have a list_agents() method."
+        ) from e
+    except Exception as e:
+        raise Exception(f"Failed to retrieve agents: {str(e)}") from e
+
+    if not agents:
+        return "No agents found."
+
+    lines = []
+    for agent in agents:
+        name = getattr(agent, "name", "")
+        description = getattr(agent, "description", "")
+
+        if not name:
+            # All agents should have a name
+            continue
+
+        if not description:
+            # All agents should have a description
+            continue
+
+        lines.append(f"{name}: {description}")
+
+    return "\n".join(lines)
