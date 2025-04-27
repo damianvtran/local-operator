@@ -108,8 +108,8 @@ Visit the [Local Operator website](https://local-operator.com) for visualization
   pip install local-operator
   ```
 1. 📌 (Optional) Enabling Web Browsing
-  > ℹ️ **Info:**  
-  > This is not necessary to use the web browsing tool, as the agent will automatically install the browsers when they are needed, but it can be faster to install them ahead of start up if you know you will need them.
+
+  This is not necessary to use the web browsing tool, as the agent will automatically install the browsers when they are needed, but it can be faster to install them ahead of start up if you know you will need them.
 
     ```bash
     playwright install
