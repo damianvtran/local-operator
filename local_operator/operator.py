@@ -1246,8 +1246,8 @@ class Operator:
                 request_hosting=agent.hosting,
                 request_model=agent.model,
                 current_agent=agent,
-                persist_conversation=self.persist_agent_conversation,
-                auto_save_conversation=self.auto_save_conversation,
+                persist_conversation=False,
+                auto_save_conversation=False,
                 verbosity_level=self.verbosity_level,
             )
         except Exception as e:
