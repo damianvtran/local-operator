@@ -7,8 +7,6 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import playwright.async_api as pw
 from pydantic import SecretStr
 
-from local_operator.agents import AgentRegistry  # Added import
-from local_operator.bootstrap import initialize_operator  # Added import
 from local_operator.clients.fal import FalClient, FalImageGenerationResponse, ImageSize
 from local_operator.clients.radient import (
     RadientClient,
@@ -17,12 +15,7 @@ from local_operator.clients.radient import (
 )
 from local_operator.clients.serpapi import SerpApiClient, SerpApiResponse
 from local_operator.clients.tavily import TavilyClient, TavilyResponse
-from local_operator.config import ConfigManager  # Added import
-from local_operator.console import VerbosityLevel  # Added import
 from local_operator.credentials import CredentialManager
-from local_operator.env import EnvConfig  # Added import
-from local_operator.operator import OperatorType  # Added import
-from local_operator.types import ResponseJsonSchema  # Added import
 
 
 def _get_git_ignored_files(gitignore_path: str) -> Set[str]:
@@ -803,89 +796,6 @@ def list_credentials_tool(credential_manager: CredentialManager) -> Callable[...
     return list_credentials
 
 
-def send_message_to_agent_tool(
-    agent_registry: AgentRegistry,
-    config_manager: ConfigManager,
-    credential_manager: CredentialManager,
-    env_config: EnvConfig,
-) -> Callable[..., Any]:
-    """Create a tool function to send a message to another agent and get its response.
-
-    Args:
-        agent_registry (AgentRegistry): The agent registry instance.
-        config_manager (ConfigManager): The configuration manager instance.
-        credential_manager (CredentialManager): The credential manager instance.
-        env_config (EnvConfig): The environment configuration instance.
-
-    Returns:
-        Callable: A function that sends a message to a specified agent and returns its response.
-    """
-
-    async def send_message_to_agent(agent_name: str, message: str) -> str:
-        """Send a message to another registered agent and get its final response.
-
-        This tool allows the current agent to delegate a task or query to another agent
-        by name. It initializes a new, temporary Operator instance for the target agent,
-        sends the message, lets the target agent process it until completion or requiring
-        input (which is not supported in this context), and returns the final response.
-
-        Args:
-            agent_name (str): The name of the target agent to send the message to.
-            message (str): The message/task to send to the target agent.
-
-        Returns:
-            str: The final response from the target agent.
-
-        Raises:
-            ValueError: If the specified agent name is not found in the registry.
-            RuntimeError: If the target agent requires user input or fails to complete.
-        """
-        target_agent = agent_registry.get_agent_by_name(agent_name)
-        if not target_agent:
-            raise ValueError(f"Agent '{agent_name}' not found in the registry.")
-
-        # Initialize a temporary, non-persistent operator for the target agent
-        # Use SERVER type to prevent interactive prompts and ensure it runs headlessly
-        # Use QUIET verbosity to avoid polluting the console
-        branched_operator = initialize_operator(
-            operator_type=OperatorType.SERVER,  # Run headlessly
-            config_manager=config_manager,
-            credential_manager=credential_manager,
-            agent_registry=agent_registry,
-            env_config=env_config,
-            current_agent=target_agent,
-            persist_conversation=False,  # Do not persist changes from this branched execution
-            auto_save_conversation=False,
-            verbosity_level=VerbosityLevel.QUIET,  # Keep console clean
-        )
-
-        # Execute the command in the branched operator
-        response_json: ResponseJsonSchema | None
-        final_response: str | None = None
-
-        try:
-            # Use execute_single_command which handles the full interaction loop
-            response_json, final_response = await branched_operator.execute_single_command(message)
-
-            # Check if the branched agent requires input, which is not supported here
-            if branched_operator._agent_requires_user_input(response_json):
-                raise RuntimeError(
-                    f"Agent '{agent_name}' requires user input, which is not supported "
-                    "in delegated tasks. Please refine the task or message."
-                )
-
-        except Exception as e:
-            # Catch potential errors during the branched execution
-            raise RuntimeError(
-                f"Error occurred while agent '{agent_name}' processed the message: {str(e)}"
-            )
-
-        # Return the final response from the branched agent
-        return final_response if final_response else "The agent did not provide a final response."
-
-    return send_message_to_agent
-
-
 class ToolRegistry:
     """Registry for tools that can be used by agents.
 
@@ -903,17 +813,11 @@ class ToolRegistry:
     fal_client: FalClient | None = None
     radient_client: RadientClient | None = None
     credential_manager: CredentialManager | None = None
-    config_manager: ConfigManager | None = None
-    env_config: EnvConfig | None = None
-    agent_registry: AgentRegistry | None = None  # Added attribute
 
     def __init__(self):
         """Initialize an empty tool registry."""
         super().__init__()
         object.__setattr__(self, "_tools", {})
-        self.config_manager = None
-        self.env_config = None
-        self.agent_registry = None  # Initialize new attribute
 
     def set_serp_api_client(self, serp_api_client: SerpApiClient):
         """Set the SERP API client for the registry.
@@ -955,30 +859,6 @@ class ToolRegistry:
         """
         self.credential_manager = credential_manager
 
-    def set_config_manager(self, config_manager: ConfigManager):
-        """Set the ConfigManager for the registry.
-
-        Args:
-            config_manager (ConfigManager): The ConfigManager to set
-        """
-        self.config_manager = config_manager
-
-    def set_env_config(self, env_config: EnvConfig):
-        """Set the EnvConfig for the registry.
-
-        Args:
-            env_config (EnvConfig): The EnvConfig to set
-        """
-        self.env_config = env_config
-
-    def set_agent_registry(self, agent_registry: AgentRegistry):
-        """Set the AgentRegistry for the registry.
-
-        Args:
-            agent_registry (AgentRegistry): The AgentRegistry to set
-        """
-        self.agent_registry = agent_registry
-
     def init_tools(self):
         """Initialize the registry with default tools.
 
@@ -1016,35 +896,6 @@ class ToolRegistry:
         if self.credential_manager:
             self.add_tool("get_credential", get_credential_tool(self.credential_manager))
             self.add_tool("list_credentials", list_credentials_tool(self.credential_manager))
-
-        # Add send_message_to_agent tool if managers are available
-        if (
-            self.agent_registry
-            and self.config_manager
-            and self.credential_manager
-            and self.env_config
-        ):
-            # Assert managers are not None to satisfy type checker
-            assert self.agent_registry is not None
-            assert self.config_manager is not None
-            assert self.credential_manager is not None
-            assert self.env_config is not None
-
-            # Assign to local variables after None check to help type checker
-            local_agent_registry = self.agent_registry
-            local_config_manager = self.config_manager
-            local_credential_manager = self.credential_manager
-            local_env_config = self.env_config
-
-            self.add_tool(
-                "send_message_to_agent",
-                send_message_to_agent_tool(
-                    local_agent_registry,
-                    local_config_manager,
-                    local_credential_manager,
-                    local_env_config,  # Use the local variable
-                ),
-            )
 
     def add_tool(self, name: str, tool: Callable[..., Any]):
         """Add a new tool to the registry.
