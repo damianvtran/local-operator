@@ -31,6 +31,13 @@ def mock_model_config():
 
 
 @pytest.fixture
+def env_config():
+    return {
+        "RADIENT_API_KEY": "test_key",
+    }
+
+
+@pytest.fixture
 def executor(mock_model_config):
     executor = LocalCodeExecutor(model_configuration=mock_model_config)
     executor.agent_state.conversation = []
@@ -39,7 +46,7 @@ def executor(mock_model_config):
 
 
 @pytest.fixture
-def cli_operator(mock_model_config, executor):
+def cli_operator(mock_model_config, executor, env_config):
     credential_manager = MagicMock()
     credential_manager.get_credential = MagicMock(return_value="test_key")
 
@@ -57,6 +64,7 @@ def cli_operator(mock_model_config, executor):
         type=OperatorType.CLI,
         agent_registry=agent_registry,
         current_agent=None,
+        env_config=env_config,
     )
 
     operator._get_input_with_history = MagicMock(return_value="noop")
@@ -64,7 +72,7 @@ def cli_operator(mock_model_config, executor):
     yield operator
 
 
-def test_cli_operator_init(mock_model_config, executor):
+def test_cli_operator_init(mock_model_config, executor, env_config):
     credential_manager = MagicMock()
     credential_manager.get_credential = MagicMock(return_value="test_key")
 
@@ -82,6 +90,7 @@ def test_cli_operator_init(mock_model_config, executor):
         type=OperatorType.CLI,
         agent_registry=agent_registry,
         current_agent=None,
+        env_config=env_config,
     )
 
     assert operator.model_configuration == mock_model_config
