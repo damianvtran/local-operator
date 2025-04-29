@@ -38,6 +38,7 @@ class ActionType(str, Enum):
     ASK = "ASK"
     BYE = "BYE"
     READ = "READ"
+    DELEGATE = "DELEGATE"  # Delegate task to another agent
 
     def __str__(self) -> str:
         """Return the string representation of the ActionType enum.
@@ -72,6 +73,7 @@ class ExecutionType(str, Enum):
     CLASSIFICATION = "classification"
     SYSTEM = "system"
     USER_INPUT = "user_input"
+    DELEGATE = "delegate"
     NONE = "none"
 
 
@@ -188,6 +190,8 @@ class ResponseJsonSchema(BaseModel):
         file_path (str): Path to the file to be written to
         mentioned_files (List[str]): List of files mentioned in the response
         replacements (List[Dict[str, str]]): List of replacements to be made in the file
+        agent (str): The name of the agent to delegate the task to
+        message (str): The message to delegate the task to
     """
 
     response: str
@@ -198,6 +202,8 @@ class ResponseJsonSchema(BaseModel):
     replacements: List[Dict[str, str]] = Field(default_factory=list)
     action: ActionType
     learnings: str = Field(default="")
+    agent: str = Field(default="")
+    message: str = Field(default="")
 
 
 class ProcessResponseStatus(str, Enum):

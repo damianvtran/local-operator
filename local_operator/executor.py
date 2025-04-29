@@ -11,7 +11,7 @@ from enum import Enum
 from multiprocessing import Queue
 from pathlib import Path
 from traceback import format_exception
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from langchain_community.callbacks.manager import get_openai_callback
 from langchain_core.messages import BaseMessage
@@ -395,6 +395,8 @@ class LocalCodeExecutor:
             execution history, learnings, current plan, and instruction details.
         status_queue (Queue | None): A queue for status updates if this is part
             of a running job for a server operator.
+        delegate_callback (Optional[Callable[[str, str], Awaitable[ProcessResponseOutput]]]):
+            Callback for handling DELEGATE actions, set by the Operator.
     """
 
     context: Dict[str, Any]
@@ -411,6 +413,7 @@ class LocalCodeExecutor:
     persist_conversation: bool
     agent_state: AgentState
     status_queue: Optional[Queue] = None  # type: ignore
+    delegate_callback: Optional[Callable[[str, str], Awaitable[ProcessResponseOutput]]] = None
 
     def __init__(
         self,
@@ -1657,6 +1660,26 @@ class LocalCodeExecutor:
             verbosity_level=self.verbosity_level,
         ):
             try:
+                if response.action == ActionType.DELEGATE:
+                    # Handle delegation to another agent via callback
+                    agent = getattr(response, "agent", None)
+                    message = getattr(response, "message", None)
+                    if not agent or not message:
+                        raise ValueError("DELEGATE action requires 'agent' and 'message' fields")
+                    if self.delegate_callback is None:
+                        raise RuntimeError(
+                            "No delegate_callback set on executor for DELEGATE action"
+                        )
+
+                    execution_result = await self.delegate_to_agent(agent, message)
+
+                    print_execution_section(
+                        ExecutionSection.RESULT,
+                        content=execution_result.message,
+                        action=response.action,
+                        verbosity_level=self.verbosity_level,
+                    )
+
                 if response.action == ActionType.WRITE:
                     file_path = response.file_path
                     content = response.content if response.content else response.code
@@ -1959,6 +1982,74 @@ class LocalCodeExecutor:
         )
 
         return output
+
+    async def delegate_to_agent(self, agent_name: str, message: str) -> CodeExecutionResult:
+        """Delegate the task to another agent.
+
+        Args:
+            agent_name (str): The name of the agent to delegate to
+            message (str): The message to delegate to the agent
+        """
+        await self.update_job_execution_state(
+            CodeExecutionResult(
+                status=ProcessResponseStatus.IN_PROGRESS,
+                message=f"Delegating the task to {agent_name}",
+                role=ConversationRole.ASSISTANT,
+                execution_type=ExecutionType.ACTION,
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                files=[],
+                action=ActionType.DELEGATE,
+            )
+        )
+
+        if not self.delegate_callback:
+            raise RuntimeError("No delegate_callback set on executor for DELEGATE action")
+
+        result = await self.delegate_callback(agent_name, message)
+
+        if result.status == ProcessResponseStatus.SUCCESS:
+            self.append_to_history(
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content=(
+                        f"{agent_name} completed the task successfully.\n\n"
+                        "Here's what they said, please review and use the "
+                        "information to continue with the task:\n\n"
+                        f"<agent_response>\n{result.message}\n</agent_response>\n"
+                    ),
+                    should_summarize=True,
+                )
+            )
+        else:
+            self.append_to_history(
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content=(
+                        f"The delegation to {agent_name} failed.\n\n"
+                        "Please review the error and try again if necessary.\n\n"
+                        f"Error:\n\n<error_message>\n{result.message}\n</error_message>\n"
+                    ),
+                    should_summarize=True,
+                )
+            )
+
+        return CodeExecutionResult(
+            status=result.status,
+            message=result.message,
+            role=ConversationRole.ASSISTANT,
+            execution_type=ExecutionType.ACTION,
+            action=ActionType.DELEGATE,
+            stdout="",
+            stderr="",
+            logging="",
+            formatted_print="",
+            code="",
+            files=[],
+        )
 
     async def read_file(
         self, file_path: str, max_file_size_bytes: int = MAX_FILE_READ_SIZE_BYTES
@@ -2416,6 +2507,44 @@ Current time: {current_time}
         """
         return "\n".join([f"- {learning}" for learning in self.agent_state.learnings])
 
+    def get_available_agents_str(self) -> str:
+        """Get the available agents for the current conversation.
+
+        Returns:
+            str: Formatted string containing available agents
+        """
+        if not self.agent_registry:
+            return "No agents found."
+
+        try:
+            agents = self.agent_registry.list_agents()
+        except AttributeError as e:
+            raise AttributeError(
+                "The provided agent_manager does not have a list_agents() method."
+            ) from e
+        except Exception as e:
+            raise Exception(f"Failed to retrieve agents: {str(e)}") from e
+
+        if not agents:
+            return "No agents found."
+
+        lines = []
+        for agent in agents:
+            name = getattr(agent, "name", "")
+            description = getattr(agent, "description", "")
+
+            if not name:
+                # All agents should have a name
+                continue
+
+            if not description:
+                # All agents should have a description
+                continue
+
+            lines.append(f"{name}: {description}")
+
+        return "\n".join(lines)
+
     def update_ephemeral_messages(self) -> None:
         """Add environment details and other ephemeral messages to the conversation history.
 
@@ -2445,12 +2574,16 @@ Current time: {current_time}
         # Add instruction details to the latest message
         instruction_details = self.get_instruction_details()
 
+        # Add available agents to the latest message
+        available_agents = self.get_available_agents_str()
+
         # "Heads up display" for the agent
         hud_message = AgentHeadsUpDisplayPrompt.format(
             environment_details=environment_details,
             learning_details=learning_details,
             current_plan_details=current_plan_details,
             instruction_details=instruction_details,
+            available_agents=available_agents,
         )
 
         self.append_to_history(

@@ -26,23 +26,16 @@ from pathlib import Path
 from typing import Optional
 
 import uvicorn
-from pydantic import SecretStr
 
-from local_operator.admin import add_admin_tools
+from local_operator.agents import AgentData  # Import AgentData type
 from local_operator.agents import AgentEditFields, AgentRegistry
-from local_operator.clients.fal import FalClient
-from local_operator.clients.openrouter import OpenRouterClient
-from local_operator.clients.radient import RadientClient
-from local_operator.clients.serpapi import SerpApiClient
-from local_operator.clients.tavily import TavilyClient
+from local_operator.bootstrap import initialize_operator  # Import the new function
 from local_operator.config import ConfigManager
+from local_operator.console import VerbosityLevel  # Import VerbosityLevel
 from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config
-from local_operator.executor import LocalCodeExecutor
-from local_operator.model.configure import configure_model, validate_model
-from local_operator.operator import Operator, OperatorType
-from local_operator.tools import ToolRegistry
-from local_operator.types import AgentState
+from local_operator.helpers import setup_cross_platform_environment
+from local_operator.operator import OperatorType
 
 CLI_DESCRIPTION = """
     Local Operator - An environment for agentic AI models to perform tasks on the local device.
@@ -480,65 +473,13 @@ def agents_delete_command(name: str, agent_registry: AgentRegistry) -> int:
     return 0
 
 
-def build_tool_registry(
-    executor: LocalCodeExecutor,
-    agent_registry: AgentRegistry,
-    config_manager: ConfigManager,
-    credential_manager: CredentialManager,
-) -> ToolRegistry:
-    """Build and initialize the tool registry.
-
-    This function creates a new ToolRegistry instance, initializes default tools,
-    and adds admin tools for agent management. It also sets up SERP API and Tavily
-    API clients if the corresponding API keys are available.
-
-    Args:
-        executor (LocalCodeExecutor): The LocalCodeExecutor instance for conversation history.
-        agent_registry (AgentRegistry): The AgentRegistry for managing agents.
-        config_manager (ConfigManager): The ConfigManager for managing configuration.
-        credential_manager (CredentialManager): The CredentialManager for managing credentials.
-
-    Returns:
-        ToolRegistry: The initialized tool registry with all tools registered.
-    """
-    tool_registry = ToolRegistry()
-
-    serp_api_key = credential_manager.get_credential("SERP_API_KEY")
-    tavily_api_key = credential_manager.get_credential("TAVILY_API_KEY")
-    fal_api_key = credential_manager.get_credential("FAL_API_KEY")
-    radient_api_key = credential_manager.get_credential("RADIENT_API_KEY")
-
-    if serp_api_key:
-        serp_api_client = SerpApiClient(serp_api_key)
-        tool_registry.set_serp_api_client(serp_api_client)
-
-    if tavily_api_key:
-        tavily_client = TavilyClient(tavily_api_key)
-        tool_registry.set_tavily_client(tavily_client)
-
-    if fal_api_key:
-        fal_client = FalClient(fal_api_key)
-        tool_registry.set_fal_client(fal_client)
-
-    if radient_api_key:
-        # Get the base URL from env_config if available, otherwise use default
-        env_config = get_env_config()
-        base_url = env_config.radient_api_base_url if env_config else "https://api.radienthq.com/v1"
-        radient_client = RadientClient(radient_api_key, base_url)
-        tool_registry.set_radient_client(radient_client)
-
-    tool_registry.set_credential_manager(credential_manager)
-    tool_registry.init_tools()
-
-    add_admin_tools(tool_registry, executor, agent_registry, config_manager)
-
-    return tool_registry
-
-
 def main() -> int:
     try:
         parser = build_cli_parser()
         args = parser.parse_args()
+
+        # Set up the subprocess environment early
+        setup_cross_platform_environment()
 
         os.environ["LOCAL_OPERATOR_DEBUG"] = "true" if args.debug else "false"
 
@@ -601,15 +542,15 @@ def main() -> int:
             print(f"\n\033[1;32mSetting working directory to: {run_in_path}\033[0m")
 
         # Get agent if name provided
-        agent = None
+        current_agent: Optional[AgentData] = None  # Use AgentData type hint
         if args.agent_name:
-            agent = agent_registry.get_agent_by_name(args.agent_name)
-            if not agent:
+            current_agent = agent_registry.get_agent_by_name(args.agent_name)
+            if not current_agent:
                 print(
                     f"\n\033[1;33mNo agent found with name: {args.agent_name}. "
                     f"Creating new agent...\033[0m"
                 )
-                agent = agent_registry.create_agent(
+                current_agent = agent_registry.create_agent(
                     AgentEditFields(
                         name=args.agent_name,
                         security_prompt=None,
@@ -628,125 +569,50 @@ def main() -> int:
                         current_working_directory=None,
                     )
                 )
-                print("\n\033[1;32m╭─ Created New Agent ───────────────────────────\033[0m")
-                print(f"\033[1;32m│ Name: {agent.name}\033[0m")
-                print(f"\033[1;32m│ ID: {agent.id}\033[0m")
-                print(f"\033[1;32m│ Created: {agent.created_date}\033[0m")
-                print(f"\033[1;32m│ Version: {agent.version}\033[0m")
-                print("\033[1;32m╰──────────────────────────────────────────────────\033[0m\n")
+                # Add check to satisfy linter, though current_agent should be set here
+                if current_agent:
+                    print("\n\033[1;32m╭─ Created New Agent ───────────────────────────\033[0m")
+                    print(f"\033[1;32m│ Name: {current_agent.name}\033[0m")
+                    print(f"\033[1;32m│ ID: {current_agent.id}\033[0m")
+                    print(f"\033[1;32m│ Created: {current_agent.created_date}\033[0m")
+                    print(f"\033[1;32m│ Version: {current_agent.version}\033[0m")
+                    print("\033[1;32m╰──────────────────────────────────────────────────\033[0m\n")
+                else:
+                    # This case should logically not happen
+                    print("\n\033[1;31mError: Failed to create or retrieve agent.\033[0m")
+                    return -1
 
-        hosting = config_manager.get_config_value("hosting")
-        model_name = config_manager.get_config_value("model_name")
-
-        chat_args = {}
-
-        if agent:
-            # Get conversation history if agent name provided
-            agent_state = agent_registry.load_agent_state(agent.id)
-
-            # Use agent's hosting and model if provided
-            if agent.hosting:
-                hosting = agent.hosting
-            if agent.model:
-                model_name = agent.model
-            if agent.temperature:
-                chat_args["temperature"] = agent.temperature
-            if agent.top_p:
-                chat_args["top_p"] = agent.top_p
-            if agent.top_k:
-                chat_args["top_k"] = agent.top_k
-            if agent.max_tokens:
-                chat_args["max_tokens"] = agent.max_tokens
-            if agent.stop:
-                chat_args["stop"] = agent.stop
-            if agent.frequency_penalty:
-                chat_args["frequency_penalty"] = agent.frequency_penalty
-            if agent.presence_penalty:
-                chat_args["presence_penalty"] = agent.presence_penalty
-            if agent.seed:
-                chat_args["seed"] = agent.seed
-
-        else:
-            agent_state = AgentState(
-                version="",
-                conversation=[],
-                execution_history=[],
-                learnings=[],
-                current_plan=None,
-                instruction_details=None,
-                agent_system_prompt=None,
-            )
-
-        model_info_client: Optional[OpenRouterClient] = None
-
-        if hosting == "openrouter":
-            model_info_client = OpenRouterClient(
-                credential_manager.get_credential("OPENROUTER_API_KEY")
-            )
-
-        model_configuration = configure_model(
-            hosting,
-            model_name,
-            credential_manager,
-            model_info_client,
-            env_config=env_config,
-            **chat_args,
-        )
-
-        if not model_configuration.instance:
-            error_msg = (
-                f"\n\033[1;31mError: Model not found for hosting: "
-                f"{hosting} and model: {model_name}\033[0m"
-            )
-            print(error_msg)
-            return -1
-
-        validate_model(hosting, model_name, model_configuration.api_key or SecretStr(""))
-
-        training_mode = False
-        if args.train:
-            training_mode = True
-
+        # Determine training mode and single execution mode
+        training_mode = bool(args.train)
         single_execution_mode = args.subcommand == "exec"
 
-        auto_save_conversation = config_manager.get_config_value("auto_save_conversation", False)
+        # Determine auto-save behavior
+        auto_save_enabled = config_manager.get_config_value("auto_save_conversation", False)
+        auto_save_active = auto_save_enabled and not single_execution_mode
 
-        # If autosave is enabled, create an autosave agent if it doesn't exist already
-        if auto_save_conversation and not single_execution_mode:
+        # Create autosave agent if needed
+        if auto_save_active:
             agent_registry.create_autosave_agent()
 
-        executor = LocalCodeExecutor(
-            model_configuration=model_configuration,
-            detail_conversation_length=config_manager.get_config_value("detail_length", 35),
-            max_conversation_history=config_manager.get_config_value(
-                "max_conversation_history", 100
-            ),
-            max_learnings_history=config_manager.get_config_value("max_learnings_history", 50),
-            agent=agent,
-            agent_registry=agent_registry,
-            agent_state=agent_state,
-            persist_conversation=training_mode,
-        )
+        # Determine verbosity level
+        verbosity = VerbosityLevel.DEBUG if args.debug else VerbosityLevel.VERBOSE
 
-        operator = Operator(
-            executor=executor,
-            credential_manager=credential_manager,
-            config_manager=config_manager,
-            model_configuration=model_configuration,
-            type=OperatorType.CLI,
-            agent_registry=agent_registry,
-            current_agent=agent,
-            auto_save_conversation=auto_save_conversation and not single_execution_mode,
-            persist_agent_conversation=auto_save_conversation and not single_execution_mode,
-        )
-
-        tool_registry = build_tool_registry(
-            executor, agent_registry, config_manager, credential_manager
-        )
-
-        executor.set_tool_registry(tool_registry)
-
-        executor.load_agent_state(agent_state)
+        # Initialize the operator using the bootstrap function
+        try:
+            operator = initialize_operator(
+                operator_type=OperatorType.CLI,
+                config_manager=config_manager,
+                credential_manager=credential_manager,
+                agent_registry=agent_registry,
+                env_config=env_config,
+                current_agent=current_agent,
+                persist_conversation=training_mode,
+                auto_save_conversation=auto_save_active,
+                verbosity_level=verbosity,
+            )
+        except ValueError as e:
+            print(f"\n\033[1;31mError initializing operator: {e}\033[0m")
+            return -1
 
         # Start the async chat interface or execute single command
         if single_execution_mode:
