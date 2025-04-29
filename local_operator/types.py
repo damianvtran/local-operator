@@ -190,6 +190,8 @@ class ResponseJsonSchema(BaseModel):
         file_path (str): Path to the file to be written to
         mentioned_files (List[str]): List of files mentioned in the response
         replacements (List[Dict[str, str]]): List of replacements to be made in the file
+        agent (str): The name of the agent to delegate the task to
+        message (str): The message to delegate the task to
     """
 
     response: str
@@ -200,6 +202,8 @@ class ResponseJsonSchema(BaseModel):
     replacements: List[Dict[str, str]] = Field(default_factory=list)
     action: ActionType
     learnings: str = Field(default="")
+    agent: str = Field(default="")
+    message: str = Field(default="")
 
 
 class ProcessResponseStatus(str, Enum):
