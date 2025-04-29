@@ -45,26 +45,25 @@ This project is proudly open source under the GPL 3.0 license. We believe AI too
 
 - [🔑 Key Features](#-key-features)
 - [💻 Requirements](#-requirements)
-- [🚀 Development with Nix Flake](#-development-with-nix-flake)
-  - [Getting Started](#getting-started)
-  - [Benefits](#benefits)
-- [🛠️ Setup](#️-setup)
-- [🐋 Running Server in Docker](#-running-server-in-docker)
-  - [Web Browsing](#web-browsing)
-  - [Web Search](#web-search)
-  - [Image Generation](#image-generation)
+- [🚀 Getting Started](#-getting-started)
+  - [🛠️ Installing Local Operator](#️-installing-local-operator)
+    - [📦 Install via pip](#-install-via-pip)
+    - [📦 Install via Nix Flake](#-install-via-nix-flake)
+  - [🐋 Running Local Operator in Docker](#-running-local-operator-in-docker)
 - [🖥️ Usage (CLI)](#️-usage-cli)
-  - [Run with a local Ollama model](#run-with-a-local-ollama-model)
-  - [Run with DeepSeek](#run-with-deepseek)
-  - [Run with OpenAI](#run-with-openai)
-- [🚀 Usage (Single Execution Mode)](#-usage-single-execution-mode)
-- [📡 Usage (Server)](#-usage-server)
-- [🧠 Usage (Agents)](#-usage-agents)
-- [🔑 Configuration](#-configuration)
-  - [Configuration Values](#configuration-values)
-  - [Configuration Options](#configuration-options)
-  - [Credentials](#credentials)
+  - [🦙 Run with a local Ollama model](#-run-with-a-local-ollama-model)
+  - [🐳 Run with DeepSeek](#-run-with-deepseek)
+  - [🤖 Run with OpenAI](#-run-with-openai)
+  - [🔂 Run Single Execution Mode](#-run-single-execution-mode)
+  - [📡 Running in Server Mode](#-running-in-server-mode)
+  - [🧠 Running in Agent mode](#-running-in-agent-mode)
+  - [🔧 Configuration Values](#-configuration-values)
+  - [🛠️ Configuration Options](#️-configuration-options)
+  - [🔐 Credentials](#-credentials)
 - [📝 Examples](#-examples)
+- [👥 Contributing](#-contributing)
+- [🔒 Safety Features](#-safety-features)
+- [📜 License](#-license)
 
 ## 🔑 Key Features
 
@@ -96,11 +95,65 @@ Visit the [Local Operator website](https://local-operator.com) for visualization
 - For 3rd party hosting: [OpenRouter](https://openrouter.ai/keys), [OpenAI](https://platform.openai.com/api-keys), [DeepSeek](https://platform.deepseek.ai/), [Anthropic](https://console.anthropic.com/), [Google](https://ai.google.dev/), or other API key (prompted for on first run)
 - For local hosting: [Ollama](https://ollama.com/download) model installed and running
 
-## 🚀 Development with Nix Flake
+## 🚀 Getting Started
+
+### 🛠️ Installing Local Operator
+
+To run Local Operator with a 3rd party cloud-hosted LLM model, you need to have an API key.  You can get one from OpenAI, DeepSeek, Anthropic, or other providers.
+
+
+###  📦 Install via pip
+   > ⚠️ **Linux Installs (Ubuntu 23.04+, Fedora 38+, Debian 12+)**  
+   > Due to recent changes in how Python is managed on modern Linux distributions (see [PEP 668](https://peps.python.org/pep-0668/)), you **cannot use `pip install` globally** on system Python.  
+- MacOS & Windows
+
+  ```bash
+  pip install local-operator
+  ```
+
+- Linux
+
+  ```bash
+  pipx install local-operator
+  ```
+
+- 📌 (Optional) Virtual python
+  ```bash
+  python3 -m venv .venv
+  source .venv/bin/activate
+  pip install local-operator
+  ```
+-  📌 (Optional) Enabling Web Browsing
+
+    This is not necessary to use the web browsing tool, as the agent will automatically install the browsers when they are needed, but it can be faster to install them ahead of start up if you know you will need them.
+
+    ```bash
+    playwright install
+    ```
+-  📌 (Optional) Enabling Web Search
+    
+    To enable web search, you will need to get a free SERP API key from [SerpApi](https://serpapi.com/users/sign_up).  On the free plan, you get 100 credits per month which is generally sufficient for light to moderate personal use. The agent uses a web search tool integrated with SERP API to fetch information from the web if you have the `SERP_API_KEY` set up in the Local Operator credentials.  The agent can still browse the web without it, though information access will be less efficient.
+
+   1. Get your API key and then configure the `SERP_API_KEY` credential:
+
+      ```bash
+      local-operator credential update <SERP_API_KEY>
+      ```
+
+- 📌 (Optional) Enabling Image Generation
+ 
+    To enable image generation capabilities, you'll need to get a FAL AI API key from [FAL AI](https://fal.ai/dashboard/keys). The Local Operator uses the FLUX.1 model from FAL AI to generate and modify images.
+
+    1. Get your API key and then configure the `FAL_API_KEY` credential:
+
+        ```bash
+        local-operator credential update <FAL_API_KEY>
+        ```
+
+### 📦 Install via Nix Flake
 
 If you use [Nix](https://nixos.org/) for development, this project provides a `flake.nix` for easy, reproducible setup. The flake ensures all dependencies are available and configures a development environment with a single command.
 
-### Getting Started
 
 1. **Enter the development shell:**
 
@@ -114,7 +167,7 @@ If you use [Nix](https://nixos.org/) for development, this project provides a `f
 
    You can now use the CLI or run scripts as described in the rest of this README.
 
-### Benefits
+#### Benefits
 
 - No need to manually install Python or other dependencies.
 - Ensures a consistent environment across all contributors.
@@ -122,34 +175,8 @@ If you use [Nix](https://nixos.org/) for development, this project provides a `f
 
 For more information about Nix flakes, see the [NixOS flake documentation](https://nixos.wiki/wiki/Flakes).
 
-## 🛠️ Setup
 
-To run Local Operator with a 3rd party cloud-hosted LLM model, you need to have an API key.  You can get one from OpenAI, DeepSeek, Anthropic, or other providers.
-
-Once you have the API key, install the operator CLI with the following command:
-
-```bash
-pip install local-operator
-```
-
-> ⚠️ **Linux Installs (Ubuntu 23.04+, Fedora 38+, Debian 12+)**  
-> Due to recent changes in how Python is managed on modern Linux distributions (see [PEP 668](https://peps.python.org/pep-0668/)), you **cannot use `pip install` globally** on system Python.  
->
-> Instead, install packages in a **virtual environment**:
->
-> ```bash
-> python3 -m venv .venv
-> source .venv/bin/activate
-> pip install local-operator
-> ```
->
-> Alternatively you can use [`pipx`](https://pypa.github.io/pipx/):
->
-> ```bash
-> pipx install local-operator
-> ```
-
-## 🐋 Running Server in Docker
+### 🐋 Running Local Operator in Docker
 
 To run Local Operator in docker, ensure docker is running and run
 
@@ -157,61 +184,11 @@ To run Local Operator in docker, ensure docker is running and run
 docker compose up --d
 ```
 
-### Web Browsing
-
-To enable web browsing, you can install the playwright browsers with the following command:
-
-```bash
-playwright install
-```
-
-This is not necessary to use the web browsing tool, as the agent will automatically install the browsers when they are needed, but it can be faster to install them ahead of start up if you know you will need them.
-
-If you would like to run with a local Ollama model, you will need to install Ollama first from [here](https://ollama.ai/download), and fetch a model using `ollama pull`.  Make sure that the ollama server is running with `ollama serve`.
-
-### Web Search
-
-To enable web search, you will need to get a free SERP API key from [SerpApi](https://serpapi.com/users/sign_up).  On the free plan, you get 100 credits per month which is generally sufficient for light to moderate personal use.  
-
-The agent uses a web search tool integrated with SERP API to fetch information from the web if you have the `SERP_API_KEY` set up in the Local Operator credentials.  The agent can still browse the web without it, though information access will be less efficient.
-
-Get your API key and then configure the `SERP_API_KEY` credential:
-
-```bash
-local-operator credential update SERP_API_KEY
-```
-
-Once the credential is set, the agent will be able to search the web for information
-using its web search tool on the next start up.
-
-### Image Generation
-
-To enable image generation capabilities, you'll need to get a FAL AI API key from [FAL AI](https://fal.ai/dashboard/keys). The Local Operator uses the FLUX.1 model from FAL AI to generate and modify images.
-
-Get your API key and then configure the `FAL_API_KEY` credential:
-
-```bash
-local-operator credential update FAL_API_KEY
-```
-
-Once the credential is set, the agent will have access to two powerful image generation tools:
-
-1. **Generate Image**: Create new images from text descriptions with customizable parameters like image size, guidance scale, and inference steps.
-
-2. **Generate Altered Image**: Modify existing images based on text prompts, allowing you to transform images while maintaining their core structure.
-
-Example usage in a conversation:
-
-- "Generate an image of a mountain landscape at sunset"
-- "Take this photo and make it look like it was taken in winter"
-
-The agent will handle downloading and saving the generated images to your local machine.
-
 ## 🖥️ Usage (CLI)
 
 Run the operator CLI with the following command:
 
-### Run with a local Ollama model
+### 🦙 Run with a local Ollama model
 
 Download and install Ollama first from [here](https://ollama.ai/download).
 
@@ -219,13 +196,13 @@ Download and install Ollama first from [here](https://ollama.ai/download).
 local-operator --hosting ollama --model qwen2.5:14b
 ```
 
-### Run with DeepSeek
+### 🐳 Run with DeepSeek
 
 ```bash
 local-operator --hosting deepseek --model deepseek-chat
 ```
 
-### Run with OpenAI
+### 🤖 Run with OpenAI
 
 ```bash
 local-operator --hosting openai --model gpt-4o
@@ -237,7 +214,7 @@ Quit by typing `exit` or `quit`.
 
 Run `local-operator --help` for more information about parameters and configuration.
 
-## 🚀 Usage (Single Execution Mode)
+### 🔂 Run Single Execution Mode
 
 The operator can be run in a single execution mode where it will execute a single task and then exit.  This is useful for running the operator in a non-interactive way such as in a script.
 
@@ -247,7 +224,7 @@ local-operator exec "Make a new file called test.txt and write Hello World in it
 
 This will execute the task and then exit with a code 0 if successful, or a non-zero code if there was an error.
 
-## 📡 Usage (Server)
+### 📡 Running in Server Mode
 
 To run the operator as a server, use the following command:
 
@@ -261,7 +238,7 @@ To view the API documentation, navigate to `http://localhost:8080/docs` in your 
 
 For development, use the `--reload` argument to enable hot reloading.
 
-## 🧠 Usage (Agents)
+### 🧠 Running in Agent mode
 
 The agents mode is helpful for passing on knowledge between agents and between runs.  It is also useful for creating reusable agentic experiences learned through conversation with the user.
 
@@ -302,9 +279,7 @@ or
 local-operator --hosting openai --model gpt-4o exec "Make a new file called test.txt and write Hello World in it" --agent "My Agent"
 ```
 
-## 🔑 Configuration
-
-### Configuration Values
+### 🔧 Configuration Values
 
 The operator uses a configuration file to manage API keys and other settings.  It can be created at `~/.local-operator/config.yml` with the `local-operator config create` command.  You can edit this file directly to change the configuration.
 
@@ -332,7 +307,7 @@ To list all available configuration options and their descriptions, use the foll
 local-operator config list
 ```
 
-### Configuration Options
+### 🛠️ Configuration Options
 
 - `conversation_length`: The number of messages to keep in the conversation history.  Defaults to 100.
 - `detail_length`: The number of messages to keep in the detail history.  All messages beyond this number excluding the primary system prompt will be summarized into a shorter form to reduce token costs.  Defaults to 35.
@@ -341,7 +316,7 @@ local-operator config list
 - `max_learnings_history`: The maximum number of learnings to keep in the learnings history.  Defaults to 50.
 - `auto_save_conversation`: Whether to automatically save the conversation history to a file.  Defaults to `false`.
 
-### Credentials
+### 🔐 Credentials
 
 Credentials are stored in the `~/.local-operator/credentials.yml` file.  Credentials can be updated at any time by running `local-operator credential update <credential_name>`.
 
@@ -413,6 +388,6 @@ The system includes multiple layers of protection:
 - Agent prompt with safety focused execution policy
 - Support for local Ollama models to prevent sending local system data to 3rd parties
 
-## 📝 License
+## 📜 License
 
 This project is licensed under the GPL 3.0 License - see the LICENSE file for details.
