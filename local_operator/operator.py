@@ -20,6 +20,7 @@ from local_operator.console import (
     spinner_context,
 )
 from local_operator.credentials import CredentialManager
+from local_operator.env import EnvConfig
 from local_operator.executor import (
     CodeExecutionResult,
     LocalCodeExecutor,
@@ -147,6 +148,7 @@ class Operator:
     auto_save_conversation: bool
     verbosity_level: VerbosityLevel
     persist_agent_conversation: bool
+    env_config: EnvConfig
 
     def __init__(
         self,
@@ -157,6 +159,7 @@ class Operator:
         type: OperatorType,
         agent_registry: AgentRegistry,
         current_agent: AgentData | None,
+        env_config: EnvConfig,
         auto_save_conversation: bool = False,
         verbosity_level: VerbosityLevel = VerbosityLevel.VERBOSE,
         persist_agent_conversation: bool = False,
@@ -180,6 +183,7 @@ class Operator:
             verbosity_level (VerbosityLevel): The verbosity level to use for the operator.
             persist_agent_conversation (bool): Whether to persist the agent's conversation
                 history to the agent's directory after each completed task.
+            env_config (EnvConfig): The environment configuration instance.
 
         The Operator class serves as the main interface for interacting with language models,
         managing configuration, credentials, and code execution. It handles both CLI and
@@ -196,6 +200,9 @@ class Operator:
         self.auto_save_conversation = auto_save_conversation
         self.verbosity_level = verbosity_level
         self.persist_agent_conversation = persist_agent_conversation
+        self.env_config = env_config
+        # Set the delegate callback for DELEGATE actions
+        self.executor.delegate_callback = self.delegate_to_agent
         if self.type == OperatorType.CLI:
             self._load_input_history()
             self._setup_interrupt_handler()
@@ -1054,7 +1061,7 @@ class Operator:
                     print(chunk, end="", flush=True)
 
             if self.verbosity_level >= VerbosityLevel.VERBOSE:
-                print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
+                print("\n\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
 
         elif classification.type != RequestType.CONTINUE:
             self.executor.set_current_plan("")
@@ -1202,6 +1209,66 @@ class Operator:
             self.print_conversation_history()
 
         return response_json, final_response
+
+    async def delegate_to_agent(self, agent_name: str, message: str):
+        """
+        Handle delegation to another agent for the DELEGATE action.
+
+        Args:
+            agent_name (str): The name of the agent to delegate to.
+            message (str): The message to send to the delegated agent.
+
+        Returns:
+            ProcessResponseOutput: The result of the delegated agent's response.
+        """
+        # Import locally to avoid circular import
+        from local_operator.bootstrap import initialize_operator
+
+        # Find the agent by name in the registry
+        agent = None
+        for a in self.agent_registry.list_agents():
+            if a.name == agent_name:
+                agent = a
+                break
+        if agent is None:
+            return ProcessResponseOutput(
+                status=ProcessResponseStatus.ERROR,
+                message=f"Agent '{agent_name}' not found for delegation.",
+            )
+
+        # Create a new Operator for the target agent
+        try:
+            delegated_operator = initialize_operator(
+                operator_type=self.type,
+                config_manager=self.config_manager,
+                credential_manager=self.credential_manager,
+                agent_registry=self.agent_registry,
+                env_config=self.env_config,
+                request_hosting=agent.hosting,
+                request_model=agent.model,
+                current_agent=agent,
+                persist_conversation=False,
+                auto_save_conversation=False,
+                verbosity_level=VerbosityLevel.QUIET,  # Silence delegation logging
+            )
+        except Exception as e:
+            return ProcessResponseOutput(
+                status=ProcessResponseStatus.ERROR,
+                message=f"Failed to initialize delegated agent '{agent_name}': {e}",
+            )
+
+        # Send the message to the delegated agent and get the response
+        try:
+            _, final_response = await delegated_operator.handle_user_input(message)
+            return ProcessResponseOutput(
+                status=ProcessResponseStatus.SUCCESS,
+                message=final_response,
+            )
+        except Exception as e:
+            return ProcessResponseOutput(
+                status=ProcessResponseStatus.ERROR,
+                message=f"Delegation to agent '{agent_name}' failed: {e}",
+            )
 
     def print_conversation_history(self) -> None:
         """Print the conversation history for debugging."""

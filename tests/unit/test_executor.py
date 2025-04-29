@@ -66,6 +66,13 @@ def test_tool_registry():
 
 
 @pytest.fixture
+def env_config():
+    return {
+        "RADIENT_API_KEY": "test_key",
+    }
+
+
+@pytest.fixture
 def executor(mock_model_config, test_tool_registry):
     agent = MagicMock()
     agent.id = "test_agent"
@@ -92,7 +99,7 @@ def executor(mock_model_config, test_tool_registry):
 
 
 @pytest.fixture
-def cli_operator(mock_model_config, executor):
+def cli_operator(mock_model_config, executor, env_config):
     credential_manager = MagicMock()
     credential_manager.get_credential = MagicMock(return_value="test_key")
 
@@ -110,6 +117,7 @@ def cli_operator(mock_model_config, executor):
         type=OperatorType.CLI,
         agent_registry=agent_registry,
         current_agent=None,
+        env_config=env_config,
     )
 
     operator._get_input_with_history = MagicMock(return_value="noop")
@@ -1389,6 +1397,7 @@ def test_process_json_response(
             "Executing Edit",
         ),
         (ActionType.READ, None, "test.txt", None, None, "Executing Read"),
+        (ActionType.DELEGATE, None, None, None, None, "Executing Delegate"),
     ],
 )
 async def test_perform_action(
@@ -1418,6 +1427,7 @@ async def test_perform_action(
     original_write_file = executor.write_file
     original_edit_file = executor.edit_file
     original_execute_code = executor.execute_code
+    original_delegate_to_agent = executor.delegate_to_agent
 
     with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
         if action_type == ActionType.READ:
@@ -1468,6 +1478,22 @@ async def test_perform_action(
                     action=action_type,
                 )
             )
+        elif action_type == ActionType.DELEGATE:
+            executor.delegate_to_agent = AsyncMock(
+                return_value=CodeExecutionResult(
+                    stdout="Delegated to agent",
+                    stderr="",
+                    logging="",
+                    formatted_print="Delegated to agent",
+                    code="",
+                    message="Delegated to agent",
+                    role=ConversationRole.SYSTEM,
+                    status=ProcessResponseStatus.SUCCESS,
+                    files=[],
+                    execution_type=ExecutionType.ACTION,
+                    action=action_type,
+                )
+            )
         else:
             executor.execute_code = AsyncMock(
                 return_value=CodeExecutionResult(
@@ -1494,6 +1520,7 @@ async def test_perform_action(
     executor.write_file = original_write_file
     executor.edit_file = original_edit_file
     executor.execute_code = original_execute_code
+    executor.delegate_to_agent = original_delegate_to_agent
 
 
 @pytest.mark.asyncio
