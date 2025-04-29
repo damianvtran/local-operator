@@ -12,8 +12,7 @@ from typing import Optional, Union
 from pydantic import SecretStr
 
 from local_operator.admin import add_admin_tools
-from local_operator.agents import AgentData  # Import AgentData instead of Agent
-from local_operator.agents import AgentRegistry, AgentState
+from local_operator.agents import AgentData, AgentRegistry, AgentState
 from local_operator.clients.fal import FalClient
 from local_operator.clients.openrouter import OpenRouterClient
 from local_operator.clients.radient import RadientClient
