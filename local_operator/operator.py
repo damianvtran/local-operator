@@ -1061,7 +1061,7 @@ class Operator:
                     print(chunk, end="", flush=True)
 
             if self.verbosity_level >= VerbosityLevel.VERBOSE:
-                print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
+                print("\n\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
 
         elif classification.type != RequestType.CONTINUE:
             self.executor.set_current_plan("")
@@ -1249,7 +1249,7 @@ class Operator:
                 current_agent=agent,
                 persist_conversation=False,
                 auto_save_conversation=False,
-                verbosity_level=self.verbosity_level,
+                verbosity_level=VerbosityLevel.QUIET,  # Silence delegation logging
             )
         except Exception as e:
             return ProcessResponseOutput(

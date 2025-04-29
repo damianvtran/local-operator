@@ -1671,23 +1671,12 @@ class LocalCodeExecutor:
                             "No delegate_callback set on executor for DELEGATE action"
                         )
 
-                    await self.update_job_execution_state(
-                        CodeExecutionResult(
-                            status=ProcessResponseStatus.IN_PROGRESS,
-                            message="Delegating the task to another agent",
-                            role=ConversationRole.ASSISTANT,
-                            execution_type=ExecutionType.ACTION,
-                            stdout="",
-                            stderr="",
-                            logging="",
-                            formatted_print="",
-                            code="",
-                            files=[],
-                            action=response.action,
-                        )
-                    )
+                    execution_result = await self.delegate_to_agent(agent, message)
 
-                    return await self.delegate_callback(agent, message)
+                    return ProcessResponseOutput(
+                        status=ProcessResponseStatus.SUCCESS,
+                        message=execution_result.message,
+                    )
 
                 if response.action == ActionType.WRITE:
                     file_path = response.file_path
@@ -1991,6 +1980,74 @@ class LocalCodeExecutor:
         )
 
         return output
+
+    async def delegate_to_agent(self, agent_name: str, message: str) -> CodeExecutionResult:
+        """Delegate the task to another agent.
+
+        Args:
+            agent_name (str): The name of the agent to delegate to
+            message (str): The message to delegate to the agent
+        """
+        await self.update_job_execution_state(
+            CodeExecutionResult(
+                status=ProcessResponseStatus.IN_PROGRESS,
+                message="Delegating the task to another agent",
+                role=ConversationRole.ASSISTANT,
+                execution_type=ExecutionType.ACTION,
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                files=[],
+                action=ActionType.DELEGATE,
+            )
+        )
+
+        if not self.delegate_callback:
+            raise RuntimeError("No delegate_callback set on executor for DELEGATE action")
+
+        result = await self.delegate_callback(agent_name, message)
+
+        if result.status == ProcessResponseStatus.SUCCESS:
+            self.append_to_history(
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content=(
+                        f"{agent_name} completed the task successfully.\n\n"
+                        "Here's what they said, please review and use the "
+                        "information to continue with the task:\n\n"
+                        f"<agent_response>\n{result.message}\n</agent_response>\n"
+                    ),
+                    should_summarize=True,
+                )
+            )
+        else:
+            self.append_to_history(
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content=(
+                        f"The delegation to {agent_name} failed.\n\n"
+                        "Please review the error and try again if necessary.\n\n"
+                        f"Error:\n\n<error_message>\n{result.message}\n</error_message>\n"
+                    ),
+                    should_summarize=True,
+                )
+            )
+
+        return CodeExecutionResult(
+            status=result.status,
+            message=result.message,
+            role=ConversationRole.ASSISTANT,
+            execution_type=ExecutionType.ACTION,
+            action=ActionType.DELEGATE,
+            stdout="",
+            stderr="",
+            logging="",
+            formatted_print="",
+            code="",
+            files=[],
+        )
 
     async def read_file(
         self, file_path: str, max_file_size_bytes: int = MAX_FILE_READ_SIZE_BYTES
