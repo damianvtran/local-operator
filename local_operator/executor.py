@@ -2431,6 +2431,44 @@ Current time: {current_time}
         """
         return "\n".join([f"- {learning}" for learning in self.agent_state.learnings])
 
+    def get_available_agents_str(self) -> str:
+        """Get the available agents for the current conversation.
+
+        Returns:
+            str: Formatted string containing available agents
+        """
+        if not self.agent_registry:
+            return "No agents found."
+
+        try:
+            agents = self.agent_registry.list_agents()
+        except AttributeError as e:
+            raise AttributeError(
+                "The provided agent_manager does not have a list_agents() method."
+            ) from e
+        except Exception as e:
+            raise Exception(f"Failed to retrieve agents: {str(e)}") from e
+
+        if not agents:
+            return "No agents found."
+
+        lines = []
+        for agent in agents:
+            name = getattr(agent, "name", "")
+            description = getattr(agent, "description", "")
+
+            if not name:
+                # All agents should have a name
+                continue
+
+            if not description:
+                # All agents should have a description
+                continue
+
+            lines.append(f"{name}: {description}")
+
+        return "\n".join(lines)
+
     def update_ephemeral_messages(self) -> None:
         """Add environment details and other ephemeral messages to the conversation history.
 
@@ -2460,12 +2498,16 @@ Current time: {current_time}
         # Add instruction details to the latest message
         instruction_details = self.get_instruction_details()
 
+        # Add available agents to the latest message
+        available_agents = self.get_available_agents_str()
+
         # "Heads up display" for the agent
         hud_message = AgentHeadsUpDisplayPrompt.format(
             environment_details=environment_details,
             learning_details=learning_details,
             current_plan_details=current_plan_details,
             instruction_details=instruction_details,
+            available_agents=available_agents,
         )
 
         self.append_to_history(

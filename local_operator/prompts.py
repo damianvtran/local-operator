@@ -1985,30 +1985,30 @@ This is information about the files, variables, and other details about the curr
 </environment_details>
 
 ## Learning Details
-This is a notepad of things that you have learned so far.  You can use this to help
-you complete the current task.  Keep adding to it by including the <learnings> tag
-in each of your actions.
+This is a notepad of things that you have learned so far.  You can use this to help you complete the current task.  Keep adding to it by including the <learnings> tag in each of your actions.
 <learning_details>
 {learning_details}
 </learning_details>
 
 ## Current Plan
-This is the current and original plan that you made based on the user's request.
-Follow it closely and accurately and make sure that you are making progress towards it.
+This is the current and original plan that you made based on the user's request. Follow it closely and accurately and make sure that you are making progress towards it.
 <current_plan_details>
 {current_plan_details}
 </current_plan_details>
 
 ## Instruction Details
-This is a set of guidelines about how to best complete the current task or respond to
-the user's request.  You should take them into account as you work on the current task.
+This is a set of guidelines about how to best complete the current task or respond to the user's request.  You should take them into account as you work on the current task.
 <instruction_details>
 {instruction_details}
 </instruction_details>
 
-Don't acknowledge this message directly in your response, it is just context for your
-own information.  Use the information only if it is relevant and necessary to the
-current conversation or task.
+## Available Agents
+This is a list of the agents that are available to you.  You can use them with the DELEGATE action to help you complete the current task.  Review their names and descriptions to help you decide if there is an agent that is best suited to handle this part of the task.
+<available_agents>
+{available_agents}
+</available_agents>
+
+Don't acknowledge this message directly in your response, it is just context for your own information.  Use the information only if it is relevant and necessary to the current conversation or task.
 
 Make sure to pay attention to the previous messages before the HUD in addition to the messages after, since the HUD continues to move forward but you need to continue the conversation in a normal way.
 </agent_heads_up_display>
@@ -2179,47 +2179,3 @@ def create_system_prompt(
     )
 
     return base_system_prompt
-
-
-def get_agents_str(agent_manager) -> str:
-    """
-    Generate a string listing all agents managed by the agent_manager.
-
-    Args:
-        agent_manager: The agent manager instance that provides a list_agents() method.
-
-    Returns:
-        str: A formatted string listing each agent's name and description.
-
-    Raises:
-        AttributeError: If agent_manager does not have a list_agents() method.
-        Exception: For any unexpected errors during agent listing.
-    """
-    try:
-        agents = agent_manager.list_agents()
-    except AttributeError as e:
-        raise AttributeError(
-            "The provided agent_manager does not have a list_agents() method."
-        ) from e
-    except Exception as e:
-        raise Exception(f"Failed to retrieve agents: {str(e)}") from e
-
-    if not agents:
-        return "No agents found."
-
-    lines = []
-    for agent in agents:
-        name = getattr(agent, "name", "")
-        description = getattr(agent, "description", "")
-
-        if not name:
-            # All agents should have a name
-            continue
-
-        if not description:
-            # All agents should have a description
-            continue
-
-        lines.append(f"{name}: {description}")
-
-    return "\n".join(lines)
