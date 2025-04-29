@@ -6,8 +6,6 @@ configuring models, initializing executors, and building tool registries,
 ensuring consistency between different entry points like the CLI and the server.
 """
 
-import logging
-import os
 from typing import Optional, Union
 
 from pydantic import SecretStr
@@ -24,6 +22,7 @@ from local_operator.console import VerbosityLevel
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.executor import LocalCodeExecutor
+from local_operator.logger import get_logger
 from local_operator.model.configure import (
     ModelConfiguration,
     configure_model,
@@ -32,8 +31,7 @@ from local_operator.model.configure import (
 from local_operator.operator import Operator, OperatorType
 from local_operator.tools import ToolRegistry
 
-logger = logging.getLogger(__name__)
-logger.setLevel(os.getenv("LOG_LEVEL", logging.WARNING))
+logger = get_logger()
 
 
 def build_tool_registry(
