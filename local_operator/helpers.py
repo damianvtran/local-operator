@@ -421,6 +421,8 @@ def get_posix_shell_path() -> str | None:
         logger.debug("Not on POSIX system, skipping shell PATH retrieval.")
         return None
 
+    shell_path = None
+    command = None
     try:
         # Determine the default shell, preferring SHELL env var if set
         # Default to /bin/zsh on Darwin (macOS), /bin/bash otherwise
@@ -479,13 +481,14 @@ def get_posix_shell_path() -> str | None:
         # This occurs if the specified shell_path does not exist
         logger.error(
             "Shell executable not found at '%s'. Cannot get PATH from login shell.",
-            shell_path,
+            shell_path if shell_path is not None else "<unknown>",
         )
         return None
     except subprocess.CalledProcessError as e:
         # This occurs if the shell command returns a non-zero exit code
         logger.error(
-            f"Failed to get PATH from login shell. Command '{command}' "
+            "Failed to get PATH from login shell. Command "
+            f"'{command if command is not None else '<unknown>'}' "
             f"failed with error code {e.returncode}."
         )
         logger.error(f"Stderr: {e.stderr.strip()}")
@@ -542,6 +545,7 @@ def setup_cross_platform_environment():
         test_command = "choco"
 
     if test_command:
+        which_cmd = None
         try:
             which_cmd = "where" if os_name == "Windows" else "which"
             logger.debug(
@@ -564,6 +568,9 @@ def setup_cross_platform_environment():
                     logger.warning(f"'{which_cmd}' stderr: {result.stderr.strip()}")
         except FileNotFoundError:
             # This happens if 'which' or 'where' itself is not found (highly unlikely)
-            logger.warning(f"'{which_cmd}' command not found. Cannot verify test command location.")
+            logger.warning(
+                f"'{which_cmd if which_cmd is not None else '<unknown>'}' command not found. "
+                "Cannot verify test command location."
+            )
         except Exception as e:
             logger.error(f"Error during verification step trying to find '{test_command}': {e}")
