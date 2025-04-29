@@ -1673,9 +1673,11 @@ class LocalCodeExecutor:
 
                     execution_result = await self.delegate_to_agent(agent, message)
 
-                    return ProcessResponseOutput(
-                        status=ProcessResponseStatus.SUCCESS,
-                        message=execution_result.message,
+                    print_execution_section(
+                        ExecutionSection.RESULT,
+                        content=execution_result.message,
+                        action=response.action,
+                        verbosity_level=self.verbosity_level,
                     )
 
                 if response.action == ActionType.WRITE:
