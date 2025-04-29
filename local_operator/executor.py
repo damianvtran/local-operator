@@ -1670,6 +1670,23 @@ class LocalCodeExecutor:
                         raise RuntimeError(
                             "No delegate_callback set on executor for DELEGATE action"
                         )
+
+                    await self.update_job_execution_state(
+                        CodeExecutionResult(
+                            status=ProcessResponseStatus.IN_PROGRESS,
+                            message="Delegating the task to another agent",
+                            role=ConversationRole.ASSISTANT,
+                            execution_type=ExecutionType.ACTION,
+                            stdout="",
+                            stderr="",
+                            logging="",
+                            formatted_print="",
+                            code="",
+                            files=[],
+                            action=response.action,
+                        )
+                    )
+
                     return await self.delegate_callback(agent, message)
 
                 if response.action == ActionType.WRITE:
