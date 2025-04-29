@@ -810,7 +810,7 @@ ASK usage guidelines:
 PlanSystemPrompt: str = """
 ## Goal Planning
 
-Given the above information about how you will need to operate in execution mode, think aloud about what you will need to do.  What tools do you need to use, which files do you need to read, what websites do you need to visit, etc.  What information do you already have from previous steps that you can use to complete the task?  Be specific.  What is the best final format to present the information?  Do not ask questions back to the user in the planning message as the user will not be directly responding to it.
+Given the above information about how you will need to operate in execution mode, think aloud about what you will need to do.  What tools do you need to use, which files do you need to read, what websites do you need to visit, etc.  What information do you already have from previous steps that you can use to complete the task?  Is there another Local Operator agent that is potentially better suited to complete parts of the task? Be specific.  What is the best final format to present the information?  Do not ask questions back to the user in the planning message as the user will not be directly responding to it.
 
 This information will be kept available to you for the duration of the task, so make it specific, detailed, and useful enough for you to use later as you complete more and more steps for the task.
 
@@ -818,7 +818,7 @@ Respond in natural language, without XML tags or code.  Do not include any code 
 """  # noqa: E501
 
 PlanUserPrompt: str = """
-Given the above information about how you will need to operate in execution mode, think aloud about what you will need to do.  What tools do you need to use, which files do you need to read, what websites do you need to visit, etc.  What information do you already have from previous steps that you can use to complete the task?  Be specific.
+Given the above information about how you will need to operate in execution mode, think aloud about what you will need to do.  What tools do you need to use, which files do you need to read, what websites do you need to visit, etc.  What information do you already have from previous steps that you can use to complete the task?  Be specific.  Is there another Local Operator agent that is potentially better suited to complete parts of the task?
 
 Respond in natural language, without XML tags or code.  Do not include any code here or markdown code formatting, you will do that after you plan.
 
@@ -941,9 +941,7 @@ Make sure to follow the format exactly.  Any incorrect fields will cause parsing
 For CODE actions, you may need to revise or clean up the code before you return it in the JSON response.  Notably, look out for the following issues and revise them:
 - Indentation errors
 - Using asyncio.run(): just await the coroutines directly since the code executor already executes in an asyncio run context
-- Attempting to show plots instead of saving them to a file.  The user cannot see
-  the plots, so they must be saved to a file and you must provide the file paths
-  in the mentioned_files field.
+- Attempting to show plots instead of saving them to a file.  The user cannot see the plots, so they must be saved to a file and you must provide the file paths in the mentioned_files field.
 - Attempting to print a variable without print(), in the code executor, unlike in the python interpreter, variables are not printed if they are not explicitly printed.
 - Attempting to use a tool incorrectly, or not invoking it correctly.
 
@@ -970,11 +968,9 @@ Particularly, make sure that tools that don't return a coroutine are not awaited
 
 JsonResponseFormatSchema: str = """
 {
-  "learnings": "I learned about this new content that I found from the web.  It will be
-  useful for the user to know this because of x reason.",
+  "learnings": "I learned about this new content that I found from the web. It will be useful for the user to know this because of x reason.",
   "response": "Reading data from the file and printing the first few rows.",
-  "code": "import pandas as pd\n\n# Read the data from the file\ndf =
-  pd.read_csv('data.csv')\n\n# Print the first few rows of the data\nprint(df.head())",
+  "code": "import pandas as pd\n\n# Read the data from the file\ndf = pd.read_csv('data.csv')\n\n# Print the first few rows of the data\nprint(df.head())",
   "content": "Content to write to a file.",
   "file_path": "relative/path/to/file.txt",
   "mentioned_files": ["relative/path/to/file.txt", "relative/path/to/file2.csv"],
@@ -988,9 +984,11 @@ JsonResponseFormatSchema: str = """
       "replace": "new_content"
     }
   ],
-  "action": "CODE"
+  "action": "CODE",
+  "agent": "Agent Name",
+  "message": "message to delegate to the agent"
 }
-"""
+"""  # noqa: E501
 
 
 SafetyCheckSystemPrompt: str = """
