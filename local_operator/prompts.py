@@ -741,6 +741,25 @@ EDIT usage guidelines:
 - Do not duplicate headers in the replacements.  If you are replacing placeholders, make sure that you pay attention to the other text around the placeholder and don't repeat content that is already present in the file.  For example, if there is a header and then placeholder, don't include the header again in the replacements as it is already above the placeholder.
 - If you have enough information to make multiple edits in a file at a time, you should do so instead of editing one at a time to be less expensive and more efficient.
 
+#### Example for DELEGATE:
+
+<action_response>
+<action>DELEGATE</action>
+
+<agent>
+Agent Name
+</agent>
+
+<message>
+This is the message to delegate to the agent.
+</message>
+</action_response>
+
+DELEGATE usage guidelines:
+- Determine if there is an agent that is best suited to handle the current task.  Only use DELEGATE if there is an agent with a description that identifies them as potentially having some relevant skills or knowledge to help with the task.
+- Make sure that the agent name matches the name of an agent in the available agents list.
+- The message should be a detailed description of the task that you want the agent to complete.  Make sure you include all relevant information from your conversation with the user so that the agent has important context to complete the task.  It will not have context without you providing relevant details in the message.
+
 #### Example for DONE:
 
 <action_response>
@@ -843,8 +862,8 @@ You must reinterpret the agent's response purely in JSON format with the followi
 - file_path: The path to the file that the agent has read/wrote/edited.  An empty string if the action is not READ/WRITE/EDIT.
 - mentioned_files: The files that the agent is referencing in CODE that the user should be able to see.  Include the paths to the files as mentioned in the code.  Make sure that all the files are included in the list, otherwise the user will not be able to see them.  If there are file names that are programatically assigned,  infer the values accurately based on the code and include them in the list as well.  If the files are generated in code, you will need to review the way that the filenames are created from the variables and include them in the list as well so that the user can see them.  Make sure that all files here are valid addresses to a file on the user's computer or a resource on the internet.  Do not include incorrect file paths or invalid names, or names that are not files.  An empty list if there are no files referenced in the code or if the action is not CODE.
 - replacements: The replacements that the agent has made to a file.  This field must be non-empty for EDIT actions and an empty list otherwise.  Be careful to double-check and proofread the diffs that the agent is requesting and properly convert them into the correct find and replace values, escaping any quotes or special characters that will cause JSON parsing errors.  Make sure to replace the entire contents with the new contents properly and don't duplicate the old contents or create any unclean edits.
-- agent: The name of the agent to delegate to.
-- prom
+- agent: The name of the agent to delegate to.  An empty string if the action is not DELEGATE.  Only use this if the action is DELEGATE.
+- message: The message to delegate to the agent.  An empty string if the action is not DELEGATE.  Only use this if the action is DELEGATE.
 </action_json_fields>
 
 Do not include any other text or formatting in your response outside of the JSON object.  Make sure to properly escape any quotes in the JSON object so that it is valid JSON.
