@@ -12,7 +12,6 @@ from langchain_core.messages import BaseMessage
 from pydantic import ValidationError
 
 from local_operator.agents import AgentData, AgentRegistry
-from local_operator.bootstrap import initialize_operator
 from local_operator.config import ConfigManager
 from local_operator.console import (
     VerbosityLevel,
@@ -1222,6 +1221,8 @@ class Operator:
         Returns:
             ProcessResponseOutput: The result of the delegated agent's response.
         """
+        # Import locally to avoid circular import
+        from local_operator.bootstrap import initialize_operator
 
         # Find the agent by name in the registry
         agent = None

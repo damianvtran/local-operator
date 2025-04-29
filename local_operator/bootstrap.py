@@ -275,8 +275,8 @@ def initialize_operator(
         current_agent=current_agent,
         auto_save_conversation=auto_save_conversation,
         verbosity_level=verbosity_level,
-        # Aligning persist_agent_conversation with persist_conversation for now
         persist_agent_conversation=persist_conversation,
+        env_config=env_config,
     )
     logger.info(
         f"Operator instance created. Type: {operator.type.name}, "
