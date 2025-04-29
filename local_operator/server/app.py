@@ -5,8 +5,6 @@ Provides REST endpoints for interacting with the Local Operator agent
 through HTTP requests instead of CLI.
 """
 
-import logging
-import os
 from contextlib import asynccontextmanager
 from importlib.metadata import version
 from pathlib import Path
@@ -20,6 +18,7 @@ from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config
 from local_operator.helpers import setup_cross_platform_environment
 from local_operator.jobs import JobManager
+from local_operator.logger import get_logger
 from local_operator.server.routes import (
     agents,
     chat,
@@ -33,22 +32,7 @@ from local_operator.server.routes import (
 )
 from local_operator.server.utils.websocket_manager import WebSocketManager
 
-ENV_LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-
-LOG_LEVELS = {
-    "DEBUG": logging.DEBUG,
-    "INFO": logging.INFO,
-    "WARNING": logging.WARNING,
-    "ERROR": logging.ERROR,
-    "CRITICAL": logging.CRITICAL,
-}
-
-if ENV_LOG_LEVEL not in LOG_LEVELS:
-    print(f"Invalid log level: {ENV_LOG_LEVEL}, using INFO")
-    ENV_LOG_LEVEL = "INFO"
-
-logging.basicConfig(level=LOG_LEVELS[ENV_LOG_LEVEL])
-logger = logging.getLogger("local_operator.server")
+logger = get_logger("local_operator.server")
 
 
 @asynccontextmanager

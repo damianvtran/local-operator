@@ -38,19 +38,27 @@ def _get_log_level() -> int:
 def _configure_logging(level: int) -> None:
     """
     Configure the root logger and common third-party loggers.
+    Ensures all previous handlers are removed and the format is enforced.
     """
-    # Set up root logger
+    # Remove all handlers from the root logger to prevent duplicate/conflicting configs
+    root_logger = logging.getLogger()
+    while root_logger.handlers:
+        root_logger.handlers.pop()
+
+    # Set up root logger with centralized format
     logging.basicConfig(
         level=level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    # Set log level for requests and urllib3
-    for lib_logger in ("requests", "urllib3"):
-        logging.getLogger(lib_logger).setLevel(level)
+    # Ensure all handlers use the centralized format
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    for handler in root_logger.handlers:
+        handler.setFormatter(formatter)
 
-    # Optionally, set level for other loggers as needed
-    # Example: logging.getLogger("some_other_library").setLevel(level)
+    # Set log level for requests, urllib3, langchain, and langchain.callbacks
+    for lib_logger in ("requests", "urllib3", "langchain", "langchain.callbacks"):
+        logging.getLogger(lib_logger).setLevel(level)
 
 
 # Configure logging at import

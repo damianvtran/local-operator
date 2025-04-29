@@ -1991,7 +1991,7 @@ class LocalCodeExecutor:
         await self.update_job_execution_state(
             CodeExecutionResult(
                 status=ProcessResponseStatus.IN_PROGRESS,
-                message="Delegating the task to another agent",
+                message=f"Delegating the task to {agent_name}",
                 role=ConversationRole.ASSISTANT,
                 execution_type=ExecutionType.ACTION,
                 stdout="",
