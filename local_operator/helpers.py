@@ -429,7 +429,7 @@ def get_posix_shell_path() -> str | None:
             default_shell = "/bin/zsh"
         shell_path = os.environ.get("SHELL", default_shell)
 
-        logger.info(f"Using shell: {shell_path}")
+        logger.debug(f"Using shell: {shell_path}")
 
         # Construct the command to echo PATH from a login shell
         # Use list format for subprocess.run when shell=False is preferred,
@@ -501,7 +501,7 @@ def setup_cross_platform_environment():
     Updates the current process's PATH environment variable based on the OS.
     Call this function early in your application's startup.
     """
-    logger.info(f"Setting up subprocess environment for OS: {platform.system()}...")
+    logger.debug(f"Setting up subprocess environment for OS: {platform.system()}...")
 
     original_path = os.environ.get("PATH", "")
     logger.debug(f"Initial PATH: {original_path}")
@@ -544,7 +544,7 @@ def setup_cross_platform_environment():
     if test_command:
         try:
             which_cmd = "where" if os_name == "Windows" else "which"
-            logger.info(
+            logger.debug(
                 f"Verifying PATH: Attempting to find '{test_command}' using '{which_cmd}'..."
             )
             # Use check=False as the command might legitimately not be installed
@@ -554,7 +554,7 @@ def setup_cross_platform_environment():
             if result.returncode == 0 and result.stdout.strip():
                 # On Windows, 'where' can return multiple paths, just log the first line
                 found_path = result.stdout.strip().splitlines()[0]
-                logger.info(f"Verification successful: Found '{test_command}' at: {found_path}")
+                logger.debug(f"Verification successful: Found '{test_command}' at: {found_path}")
             else:
                 logger.warning(
                     f"Verification: Could not find '{test_command}' using '{which_cmd}'. "

@@ -138,7 +138,7 @@ def initialize_operator(
     if not model_name:
         raise ValueError("Model name is not configured.")
 
-    logger.info(
+    logger.debug(
         f"Initializing operator (Type: {operator_type.name}) with Hosting: {hosting}, "
         f"Model: {model_name}, Agent: {current_agent.name if current_agent else 'None'}"
     )
@@ -148,15 +148,15 @@ def initialize_operator(
 
     if current_agent:
         agent_state = agent_registry.load_agent_state(current_agent.id)
-        logger.info(f"Loaded state for agent: {current_agent.name} (ID: {current_agent.id})")
+        logger.debug(f"Loaded state for agent: {current_agent.name} (ID: {current_agent.id})")
 
         # Override hosting/model from agent if set
         if current_agent.hosting:
             hosting = current_agent.hosting
-            logger.info(f"Using agent's hosting override: {hosting}")
+            logger.debug(f"Using agent's hosting override: {hosting}")
         if current_agent.model:
             model_name = current_agent.model
-            logger.info(f"Using agent's model override: {model_name}")
+            logger.debug(f"Using agent's model override: {model_name}")
 
         # Load chat parameters from agent
         if current_agent.temperature is not None:
@@ -188,7 +188,7 @@ def initialize_operator(
             instruction_details=None,
             agent_system_prompt=None,
         )
-        logger.info("No agent provided, using default empty agent state.")
+        logger.debug("No agent provided, using default empty agent state.")
 
     # --- Model Configuration ---
     model_info_client: Optional[Union[OpenRouterClient, RadientClient]] = None
@@ -225,7 +225,7 @@ def initialize_operator(
     # Validate model (primarily for CLI to give early feedback)
     if operator_type == OperatorType.CLI:
         validate_model(hosting, model_name, model_configuration.api_key or SecretStr(""))
-        logger.info(f"Model {model_name} on {hosting} validated successfully.")
+        logger.debug(f"Model {model_name} on {hosting} validated successfully.")
 
     # --- Executor Initialization ---
     executor = LocalCodeExecutor(
@@ -241,7 +241,7 @@ def initialize_operator(
         persist_conversation=persist_conversation,
         job_id=job_id,
     )
-    logger.info(f"LocalCodeExecutor initialized. Can prompt user: {executor.can_prompt_user}")
+    logger.debug(f"LocalCodeExecutor initialized. Can prompt user: {executor.can_prompt_user}")
 
     # --- Tool Registry Initialization ---
     # Pass env_config to build_tool_registry
@@ -249,13 +249,13 @@ def initialize_operator(
         executor, agent_registry, config_manager, credential_manager, env_config
     )
     executor.set_tool_registry(tool_registry)
-    logger.info("ToolRegistry built and set on executor.")
+    logger.debug("ToolRegistry built and set on executor.")
 
     # Load agent state into executor *after* tool registry is set
     # (in case tools need access during loading, though unlikely)
     if agent_state:
         executor.load_agent_state(agent_state)
-        logger.info("Agent state loaded into executor.")
+        logger.debug("Agent state loaded into executor.")
 
     # --- Operator Initialization ---
     operator = Operator(
@@ -271,7 +271,7 @@ def initialize_operator(
         persist_agent_conversation=persist_conversation,
         env_config=env_config,
     )
-    logger.info(
+    logger.debug(
         f"Operator instance created. Type: {operator.type.name}, "
         f"AutoSave: {operator.auto_save_conversation}"
     )
