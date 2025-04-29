@@ -224,14 +224,8 @@ def initialize_operator(
 
     # Validate model (primarily for CLI to give early feedback)
     if operator_type == OperatorType.CLI:
-        try:
-            validate_model(hosting, model_name, model_configuration.api_key or SecretStr(""))
-            logger.info(f"Model {model_name} on {hosting} validated successfully.")
-        except ValueError as e:
-            # Log validation error but proceed; configuration might still work
-            logger.warning(f"Model validation failed: {e}")
-            # Re-raise for CLI to handle? Or just log? Let's log for now.
-            # raise e # Re-raising might prevent startup if validation is strict
+        validate_model(hosting, model_name, model_configuration.api_key or SecretStr(""))
+        logger.info(f"Model {model_name} on {hosting} validated successfully.")
 
     # --- Executor Initialization ---
     executor = LocalCodeExecutor(
