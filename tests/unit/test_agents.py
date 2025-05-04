@@ -1546,6 +1546,124 @@ def test_get_agent_system_prompt(temp_agents_dir: Path):
         registry.get_agent_system_prompt("non-existent-id")
 
 
+def test_import_agent_and_export_agent_roundtrip(temp_agents_dir: Path):
+    """Test import_agent and export_agent roundtrip."""
+    registry = AgentRegistry(temp_agents_dir)
+    # Create an agent
+    agent = registry.create_agent(
+        AgentEditFields(
+            name="ExportImportAgent",
+            security_prompt="prompt",
+            hosting="host",
+            model="model",
+            description="desc",
+            last_message="msg",
+            temperature=0.5,
+            top_p=0.9,
+            top_k=10,
+            max_tokens=100,
+            stop=["stop"],
+            frequency_penalty=0.1,
+            presence_penalty=0.2,
+            seed=123,
+            current_working_directory="/tmp",
+        )
+    )
+    # Export the agent
+    zip_path, filename = registry.export_agent(agent.id)
+    assert zip_path.exists()
+    # Import the agent (should create a new agent with a new id)
+    imported_agent = registry.import_agent(zip_path)
+    assert imported_agent.id == agent.id
+    assert imported_agent.name == agent.name
+    assert imported_agent.security_prompt == agent.security_prompt
+    assert imported_agent.model == agent.model
+    assert imported_agent.hosting == agent.hosting
+    assert imported_agent.description == agent.description
+
+
+def test_upload_agent_to_radient_new_and_overwrite(tmp_path: Path):
+    """Test upload_agent_to_radient for new and overwrite modes."""
+    from unittest.mock import MagicMock
+
+    from local_operator.agents import AgentEditFields, AgentRegistry
+
+    registry = AgentRegistry(tmp_path)
+    agent = registry.create_agent(
+        AgentEditFields(
+            name="RadientAgent",
+            security_prompt="test security prompt",
+            hosting="test-hosting",
+            model="test-model",
+            description="test description",
+            last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+    zip_path, _ = registry.export_agent(agent.id)
+
+    radient_client = MagicMock()
+    # New agent upload
+    radient_client.upload_agent_to_marketplace.return_value = "market-id"
+    result = registry.upload_agent_to_radient(radient_client, None, zip_path)
+    assert result == "market-id"
+    radient_client.upload_agent_to_marketplace.assert_called_once_with(zip_path)
+    # Overwrite agent upload
+    radient_client.reset_mock()
+    radient_client.overwrite_agent_in_marketplace.return_value = None
+    result = registry.upload_agent_to_radient(radient_client, "existing-id", zip_path)
+    assert result is None
+    radient_client.overwrite_agent_in_marketplace.assert_called_once_with("existing-id", zip_path)
+
+
+def test_download_agent_from_radient(tmp_path: Path):
+    """Test download_agent_from_radient."""
+    from unittest.mock import MagicMock
+
+    from local_operator.agents import AgentEditFields, AgentRegistry
+
+    registry = AgentRegistry(tmp_path)
+    # Prepare a zip file to simulate download
+    agent = registry.create_agent(
+        AgentEditFields(
+            name="DownloadAgent",
+            security_prompt="test security prompt",
+            hosting="test-hosting",
+            model="test-model",
+            description="test description",
+            last_message="",
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+    zip_path, _ = registry.export_agent(agent.id)
+    zip_bytes = zip_path.read_bytes()
+    # Mock radient_client
+    radient_client = MagicMock()
+
+    def fake_download(agent_id, dest_path):
+        dest_path.write_bytes(zip_bytes)
+
+    radient_client.download_agent_from_marketplace.side_effect = fake_download
+    imported_agent = registry.download_agent_from_radient(radient_client, "market-id")
+    assert imported_agent.name == "DownloadAgent"
+
+
 def test_set_agent_system_prompt(temp_agents_dir: Path):
     registry = AgentRegistry(temp_agents_dir)
     agent_name = "Test Agent"

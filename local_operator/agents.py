@@ -1216,9 +1216,7 @@ class AgentRegistry:
                     agent_data = yaml.safe_load(f)
 
                 # Create a new agent with the imported data
-                # Generate a new ID and reset the working directory
-                new_id = str(uuid.uuid4())
-                agent_data["id"] = new_id
+                agent_id = agent_data["id"]
                 agent_data["current_working_directory"] = "~/local-operator-home"
 
                 # Save the updated agent.yml
@@ -1226,9 +1224,11 @@ class AgentRegistry:
                     yaml.dump(agent_data, f, default_flow_style=False)
 
                 # Create the agent directory in the registry
-                agent_dir = self.agents_dir / new_id
-                if not agent_dir.exists():
-                    agent_dir.mkdir(parents=True, exist_ok=True)
+                agent_dir = self.agents_dir / agent_id
+                # Always overwrite the agent directory if it exists
+                if agent_dir.exists():
+                    shutil.rmtree(agent_dir)
+                agent_dir.mkdir(parents=True, exist_ok=True)
 
                 # Copy all files from the extracted directory to the agent directory
                 extracted_agent_dir = agent_yml_path.parent
@@ -1251,6 +1251,57 @@ class AgentRegistry:
                 raise ValueError("Invalid YAML in agent.yml")
             except Exception as e:
                 raise Exception(f"Error importing agent: {str(e)}")
+
+    def upload_agent_to_radient(
+        self,
+        radient_client,
+        agent_id: Optional[str],
+        zip_path: Path,
+    ) -> Optional[str]:
+        """
+        Upload an agent to the Radient marketplace.
+
+        Args:
+            radient_client: An instance of RadientClient.
+            agent_id (Optional[str]): If provided, overwrite the agent with
+            this ID. If None, create a new agent.
+            zip_path (Path): Path to the ZIP file containing agent data.
+
+        Returns:
+            Optional[str]: The new agent ID if created, or None if overwritten.
+
+        Raises:
+            RuntimeError: If the upload fails.
+        """
+        if agent_id:
+            radient_client.overwrite_agent_in_marketplace(agent_id, zip_path)
+            return None
+        else:
+            return radient_client.upload_agent_to_marketplace(zip_path)
+
+    def download_agent_from_radient(
+        self,
+        radient_client,
+        agent_id: str,
+    ) -> AgentData:
+        """
+        Download an agent from the Radient marketplace and import it.
+
+        Args:
+            radient_client: An instance of RadientClient.
+            agent_id (str): The agent ID to download.
+
+        Returns:
+            AgentData: The imported agent's metadata.
+
+        Raises:
+            RuntimeError: If the download or import fails.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_dir_path = Path(temp_dir)
+            zip_path = temp_dir_path / f"{agent_id}.zip"
+            radient_client.download_agent_from_marketplace(agent_id, zip_path)
+            return self.import_agent(zip_path)
 
     def export_agent(self, agent_id: str) -> Tuple[Path, str]:
         """
