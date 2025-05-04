@@ -414,14 +414,20 @@ def test_agents_delete_command_success(mock_agent_registry):
         seed=None,
         current_working_directory=".",
     )
+    import argparse
+
     mock_agent_registry.list_agents.return_value = [mock_agent]
-    result = agents_delete_command("TestAgent", mock_agent_registry)
+    args = argparse.Namespace(name="TestAgent", agent_id=None)
+    result = agents_delete_command(args, mock_agent_registry, Path("."))
     assert result == 0
     mock_agent_registry.delete_agent.assert_called_once_with("test-id")
 
 
 def test_agents_delete_command_not_found(mock_agent_registry):
+    import argparse
+
     mock_agent_registry.list_agents.return_value = []
-    result = agents_delete_command("NonExistentAgent", mock_agent_registry)
+    args = argparse.Namespace(name="NonExistentAgent", agent_id=None)
+    result = agents_delete_command(args, mock_agent_registry, Path("."))
     assert result == -1
     mock_agent_registry.delete_agent.assert_not_called()

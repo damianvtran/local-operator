@@ -315,6 +315,51 @@ def test_download_agent_from_marketplace_success(
     assert dest_path.read_bytes() == dummy_content
 
 
+def test_delete_agent_from_marketplace_success(radient_client: RadientClient, base_url: str):
+    """Test successful deletion of an agent from the Radient marketplace (204)."""
+    agent_id = "agent-to-delete"
+    mock_response = MagicMock()
+    mock_response.status_code = 204
+    with patch("requests.delete", return_value=mock_response) as mock_delete:
+        radient_client.delete_agent_from_marketplace(agent_id)
+    mock_delete.assert_called_once_with(
+        f"{base_url}/agents/{agent_id}",
+        headers={
+            "Authorization": "Bearer test_api_key",
+            "X-Title": "Local Operator",
+            "HTTP-Referer": "https://local-operator.com",
+        },
+    )
+
+
+def test_delete_agent_from_marketplace_error_response(radient_client: RadientClient, base_url: str):
+    """Test error response (non-204) when deleting an agent from Radient."""
+    agent_id = "bad-agent"
+    mock_response = MagicMock()
+    mock_response.status_code = 404
+    mock_response.content = b"Agent not found"
+    with patch("requests.delete", return_value=mock_response):
+        with pytest.raises(RuntimeError) as exc_info:
+            radient_client.delete_agent_from_marketplace(agent_id)
+        assert "Failed to delete agent from Radient marketplace" in str(exc_info.value)
+        assert "Agent not found" in str(exc_info.value)
+
+
+def test_delete_agent_from_marketplace_network_error(radient_client: RadientClient, base_url: str):
+    """Test network error when deleting an agent from Radient."""
+    agent_id = "network-error-agent"
+    mock_response = MagicMock()
+    mock_response.content = b"Network error"
+    mock_delete = MagicMock(
+        side_effect=requests.exceptions.RequestException("Network error", response=mock_response)
+    )
+    with patch("requests.delete", mock_delete):
+        with pytest.raises(RuntimeError) as exc_info:
+            radient_client.delete_agent_from_marketplace(agent_id)
+        assert "Failed to delete agent from Radient marketplace" in str(exc_info.value)
+        assert "Network error" in str(exc_info.value)
+
+
 # Image Generation Tests
 
 
