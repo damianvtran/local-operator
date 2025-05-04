@@ -5,6 +5,7 @@ This module contains the FastAPI route handlers for agent-related endpoints.
 """
 
 import logging
+import os
 import shutil
 import tempfile
 import zipfile
@@ -464,8 +465,6 @@ async def upload_agent_to_radient(
     Upload (push) the agent with the given ID to the Radient agents marketplace.
     Requires RADIENT_API_KEY.
     """
-    import os
-
     try:
         # Get config and credentials
         config_dir = FilePath(os.path.expanduser("~/.local-operator"))
@@ -556,8 +555,6 @@ async def download_agent_from_radient(
     """
     Download (pull) an agent from the Radient agents marketplace by agent ID.
     """
-    import os
-
     try:
         # Get config (no API key required for download)
         config_dir = FilePath(os.path.expanduser("~/.local-operator"))
