@@ -675,3 +675,36 @@ class RadientClient:
             ) from e
         except Exception as e:
             raise RuntimeError(f"Failed to list search providers: {str(e)}") from e
+
+    def delete_agent_from_marketplace(self, agent_id: str) -> None:
+        """
+        Delete an agent from the Radient marketplace by ID.
+
+        Args:
+            agent_id (str): The agent ID to delete.
+
+        Raises:
+            RuntimeError: If the API key is not set or the delete fails.
+        """
+        url = f"{self.base_url}/agents/{agent_id}"
+        headers = self._get_headers(content_type=None, require_api_key=True)
+        try:
+            response = requests.delete(url, headers=headers)
+            if response.status_code == 204:
+                return
+            # If not 204, try to extract error details
+            error_body = response.content.decode() if response.content else "No response body"
+            raise RuntimeError(
+                f"Failed to delete agent from Radient marketplace: HTTP {response.status_code}, "
+                f"Response Body: {error_body}"
+            )
+        except requests.exceptions.RequestException as e:
+            error_body = (
+                e.response.content.decode()
+                if hasattr(e, "response") and e.response
+                else "No response body"
+            )
+            raise RuntimeError(
+                f"Failed to delete agent from Radient marketplace: {str(e)}, "
+                f"Response Body: {error_body}"
+            ) from e
