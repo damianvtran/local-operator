@@ -103,10 +103,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "google",
             "mistral",
             "openrouter",
+            "xai",
             "test",
         ],
         help="Hosting platform to use (radient, deepseek, openai, anthropic, ollama, kimi, "
-        "alibaba, google, mistral, test, openrouter)",
+        "alibaba, google, mistral, test, openrouter, xai)",
     )
     parser.add_argument(
         "--model",
@@ -140,7 +141,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     credential_key_help = (
         "Credential key to manage (e.g., RADIENT_API_KEY,DEEPSEEK_API_KEY, OPENAI_API_KEY, "
         "ANTHROPIC_API_KEY, KIMI_API_KEY, ALIBABA_CLOUD_API_KEY, GOOGLE_AI_STUDIO_API_KEY, "
-        "MISTRAL_API_KEY, OPENROUTER_API_KEY)"
+        "MISTRAL_API_KEY, OPENROUTER_API_KEY, XAI_API_KEY)"
     )
 
     credential_update_parser.add_argument("key", type=str, help=credential_key_help)
