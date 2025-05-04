@@ -6,6 +6,7 @@ creating, updating, deleting, and listing agents.
 """
 
 from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -1296,3 +1297,278 @@ async def test_update_agent_system_prompt_validation_error(
     )
 
     assert response.status_code == 422  # Validation error
+
+
+@pytest.mark.asyncio
+async def test_upload_agent_to_radient_success(test_app_client, dummy_registry: AgentRegistry):
+    """
+    Test successful upload of an agent to the Radient marketplace.
+
+    Args:
+        test_app_client: The test HTTP client.
+        dummy_registry: The agent registry fixture.
+
+    Raises:
+        AssertionError: If the response does not indicate success.
+    """
+    # Create a test agent
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="Radient Upload Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description="Test agent for Radient upload",
+            last_message=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+    agent_id = agent.id
+
+    # Patch credential and config managers, and upload method
+    with (
+        patch("local_operator.server.routes.agents.CredentialManager") as mock_cred_mgr,
+        patch("local_operator.server.routes.agents.ConfigManager") as mock_cfg_mgr,
+        patch("local_operator.server.routes.agents.RadientClient") as mock_radient_client,
+        patch.object(dummy_registry, "export_agent", return_value=(MagicMock(), None)),
+        patch.object(
+            dummy_registry, "upload_agent_to_radient", return_value={"agent_id": agent_id}
+        ),
+    ):
+
+        mock_cred_mgr.return_value.get_credential.return_value = "dummy-api-key"
+        mock_cfg_mgr.return_value.get_config_value.return_value = "https://api.radienthq.com"
+        mock_radient_client.return_value = MagicMock()
+
+        response = await test_app_client.post(f"/v1/agents/{agent_id}/upload")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("status") == 200
+    assert data.get("message") == "Agent uploaded to Radient successfully"
+    assert data.get("result", {}).get("agent_id") == agent_id
+
+
+@pytest.mark.asyncio
+async def test_upload_agent_to_radient_missing_api_key(
+    test_app_client, dummy_registry: AgentRegistry
+):
+    """
+    Test upload to Radient fails with missing RADIENT_API_KEY.
+
+    Args:
+        test_app_client: The test HTTP client.
+        dummy_registry: The agent registry fixture.
+
+    Raises:
+        AssertionError: If the response does not indicate unauthorized.
+    """
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="Radient Upload Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description="Test agent for Radient upload",
+            last_message=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+    agent_id = agent.id
+
+    with (
+        patch("local_operator.server.routes.agents.CredentialManager") as mock_cred_mgr,
+        patch("local_operator.server.routes.agents.ConfigManager") as mock_cfg_mgr,
+    ):
+        mock_cred_mgr.return_value.get_credential.return_value = None
+        mock_cfg_mgr.return_value.get_config_value.return_value = "https://api.radienthq.com"
+
+        response = await test_app_client.post(f"/v1/agents/{agent_id}/upload")
+
+    assert response.status_code == 401 or response.status_code == 400
+    data = response.json()
+    # Accept either 401 or 400 for missing API key, depending on implementation
+    assert (
+        "RADIENT_API_KEY is required" in data.get("detail", "")
+        or "Missing RADIENT_API_KEY" in data.get("detail", "")
+        or "Missing required credential" in data.get("detail", "")
+    )
+
+
+@pytest.mark.asyncio
+async def test_upload_agent_to_radient_agent_not_found(
+    test_app_client, dummy_registry: AgentRegistry
+):
+    """
+    Test upload to Radient fails if agent does not exist.
+
+    Args:
+        test_app_client: The test HTTP client.
+        dummy_registry: The agent registry fixture.
+
+    Raises:
+        AssertionError: If the response does not indicate not found.
+    """
+    non_existent_id = "nonexistent"
+    with (
+        patch("local_operator.server.routes.agents.CredentialManager") as mock_cred_mgr,
+        patch("local_operator.server.routes.agents.ConfigManager") as mock_cfg_mgr,
+    ):
+        mock_cred_mgr.return_value.get_credential.return_value = "dummy-api-key"
+        mock_cfg_mgr.return_value.get_config_value.return_value = "https://api.radienthq.com"
+
+        response = await test_app_client.post(f"/v1/agents/{non_existent_id}/upload")
+
+    assert response.status_code == 404
+    data = response.json()
+    assert (
+        f"Agent with ID {non_existent_id} not found" in data.get("detail", "")
+        or "not found" in data.get("detail", "").lower()
+    )
+
+
+@pytest.mark.asyncio
+async def test_upload_agent_to_radient_error(test_app_client, dummy_registry: AgentRegistry):
+    """
+    Test upload to Radient fails with an internal error.
+
+    Args:
+        test_app_client: The test HTTP client.
+        dummy_registry: The agent registry fixture.
+
+    Raises:
+        AssertionError: If the response does not indicate a bad request.
+    """
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="Radient Upload Agent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description="Test agent for Radient upload",
+            last_message=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+    agent_id = agent.id
+
+    with (
+        patch("local_operator.server.routes.agents.CredentialManager") as mock_cred_mgr,
+        patch("local_operator.server.routes.agents.ConfigManager") as mock_cfg_mgr,
+        patch.object(dummy_registry, "export_agent", return_value=(MagicMock(), None)),
+        patch.object(
+            dummy_registry, "upload_agent_to_radient", side_effect=Exception("Upload failed")
+        ),
+    ):
+        mock_cred_mgr.return_value.get_credential.return_value = "dummy-api-key"
+        mock_cfg_mgr.return_value.get_config_value.return_value = "https://api.radienthq.com"
+
+        response = await test_app_client.post(f"/v1/agents/{agent_id}/upload")
+
+    assert response.status_code == 400 or response.status_code == 500
+    data = response.json()
+    assert "Error uploading agent to Radient" in data.get(
+        "detail", ""
+    ) or "Upload failed" in data.get("detail", "")
+
+
+@pytest.mark.asyncio
+async def test_download_agent_from_radient_success(test_app_client, dummy_registry: AgentRegistry):
+    """
+    Test successful download of an agent from the Radient marketplace.
+
+    Args:
+        test_app_client: The test HTTP client.
+        dummy_registry: The agent registry fixture.
+
+    Raises:
+        AssertionError: If the response does not indicate success.
+    """
+    agent_id = "radient-agent-123"
+    mock_agent = MagicMock()
+    mock_agent.model_dump.return_value = {
+        "id": "imported-agent-123",
+        "name": "Imported Agent",
+        "created_date": "2024-01-01T00:00:00",
+        "version": "0.2.16",
+        "security_prompt": "Example security prompt",
+        "hosting": "openrouter",
+        "model": "openai/gpt-4o-mini",
+        "description": "An imported agent",
+        "last_message": "",
+        "last_message_datetime": "2024-01-01T00:00:00",
+    }
+
+    with (
+        patch("local_operator.server.routes.agents.ConfigManager") as mock_cfg_mgr,
+        patch("local_operator.server.routes.agents.RadientClient") as mock_radient_client,
+        patch.object(dummy_registry, "download_agent_from_radient", return_value=mock_agent),
+    ):
+        mock_cfg_mgr.return_value.get_config_value.return_value = "https://api.radienthq.com"
+        mock_radient_client.return_value = MagicMock()
+
+        response = await test_app_client.get(f"/v1/agents/{agent_id}/download")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("status") == 200
+    assert data.get("message") == "Agent downloaded from Radient successfully"
+    result = data.get("result")
+    assert result["id"] == "imported-agent-123"
+    assert result["name"] == "Imported Agent"
+
+
+@pytest.mark.asyncio
+async def test_download_agent_from_radient_error(test_app_client, dummy_registry: AgentRegistry):
+    """
+    Test download from Radient fails with an internal error.
+
+    Args:
+        test_app_client: The test HTTP client.
+        dummy_registry: The agent registry fixture.
+
+    Raises:
+        AssertionError: If the response does not indicate a bad request.
+    """
+    agent_id = "radient-agent-123"
+    with (
+        patch("local_operator.server.routes.agents.ConfigManager") as mock_cfg_mgr,
+        patch("local_operator.server.routes.agents.RadientClient") as mock_radient_client,
+        patch.object(
+            dummy_registry, "download_agent_from_radient", side_effect=Exception("Download failed")
+        ),
+    ):
+        mock_cfg_mgr.return_value.get_config_value.return_value = "https://api.radienthq.com"
+        mock_radient_client.return_value = MagicMock()
+
+        response = await test_app_client.get(f"/v1/agents/{agent_id}/download")
+
+    assert response.status_code == 400 or response.status_code == 500
+    data = response.json()
+    assert "Error downloading agent from Radient" in data.get(
+        "detail", ""
+    ) or "Download failed" in data.get("detail", "")
