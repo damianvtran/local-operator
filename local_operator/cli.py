@@ -30,6 +30,7 @@ import uvicorn
 from local_operator.agents import AgentData  # Import AgentData type
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.bootstrap import initialize_operator  # Import the new function
+from local_operator.clients.radient import RadientClient
 from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel  # Import VerbosityLevel
 from local_operator.credentials import CredentialManager
@@ -219,6 +220,31 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "name",
         type=str,
         help="Name of the agent to delete",
+    )
+    # Push command
+    push_parser = agents_subparsers.add_parser(
+        "push", help="Push (upload) an agent to Radient", parents=[parent_parser]
+    )
+    push_group = push_parser.add_mutually_exclusive_group(required=True)
+    push_group.add_argument(
+        "--name",
+        type=str,
+        help="Name of the agent to push to Radient",
+    )
+    push_group.add_argument(
+        "--id",
+        type=str,
+        help="ID of the agent to push to Radient (explicit overwrite)",
+    )
+    # Pull command
+    pull_parser = agents_subparsers.add_parser(
+        "pull", help="Pull (download) an agent from Radient", parents=[parent_parser]
+    )
+    pull_parser.add_argument(
+        "--id",
+        type=str,
+        required=True,
+        help="ID of the agent to pull from Radient",
     )
 
     # Serve command to start the API server
@@ -520,6 +546,78 @@ def main() -> int:
                 return agents_create_command(args.name, agent_registry)
             elif args.agents_command == "delete":
                 return agents_delete_command(args.name, agent_registry)
+            elif args.agents_command == "push":
+                # Push agent to Radient
+                credential_manager = CredentialManager(config_dir)
+                api_key = credential_manager.get_credential("RADIENT_API_KEY")
+                if not api_key:
+                    print(
+                        "\n\033[1;31mError: RADIENT_API_KEY is required to push to Radient\033[0m"
+                    )
+                    return -1
+                config_manager = ConfigManager(config_dir)
+                base_url = config_manager.get_config_value(
+                    "radient_base_url", "https://api.radienthq.com"
+                )
+                radient_client = RadientClient(api_key=api_key, base_url=base_url)
+                # Support push by name or id
+                agent = None
+                agent_id_to_overwrite = None
+                if getattr(args, "name", None):
+                    agent = agent_registry.get_agent_by_name(args.name)
+                    if not agent:
+                        print(f"\n\033[1;31mError: No agent found with name: {args.name}\033[0m")
+                        return -1
+                elif getattr(args, "id", None):
+                    try:
+                        agent = agent_registry.get_agent(args.id)
+                        agent_id_to_overwrite = args.id
+                    except KeyError:
+                        print(f"\n\033[1;31mError: No agent found with ID: {args.id}\033[0m")
+                        return -1
+                else:
+                    print("\n\033[1;31mError: Must provide --name or --id for push\033[0m")
+                    return -1
+                zip_path, _ = agent_registry.export_agent(agent.id)
+                try:
+                    agent_id = agent_registry.upload_agent_to_radient(
+                        radient_client, agent_id_to_overwrite, zip_path
+                    )
+                    if agent_id_to_overwrite:
+                        print(
+                            f"\n\033[1;32mSuccessfully pushed agent '{agent.name}' as "
+                            f"overwrite to Radient (ID: {agent_id_to_overwrite})\033[0m"
+                        )
+                    else:
+                        print(
+                            f"\n\033[1;32mSuccessfully pushed agent '{agent.name}' to Radient. "
+                            f"New agent ID: {agent_id}\033[0m"
+                        )
+                    return 0
+                except Exception as e:
+                    print(f"\n\033[1;31mError pushing agent to Radient: {e}\033[0m")
+                    return -1
+            elif args.agents_command == "pull":
+                # Pull agent from Radient
+                agent_id = args.id
+                # Get Radient base URL from config or use default
+                config_manager = ConfigManager(config_dir)
+                base_url = config_manager.get_config_value(
+                    "radient_base_url", "https://api.radientlabs.ai"
+                )
+                radient_client = RadientClient(api_key=None, base_url=base_url)
+                try:
+                    imported_agent = agent_registry.download_agent_from_radient(
+                        radient_client, agent_id
+                    )
+                    print(
+                        f"\n\033[1;32mSuccessfully pulled agent '{imported_agent.name}' "
+                        f"(ID: {imported_agent.id}) from Radient\033[0m"
+                    )
+                    return 0
+                except Exception as e:
+                    print(f"\n\033[1;31mError pulling agent from Radient: {e}\033[0m")
+                    return -1
             else:
                 parser.error(f"Invalid agents command: {args.agents_command}")
         elif args.subcommand == "serve":
