@@ -27,6 +27,7 @@ from local_operator.model.registry import (
     ollama_default_model_info,
     openai_models,
     qwen_models,
+    xai_models,
 )
 from local_operator.server.dependencies import get_credential_manager, get_env_config
 from local_operator.server.models.schemas import (
@@ -318,6 +319,16 @@ async def list_models(
                     )
             elif provider_detail.id == "alibaba":
                 for model_name, model_info in qwen_models.items():
+                    models.append(
+                        ModelEntry(
+                            id=model_name,
+                            name=model_info.name,
+                            provider=provider_detail.id,
+                            info=model_info,
+                        )
+                    )
+            elif provider_detail.id == "xai":
+                for model_name, model_info in xai_models.items():
                     models.append(
                         ModelEntry(
                             id=model_name,
