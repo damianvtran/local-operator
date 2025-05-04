@@ -69,7 +69,7 @@ async def test_import_agent_success(test_app_client, dummy_registry: AgentRegist
 
     # Verify the agent was created with a new ID and the correct working directory
     result = data["result"]
-    assert result["id"] != "old-id"
+    assert result["id"] == "old-id"
     assert result["name"] == "Test Import Agent"
     assert result["current_working_directory"] == "~/local-operator-home"
 
@@ -253,6 +253,7 @@ async def test_import_export_roundtrip(test_app_client, dummy_registry: AgentReg
 
     # Verify the imported agent has the same data (except ID and working directory)
     imported_agent = dummy_registry.get_agent(imported_agent_id)
+    assert imported_agent.id == original_agent.id
     assert imported_agent.name == original_agent.name
     assert imported_agent.description == original_agent.description
     assert imported_agent.security_prompt == original_agent.security_prompt
