@@ -1350,7 +1350,7 @@ async def test_update_agent_system_prompt_validation_error(
 @pytest.mark.asyncio
 async def test_upload_agent_to_radient_success(test_app_client, dummy_registry: AgentRegistry):
     """
-    Test successful upload of an agent to the Radient marketplace.
+    Test successful upload of an agent to the Radient Agent Hub.
 
     Args:
         test_app_client: The test HTTP client.
@@ -1558,7 +1558,7 @@ async def test_upload_agent_to_radient_error(test_app_client, dummy_registry: Ag
 @pytest.mark.asyncio
 async def test_download_agent_from_radient_success(test_app_client, dummy_registry: AgentRegistry):
     """
-    Test successful download of an agent from the Radient marketplace.
+    Test successful download of an agent from the Radient Agent Hub.
 
     Args:
         test_app_client: The test HTTP client.

@@ -1288,7 +1288,7 @@ class AgentRegistry:
         zip_path: Path,
     ) -> Optional[str]:
         """
-        Upload an agent to the Radient marketplace.
+        Upload an agent to the Radient Agent Hub.
 
         Args:
             radient_client: An instance of RadientClient.
@@ -1328,7 +1328,7 @@ class AgentRegistry:
         agent_id: str,
     ) -> AgentData:
         """
-        Download an agent from the Radient marketplace and import it.
+        Download an agent from the Radient Agent Hub and import it.
 
         Args:
             radient_client: An instance of RadientClient.

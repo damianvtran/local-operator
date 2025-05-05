@@ -316,7 +316,7 @@ def test_download_agent_from_marketplace_success(
 
 
 def test_delete_agent_from_marketplace_success(radient_client: RadientClient, base_url: str):
-    """Test successful deletion of an agent from the Radient marketplace (204)."""
+    """Test successful deletion of an agent from the Radient Agent Hub (204)."""
     agent_id = "agent-to-delete"
     mock_response = MagicMock()
     mock_response.status_code = 204
@@ -341,7 +341,7 @@ def test_delete_agent_from_marketplace_error_response(radient_client: RadientCli
     with patch("requests.delete", return_value=mock_response):
         with pytest.raises(RuntimeError) as exc_info:
             radient_client.delete_agent_from_marketplace(agent_id)
-        assert "Failed to delete agent from Radient marketplace" in str(exc_info.value)
+        assert "Failed to delete agent from Radient Agent Hub" in str(exc_info.value)
         assert "Agent not found" in str(exc_info.value)
 
 
@@ -356,7 +356,7 @@ def test_delete_agent_from_marketplace_network_error(radient_client: RadientClie
     with patch("requests.delete", mock_delete):
         with pytest.raises(RuntimeError) as exc_info:
             radient_client.delete_agent_from_marketplace(agent_id)
-        assert "Failed to delete agent from Radient marketplace" in str(exc_info.value)
+        assert "Failed to delete agent from Radient Agent Hub" in str(exc_info.value)
         assert "Network error" in str(exc_info.value)
 
 

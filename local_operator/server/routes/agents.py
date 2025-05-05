@@ -423,7 +423,7 @@ async def update_agent(
 @router.post(
     "/v1/agents/{agent_id}/upload",
     response_model=CRUDResponse,
-    summary="Upload (push) an agent to Radient marketplace",
+    summary="Upload (push) an agent to Radient Agent Hub",
     description=(
         "Upload (push) the agent with the given ID to the Radient agents marketplace. "
         "Requires RADIENT_API_KEY."
@@ -507,7 +507,7 @@ async def upload_agent_to_radient(
 @router.get(
     "/v1/agents/{agent_id}/download",
     response_model=CRUDResponse[Agent],
-    summary="Download (pull) an agent from Radient marketplace",
+    summary="Download (pull) an agent from Radient Agent Hub",
     description="Download (pull) an agent from the Radient agents marketplace by agent ID.",
     openapi_extra={
         "responses": {
