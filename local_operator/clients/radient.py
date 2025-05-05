@@ -232,7 +232,7 @@ class RadientClient:
     """Client for interacting with the Radient API.
 
     This client is used to fetch model pricing information from Radient and
-    interact with the agent marketplace.
+    interact with the Radient Agent Hub.
     """
 
     def __init__(self, api_key: Optional[SecretStr], base_url: str) -> None:
@@ -279,7 +279,7 @@ class RadientClient:
 
     def upload_agent_to_marketplace(self, zip_path) -> str:
         """
-        Upload a new agent to the Radient marketplace.
+        Upload a new agent to the Radient Agent Hub.
 
         Args:
             zip_path (Path): Path to the ZIP file containing agent data.
@@ -310,7 +310,7 @@ class RadientClient:
                 else "No response body"
             )
             raise RuntimeError(
-                f"Failed to upload agent to Radient marketplace: {str(e)},"
+                f"Failed to upload agent to Radient Agent Hub: {str(e)},"
                 f"Response Body: {error_body}"
             ) from e
         finally:
@@ -318,7 +318,7 @@ class RadientClient:
 
     def overwrite_agent_in_marketplace(self, agent_id: str, zip_path) -> None:
         """
-        Overwrite an existing agent in the Radient marketplace.
+        Overwrite an existing agent in the Radient Agent Hub.
 
         Args:
             agent_id (str): The agent ID to overwrite.
@@ -340,7 +340,7 @@ class RadientClient:
                 else "No response body"
             )
             raise RuntimeError(
-                f"Failed to overwrite agent in Radient marketplace: {str(e)},"
+                f"Failed to overwrite agent in Radient Agent Hub: {str(e)},"
                 f"Response Body: {error_body}"
             ) from e
         finally:
@@ -348,7 +348,7 @@ class RadientClient:
 
     def download_agent_from_marketplace(self, agent_id: str, dest_path) -> None:
         """
-        Download an agent from the Radient marketplace.
+        Download an agent from the Radient Agent Hub.
 
         Args:
             agent_id (str): The agent ID to download.
@@ -374,13 +374,13 @@ class RadientClient:
                 else "No response body"
             )
             raise RuntimeError(
-                f"Failed to download agent from Radient marketplace: {str(e)},"
+                f"Failed to download agent from Radient Agent Hub: {str(e)},"
                 f"Response Body: {error_body}"
             ) from e
 
     def get_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
         """
-        Get agent details from the Radient marketplace by ID.
+        Get agent details from the Radient Agent Hub by ID.
 
         Args:
             agent_id (str): The agent ID to fetch.
@@ -405,13 +405,13 @@ class RadientClient:
             # For other HTTP errors, raise a runtime error
             error_body = e.response.content.decode() if e.response.content else "No response body"
             raise RuntimeError(
-                f"Failed to get agent {agent_id} from Radient marketplace: "
+                f"Failed to get agent {agent_id} from Radient Agent Hub: "
                 f"HTTP {e.response.status_code}, Response Body: {error_body}"
             ) from e
         except requests.exceptions.RequestException as e:
             # For non-HTTP request errors (e.g., connection issues)
             raise RuntimeError(
-                f"Failed to get agent {agent_id} from Radient marketplace due to a network error: "
+                f"Failed to get agent {agent_id} from Radient Agent Hub due to a network error: "
                 f"{str(e)}"
             ) from e
 
@@ -716,7 +716,7 @@ class RadientClient:
 
     def delete_agent_from_marketplace(self, agent_id: str) -> None:
         """
-        Delete an agent from the Radient marketplace by ID.
+        Delete an agent from the Radient Agent Hub by ID.
 
         Args:
             agent_id (str): The agent ID to delete.
@@ -733,7 +733,7 @@ class RadientClient:
             # If not 204, try to extract error details
             error_body = response.content.decode() if response.content else "No response body"
             raise RuntimeError(
-                f"Failed to delete agent from Radient marketplace: HTTP {response.status_code}, "
+                f"Failed to delete agent from Radient Agent Hub: HTTP {response.status_code}, "
                 f"Response Body: {error_body}"
             )
         except requests.exceptions.RequestException as e:
@@ -743,6 +743,6 @@ class RadientClient:
                 else "No response body"
             )
             raise RuntimeError(
-                f"Failed to delete agent from Radient marketplace: {str(e)}, "
+                f"Failed to delete agent from Radient Agent Hub: {str(e)}, "
                 f"Response Body: {error_body}"
             ) from e
