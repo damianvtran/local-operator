@@ -36,6 +36,8 @@ async def test_update_agent_success(test_app_client, dummy_registry: AgentRegist
             model="gpt-4",
             description="Original description",
             last_message="Original last message",
+            tags=["test-tag1", "test-tag2"],
+            categories=["test-category1", "test-category2"],
             temperature=0.2,
             top_p=0.5,
             top_k=10,
@@ -56,6 +58,8 @@ async def test_update_agent_success(test_app_client, dummy_registry: AgentRegist
         model="claude-2",
         description="New description",
         temperature=0.3,
+        tags=["test-tag3", "test-tag4"],
+        categories=["test-category3", "test-category4"],
         top_p=0.6,
         top_k=15,
         max_tokens=150,
@@ -82,6 +86,8 @@ async def test_update_agent_success(test_app_client, dummy_registry: AgentRegist
     assert result["model"] == "claude-2"
     assert result["description"] == "New description"
     assert result["last_message"] == "Original last message"
+    assert result["tags"] == ["test-tag3", "test-tag4"]
+    assert result["categories"] == ["test-category3", "test-category4"]
     assert result["temperature"] == 0.3
     assert result["top_p"] == 0.6
     assert result["top_k"] == 15
@@ -109,6 +115,8 @@ async def test_update_agent_single_field(test_app_client, dummy_registry: AgentR
             model="gpt-4",
             description=None,
             last_message=None,
+            tags=["test-tag1", "test-tag2"],
+            categories=["test-category1", "test-category2"],
             temperature=0.7,
             top_p=1.0,
             top_k=None,
@@ -130,6 +138,8 @@ async def test_update_agent_single_field(test_app_client, dummy_registry: AgentR
         description=None,
         last_message=None,
         temperature=None,
+        tags=None,
+        categories=None,
         top_p=None,
         top_k=None,
         max_tokens=None,
@@ -154,6 +164,8 @@ async def test_update_agent_single_field(test_app_client, dummy_registry: AgentR
     assert result["security_prompt"] == "Original Security"
     assert result["hosting"] == "openai"
     assert result["model"] == "gpt-4"
+    assert result["tags"] == ["test-tag1", "test-tag2"]
+    assert result["categories"] == ["test-category1", "test-category2"]
     assert result["temperature"] == 0.7
     assert result["top_p"] == 1.0
     assert result["max_tokens"] == 2048
@@ -173,6 +185,8 @@ async def test_update_agent_not_found(test_app_client, dummy_registry: AgentRegi
         description=None,
         last_message=None,
         temperature=None,
+        tags=None,
+        categories=None,
         top_p=None,
         top_k=None,
         max_tokens=None,
@@ -205,6 +219,8 @@ async def test_delete_agent_success(test_app_client, dummy_registry: AgentRegist
             model="gpt-4",
             description=None,
             last_message=None,
+            tags=["test-tag1", "test-tag2"],
+            categories=["test-category1", "test-category2"],
             temperature=0.7,
             top_p=1.0,
             top_k=None,
@@ -323,6 +339,8 @@ async def test_list_agents_pagination(test_app_client, dummy_registry: AgentRegi
                 model="gpt-4",
                 description=None,
                 last_message=None,
+                tags=["test-tag1", "test-tag2"],
+                categories=["test-category1", "test-category2"],
                 temperature=0.7,
                 top_p=1.0,
                 top_k=None,
@@ -373,6 +391,8 @@ async def test_list_agents_name_filter(test_app_client, dummy_registry: AgentReg
                 model="gpt-4",
                 description=None,
                 last_message=None,
+                tags=["test-tag1", "test-tag2"],
+                categories=["test-category1", "test-category2"],
                 temperature=0.7,
                 top_p=1.0,
                 top_k=None,
@@ -428,6 +448,8 @@ async def test_get_agent_success(test_app_client, dummy_registry: AgentRegistry)
             model="gpt-4",
             description=None,
             last_message=None,
+            tags=["test-tag1", "test-tag2"],
+            categories=["test-category1", "test-category2"],
             temperature=0.7,
             top_p=1.0,
             top_k=None,
@@ -482,6 +504,8 @@ async def test_get_agent_conversation_empty(test_app_client, dummy_registry: Age
             model="gpt-4",
             description=None,
             last_message=None,
+            tags=["test-tag1", "test-tag2"],
+            categories=["test-category1", "test-category2"],
             temperature=0.7,
             top_p=1.0,
             top_k=None,
@@ -526,6 +550,8 @@ async def test_get_agent_conversation_pagination_default(
             model="gpt-4",
             description=None,
             last_message=None,
+            tags=["test-tag1", "test-tag2"],
+            categories=["test-category1", "test-category2"],
             temperature=0.7,
             top_p=1.0,
             top_k=None,
@@ -595,6 +621,8 @@ async def test_get_agent_conversation_pagination_second_page(
             model="gpt-4",
             description=None,
             last_message=None,
+            tags=["test-tag1", "test-tag2"],
+            categories=["test-category1", "test-category2"],
             temperature=0.7,
             top_p=1.0,
             top_k=None,
@@ -664,6 +692,8 @@ async def test_get_agent_conversation_custom_per_page(
             model="gpt-4",
             description=None,
             last_message=None,
+            tags=["test-tag1", "test-tag2"],
+            categories=["test-category1", "test-category2"],
             temperature=0.7,
             top_p=1.0,
             top_k=None,
@@ -732,6 +762,8 @@ async def test_get_agent_conversation_page_out_of_bounds(
             model="gpt-4",
             description=None,
             last_message=None,
+            tags=["test-tag1", "test-tag2"],
+            categories=["test-category1", "test-category2"],
             temperature=0.7,
             top_p=1.0,
             top_k=None,
@@ -801,6 +833,8 @@ async def test_get_agent_execution_history(test_app_client, dummy_registry: Agen
             model="gpt-4",
             description=None,
             last_message=None,
+            tags=["test-tag1", "test-tag2"],
+            categories=["test-category1", "test-category2"],
             temperature=0.7,
             top_p=1.0,
             top_k=None,
@@ -875,6 +909,8 @@ async def test_get_agent_execution_history_pagination(
             model="gpt-4",
             description=None,
             last_message=None,
+            tags=["test-tag1", "test-tag2"],
+            categories=["test-category1", "test-category2"],
             temperature=0.7,
             top_p=1.0,
             top_k=None,
@@ -960,6 +996,8 @@ async def test_get_agent_execution_history_page_out_of_bounds(
             model="gpt-4",
             description=None,
             last_message=None,
+            tags=["test-tag1", "test-tag2"],
+            categories=["test-category1", "test-category2"],
             temperature=0.7,
             top_p=1.0,
             top_k=None,
@@ -1038,6 +1076,8 @@ async def test_get_agent_execution_history_empty(test_app_client, dummy_registry
             model="gpt-4",
             description=None,
             last_message=None,
+            tags=["test-tag1", "test-tag2"],
+            categories=["test-category1", "test-category2"],
             temperature=0.7,
             top_p=1.0,
             top_k=None,
@@ -1076,6 +1116,8 @@ async def test_clear_agent_conversation(test_app_client, dummy_registry: AgentRe
             model="gpt-4",
             description=None,
             last_message=None,
+            tags=["test-tag1", "test-tag2"],
+            categories=["test-category1", "test-category2"],
             temperature=0.7,
             top_p=1.0,
             top_k=None,
@@ -1162,6 +1204,8 @@ async def test_get_agent_system_prompt(test_app_client, dummy_registry: AgentReg
             model="gpt-4",
             description=None,
             last_message=None,
+            tags=None,
+            categories=None,
             temperature=0.7,
             top_p=1.0,
             top_k=None,
@@ -1212,6 +1256,8 @@ async def test_update_agent_system_prompt(test_app_client, dummy_registry: Agent
             model="gpt-4",
             description=None,
             last_message=None,
+            tags=None,
+            categories=None,
             temperature=0.7,
             top_p=1.0,
             top_k=None,
@@ -1277,6 +1323,8 @@ async def test_update_agent_system_prompt_validation_error(
             model="gpt-4",
             description=None,
             last_message=None,
+            tags=None,
+            categories=None,
             temperature=0.7,
             top_p=1.0,
             top_k=None,
@@ -1320,6 +1368,8 @@ async def test_upload_agent_to_radient_success(test_app_client, dummy_registry: 
             model="gpt-4",
             description="Test agent for Radient upload",
             last_message=None,
+            tags=None,
+            categories=None,
             temperature=0.7,
             top_p=1.0,
             top_k=None,
@@ -1336,7 +1386,7 @@ async def test_upload_agent_to_radient_success(test_app_client, dummy_registry: 
     # Patch credential and config managers, and upload method
     with (
         patch("local_operator.server.routes.agents.CredentialManager") as mock_cred_mgr,
-        patch("local_operator.server.routes.agents.ConfigManager") as mock_cfg_mgr,
+        patch("local_operator.config.ConfigManager") as mock_cfg_mgr,
         patch("local_operator.server.routes.agents.RadientClient") as mock_radient_client,
         patch.object(dummy_registry, "export_agent", return_value=(MagicMock(), None)),
         patch.object(
@@ -1379,6 +1429,8 @@ async def test_upload_agent_to_radient_missing_api_key(
             model="gpt-4",
             description="Test agent for Radient upload",
             last_message=None,
+            tags=None,
+            categories=None,
             temperature=0.7,
             top_p=1.0,
             top_k=None,
@@ -1393,13 +1445,18 @@ async def test_upload_agent_to_radient_missing_api_key(
     agent_id = agent.id
 
     with (
-        patch("local_operator.server.routes.agents.CredentialManager") as mock_cred_mgr,
-        patch("local_operator.server.routes.agents.ConfigManager") as mock_cfg_mgr,
+        patch.object(dummy_registry, "export_agent", return_value=(MagicMock(), None)),
+        patch.object(dummy_registry, "upload_agent_to_radient") as mock_upload_agent_to_radient,
     ):
-        mock_cred_mgr.return_value.get_credential.return_value = None
-        mock_cfg_mgr.return_value.get_config_value.return_value = "https://api.radienthq.com"
-
-        response = await test_app_client.post(f"/v1/agents/{agent_id}/upload")
+        # Temporarily override the app's credential_manager to simulate missing API key
+        orig_get_credential = app.state.credential_manager.get_credential
+        app.state.credential_manager.get_credential = lambda key: None
+        try:
+            response = await test_app_client.post(f"/v1/agents/{agent_id}/upload")
+            # Ensure upload_agent_to_radient is not called when API key is missing
+            mock_upload_agent_to_radient.assert_not_called()
+        finally:
+            app.state.credential_manager.get_credential = orig_get_credential
 
     assert response.status_code == 401 or response.status_code == 400
     data = response.json()
@@ -1428,7 +1485,7 @@ async def test_upload_agent_to_radient_agent_not_found(
     non_existent_id = "nonexistent"
     with (
         patch("local_operator.server.routes.agents.CredentialManager") as mock_cred_mgr,
-        patch("local_operator.server.routes.agents.ConfigManager") as mock_cfg_mgr,
+        patch("local_operator.config.ConfigManager") as mock_cfg_mgr,
     ):
         mock_cred_mgr.return_value.get_credential.return_value = "dummy-api-key"
         mock_cfg_mgr.return_value.get_config_value.return_value = "https://api.radienthq.com"
@@ -1463,6 +1520,8 @@ async def test_upload_agent_to_radient_error(test_app_client, dummy_registry: Ag
             model="gpt-4",
             description="Test agent for Radient upload",
             last_message=None,
+            tags=None,
+            categories=None,
             temperature=0.7,
             top_p=1.0,
             top_k=None,
@@ -1478,7 +1537,7 @@ async def test_upload_agent_to_radient_error(test_app_client, dummy_registry: Ag
 
     with (
         patch("local_operator.server.routes.agents.CredentialManager") as mock_cred_mgr,
-        patch("local_operator.server.routes.agents.ConfigManager") as mock_cfg_mgr,
+        patch("local_operator.config.ConfigManager") as mock_cfg_mgr,
         patch.object(dummy_registry, "export_agent", return_value=(MagicMock(), None)),
         patch.object(
             dummy_registry, "upload_agent_to_radient", side_effect=Exception("Upload failed")
@@ -1524,7 +1583,7 @@ async def test_download_agent_from_radient_success(test_app_client, dummy_regist
     }
 
     with (
-        patch("local_operator.server.routes.agents.ConfigManager") as mock_cfg_mgr,
+        patch("local_operator.config.ConfigManager") as mock_cfg_mgr,
         patch("local_operator.server.routes.agents.RadientClient") as mock_radient_client,
         patch.object(dummy_registry, "download_agent_from_radient", return_value=mock_agent),
     ):
@@ -1556,7 +1615,7 @@ async def test_download_agent_from_radient_error(test_app_client, dummy_registry
     """
     agent_id = "radient-agent-123"
     with (
-        patch("local_operator.server.routes.agents.ConfigManager") as mock_cfg_mgr,
+        patch("local_operator.config.ConfigManager") as mock_cfg_mgr,
         patch("local_operator.server.routes.agents.RadientClient") as mock_radient_client,
         patch.object(
             dummy_registry, "download_agent_from_radient", side_effect=Exception("Download failed")

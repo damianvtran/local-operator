@@ -53,6 +53,14 @@ class AgentData(BaseModel):
         "",
         description="A description of the agent.  Defaults to ''.",
     )
+    tags: List[str] = Field(
+        [],
+        description="Tags for the agent.  Defaults to an empty list.",
+    )
+    categories: List[str] = Field(
+        [],
+        description="Categories for the agent.  Defaults to an empty list.",
+    )
     last_message: str = Field(
         "",
         description="The last message sent to the agent.  Defaults to ''.",
@@ -109,6 +117,14 @@ class AgentEditFields(BaseModel):
     description: str | None = Field(
         None,
         description="A description of the agent.  Defaults to ''.",
+    )
+    tags: List[str] | None = Field(
+        None,
+        description="Tags for the agent.  Defaults to an empty list.",
+    )
+    categories: List[str] | None = Field(
+        None,
+        description="Categories for the agent.  Defaults to an empty list.",
     )
     last_message: str | None = Field(
         None,
@@ -256,6 +272,8 @@ class AgentRegistry:
             model=agent_edit_metadata.model or "",
             description=agent_edit_metadata.description or "",
             last_message=agent_edit_metadata.last_message or "",
+            tags=agent_edit_metadata.tags or [],
+            categories=agent_edit_metadata.categories or [],
             last_message_datetime=datetime.now(timezone.utc),
             temperature=agent_edit_metadata.temperature,
             top_p=agent_edit_metadata.top_p,
@@ -417,6 +435,8 @@ class AgentRegistry:
                 hosting=original_agent.hosting,
                 model=original_agent.model,
                 description=original_agent.description,
+                tags=original_agent.tags,
+                categories=original_agent.categories,
                 last_message=original_agent.last_message,
                 temperature=original_agent.temperature,
                 top_p=original_agent.top_p,
@@ -736,6 +756,8 @@ class AgentRegistry:
             description="Automatic capture of your last conversation with a Local Operator agent.",
             last_message="",
             last_message_datetime=datetime.now(timezone.utc),
+            tags=[],
+            categories=[],
             temperature=None,
             top_p=None,
             top_k=None,
@@ -1417,6 +1439,8 @@ class AgentRegistry:
                 hosting=None,
                 model=None,
                 description=None,
+                tags=None,
+                categories=None,
                 last_message=last_assistant_message,
                 temperature=None,
                 top_p=None,
