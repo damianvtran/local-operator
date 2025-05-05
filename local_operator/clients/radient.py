@@ -293,6 +293,7 @@ class RadientClient:
         url = f"{self.base_url}/agents/upload"
         headers = self._get_headers(content_type=None, require_api_key=True)
         files = {"file": (zip_path.name, open(zip_path, "rb"), "application/zip")}
+
         try:
             response = requests.post(url, headers=headers, files=files)
             response.raise_for_status()
@@ -375,6 +376,43 @@ class RadientClient:
             raise RuntimeError(
                 f"Failed to download agent from Radient marketplace: {str(e)},"
                 f"Response Body: {error_body}"
+            ) from e
+
+    def get_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get agent details from the Radient marketplace by ID.
+
+        Args:
+            agent_id (str): The agent ID to fetch.
+
+        Returns:
+            Optional[Dict[str, Any]]: The agent details as a dictionary if found,
+                                      None if the agent is not found (404).
+
+        Raises:
+            RuntimeError: If the API request fails for reasons other than 404.
+        """
+        url = f"{self.base_url}/v1/agents/{agent_id}"
+        # This is a public endpoint, no API key required
+        headers = self._get_headers(content_type="application/json", require_api_key=False)
+        try:
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+            return response.json()
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                return None  # Agent not found
+            # For other HTTP errors, raise a runtime error
+            error_body = e.response.content.decode() if e.response.content else "No response body"
+            raise RuntimeError(
+                f"Failed to get agent {agent_id} from Radient marketplace: "
+                f"HTTP {e.response.status_code}, Response Body: {error_body}"
+            ) from e
+        except requests.exceptions.RequestException as e:
+            # For non-HTTP request errors (e.g., connection issues)
+            raise RuntimeError(
+                f"Failed to get agent {agent_id} from Radient marketplace due to a network error: "
+                f"{str(e)}"
             ) from e
 
     def list_models(self) -> RadientListModelsResponse:

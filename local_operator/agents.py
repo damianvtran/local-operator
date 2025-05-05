@@ -1273,10 +1273,24 @@ class AgentRegistry:
         Raises:
             RuntimeError: If the upload fails.
         """
+        # Check if the agent exists using the provided agent_id
+        agent_exists = False
         if agent_id:
+            try:
+                existing_agent = radient_client.get_agent(agent_id)
+                if existing_agent:
+                    agent_exists = True
+            except Exception as e:
+                # Log the error but proceed as if the agent doesn't exist or cannot be verified
+                logging.error(f"Failed to check if agent {agent_id} exists on Radient: {str(e)}")
+
+        # If agent_id was provided and the agent exists, overwrite it
+        if agent_id and agent_exists:
             radient_client.overwrite_agent_in_marketplace(agent_id, zip_path)
-            return None
+            return None  # Return None when overwriting
         else:
+            # If no agent_id was provided, or if the agent_id was provided but the agent
+            # doesn't exist (or check failed), upload as a new agent
             return radient_client.upload_agent_to_marketplace(zip_path)
 
     def download_agent_from_radient(

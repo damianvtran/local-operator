@@ -5,7 +5,6 @@ This module contains the FastAPI route handlers for agent-related endpoints.
 """
 
 import logging
-import os
 import shutil
 import tempfile
 import zipfile
@@ -28,12 +27,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import ValidationError
 
 from local_operator.agents import AgentEditFields, AgentRegistry
-
-# Import RadientClient, ConfigManager, CredentialManager
 from local_operator.clients.radient import RadientClient
-from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
-from local_operator.server.dependencies import get_agent_registry
+from local_operator.env import EnvConfig, get_env_config
+from local_operator.server.dependencies import (
+    get_agent_registry,
+    get_credential_manager,
+)
 from local_operator.server.models.schemas import (
     Agent,
     AgentCreate,
@@ -460,6 +460,8 @@ async def update_agent(
 async def upload_agent_to_radient(
     agent_id: str = Path(..., description="ID of the agent to upload", examples=["agent123"]),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
+    env_config: EnvConfig = Depends(get_env_config),
+    credential_manager: CredentialManager = Depends(get_credential_manager),
 ):
     """
     Upload (push) the agent with the given ID to the Radient agents marketplace.
@@ -467,13 +469,10 @@ async def upload_agent_to_radient(
     """
     try:
         # Get config and credentials
-        config_dir = FilePath(os.path.expanduser("~/.local-operator"))
-        config_manager = ConfigManager(config_dir)
-        credential_manager = CredentialManager(config_dir)
         api_key = credential_manager.get_credential("RADIENT_API_KEY")
         if not api_key:
             raise HTTPException(status_code=401, detail="RADIENT_API_KEY is required")
-        base_url = config_manager.get_config_value("radient_base_url", "https://api.radienthq.com")
+        base_url = env_config.radient_api_base_url
         radient_client = RadientClient(api_key=api_key, base_url=base_url)
 
         # Get agent and export as zip
@@ -551,15 +550,14 @@ async def download_agent_from_radient(
         ..., description="ID of the agent to download from Radient", examples=["radient-agent-id"]
     ),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
+    env_config: EnvConfig = Depends(get_env_config),
 ):
     """
     Download (pull) an agent from the Radient agents marketplace by agent ID.
     """
     try:
-        # Get config (no API key required for download)
-        config_dir = FilePath(os.path.expanduser("~/.local-operator"))
-        config_manager = ConfigManager(config_dir)
-        base_url = config_manager.get_config_value("radient_base_url", "https://api.radienthq.com")
+        base_url = env_config.radient_api_base_url
+        # API key not required for download
         radient_client = RadientClient(api_key=None, base_url=base_url)
 
         # Download from Radient
