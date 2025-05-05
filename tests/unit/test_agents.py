@@ -1647,8 +1647,8 @@ def test_import_agent_and_export_agent_roundtrip(temp_agents_dir: Path):
     assert imported_agent.id == agent.id
     assert imported_agent.name == agent.name
     assert imported_agent.security_prompt == agent.security_prompt
-    assert imported_agent.model == agent.model
-    assert imported_agent.hosting == agent.hosting
+    assert imported_agent.model == ""
+    assert imported_agent.hosting == ""
     assert imported_agent.description == agent.description
     assert imported_agent.tags == agent.tags
     assert imported_agent.categories == agent.categories

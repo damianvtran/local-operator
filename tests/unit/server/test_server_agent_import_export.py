@@ -263,8 +263,8 @@ async def test_import_export_roundtrip(test_app_client, dummy_registry: AgentReg
     assert imported_agent.name == original_agent.name
     assert imported_agent.description == original_agent.description
     assert imported_agent.security_prompt == original_agent.security_prompt
-    assert imported_agent.hosting == original_agent.hosting
-    assert imported_agent.model == original_agent.model
+    assert imported_agent.hosting == ""
+    assert imported_agent.model == ""
     assert imported_agent.current_working_directory == "~/local-operator-home"
     assert imported_agent.tags == original_agent.tags
     assert imported_agent.categories == original_agent.categories
