@@ -53,6 +53,14 @@ class AgentData(BaseModel):
         "",
         description="A description of the agent.  Defaults to ''.",
     )
+    tags: List[str] = Field(
+        [],
+        description="Tags for the agent.  Defaults to an empty list.",
+    )
+    categories: List[str] = Field(
+        [],
+        description="Categories for the agent.  Defaults to an empty list.",
+    )
     last_message: str = Field(
         "",
         description="The last message sent to the agent.  Defaults to ''.",
@@ -109,6 +117,14 @@ class AgentEditFields(BaseModel):
     description: str | None = Field(
         None,
         description="A description of the agent.  Defaults to ''.",
+    )
+    tags: List[str] | None = Field(
+        None,
+        description="Tags for the agent.  Defaults to an empty list.",
+    )
+    categories: List[str] | None = Field(
+        None,
+        description="Categories for the agent.  Defaults to an empty list.",
     )
     last_message: str | None = Field(
         None,
@@ -256,6 +272,8 @@ class AgentRegistry:
             model=agent_edit_metadata.model or "",
             description=agent_edit_metadata.description or "",
             last_message=agent_edit_metadata.last_message or "",
+            tags=agent_edit_metadata.tags or [],
+            categories=agent_edit_metadata.categories or [],
             last_message_datetime=datetime.now(timezone.utc),
             temperature=agent_edit_metadata.temperature,
             top_p=agent_edit_metadata.top_p,
@@ -417,6 +435,8 @@ class AgentRegistry:
                 hosting=original_agent.hosting,
                 model=original_agent.model,
                 description=original_agent.description,
+                tags=original_agent.tags,
+                categories=original_agent.categories,
                 last_message=original_agent.last_message,
                 temperature=original_agent.temperature,
                 top_p=original_agent.top_p,
@@ -736,6 +756,8 @@ class AgentRegistry:
             description="Automatic capture of your last conversation with a Local Operator agent.",
             last_message="",
             last_message_datetime=datetime.now(timezone.utc),
+            tags=[],
+            categories=[],
             temperature=None,
             top_p=None,
             top_k=None,
@@ -1216,19 +1238,26 @@ class AgentRegistry:
                     agent_data = yaml.safe_load(f)
 
                 # Create a new agent with the imported data
-                # Generate a new ID and reset the working directory
-                new_id = str(uuid.uuid4())
-                agent_data["id"] = new_id
+                agent_id = agent_data["id"]
                 agent_data["current_working_directory"] = "~/local-operator-home"
+
+                # Remove hosting and model from the agent data to use
+                # the default values from user config
+                if "hosting" in agent_data:
+                    del agent_data["hosting"]
+                if "model" in agent_data:
+                    del agent_data["model"]
 
                 # Save the updated agent.yml
                 with open(agent_yml_path, "w", encoding="utf-8") as f:
                     yaml.dump(agent_data, f, default_flow_style=False)
 
                 # Create the agent directory in the registry
-                agent_dir = self.agents_dir / new_id
-                if not agent_dir.exists():
-                    agent_dir.mkdir(parents=True, exist_ok=True)
+                agent_dir = self.agents_dir / agent_id
+                # Always overwrite the agent directory if it exists
+                if agent_dir.exists():
+                    shutil.rmtree(agent_dir)
+                agent_dir.mkdir(parents=True, exist_ok=True)
 
                 # Copy all files from the extracted directory to the agent directory
                 extracted_agent_dir = agent_yml_path.parent
@@ -1242,6 +1271,28 @@ class AgentRegistry:
                 # Save the agent to the registry
                 self.save_agent(agent_data)
 
+                # Update conversation history and learnings to reflect import
+                # event so that the agent has continuity
+                agent_state = self.load_agent_state(agent_data.id)
+                import_message = "You were just imported to a new device.  I might be a different user, or the same user than the person you were just talking to.  I might ask you to do something that is the same or different than the conversation before this.  Make sure to use your learnings and the conversation history to replicate what you've learned and give me a consistent experience.  Don't acknowledge this message directly, it is just for your reference."  # noqa: E501
+                learnings_message = "I was just imported to a new device.  The user might be the same or different than the user that I was just talking to.  I'm expected to provide a consistent experience to the user that I was just talking to, so I will need to use learnings and conversation history to replicate the same results for a potentially different topic."  # noqa: E501
+                now = datetime.now(timezone.utc)
+                agent_state.conversation.append(
+                    ConversationRecord(
+                        content=import_message,
+                        role=ConversationRole.USER,
+                        timestamp=now,
+                        should_summarize=True,
+                        ephemeral=False,
+                        summarized=False,
+                        is_system_prompt=False,
+                        files=None,
+                        should_cache=False,
+                    )
+                )
+                agent_state.learnings.append(learnings_message)
+                self.save_agent_state(agent_data.id, agent_state)
+
                 # Return the agent data
                 return agent_data
 
@@ -1251,6 +1302,71 @@ class AgentRegistry:
                 raise ValueError("Invalid YAML in agent.yml")
             except Exception as e:
                 raise Exception(f"Error importing agent: {str(e)}")
+
+    def upload_agent_to_radient(
+        self,
+        radient_client,
+        agent_id: Optional[str],
+        zip_path: Path,
+    ) -> Optional[str]:
+        """
+        Upload an agent to the Radient Agent Hub.
+
+        Args:
+            radient_client: An instance of RadientClient.
+            agent_id (Optional[str]): If provided, overwrite the agent with
+            this ID. If None, create a new agent.
+            zip_path (Path): Path to the ZIP file containing agent data.
+
+        Returns:
+            Optional[str]: The new agent ID if created, or None if overwritten.
+
+        Raises:
+            RuntimeError: If the upload fails.
+        """
+        # Check if the agent exists using the provided agent_id
+        agent_exists = False
+        if agent_id:
+            try:
+                existing_agent = radient_client.get_agent(agent_id)
+                if existing_agent:
+                    agent_exists = True
+            except Exception as e:
+                # Log the error but proceed as if the agent doesn't exist or cannot be verified
+                logging.error(f"Failed to check if agent {agent_id} exists on Radient: {str(e)}")
+
+        # If agent_id was provided and the agent exists, overwrite it
+        if agent_id and agent_exists:
+            radient_client.overwrite_agent_in_marketplace(agent_id, zip_path)
+            return None  # Return None when overwriting
+        else:
+            # If no agent_id was provided, or if the agent_id was provided but the agent
+            # doesn't exist (or check failed), upload as a new agent
+            return radient_client.upload_agent_to_marketplace(zip_path)
+
+    def download_agent_from_radient(
+        self,
+        radient_client,
+        agent_id: str,
+    ) -> AgentData:
+        """
+        Download an agent from the Radient Agent Hub and import it.
+
+        Args:
+            radient_client: An instance of RadientClient.
+            agent_id (str): The agent ID to download.
+
+        Returns:
+            AgentData: The imported agent's metadata.
+
+        Raises:
+            RuntimeError: If the download or import fails.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_dir_path = Path(temp_dir)
+            zip_path = temp_dir_path / f"{agent_id}.zip"
+            radient_client.download_agent_from_marketplace(agent_id, zip_path)
+            return self.import_agent(zip_path)
 
     def export_agent(self, agent_id: str) -> Tuple[Path, str]:
         """
@@ -1352,6 +1468,8 @@ class AgentRegistry:
                 hosting=None,
                 model=None,
                 description=None,
+                tags=None,
+                categories=None,
                 last_message=last_assistant_message,
                 temperature=None,
                 top_p=None,

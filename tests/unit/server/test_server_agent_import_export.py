@@ -69,7 +69,7 @@ async def test_import_agent_success(test_app_client, dummy_registry: AgentRegist
 
     # Verify the agent was created with a new ID and the correct working directory
     result = data["result"]
-    assert result["id"] != "old-id"
+    assert result["id"] == "old-id"
     assert result["name"] == "Test Import Agent"
     assert result["current_working_directory"] == "~/local-operator-home"
 
@@ -147,6 +147,8 @@ async def test_export_agent_success(test_app_client, dummy_registry: AgentRegist
             description="A test agent for export",
             current_working_directory="~/local-operator-home",
             last_message="",
+            tags=["test-tag1", "test-tag2"],
+            categories=["test-category1", "test-category2"],
             temperature=0.7,
             top_p=1.0,
             top_k=20,
@@ -186,6 +188,8 @@ async def test_export_agent_success(test_app_client, dummy_registry: AgentRegist
         # The ID is a UUID, so we just check that it exists and is a string
         assert isinstance(agent_data["id"], str)
         assert agent_data["name"] == "Export Test Agent"
+        assert agent_data["tags"] == ["test-tag1", "test-tag2"]
+        assert agent_data["categories"] == ["test-category1", "test-category2"]
 
         # Check the content of the test file
         test_file_content = zip_file.read("test_file.txt").decode("utf-8")
@@ -217,6 +221,8 @@ async def test_import_export_roundtrip(test_app_client, dummy_registry: AgentReg
             description="A test agent for roundtrip testing",
             current_working_directory="~/local-operator-home",
             last_message="",
+            tags=["test-tag1", "test-tag2"],
+            categories=["test-category1", "test-category2"],
             temperature=0.7,
             top_p=1.0,
             top_k=20,
@@ -253,12 +259,15 @@ async def test_import_export_roundtrip(test_app_client, dummy_registry: AgentReg
 
     # Verify the imported agent has the same data (except ID and working directory)
     imported_agent = dummy_registry.get_agent(imported_agent_id)
+    assert imported_agent.id == original_agent.id
     assert imported_agent.name == original_agent.name
     assert imported_agent.description == original_agent.description
     assert imported_agent.security_prompt == original_agent.security_prompt
-    assert imported_agent.hosting == original_agent.hosting
-    assert imported_agent.model == original_agent.model
+    assert imported_agent.hosting == ""
+    assert imported_agent.model == ""
     assert imported_agent.current_working_directory == "~/local-operator-home"
+    assert imported_agent.tags == original_agent.tags
+    assert imported_agent.categories == original_agent.categories
 
     # Verify the test file was imported correctly
     imported_agent_dir = dummy_registry.agents_dir / imported_agent.id

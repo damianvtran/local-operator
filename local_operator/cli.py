@@ -30,6 +30,7 @@ import uvicorn
 from local_operator.agents import AgentData  # Import AgentData type
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.bootstrap import initialize_operator  # Import the new function
+from local_operator.clients.radient import RadientClient
 from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel  # Import VerbosityLevel
 from local_operator.credentials import CredentialManager
@@ -103,10 +104,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "google",
             "mistral",
             "openrouter",
+            "xai",
             "test",
         ],
         help="Hosting platform to use (radient, deepseek, openai, anthropic, ollama, kimi, "
-        "alibaba, google, mistral, test, openrouter)",
+        "alibaba, google, mistral, test, openrouter, xai)",
     )
     parser.add_argument(
         "--model",
@@ -140,7 +142,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     credential_key_help = (
         "Credential key to manage (e.g., RADIENT_API_KEY,DEEPSEEK_API_KEY, OPENAI_API_KEY, "
         "ANTHROPIC_API_KEY, KIMI_API_KEY, ALIBABA_CLOUD_API_KEY, GOOGLE_AI_STUDIO_API_KEY, "
-        "MISTRAL_API_KEY, OPENROUTER_API_KEY)"
+        "MISTRAL_API_KEY, OPENROUTER_API_KEY, XAI_API_KEY)"
     )
 
     credential_update_parser.add_argument("key", type=str, help=credential_key_help)
@@ -212,12 +214,45 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Name of the agent to create",
     )
     delete_parser = agents_subparsers.add_parser(
-        "delete", help="Delete an agent by name", parents=[parent_parser]
+        "delete", help="Delete an agent (local by name or Radient by ID)", parents=[parent_parser]
     )
-    delete_parser.add_argument(
-        "name",
+    delete_group = delete_parser.add_mutually_exclusive_group(required=True)
+    delete_group.add_argument(
+        "--name",
         type=str,
-        help="Name of the agent to delete",
+        help="Name of the agent to delete locally",
+        dest="name",
+    )
+    delete_group.add_argument(
+        "--id",
+        type=str,
+        help="ID of the agent to delete from Radient",
+        dest="agent_id",
+    )
+    # Push command
+    push_parser = agents_subparsers.add_parser(
+        "push", help="Push (upload) an agent to Radient", parents=[parent_parser]
+    )
+    push_group = push_parser.add_mutually_exclusive_group(required=True)
+    push_group.add_argument(
+        "--name",
+        type=str,
+        help="Name of the agent to push to Radient",
+    )
+    push_group.add_argument(
+        "--id",
+        type=str,
+        help="ID of the agent to push to Radient (explicit overwrite)",
+    )
+    # Pull command
+    pull_parser = agents_subparsers.add_parser(
+        "pull", help="Pull (download) an agent from Radient", parents=[parent_parser]
+    )
+    pull_parser.add_argument(
+        "--id",
+        type=str,
+        required=True,
+        help="ID of the agent to pull from Radient",
     )
 
     # Serve command to start the API server
@@ -440,6 +475,8 @@ def agents_create_command(name: str, agent_registry: AgentRegistry) -> int:
             description=None,
             last_message=None,
             temperature=None,
+            tags=[],
+            categories=[],
             top_p=None,
             top_k=None,
             max_tokens=None,
@@ -459,18 +496,51 @@ def agents_create_command(name: str, agent_registry: AgentRegistry) -> int:
     return 0
 
 
-def agents_delete_command(name: str, agent_registry: AgentRegistry) -> int:
-    """Delete an agent by name."""
-    agents = agent_registry.list_agents()
-    matching_agents = [a for a in agents if a.name == name]
-    if not matching_agents:
-        print(f"\n\033[1;31mError: No agent found with name: {name}\033[0m")
-        return -1
+def agents_delete_command(
+    args: argparse.Namespace, agent_registry: AgentRegistry, config_dir: Path
+) -> int:
+    """
+    Delete an agent by name (local) or by ID (Radient).
+    """
+    if getattr(args, "name", None):
+        name = args.name
+        agents = agent_registry.list_agents()
+        matching_agents = [a for a in agents if a.name == name]
+        if not matching_agents:
+            print(f"\n\033[1;31mError: No agent found with name: {name}\033[0m")
+            return -1
 
-    agent = matching_agents[0]
-    agent_registry.delete_agent(agent.id)
-    print(f"\n\033[1;32mSuccessfully deleted agent: {name}\033[0m")
-    return 0
+        agent = matching_agents[0]
+        agent_registry.delete_agent(agent.id)
+        print(f"\n\033[1;32mSuccessfully deleted agent: {name}\033[0m")
+        return 0
+    elif getattr(args, "agent_id", None):
+        # Delete from Radient by ID
+        from local_operator.clients.radient import RadientClient
+        from local_operator.config import ConfigManager
+        from local_operator.credentials import CredentialManager
+
+        credential_manager = CredentialManager(config_dir)
+        api_key = credential_manager.get_credential("RADIENT_API_KEY")
+        if not api_key:
+            print("\n\033[1;31mError: RADIENT_API_KEY is required to delete from Radient\033[0m")
+            return -1
+        config_manager = ConfigManager(config_dir)
+        base_url = config_manager.get_config_value("radient_base_url", "https://api.radienthq.com")
+        radient_client = RadientClient(api_key=api_key, base_url=base_url)
+        try:
+            radient_client.delete_agent_from_marketplace(args.agent_id)
+            print(
+                f"\n\033[1;32mSuccessfully deleted agent with ID: {args.agent_id} "
+                "from Radient\033[0m"
+            )
+            return 0
+        except Exception as e:
+            print(f"\n\033[1;31mError deleting agent from Radient: {e}\033[0m")
+            return -1
+    else:
+        print("\n\033[1;31mError: Must provide --name or --id for delete\033[0m")
+        return -1
 
 
 def main() -> int:
@@ -518,7 +588,79 @@ def main() -> int:
             elif args.agents_command == "create":
                 return agents_create_command(args.name, agent_registry)
             elif args.agents_command == "delete":
-                return agents_delete_command(args.name, agent_registry)
+                return agents_delete_command(args, agent_registry, config_dir)
+            elif args.agents_command == "push":
+                # Push agent to Radient
+                credential_manager = CredentialManager(config_dir)
+                api_key = credential_manager.get_credential("RADIENT_API_KEY")
+                if not api_key:
+                    print(
+                        "\n\033[1;31mError: RADIENT_API_KEY is required to push to Radient\033[0m"
+                    )
+                    return -1
+                config_manager = ConfigManager(config_dir)
+                base_url = config_manager.get_config_value(
+                    "radient_base_url", "https://api.radienthq.com"
+                )
+                radient_client = RadientClient(api_key=api_key, base_url=base_url)
+                # Support push by name or id
+                agent = None
+                agent_id_to_overwrite = None
+                if getattr(args, "name", None):
+                    agent = agent_registry.get_agent_by_name(args.name)
+                    if not agent:
+                        print(f"\n\033[1;31mError: No agent found with name: {args.name}\033[0m")
+                        return -1
+                elif getattr(args, "id", None):
+                    try:
+                        agent = agent_registry.get_agent(args.id)
+                        agent_id_to_overwrite = args.id
+                    except KeyError:
+                        print(f"\n\033[1;31mError: No agent found with ID: {args.id}\033[0m")
+                        return -1
+                else:
+                    print("\n\033[1;31mError: Must provide --name or --id for push\033[0m")
+                    return -1
+                zip_path, _ = agent_registry.export_agent(agent.id)
+                try:
+                    agent_id = agent_registry.upload_agent_to_radient(
+                        radient_client, agent_id_to_overwrite, zip_path
+                    )
+                    if agent_id_to_overwrite:
+                        print(
+                            f"\n\033[1;32mSuccessfully pushed agent '{agent.name}' as "
+                            f"overwrite to Radient (ID: {agent_id_to_overwrite})\033[0m"
+                        )
+                    else:
+                        print(
+                            f"\n\033[1;32mSuccessfully pushed agent '{agent.name}' to Radient. "
+                            f"New agent ID: {agent_id}\033[0m"
+                        )
+                    return 0
+                except Exception as e:
+                    print(f"\n\033[1;31mError pushing agent to Radient: {e}\033[0m")
+                    return -1
+            elif args.agents_command == "pull":
+                # Pull agent from Radient
+                agent_id = args.id
+                # Get Radient base URL from config or use default
+                config_manager = ConfigManager(config_dir)
+                base_url = config_manager.get_config_value(
+                    "radient_base_url", "https://api.radientlabs.ai"
+                )
+                radient_client = RadientClient(api_key=None, base_url=base_url)
+                try:
+                    imported_agent = agent_registry.download_agent_from_radient(
+                        radient_client, agent_id
+                    )
+                    print(
+                        f"\n\033[1;32mSuccessfully pulled agent '{imported_agent.name}' "
+                        f"(ID: {imported_agent.id}) from Radient\033[0m"
+                    )
+                    return 0
+                except Exception as e:
+                    print(f"\n\033[1;31mError pulling agent from Radient: {e}\033[0m")
+                    return -1
             else:
                 parser.error(f"Invalid agents command: {args.agents_command}")
         elif args.subcommand == "serve":
@@ -559,6 +701,8 @@ def main() -> int:
                         description=None,
                         last_message=None,
                         temperature=None,
+                        tags=[],
+                        categories=[],
                         top_p=None,
                         top_k=None,
                         max_tokens=None,

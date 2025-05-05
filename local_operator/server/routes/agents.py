@@ -27,7 +27,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import ValidationError
 
 from local_operator.agents import AgentEditFields, AgentRegistry
-from local_operator.server.dependencies import get_agent_registry
+from local_operator.clients.radient import RadientClient
+from local_operator.credentials import CredentialManager
+from local_operator.env import EnvConfig, get_env_config
+from local_operator.server.dependencies import (
+    get_agent_registry,
+    get_credential_manager,
+)
 from local_operator.server.models.schemas import (
     Agent,
     AgentCreate,
@@ -414,6 +420,168 @@ async def update_agent(
     )
 
 
+@router.post(
+    "/v1/agents/{agent_id}/upload",
+    response_model=CRUDResponse,
+    summary="Upload (push) an agent to Radient Agent Hub",
+    description=(
+        "Upload (push) the agent with the given ID to the Radient agents marketplace. "
+        "Requires RADIENT_API_KEY."
+    ),
+    openapi_extra={
+        "responses": {
+            "200": {
+                "description": "Agent uploaded to Radient successfully",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "status": 200,
+                            "message": "Agent uploaded to Radient successfully",
+                            "result": {"agent_id": "radient-agent-id"},
+                        }
+                    }
+                },
+            },
+            "400": {
+                "description": "Bad request",
+                "content": {
+                    "application/json": {"example": {"detail": "Error uploading agent to Radient"}}
+                },
+            },
+            "401": {
+                "description": "Unauthorized",
+                "content": {
+                    "application/json": {"example": {"detail": "RADIENT_API_KEY is required"}}
+                },
+            },
+        },
+    },
+)
+async def upload_agent_to_radient(
+    agent_id: str = Path(..., description="ID of the agent to upload", examples=["agent123"]),
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
+    env_config: EnvConfig = Depends(get_env_config),
+    credential_manager: CredentialManager = Depends(get_credential_manager),
+):
+    """
+    Upload (push) the agent with the given ID to the Radient agents marketplace.
+    Requires RADIENT_API_KEY.
+    """
+    try:
+        # Get config and credentials
+        api_key = credential_manager.get_credential("RADIENT_API_KEY")
+        if not api_key:
+            raise HTTPException(status_code=401, detail="RADIENT_API_KEY is required")
+        base_url = env_config.radient_api_base_url
+        radient_client = RadientClient(api_key=api_key, base_url=base_url)
+
+        # Get agent and export as zip
+        try:
+            agent = agent_registry.get_agent(agent_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+        zip_path, _ = agent_registry.export_agent(agent.id)
+
+        # Upload to Radient
+        try:
+            agent_registry.upload_agent_to_radient(radient_client, agent_id, zip_path)
+        except Exception as e:
+            logger.exception("Error uploading agent to Radient")
+            raise HTTPException(status_code=400, detail=f"Error uploading agent to Radient: {e}")
+
+        return CRUDResponse(
+            status=200,
+            message="Agent uploaded to Radient successfully",
+            result={"agent_id": agent_id},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error uploading agent to Radient")
+        # If the error is about missing API key, return a clear message
+        if "RADIENT_API_KEY" in str(e) or "credential" in str(e):
+            raise HTTPException(status_code=401, detail="RADIENT_API_KEY is required")
+        raise HTTPException(status_code=400, detail=f"Error uploading agent to Radient: {e}")
+
+
+@router.get(
+    "/v1/agents/{agent_id}/download",
+    response_model=CRUDResponse[Agent],
+    summary="Download (pull) an agent from Radient Agent Hub",
+    description="Download (pull) an agent from the Radient agents marketplace by agent ID.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "description": "Agent downloaded from Radient successfully",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "status": 200,
+                            "message": "Agent downloaded from Radient successfully",
+                            "result": {
+                                "id": "imported-agent-123",
+                                "name": "Imported Agent",
+                                "created_date": "2024-01-01T00:00:00",
+                                "version": "0.2.16",
+                                "security_prompt": "Example security prompt",
+                                "hosting": "openrouter",
+                                "model": "openai/gpt-4o-mini",
+                                "description": "An imported agent",
+                                "last_message": "",
+                                "last_message_datetime": "2024-01-01T00:00:00",
+                            },
+                        }
+                    }
+                },
+            },
+            "400": {
+                "description": "Bad request",
+                "content": {
+                    "application/json": {
+                        "example": {"detail": "Error downloading agent from Radient"}
+                    }
+                },
+            },
+        },
+    },
+)
+async def download_agent_from_radient(
+    agent_id: str = Path(
+        ..., description="ID of the agent to download from Radient", examples=["radient-agent-id"]
+    ),
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
+    env_config: EnvConfig = Depends(get_env_config),
+):
+    """
+    Download (pull) an agent from the Radient agents marketplace by agent ID.
+    """
+    try:
+        base_url = env_config.radient_api_base_url
+        # API key not required for download
+        radient_client = RadientClient(api_key=None, base_url=base_url)
+
+        # Download from Radient
+        try:
+            imported_agent = agent_registry.download_agent_from_radient(radient_client, agent_id)
+        except Exception as e:
+            logger.exception("Error downloading agent from Radient")
+            raise HTTPException(
+                status_code=400, detail=f"Error downloading agent from Radient: {e}"
+            )
+
+        agent_serialized = imported_agent.model_dump()
+        return CRUDResponse(
+            status=200,
+            message="Agent downloaded from Radient successfully",
+            result=cast(Dict[str, Any], agent_serialized),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error downloading agent from Radient")
+        raise HTTPException(status_code=400, detail=f"Error downloading agent from Radient: {e}")
+
+
 @router.delete(
     "/v1/agents/{agent_id}",
     response_model=CRUDResponse,
@@ -659,6 +827,9 @@ async def clear_agent_conversation(
         # Get the agent to verify it exists
         agent = agent_registry.get_agent(agent_id)
 
+        # Get the current agent state
+        agent_state = agent_registry.load_agent_state(agent_id)
+
         # Clear the conversation by saving an empty list
         agent_registry.save_agent_state(
             agent_id=agent_id,
@@ -666,10 +837,10 @@ async def clear_agent_conversation(
                 version=agent.version,
                 conversation=[],
                 execution_history=[],
-                learnings=[],
+                learnings=agent_state.learnings,
                 current_plan="",
-                instruction_details="",
-                agent_system_prompt=None,
+                instruction_details=agent_state.instruction_details,
+                agent_system_prompt=agent_state.agent_system_prompt,
             ),
         )
         agent_registry.save_agent_context(agent_id=agent_id, context={})
@@ -948,20 +1119,42 @@ async def get_agent_execution_history(
         # Get actual timestamps if executions exist
         if execution_history:
             try:
-                first_execution_datetime = min(
+                timestamps = [
                     execution.timestamp
                     for execution in execution_history
                     if hasattr(execution, "timestamp") and execution.timestamp is not None
-                )
+                ]
+                if timestamps:
+                    try:
+                        first_execution_datetime = min(timestamps)
+                        last_execution_datetime = max(timestamps)
+                    except TypeError:
+                        # Handle offset-naive and offset-aware datetime comparison
+                        def to_aware(dt):
+                            if dt.tzinfo is None:
+                                return dt.replace(tzinfo=timezone.utc)
+                            return dt
 
-                last_execution_datetime = max(
-                    execution.timestamp
-                    for execution in execution_history
-                    if hasattr(execution, "timestamp") and execution.timestamp is not None
-                )
-            except (AttributeError, ValueError):
-                # If timestamps aren't available, use current time
-                pass
+                        try:
+                            aware_timestamps = [to_aware(dt) for dt in timestamps]
+                            first_execution_datetime = min(aware_timestamps)
+                            last_execution_datetime = max(aware_timestamps)
+                        except Exception:
+                            logger.exception(
+                                "Failed to normalize datetimes in agent execution history"
+                            )
+                            # Fallback to current time if normalization fails
+                            first_execution_datetime = datetime.now(timezone.utc)
+                            last_execution_datetime = datetime.now(timezone.utc)
+                else:
+                    # No valid timestamps, use current time
+                    first_execution_datetime = datetime.now(timezone.utc)
+                    last_execution_datetime = datetime.now(timezone.utc)
+            except (AttributeError, ValueError, TypeError):
+                logger.exception("Error processing execution timestamps")
+                # If timestamps aren't available or error occurs, use current time
+                first_execution_datetime = datetime.now(timezone.utc)
+                last_execution_datetime = datetime.now(timezone.utc)
 
         # Apply pagination
         start_idx = (page - 1) * per_page

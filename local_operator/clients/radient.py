@@ -231,15 +231,17 @@ class RadientListModelsResponse(BaseModel):
 class RadientClient:
     """Client for interacting with the Radient API.
 
-    This client is used to fetch model pricing information from Radient.
+    This client is used to fetch model pricing information from Radient and
+    interact with the Radient Agent Hub.
     """
 
-    def __init__(self, api_key: SecretStr, base_url: str) -> None:
+    def __init__(self, api_key: Optional[SecretStr], base_url: str) -> None:
         """Initializes the RadientClient.
 
         Args:
             api_key (SecretStr | None): The Radient API key. If None, it is assumed that
-                the key is not needed for the specific operation (e.g., listing models).
+                the key is not needed for the specific operation (e.g., listing
+                models or downloading agents).
             base_url (str): The base URL for the Radient API.
         """
         self.api_key = api_key
@@ -247,21 +249,171 @@ class RadientClient:
         self.app_title = "Local Operator"
         self.http_referer = "https://local-operator.com"
 
-        if not self.api_key:
-            raise RuntimeError("Radient API key is required")
-
-    def _get_headers(self) -> Dict[str, str]:
+    def _get_headers(
+        self, content_type: Optional[str] = "application/json", require_api_key: bool = True
+    ) -> Dict[str, str]:
         """Get the headers for the Radient API request.
+
+        Args:
+            content_type (Optional[str]): The Content-Type header value. If
+            None, Content-Type is not set.
+            require_api_key (bool): Whether to require the API key for this request.
 
         Returns:
             Dict[str, str]: Headers for the API request
+
+        Raises:
+            RuntimeError: If the API key is required but not set.
         """
-        return {
-            "Authorization": f"Bearer {self.api_key.get_secret_value()}",
-            "Content-Type": "application/json",
+        headers = {
             "X-Title": self.app_title,
             "HTTP-Referer": self.http_referer,
         }
+        if require_api_key:
+            if not self.api_key:
+                raise RuntimeError("Radient API key is required for this operation")
+            headers["Authorization"] = f"Bearer {self.api_key.get_secret_value()}"
+        if content_type is not None:
+            headers["Content-Type"] = content_type
+        return headers
+
+    def upload_agent_to_marketplace(self, zip_path) -> str:
+        """
+        Upload a new agent to the Radient Agent Hub.
+
+        Args:
+            zip_path (Path): Path to the ZIP file containing agent data.
+
+        Returns:
+            str: The new agent ID returned by the marketplace.
+
+        Raises:
+            RuntimeError: If the API key is not set or the upload fails.
+        """
+        url = f"{self.base_url}/agents/upload"
+        headers = self._get_headers(content_type=None, require_api_key=True)
+        files = {"file": (zip_path.name, open(zip_path, "rb"), "application/zip")}
+
+        try:
+            response = requests.post(url, headers=headers, files=files)
+            response.raise_for_status()
+            data = response.json()
+            # The response is a dict with the new agent ID (e.g., {"id": "new-agent-id"})
+            if not isinstance(data, dict) or not data:
+                raise RuntimeError("Unexpected response from Radient agent upload")
+            # Return the first value (agent ID)
+            return next(iter(data.values()))
+        except requests.exceptions.RequestException as e:
+            error_body = (
+                e.response.content.decode()
+                if hasattr(e, "response") and e.response
+                else "No response body"
+            )
+            raise RuntimeError(
+                f"Failed to upload agent to Radient Agent Hub: {str(e)},"
+                f"Response Body: {error_body}"
+            ) from e
+        finally:
+            files["file"][1].close()
+
+    def overwrite_agent_in_marketplace(self, agent_id: str, zip_path) -> None:
+        """
+        Overwrite an existing agent in the Radient Agent Hub.
+
+        Args:
+            agent_id (str): The agent ID to overwrite.
+            zip_path (Path): Path to the ZIP file containing agent data.
+
+        Raises:
+            RuntimeError: If the API key is not set or the upload fails.
+        """
+        url = f"{self.base_url}/agents/{agent_id}/upload"
+        headers = self._get_headers(content_type=None, require_api_key=True)
+        files = {"file": (zip_path.name, open(zip_path, "rb"), "application/zip")}
+        try:
+            response = requests.put(url, headers=headers, files=files)
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            error_body = (
+                e.response.content.decode()
+                if hasattr(e, "response") and e.response
+                else "No response body"
+            )
+            raise RuntimeError(
+                f"Failed to overwrite agent in Radient Agent Hub: {str(e)},"
+                f"Response Body: {error_body}"
+            ) from e
+        finally:
+            files["file"][1].close()
+
+    def download_agent_from_marketplace(self, agent_id: str, dest_path) -> None:
+        """
+        Download an agent from the Radient Agent Hub.
+
+        Args:
+            agent_id (str): The agent ID to download.
+            dest_path (Path): Path to save the downloaded ZIP file.
+
+        Raises:
+            RuntimeError: If the download fails.
+        """
+        url = f"{self.base_url}/agents/{agent_id}/download"
+        # Download does not require API key
+        headers = self._get_headers(content_type=None, require_api_key=False)
+        try:
+            response = requests.get(url, headers=headers, stream=True)
+            response.raise_for_status()
+            with open(dest_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+        except requests.exceptions.RequestException as e:
+            error_body = (
+                e.response.content.decode()
+                if hasattr(e, "response") and e.response
+                else "No response body"
+            )
+            raise RuntimeError(
+                f"Failed to download agent from Radient Agent Hub: {str(e)},"
+                f"Response Body: {error_body}"
+            ) from e
+
+    def get_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get agent details from the Radient Agent Hub by ID.
+
+        Args:
+            agent_id (str): The agent ID to fetch.
+
+        Returns:
+            Optional[Dict[str, Any]]: The agent details as a dictionary if found,
+                                      None if the agent is not found (404).
+
+        Raises:
+            RuntimeError: If the API request fails for reasons other than 404.
+        """
+        url = f"{self.base_url}/v1/agents/{agent_id}"
+        # This is a public endpoint, no API key required
+        headers = self._get_headers(content_type="application/json", require_api_key=False)
+        try:
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+            return response.json()
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                return None  # Agent not found
+            # For other HTTP errors, raise a runtime error
+            error_body = e.response.content.decode() if e.response.content else "No response body"
+            raise RuntimeError(
+                f"Failed to get agent {agent_id} from Radient Agent Hub: "
+                f"HTTP {e.response.status_code}, Response Body: {error_body}"
+            ) from e
+        except requests.exceptions.RequestException as e:
+            # For non-HTTP request errors (e.g., connection issues)
+            raise RuntimeError(
+                f"Failed to get agent {agent_id} from Radient Agent Hub due to a network error: "
+                f"{str(e)}"
+            ) from e
 
     def list_models(self) -> RadientListModelsResponse:
         """Lists all available models on Radient along with their pricing.
@@ -282,8 +434,10 @@ class RadientClient:
             return RadientListModelsResponse.model_validate(data)
         except requests.exceptions.RequestException as e:
             raise RuntimeError(
-                f"Failed to fetch Radient models due to a requests error: {str(e)}, Response"
-                f" Body: {e.response.content.decode() if e.response else 'No response body'}"
+                f"Failed to fetch Radient models due to a requests error: {str(e)},"
+                f"Response Body: {
+                    e.response.content.decode() if e.response else 'No response body'
+                }"
             ) from e
         except Exception as e:
             raise RuntimeError(f"Failed to fetch Radient models: {str(e)}") from e
@@ -559,3 +713,36 @@ class RadientClient:
             ) from e
         except Exception as e:
             raise RuntimeError(f"Failed to list search providers: {str(e)}") from e
+
+    def delete_agent_from_marketplace(self, agent_id: str) -> None:
+        """
+        Delete an agent from the Radient Agent Hub by ID.
+
+        Args:
+            agent_id (str): The agent ID to delete.
+
+        Raises:
+            RuntimeError: If the API key is not set or the delete fails.
+        """
+        url = f"{self.base_url}/agents/{agent_id}"
+        headers = self._get_headers(content_type=None, require_api_key=True)
+        try:
+            response = requests.delete(url, headers=headers)
+            if response.status_code == 204:
+                return
+            # If not 204, try to extract error details
+            error_body = response.content.decode() if response.content else "No response body"
+            raise RuntimeError(
+                f"Failed to delete agent from Radient Agent Hub: HTTP {response.status_code}, "
+                f"Response Body: {error_body}"
+            )
+        except requests.exceptions.RequestException as e:
+            error_body = (
+                e.response.content.decode()
+                if hasattr(e, "response") and e.response
+                else "No response body"
+            )
+            raise RuntimeError(
+                f"Failed to delete agent from Radient Agent Hub: {str(e)}, "
+                f"Response Body: {error_body}"
+            ) from e

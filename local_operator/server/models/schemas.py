@@ -141,6 +141,14 @@ class Agent(BaseModel):
         "",
         description="A description of the agent. Defaults to ''.",
     )
+    tags: Optional[List[str]] = Field(
+        None,
+        description="Tags for the agent. Defaults to an empty list.",
+    )
+    categories: Optional[List[str]] = Field(
+        None,
+        description="Categories for the agent. Defaults to an empty list.",
+    )
     last_message: str = Field(
         "",
         description="The last message sent to the agent. Defaults to ''.",
@@ -284,6 +292,14 @@ class AgentUpdate(BaseModel):
     description: str | None = Field(
         None,
         description="A description of the agent.  Defaults to ''.",
+    )
+    tags: List[str] | None = Field(
+        None,
+        description="Tags for the agent.  Defaults to an empty list.",
+    )
+    categories: List[str] | None = Field(
+        None,
+        description="Categories for the agent.  Defaults to an empty list.",
     )
     temperature: float | None = Field(
         None,
