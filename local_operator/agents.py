@@ -1241,6 +1241,13 @@ class AgentRegistry:
                 agent_id = agent_data["id"]
                 agent_data["current_working_directory"] = "~/local-operator-home"
 
+                # Remove hosting and model from the agent data to use
+                # the default values from user config
+                if "hosting" in agent_data:
+                    del agent_data["hosting"]
+                if "model" in agent_data:
+                    del agent_data["model"]
+
                 # Save the updated agent.yml
                 with open(agent_yml_path, "w", encoding="utf-8") as f:
                     yaml.dump(agent_data, f, default_flow_style=False)
