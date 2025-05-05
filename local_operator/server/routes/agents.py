@@ -1116,20 +1116,42 @@ async def get_agent_execution_history(
         # Get actual timestamps if executions exist
         if execution_history:
             try:
-                first_execution_datetime = min(
+                timestamps = [
                     execution.timestamp
                     for execution in execution_history
                     if hasattr(execution, "timestamp") and execution.timestamp is not None
-                )
+                ]
+                if timestamps:
+                    try:
+                        first_execution_datetime = min(timestamps)
+                        last_execution_datetime = max(timestamps)
+                    except TypeError:
+                        # Handle offset-naive and offset-aware datetime comparison
+                        def to_aware(dt):
+                            if dt.tzinfo is None:
+                                return dt.replace(tzinfo=timezone.utc)
+                            return dt
 
-                last_execution_datetime = max(
-                    execution.timestamp
-                    for execution in execution_history
-                    if hasattr(execution, "timestamp") and execution.timestamp is not None
-                )
-            except (AttributeError, ValueError):
-                # If timestamps aren't available, use current time
-                pass
+                        try:
+                            aware_timestamps = [to_aware(dt) for dt in timestamps]
+                            first_execution_datetime = min(aware_timestamps)
+                            last_execution_datetime = max(aware_timestamps)
+                        except Exception:
+                            logger.exception(
+                                "Failed to normalize datetimes in agent execution history"
+                            )
+                            # Fallback to current time if normalization fails
+                            first_execution_datetime = datetime.now(timezone.utc)
+                            last_execution_datetime = datetime.now(timezone.utc)
+                else:
+                    # No valid timestamps, use current time
+                    first_execution_datetime = datetime.now(timezone.utc)
+                    last_execution_datetime = datetime.now(timezone.utc)
+            except (AttributeError, ValueError, TypeError):
+                logger.exception("Error processing execution timestamps")
+                # If timestamps aren't available or error occurs, use current time
+                first_execution_datetime = datetime.now(timezone.utc)
+                last_execution_datetime = datetime.now(timezone.utc)
 
         # Apply pagination
         start_idx = (page - 1) * per_page
