@@ -1271,6 +1271,28 @@ class AgentRegistry:
                 # Save the agent to the registry
                 self.save_agent(agent_data)
 
+                # Update conversation history and learnings to reflect import
+                # event so that the agent has continuity
+                agent_state = self.load_agent_state(agent_data.id)
+                import_message = "You were just imported to a new device.  I might be a different user, or the same user than the person you were just talking to.  I might ask you to do something that is the same or different than the conversation before this.  Make sure to use your learnings and the conversation history to replicate what you've learned and give me a consistent experience.  Don't acknowledge this message directly, it is just for your reference."  # noqa: E501
+                learnings_message = "I was just imported to a new device.  The user might be the same or different than the user that I was just talking to.  I'm expected to provide a consistent experience to the user that I was just talking to, so I will need to use learnings and conversation history to replicate the same results for a potentially different topic."  # noqa: E501
+                now = datetime.now(timezone.utc)
+                agent_state.conversation.append(
+                    ConversationRecord(
+                        content=import_message,
+                        role=ConversationRole.USER,
+                        timestamp=now,
+                        should_summarize=True,
+                        ephemeral=False,
+                        summarized=False,
+                        is_system_prompt=False,
+                        files=None,
+                        should_cache=False,
+                    )
+                )
+                agent_state.learnings.append(learnings_message)
+                self.save_agent_state(agent_data.id, agent_state)
+
                 # Return the agent data
                 return agent_data
 
