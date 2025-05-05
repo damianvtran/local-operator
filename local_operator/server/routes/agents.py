@@ -827,6 +827,9 @@ async def clear_agent_conversation(
         # Get the agent to verify it exists
         agent = agent_registry.get_agent(agent_id)
 
+        # Get the current agent state
+        agent_state = agent_registry.load_agent_state(agent_id)
+
         # Clear the conversation by saving an empty list
         agent_registry.save_agent_state(
             agent_id=agent_id,
@@ -834,10 +837,10 @@ async def clear_agent_conversation(
                 version=agent.version,
                 conversation=[],
                 execution_history=[],
-                learnings=[],
+                learnings=agent_state.learnings,
                 current_plan="",
-                instruction_details="",
-                agent_system_prompt=None,
+                instruction_details=agent_state.instruction_details,
+                agent_system_prompt=agent_state.agent_system_prompt,
             ),
         )
         agent_registry.save_agent_context(agent_id=agent_id, context={})
