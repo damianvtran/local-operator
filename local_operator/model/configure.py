@@ -19,7 +19,14 @@ from local_operator.model.registry import (
     radient_default_model_info,
 )
 
-ModelType = Union[ChatOpenAI, ChatOllama, ChatAnthropic, ChatGoogleGenerativeAI, ChatMock, ChatNoop]
+ModelType = Union[
+    ChatOpenAI,
+    ChatOllama,
+    ChatAnthropic,
+    ChatGoogleGenerativeAI,
+    ChatMock,
+    ChatNoop,
+]
 
 DEFAULT_TEMPERATURE = 0.2
 """Default temperature value for language models."""
@@ -195,6 +202,11 @@ def validate_model(hosting: str, model: str, api_key: SecretStr) -> bool:
     elif hosting == "ollama":
         # Ollama is local, so just check if model exists
         response = requests.get("http://localhost:11434/api/tags")
+    elif hosting == "xai":
+        response = requests.get(
+            "https://api.x.ai/v1/models",
+            headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
+        )
     else:
         return True
 
@@ -279,7 +291,7 @@ def configure_model(
     """Configure and return the appropriate model based on hosting platform.
 
     Args:
-        hosting (str): Hosting platform (deepseek, openai, anthropic, ollama, or noop)
+        hosting (str): Hosting platform (deepseek, openai, anthropic, ollama, xai, or noop)
         model_name (str): Model name to use
         credential_manager: CredentialManager instance for API key management
         model_info_client: OpenRouterClient instance for model info
@@ -626,6 +638,31 @@ def configure_model(
             model_kwargs["stop"] = stop
 
         configured_model = ChatOllama(**model_kwargs)
+
+    elif hosting == "xai":
+        # xAI (Grok) support
+        if not model_name:
+            model_name = "grok-beta"
+        api_key = credential_manager.get_credential("XAI_API_KEY")
+        if not api_key:
+            api_key = credential_manager.prompt_for_credential("XAI_API_KEY")
+
+        model_kwargs: Dict[str, Any] = {
+            "model": model_name,
+            "base_url": "https://api.x.ai/v1",
+            "api_key": api_key.get_secret_value(),
+        }
+
+        if temperature is not None:
+            model_kwargs["temperature"] = temperature
+        if top_p is not None:
+            model_kwargs["top_p"] = top_p
+        if max_tokens is not None:
+            model_kwargs["max_tokens"] = max_tokens
+        if stop is not None:
+            model_kwargs["stop"] = stop
+
+        configured_model = ChatOpenAI(**model_kwargs)
 
     else:
         raise ValueError(f"Unsupported hosting platform: {hosting}")

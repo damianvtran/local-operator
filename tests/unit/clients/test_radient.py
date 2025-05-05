@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any, Dict, List
 from unittest.mock import MagicMock, patch
 
@@ -242,12 +243,121 @@ def test_client_init_no_api_key(base_url: str) -> None:
     Args:
         base_url (str): Base URL for the Radient API.
 
-    Raises:
-        RuntimeError: If no API key is provided.
+    The client should not raise on init, but should raise when calling an API-key-required method.
     """
+    client = RadientClient(api_key=None, base_url=base_url)
+    # Should not raise on init
+    assert isinstance(client, RadientClient)
+    # Should raise when calling an API-key-required method
     with pytest.raises(RuntimeError) as exc_info:
-        RadientClient(SecretStr(""), base_url)
+        client.list_models()
     assert "Radient API key is required" in str(exc_info.value)
+
+
+def test_upload_agent_to_marketplace_success(
+    radient_client: RadientClient, base_url: str, tmp_path: Path
+):
+    """Test successful upload of a new agent to the marketplace."""
+    zip_path = tmp_path / "agent.zip"
+    zip_path.write_bytes(b"dummy zip content")
+    mock_response = MagicMock()
+    mock_response.status_code = 201
+    mock_response.json.return_value = {"id": "new-agent-id"}
+    with patch("requests.post", return_value=mock_response) as mock_post:
+        agent_id = radient_client.upload_agent_to_marketplace(zip_path)
+    assert agent_id == "new-agent-id"
+    mock_post.assert_called_once()
+    args, kwargs = mock_post.call_args
+    assert args[0] == f"{base_url}/agents/upload"
+    assert "files" in kwargs
+    assert "headers" in kwargs
+    assert kwargs["files"]["file"][0] == "agent.zip"
+
+
+def test_overwrite_agent_in_marketplace_success(
+    radient_client: RadientClient, base_url: str, tmp_path: Path
+):
+    """Test successful overwrite of an existing agent in the marketplace."""
+    zip_path = tmp_path / "agent.zip"
+    zip_path.write_bytes(b"dummy zip content")
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    with patch("requests.put", return_value=mock_response) as mock_put:
+        radient_client.overwrite_agent_in_marketplace("existing-id", zip_path)
+    mock_put.assert_called_once()
+    args, kwargs = mock_put.call_args
+    assert args[0] == f"{base_url}/agents/existing-id/upload"
+    assert "files" in kwargs
+    assert "headers" in kwargs
+    assert kwargs["files"]["file"][0] == "agent.zip"
+
+
+def test_download_agent_from_marketplace_success(
+    radient_client: RadientClient, base_url: str, tmp_path: Path
+):
+    """Test successful download of an agent from the marketplace."""
+    agent_id = "agent123"
+    dest_path = tmp_path / "downloaded.zip"
+    dummy_content = b"zip file content"
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.iter_content = MagicMock(return_value=[dummy_content])
+    with patch("requests.get", return_value=mock_response) as mock_get:
+        radient_client.download_agent_from_marketplace(agent_id, dest_path)
+    mock_get.assert_called_once_with(
+        f"{base_url}/agents/{agent_id}/download",
+        headers={
+            "X-Title": "Local Operator",
+            "HTTP-Referer": "https://local-operator.com",
+        },
+        stream=True,
+    )
+    assert dest_path.read_bytes() == dummy_content
+
+
+def test_delete_agent_from_marketplace_success(radient_client: RadientClient, base_url: str):
+    """Test successful deletion of an agent from the Radient Agent Hub (204)."""
+    agent_id = "agent-to-delete"
+    mock_response = MagicMock()
+    mock_response.status_code = 204
+    with patch("requests.delete", return_value=mock_response) as mock_delete:
+        radient_client.delete_agent_from_marketplace(agent_id)
+    mock_delete.assert_called_once_with(
+        f"{base_url}/agents/{agent_id}",
+        headers={
+            "Authorization": "Bearer test_api_key",
+            "X-Title": "Local Operator",
+            "HTTP-Referer": "https://local-operator.com",
+        },
+    )
+
+
+def test_delete_agent_from_marketplace_error_response(radient_client: RadientClient, base_url: str):
+    """Test error response (non-204) when deleting an agent from Radient."""
+    agent_id = "bad-agent"
+    mock_response = MagicMock()
+    mock_response.status_code = 404
+    mock_response.content = b"Agent not found"
+    with patch("requests.delete", return_value=mock_response):
+        with pytest.raises(RuntimeError) as exc_info:
+            radient_client.delete_agent_from_marketplace(agent_id)
+        assert "Failed to delete agent from Radient Agent Hub" in str(exc_info.value)
+        assert "Agent not found" in str(exc_info.value)
+
+
+def test_delete_agent_from_marketplace_network_error(radient_client: RadientClient, base_url: str):
+    """Test network error when deleting an agent from Radient."""
+    agent_id = "network-error-agent"
+    mock_response = MagicMock()
+    mock_response.content = b"Network error"
+    mock_delete = MagicMock(
+        side_effect=requests.exceptions.RequestException("Network error", response=mock_response)
+    )
+    with patch("requests.delete", mock_delete):
+        with pytest.raises(RuntimeError) as exc_info:
+            radient_client.delete_agent_from_marketplace(agent_id)
+        assert "Failed to delete agent from Radient Agent Hub" in str(exc_info.value)
+        assert "Network error" in str(exc_info.value)
 
 
 # Image Generation Tests
