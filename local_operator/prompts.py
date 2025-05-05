@@ -639,7 +639,14 @@ Your code must use only Python in a stepwise manner:
 ## System Action Response Format
 
 Fields:
-- learnings: Important new information learned. Include detailed insights, not just actions. This is like a diary or notepad for you to keep track of important things, it will last longer than the conversation history which gets truncated.  Make sure that you keep track of key variable names, values, links, URLs, insights, and other important information so that you can use it later in your code.  If you've learned how to do something important successfully, note down the steps in short point form so that you can use it later in your code.  Empty for first step.
+- learnings: Important new information learned. Include detailed insights, not just actions. This is like a diary or notepad for you to keep track of important things, it will last longer than the conversation history which gets truncated.  Make sure that you keep track of key variable names, values, links, URLs, insights, and other important information so that you can use it later in your code.  If you've learned how to do something important successfully, note down the steps in short point form so that you can use it later in your code.  Don't duplicate learnings if you already have the same learning in your agent heads up display.  Only add new, key insights that are not already in the learnings list.Empty for first step.  Examples of learnings to track:
+  - Key variable names and values
+  - Important URLs and links, places to access things
+  - Schemas, data models, and other important information about the data that will help you use integrations, databases, and other systems
+  - Important insights and observations
+  - Important steps and procedures, how-to instructions
+  - Things that the user positively or negatively reacted to
+  - Details that the user has provided that are important to remember
 - response: Short description of the current action.  If the user has asked for you to write something or summarize something, include that in this field.
 - code: Required for CODE: valid Python code to achieve goal. Omit for WRITE/EDIT.
 - content: Required for WRITE: content to write to file. Omit for READ/EDIT.  Do not use for any actions that are not WRITE.
@@ -859,7 +866,7 @@ You will need to interpret the actions and provide the correct JSON response for
 You must reinterpret the agent's response purely in JSON format with the following fields:
 <action_json_fields>
 - action: The action that the agent wants to take.  One of: CODE | READ | WRITE | EDIT | DONE | ASK | BYE | DELEGATE.  Must not be empty.
-- learnings: The learnings from the action, such as how to do new things or information from the web or data files that will be useful for the agent to know and retrieve later.  Empty string if there is nothing to note down for this action.
+- learnings: The learnings from the action, such as how to do new things or information from the web or data files that will be useful for the agent to know and retrieve later.  Empty string if there is nothing to note down for this action.  Make sure to keep the learnings information provided by the agent and don't shorten or otherwise change the content.
 - response: Short description of what the agent is doing at this time.  Written in the present continuous tense.  Empty string if there is nothing to note down for this action.
 - code: The code that the agent has written.  An empty string if the action is not CODE.
 - content: The content that the agent has written to a file.  An empty string if the action is not WRITE.
@@ -2019,7 +2026,7 @@ This is information about the files, variables, and other details about the curr
 </environment_details>
 
 ## Learning Details
-This is a notepad of things that you have learned so far.  You can use this to help you complete the current task.  Keep adding to it by including the <learnings> tag in each of your actions.
+This is a notepad of things that you have learned so far.  You can use this to help you complete the current task.  Keep adding to it by including the <learnings> tag in each of your actions.  Make sure to only add new learnings and key insights, don't duplicate existing learnings.
 <learning_details>
 {learning_details}
 </learning_details>
