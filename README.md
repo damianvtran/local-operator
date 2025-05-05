@@ -60,6 +60,7 @@ This project is proudly open source under the GPL 3.0 license. We believe AI too
   - [🔧 Configuration Values](#-configuration-values)
   - [🛠️ Configuration Options](#️-configuration-options)
   - [🔐 Credentials](#-credentials)
+- [🌟 Radient Agent Hub and Automatic Model Selection](#-radient-agent-hub-and-automatic-model-selection)
 - [📝 Examples](#-examples)
 - [👥 Contributing](#-contributing)
 - [🔒 Safety Features](#-safety-features)
@@ -101,10 +102,11 @@ Visit the [Local Operator website](https://local-operator.com) for visualization
 
 To run Local Operator with a 3rd party cloud-hosted LLM model, you need to have an API key.  You can get one from OpenAI, DeepSeek, Anthropic, or other providers.
 
-
-###  📦 Install via pip
+### 📦 Install via pip
+   >
    > ⚠️ **Linux Installs (Ubuntu 23.04+, Fedora 38+, Debian 12+)**  
    > Due to recent changes in how Python is managed on modern Linux distributions (see [PEP 668](https://peps.python.org/pep-0668/)), you **cannot use `pip install` globally** on system Python.  
+
 - MacOS & Windows
 
   ```bash
@@ -118,20 +120,23 @@ To run Local Operator with a 3rd party cloud-hosted LLM model, you need to have 
   ```
 
 - 📌 (Optional) Virtual python
+
   ```bash
   python3 -m venv .venv
   source .venv/bin/activate
   pip install local-operator
   ```
--  📌 (Optional) Enabling Web Browsing
+
+- 📌 (Optional) Enabling Web Browsing
 
     This is not necessary to use the web browsing tool, as the agent will automatically install the browsers when they are needed, but it can be faster to install them ahead of start up if you know you will need them.
 
     ```bash
     playwright install
     ```
--  📌 (Optional) Enabling Web Search
-    
+
+- 📌 (Optional) Enabling Web Search
+
     To enable web search, you will need to get a free SERP API key from [SerpApi](https://serpapi.com/users/sign_up).  On the free plan, you get 100 credits per month which is generally sufficient for light to moderate personal use. The agent uses a web search tool integrated with SERP API to fetch information from the web if you have the `SERP_API_KEY` set up in the Local Operator credentials.  The agent can still browse the web without it, though information access will be less efficient.
 
    1. Get your API key and then configure the `SERP_API_KEY` credential:
@@ -141,7 +146,7 @@ To run Local Operator with a 3rd party cloud-hosted LLM model, you need to have 
       ```
 
 - 📌 (Optional) Enabling Image Generation
- 
+
     To enable image generation capabilities, you'll need to get a FAL AI API key from [FAL AI](https://fal.ai/dashboard/keys). The Local Operator uses the FLUX.1 model from FAL AI to generate and modify images.
 
     1. Get your API key and then configure the `FAL_API_KEY` credential:
@@ -153,7 +158,6 @@ To run Local Operator with a 3rd party cloud-hosted LLM model, you need to have 
 ### 📦 Install via Nix Flake
 
 If you use [Nix](https://nixos.org/) for development, this project provides a `flake.nix` for easy, reproducible setup. The flake ensures all dependencies are available and configures a development environment with a single command.
-
 
 1. **Enter the development shell:**
 
@@ -174,7 +178,6 @@ If you use [Nix](https://nixos.org/) for development, this project provides a `f
 - Works on Linux, macOS, and (with [nix-darwin](https://github.com/LnL7/nix-darwin)) on macOS.
 
 For more information about Nix flakes, see the [NixOS flake documentation](https://nixos.wiki/wiki/Flakes).
-
 
 ### 🐋 Running Local Operator in Docker
 
@@ -350,6 +353,89 @@ for personal use if you go over the SERP API 100 requests per month limit.  The 
 - `GOOGLE_API_KEY`: The API key for the Google API.  This is used to access the Google model.
 
 - `MISTRAL_API_KEY`: The API key for the Mistral API.  This is used to access the Mistral model.
+
+---
+
+## 🌟 Radient Agent Hub and Automatic Model Selection
+
+Radient enables seamless sharing, hosting, and auto-selection of AI agents and models through the Agent Hub in Local Operator.  The Agent Hub is public and available to all for downloading agents, however to publish an agent you will need to set up an account on the [Radient Console](https://console.radienthq.com). You can push your agents to the Radient Hub, pull agents shared by others, and leverage Radient's automatic model selection for optimal performance and cost reductions.
+
+### Setting Up a Radient Account
+
+1. **Sign Up & Create an Application**
+   - Go to [https://console.radienthq.com](https://console.radienthq.com) and sign up for a free account.
+   - After logging in, create a new application in the Radient Console Applications section.
+   - Copy your generated **RADIENT_API_KEY** from the application creation dialog.
+
+2. **Configure Your API Key in Local Operator**
+   - Set your Radient API key using the credentials manager:
+
+     ```bash
+     local-operator credential update RADIENT_API_KEY
+     ```
+
+### Pushing and Pulling Agents
+
+- **Push an Agent to Radient**
+  - You must be logged in (RADIENT_API_KEY configured) to push agents.
+  - Use either the agent's name or ID:
+
+    ```bash
+    local-operator agents push --name "<agent_name>"
+    ```
+
+    or
+
+    ```bash
+    local-operator agents push --id "<agent_id>"
+    ```
+
+  - This uploads your agent to the Radient Agents Hub for sharing or backup.
+
+- **Pull an Agent from Radient**
+  - Download an agent by its Radient ID (no RADIENT_API_KEY required):
+
+    ```bash
+    local-operator agents pull --id "<agent_id>"
+    ```
+
+### Using Radient Hosting for Model Auto-Selection
+
+Radient can automatically select the best model for your task, removing the need to specify a model manually.
+
+1. **Configure Your API Key** (if not already done):
+
+   ```bash
+   local-operator credential update RADIENT_API_KEY
+   ```
+
+2. **Run Local Operator with Radient Hosting**:
+
+   ```bash
+   local-operator --hosting radient
+   ```
+
+   - No `--model` argument is needed; Radient will select the optimal model automatically.  The model will be selected on a step-by-step basis to optimize for the best model for the job and reduce agentic AI costs.
+
+#### Example Workflow
+
+```bash
+# Set up your Radient API key
+local-operator credential update RADIENT_API_KEY
+
+# Push an agent to Radient
+local-operator agents push --name "My Agent"
+
+# Pull an agent from Radient
+local-operator agents pull --id "radient-agent-id-123"
+
+# Use Radient hosting for automatic model selection
+local-operator --hosting radient
+```
+
+> **Note:** You must have a valid RADIENT_API_KEY configured to push agents or use Radient hosting.
+
+For more details, visit the [Radient Console](https://console.radienthq.com) or see the [Local Operator documentation](https://local-operator.com).
 
 ## 📝 Examples
 
