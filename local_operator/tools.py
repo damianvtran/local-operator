@@ -1,8 +1,12 @@
+import asyncio
 import base64
 import fnmatch
+import http.client
+import json
 import os
 import platform
 import shutil
+import socket
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -974,6 +978,67 @@ def _get_browser_path() -> Optional[str]:
     return None
 
 
+DEFAULT_DEBUGGING_PORTS = [
+    9222,
+    9223,
+    9224,
+    9225,
+    9229,
+    9230,
+]  # Common ports for Chrome, Edge, Brave, Opera, Arc etc.
+
+
+def _is_port_open(host: str, port: int, timeout: float = 0.1) -> bool:
+    """Quickly check if a port is open on a host."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect((host, port))
+        s.close()
+        return True
+    except (socket.timeout, ConnectionRefusedError, OSError):
+        return False
+
+
+def _get_browser_ws_url_from_port(host: str, port: int, timeout: float = 1.0) -> Optional[str]:
+    """Attempts to get the WebSocket debugger URL from /json/version on a given host and port."""
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        conn.request("GET", "/json/version")
+        response = conn.getresponse()
+        if response.status == 200:
+            data = response.read()
+            version_info = json.loads(data.decode("utf-8"))
+            if "webSocketDebuggerUrl" in version_info and version_info["webSocketDebuggerUrl"]:
+                ws_url = version_info["webSocketDebuggerUrl"]
+                if ws_url.startswith("ws://") or ws_url.startswith("wss://"):
+                    return ws_url
+        conn.close()
+    except (
+        http.client.HTTPException,
+        socket.error,
+        json.JSONDecodeError,
+        ConnectionRefusedError,
+        UnicodeDecodeError,
+    ):
+        pass  # Silently ignore errors for a specific port, try next
+    return None
+
+
+def _scan_for_browser_websocket_url() -> Optional[str]:
+    """
+    Scans a list of common remote debugging ports for an active browser session
+    and returns the WebSocket debugger URL if found.
+    """
+    host = "127.0.0.1"  # Use 127.0.0.1 to avoid IPv6 resolution issues with localhost
+    for port in DEFAULT_DEBUGGING_PORTS:
+        if _is_port_open(host, port, timeout=0.2):  # Slightly increased timeout for reliability
+            ws_url = _get_browser_ws_url_from_port(host, port, timeout=0.5)  # Quick HTTP timeout
+            if ws_url:
+                return ws_url
+    return None
+
+
 def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any]:
     """Create a tool function to run a browser automation task.
 
@@ -1014,22 +1079,35 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
             )
             raise TypeError(error_message)
 
-        browser_path = _get_browser_path()
-        if not browser_path:
-            error_msg = (
-                "No supported browser found (Arc, Chrome, Edge, Firefox, Opera, Brave). "
-                "Ensure one is installed and in PATH, or provide path manually."
-            )
-            raise RuntimeError(error_msg)
+        existing_wss_url = await asyncio.to_thread(_scan_for_browser_websocket_url)
 
-        browser_instance = Browser(
-            config=BrowserConfig(
-                headless=False,
+        # Common settings for BrowserConfig
+        headless_setting = False  # Default to non-headless for visibility
+        keep_alive_setting = True  # As per original code's intent
+
+        browser_config: BrowserConfig
+        if existing_wss_url:
+            browser_config = BrowserConfig(
+                wss_url=existing_wss_url,
+                headless=headless_setting,
+                keep_alive=keep_alive_setting,  # type: ignore - browser-use type issue
+            )
+        else:
+            browser_path = _get_browser_path()
+            if not browser_path:
+                error_msg = (
+                    "No supported browser found (Arc, Chrome, Edge, Firefox, "
+                    "Opera, Brave) for launching. "
+                    "Ensure one is installed and in PATH, or provide path manually."
+                )
+                raise RuntimeError(error_msg)
+            browser_config = BrowserConfig(
                 browser_binary_path=browser_path,
-                keep_alive=True,  # type: ignore - browser-use type issue
+                headless=headless_setting,
+                keep_alive=keep_alive_setting,  # type: ignore - browser-use type issue
             )
-        )
 
+        browser_instance = Browser(config=browser_config)
         controller = BrowserController()
 
         # Need to set this due to a browser-use bug
