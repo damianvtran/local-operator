@@ -1026,6 +1026,7 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
             config=BrowserConfig(
                 headless=False,
                 browser_binary_path=browser_path,
+                keep_alive=True,  # type: ignore - browser-use type issue
             )
         )
 
