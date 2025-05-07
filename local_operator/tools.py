@@ -1070,7 +1070,7 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
         the task. It will then return the result as a string.
         Review console output to see if the task was done according to instructions.
         Ensure instructions to the agent are clear and specific, including any websites,
-        commands, and context the agent will need.
+        commands, and context the agent will need.  HOW TO HANDLE ERRORS: The agent will attempt 3 times to launch or connect to a browser.  If it fails all 3 times, it will raise an error that you will need to help the user to handle.  Often it's related to an existing browser instance that doesn't have a debug port open, which will need to be closed and reopened when this method runs.  This happens on Arc, but can happen on Chrome and other browsers as well.
 
         Args:
             task (str): The task to be performed by the agent.
@@ -1094,8 +1094,9 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
         # Ensure the LLM instance is not a mock or noop, as BrowserAgent needs a functional LLM
         if isinstance(model_config.instance, (ChatMock, ChatNoop)):
             error_message = (
-                f"Browser task tool cannot use LLM of type {type(model_config.instance).__name__}. "
-                "A functional LLM (e.g., ChatOpenAI, ChatAnthropic) is required."
+                "Browser task tool cannot use LLM client of type "
+                f"{type(model_config.instance).__name__}. "
+                "A functional LLM client (e.g., ChatOpenAI, ChatAnthropic) is required."
             )
             raise TypeError(error_message)
 
