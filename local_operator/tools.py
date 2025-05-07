@@ -1,10 +1,15 @@
 import base64
 import fnmatch
 import os
+import platform
+import shutil
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import playwright.async_api as pw
+from browser_use import Agent as BrowserAgent
+from browser_use import Browser, BrowserConfig
+from browser_use import Controller as BrowserController
 from pydantic import SecretStr
 
 from local_operator.clients.fal import FalClient, FalImageGenerationResponse, ImageSize
@@ -16,6 +21,8 @@ from local_operator.clients.radient import (
 from local_operator.clients.serpapi import SerpApiClient, SerpApiResponse
 from local_operator.clients.tavily import TavilyClient, TavilyResponse
 from local_operator.credentials import CredentialManager
+from local_operator.mocks import ChatMock, ChatNoop  # Added import
+from local_operator.model.configure import ModelConfiguration
 
 
 def _get_git_ignored_files(gitignore_path: str) -> Set[str]:
@@ -796,6 +803,119 @@ def list_credentials_tool(credential_manager: CredentialManager) -> Callable[...
     return list_credentials
 
 
+def _get_chrome_path() -> Optional[str]:
+    """Attempt to find the path to the Google Chrome executable.
+
+    Returns:
+        Optional[str]: The path to the Chrome executable, or None if not found.
+    """
+    system = platform.system()
+    possible_paths = []
+
+    if system == "Darwin":  # macOS
+        possible_paths = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        ]
+    elif system == "Windows":
+        program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
+        program_files_x86 = os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")
+        local_app_data = os.environ.get("LOCALAPPDATA", "")
+        possible_paths = [
+            os.path.join(program_files, "Google\\Chrome\\Application\\chrome.exe"),
+            os.path.join(program_files_x86, "Google\\Chrome\\Application\\chrome.exe"),
+        ]
+        if local_app_data:  # Ensure local_app_data is not empty before joining
+            possible_paths.append(
+                os.path.join(local_app_data, "Google\\Chrome\\Application\\chrome.exe")
+            )
+    elif system == "Linux":
+        possible_paths = [
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium-browser",
+            "chromium",
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/chromium",
+            "/snap/bin/chromium",
+        ]
+
+    for path in possible_paths:
+        if shutil.which(path):
+            return shutil.which(path)
+    return None
+
+
+def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any]:
+    """Create a tool function to run a browser automation task.
+
+    Args:
+        model_config (ModelConfiguration): The configured model to use for the agent.
+
+    Returns:
+        Callable: An async function that runs a browser automation task.
+    """
+
+    async def run_browser_task(task: str) -> str:
+        """Run a browser automation task using the browser-use library.  This will open the user's browser and have a browser agent control it to carry out the task that you need to do.  Make sure that your instructions to the agent are clear and specific, include any websites, commands, and context that the agent will need to know in order to carry out the browser automation task for you.
+
+        Args:
+            task (str): The task to be performed by the agent.
+
+        Returns:
+            str: The result of the browser automation task.
+
+        Raises:
+            RuntimeError: If Chrome executable is not found or model instance is not available.
+            TypeError: If the configured model instance is not a supported LLM type.
+        """  # noqa: E501
+        if not model_config or not model_config.instance:
+            raise RuntimeError(
+                "ModelConfiguration or model instance is not available for the browser task tool."
+            )
+
+        # Ensure the LLM instance is not a mock or noop, as BrowserAgent needs a functional LLM
+        if isinstance(model_config.instance, (ChatMock, ChatNoop)):
+            error_message = (
+                f"Browser task tool cannot use LLM of type {type(model_config.instance).__name__}. "
+                "A functional LLM (e.g., ChatOpenAI, ChatAnthropic) is required."
+            )
+            raise TypeError(error_message)
+
+        chrome_path = _get_chrome_path()
+        if not chrome_path:
+            raise RuntimeError(
+                "Google Chrome executable not found. Please ensure it is installed "
+                "and in your PATH, or provide the path manually."
+            )
+
+        browser_instance = Browser(
+            config=BrowserConfig(
+                headless=False,
+                browser_binary_path=chrome_path,
+            )
+        )
+
+        controller = BrowserController()
+
+        agent = BrowserAgent(
+            task=task,
+            llm=model_config.instance,  # Use configured LLM instance
+            browser=browser_instance,
+            controller=controller,
+        )
+
+        try:
+            result = await agent.run()
+            return str(result)  # Ensure result is a string
+        finally:
+            await browser_instance.close()
+
+    return run_browser_task
+
+
 class ToolRegistry:
     """Registry for tools that can be used by agents.
 
@@ -813,6 +933,7 @@ class ToolRegistry:
     fal_client: FalClient | None = None
     radient_client: RadientClient | None = None
     credential_manager: CredentialManager | None = None
+    model_configuration: Optional[ModelConfiguration] = None
 
     def __init__(self):
         """Initialize an empty tool registry."""
@@ -859,6 +980,14 @@ class ToolRegistry:
         """
         self.credential_manager = credential_manager
 
+    def set_model_configuration(self, model_config: ModelConfiguration):
+        """Set the ModelConfiguration for the registry.
+
+        Args:
+            model_config (ModelConfiguration): The ModelConfiguration to set.
+        """
+        self.model_configuration = model_config
+
     def init_tools(self):
         """Initialize the registry with default tools.
 
@@ -871,6 +1000,7 @@ class ToolRegistry:
         - generate_altered_image: Alter existing images using available image generation APIs
         - get_credential: Retrieve a secret credential
         - list_credentials: List available credentials
+        - run_browser_task: Perform a task using an automated browser
         """
         self.add_tool("get_page_html_content", get_page_html_content)
         self.add_tool("get_page_text_content", get_page_text_content)
@@ -896,6 +1026,11 @@ class ToolRegistry:
         if self.credential_manager:
             self.add_tool("get_credential", get_credential_tool(self.credential_manager))
             self.add_tool("list_credentials", list_credentials_tool(self.credential_manager))
+            if self.model_configuration:  # Ensure model_configuration is set
+                self.add_tool("run_browser_task", run_browser_task_tool(self.model_configuration))
+            else:
+                # Optionally log a warning or skip adding the tool if model_config is None
+                print("Warning: ModelConfiguration not set, skipping run_browser_task tool.")
 
     def add_tool(self, name: str, tool: Callable[..., Any]):
         """Add a new tool to the registry.
