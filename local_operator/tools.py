@@ -21,7 +21,7 @@ from local_operator.clients.radient import (
 from local_operator.clients.serpapi import SerpApiClient, SerpApiResponse
 from local_operator.clients.tavily import TavilyClient, TavilyResponse
 from local_operator.credentials import CredentialManager
-from local_operator.mocks import ChatMock, ChatNoop  # Added import
+from local_operator.mocks import ChatMock, ChatNoop
 from local_operator.model.configure import ModelConfiguration
 
 
@@ -803,48 +803,174 @@ def list_credentials_tool(credential_manager: CredentialManager) -> Callable[...
     return list_credentials
 
 
-def _get_chrome_path() -> Optional[str]:
-    """Attempt to find the path to the Google Chrome executable.
+def _get_browser_path() -> Optional[str]:
+    """Attempt to find the path to a supported browser executable.
+
+    Searches for browsers in the following order: Arc, Chrome, Edge, Firefox, Opera, Brave.
 
     Returns:
-        Optional[str]: The path to the Chrome executable, or None if not found.
+        Optional[str]: The path to the first found browser executable, or None if not found.
     """
     system = platform.system()
-    possible_paths = []
+    # Ordered list of browsers to check with their typical executable names or paths
+    browsers_mac = [
+        ("/Applications/Arc.app/Contents/MacOS/Arc", "Arc"),
+        ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "Google Chrome"),
+        ("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge", "Microsoft Edge"),
+        ("/Applications/Firefox.app/Contents/MacOS/firefox", "Firefox"),
+        ("/Applications/Opera.app/Contents/MacOS/Opera", "Opera"),
+        ("/Applications/Brave Browser.app/Contents/MacOS/Brave Browser", "Brave Browser"),
+    ]
+    browsers_windows = [
+        (
+            os.path.join(
+                os.environ.get("ProgramFiles", "C:\\Program Files"),
+                "The Browser Company\\Arc\\Application\\arc.exe",
+            ),
+            "Arc",
+        ),
+        (
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs\\Arc\\arc.exe"),
+            "Arc",
+        ),  # User install
+        (
+            os.path.join(
+                os.environ.get("ProgramFiles", "C:\\Program Files"),
+                "Google\\Chrome\\Application\\chrome.exe",
+            ),
+            "Google Chrome",
+        ),
+        (
+            os.path.join(
+                os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"),
+                "Google\\Chrome\\Application\\chrome.exe",
+            ),
+            "Google Chrome",
+        ),
+        (
+            os.path.join(
+                os.environ.get("LOCALAPPDATA", ""), "Google\\Chrome\\Application\\chrome.exe"
+            ),
+            "Google Chrome",
+        ),
+        (
+            os.path.join(
+                os.environ.get("ProgramFiles", "C:\\Program Files"),
+                "Microsoft\\Edge\\Application\\msedge.exe",
+            ),
+            "Microsoft Edge",
+        ),
+        (
+            os.path.join(
+                os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"),
+                "Microsoft\\Edge\\Application\\msedge.exe",
+            ),
+            "Microsoft Edge",
+        ),
+        (
+            os.path.join(
+                os.environ.get("ProgramFiles", "C:\\Program Files"), "Mozilla Firefox\\firefox.exe"
+            ),
+            "Mozilla Firefox",
+        ),
+        (
+            os.path.join(
+                os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"),
+                "Mozilla Firefox\\firefox.exe",
+            ),
+            "Mozilla Firefox",
+        ),
+        (
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs\\Opera\\launcher.exe"),
+            "Opera",
+        ),
+        (
+            os.path.join(
+                os.environ.get("ProgramFiles", "C:\\Program Files"), "Opera\\launcher.exe"
+            ),
+            "Opera",
+        ),
+        (
+            os.path.join(
+                os.environ.get("ProgramFiles", "C:\\Program Files"),
+                "BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+            ),
+            "Brave Browser",
+        ),
+        (
+            os.path.join(
+                os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"),
+                "BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+            ),
+            "Brave Browser",
+        ),
+        (
+            os.path.join(
+                os.environ.get("LOCALAPPDATA", ""),
+                "BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+            ),
+            "Brave Browser",
+        ),
+    ]
+    browsers_linux = [
+        ("arc", "Arc"),  # Placeholder, Arc not officially on Linux yet
+        ("google-chrome", "Google Chrome"),
+        ("google-chrome-stable", "Google Chrome Stable"),
+        ("microsoft-edge", "Microsoft Edge"),
+        ("microsoft-edge-stable", "Microsoft Edge Stable"),
+        ("firefox", "Firefox"),
+        ("opera", "Opera"),
+        ("brave-browser", "Brave Browser"),
+        ("chromium-browser", "Chromium"),  # Fallback
+        ("chromium", "Chromium"),  # Fallback
+    ]
 
-    if system == "Darwin":  # macOS
-        possible_paths = [
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-        ]
+    possible_paths_os: List[Tuple[str, str]] = []
+    if system == "Darwin":
+        possible_paths_os = browsers_mac
     elif system == "Windows":
-        program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
-        program_files_x86 = os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")
-        local_app_data = os.environ.get("LOCALAPPDATA", "")
-        possible_paths = [
-            os.path.join(program_files, "Google\\Chrome\\Application\\chrome.exe"),
-            os.path.join(program_files_x86, "Google\\Chrome\\Application\\chrome.exe"),
-        ]
-        if local_app_data:  # Ensure local_app_data is not empty before joining
-            possible_paths.append(
-                os.path.join(local_app_data, "Google\\Chrome\\Application\\chrome.exe")
-            )
+        possible_paths_os = browsers_windows
     elif system == "Linux":
-        possible_paths = [
-            "google-chrome",
-            "google-chrome-stable",
-            "chromium-browser",
-            "chromium",
-            "/usr/bin/google-chrome",
-            "/usr/bin/google-chrome-stable",
-            "/usr/bin/chromium-browser",
-            "/usr/bin/chromium",
-            "/snap/bin/chromium",
-        ]
+        possible_paths_os = browsers_linux
 
-    for path in possible_paths:
-        if shutil.which(path):
-            return shutil.which(path)
+    for path_candidate, browser_name in possible_paths_os:
+        # For Linux, shutil.which is better for finding executables in PATH
+        if system == "Linux" and not os.path.isabs(path_candidate):
+            found_path = shutil.which(path_candidate)
+            if found_path:
+                # print(f"Found {browser_name} at {found_path}") # Optional: for debugging
+                return found_path
+        # For absolute paths or other OSes, check existence directly
+        elif os.path.exists(path_candidate):
+            # print(f"Found {browser_name} at {path_candidate}") # Optional: for debugging
+            return path_candidate
+        # On macOS, also check user-specific application paths
+        if system == "Darwin":
+            user_path = os.path.expanduser(f"~/Applications/{Path(path_candidate).name}")
+            if os.path.exists(user_path):
+                # print(f"Found {browser_name} at {user_path}") # Optional: for debugging
+                return user_path
+            # Arc specific user path on macOS
+            if browser_name == "Arc":
+                user_arc_path = os.path.expanduser("~/Applications/Arc.app/Contents/MacOS/Arc")
+                if os.path.exists(user_arc_path):
+                    return user_arc_path
+
+    # Fallback for Linux if specific paths weren't found but command might be in PATH
+    if system == "Linux":
+        linux_fallbacks = [
+            "google-chrome",
+            "microsoft-edge",
+            "firefox",
+            "opera",
+            "brave-browser",
+            "chromium",
+        ]
+        for browser_cmd in linux_fallbacks:
+            found_path = shutil.which(browser_cmd)
+            if found_path:
+                # print(f"Found {browser_cmd} (fallback) at {found_path}") # Optional: for debugging
+                return found_path
     return None
 
 
@@ -859,7 +985,7 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
     """
 
     async def run_browser_task(task: str) -> str:
-        """Run a browser automation task using the browser-use library.  This will open the user's browser and have a browser agent control it to carry out the task that you need to do.  Make sure that your instructions to the agent are clear and specific, include any websites, commands, and context that the agent will need to know in order to carry out the browser automation task for you.
+        """Run a browser automation task using the browser-use library.  This will open the user's browser and have a browser agent control it to carry out the task that you need to do.  It will then return the result as a string, which you can use to find out if the task was successful or not.  You'll also see the result in the console output, so make sure to review that to see if the task was done according to your instructions.  Make sure that your instructions to the agent are clear and specific, include any websites, commands, and context that the agent will need to know in order to carry out the browser automation task for you.
 
         Args:
             task (str): The task to be performed by the agent.
@@ -873,8 +999,12 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
         """  # noqa: E501
         if not model_config or not model_config.instance:
             raise RuntimeError(
-                "ModelConfiguration or model instance is not available for the browser task tool."
+                "ModelConfiguration or model instance is not available for "
+                "the browser task tool."
             )
+
+        if not model_config.api_key or not model_config.api_key.get_secret_value():
+            raise RuntimeError("API key not set for the model configuration.")
 
         # Ensure the LLM instance is not a mock or noop, as BrowserAgent needs a functional LLM
         if isinstance(model_config.instance, (ChatMock, ChatNoop)):
@@ -884,25 +1014,29 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
             )
             raise TypeError(error_message)
 
-        chrome_path = _get_chrome_path()
-        if not chrome_path:
-            raise RuntimeError(
-                "Google Chrome executable not found. Please ensure it is installed "
-                "and in your PATH, or provide the path manually."
+        browser_path = _get_browser_path()
+        if not browser_path:
+            error_msg = (
+                "No supported browser found (Arc, Chrome, Edge, Firefox, Opera, Brave). "
+                "Ensure one is installed and in PATH, or provide path manually."
             )
+            raise RuntimeError(error_msg)
 
         browser_instance = Browser(
             config=BrowserConfig(
                 headless=False,
-                browser_binary_path=chrome_path,
+                browser_binary_path=browser_path,
             )
         )
 
         controller = BrowserController()
 
+        # Need to set this due to a browser-use bug
+        os.environ["OPENAI_API_KEY"] = model_config.api_key.get_secret_value()
+
         agent = BrowserAgent(
             task=task,
-            llm=model_config.instance,  # Use configured LLM instance
+            llm=model_config.instance,
             browser=browser_instance,
             controller=controller,
         )
