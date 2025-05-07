@@ -1000,8 +1000,16 @@ def _is_port_open(host: str, port: int, timeout: float = 0.1) -> bool:
         return False
 
 
-def _get_browser_ws_url_from_port(host: str, port: int, timeout: float = 1.0) -> Optional[str]:
-    """Attempts to get the WebSocket debugger URL from /json/version on a given host and port."""
+def _get_browser_connection_urls_from_port(
+    host: str, port: int, timeout: float = 1.0
+) -> Optional[Tuple[Optional[str], Optional[str]]]:
+    """
+    Attempts to get WebSocket debugger URL and construct CDP URL from /json/version.
+    Returns a tuple (wss_url, cdp_url).
+    """
+    wss_url: Optional[str] = None
+    cdp_url: Optional[str] = f"http://{host}:{port}"  # CDP URL is typically the http endpoint
+
     try:
         conn = http.client.HTTPConnection(host, port, timeout=timeout)
         conn.request("GET", "/json/version")
@@ -1010,32 +1018,38 @@ def _get_browser_ws_url_from_port(host: str, port: int, timeout: float = 1.0) ->
             data = response.read()
             version_info = json.loads(data.decode("utf-8"))
             if "webSocketDebuggerUrl" in version_info and version_info["webSocketDebuggerUrl"]:
-                ws_url = version_info["webSocketDebuggerUrl"]
-                if ws_url.startswith("ws://") or ws_url.startswith("wss://"):
-                    return ws_url
+                retrieved_wss_url = version_info["webSocketDebuggerUrl"]
+                if retrieved_wss_url.startswith("ws://") or retrieved_wss_url.startswith("wss://"):
+                    wss_url = retrieved_wss_url
+            # If we got a 200, even without wss_url, the cdp_url might be valid
+            conn.close()
+            return wss_url, cdp_url
         conn.close()
     except (
-        http.client.HTTPException,
-        socket.error,
+        http.client.HTTPException,  # Includes IncompleteRead, etc.
+        socket.error,  # Includes timeout, connection refused if _is_port_open was too optimistic
         json.JSONDecodeError,
-        ConnectionRefusedError,
+        ConnectionRefusedError,  # Explicitly catch if connect fails here
         UnicodeDecodeError,
     ):
-        pass  # Silently ignore errors for a specific port, try next
-    return None
+        # If HTTP request fails, cdp_url might still be considered invalid or unreliable
+        return None, None  # Indicate failure to get reliable connection details
+    return wss_url, cdp_url  # Returns (None, cdp_url) if wss_url not found but HTTP 200
 
 
-def _scan_for_browser_websocket_url() -> Optional[str]:
+def _scan_for_browser_connection_urls() -> Optional[Tuple[Optional[str], Optional[str]]]:
     """
-    Scans a list of common remote debugging ports for an active browser session
-    and returns the WebSocket debugger URL if found.
+    Scans common remote debugging ports for an active browser session.
+    Returns a tuple (wss_url, cdp_url) if a connectable session is found.
+    Prefers wss_url if available.
     """
-    host = "127.0.0.1"  # Use 127.0.0.1 to avoid IPv6 resolution issues with localhost
+    host = "127.0.0.1"
     for port in DEFAULT_DEBUGGING_PORTS:
-        if _is_port_open(host, port, timeout=0.2):  # Slightly increased timeout for reliability
-            ws_url = _get_browser_ws_url_from_port(host, port, timeout=0.5)  # Quick HTTP timeout
-            if ws_url:
-                return ws_url
+        if _is_port_open(host, port, timeout=0.2):
+            connection_urls = _get_browser_connection_urls_from_port(host, port, timeout=0.5)
+            if connection_urls and (connection_urls[0] or connection_urls[1]):
+                # Return if either wss_url or cdp_url is found
+                return connection_urls
     return None
 
 
@@ -1050,7 +1064,13 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
     """
 
     async def run_browser_task(task: str) -> str:
-        """Run a browser automation task using the browser-use library.  This will open the user's browser and have a browser agent control it to carry out the task that you need to do.  It will then return the result as a string, which you can use to find out if the task was successful or not.  You'll also see the result in the console output, so make sure to review that to see if the task was done according to your instructions.  Make sure that your instructions to the agent are clear and specific, include any websites, commands, and context that the agent will need to know in order to carry out the browser automation task for you.
+        """
+        Run a browser automation task using the browser-use library.
+        This will open the user's browser and have a browser agent control it to carry out
+        the task. It will then return the result as a string.
+        Review console output to see if the task was done according to instructions.
+        Ensure instructions to the agent are clear and specific, including any websites,
+        commands, and context the agent will need.
 
         Args:
             task (str): The task to be performed by the agent.
@@ -1079,26 +1099,35 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
             )
             raise TypeError(error_message)
 
-        existing_wss_url = await asyncio.to_thread(_scan_for_browser_websocket_url)
+        connection_urls = await asyncio.to_thread(_scan_for_browser_connection_urls)
+        existing_wss_url, existing_cdp_url = connection_urls if connection_urls else (None, None)
 
         # Common settings for BrowserConfig
         headless_setting = False  # Default to non-headless for visibility
         keep_alive_setting = True  # As per original code's intent
 
         browser_config: BrowserConfig
-        if existing_wss_url:
+        if existing_cdp_url:
+            print(f"Attempting to connect to existing browser session via CDP: {existing_cdp_url}")
+            browser_config = BrowserConfig(
+                cdp_url=existing_cdp_url,  # type: ignore - browser-use might not type this
+                headless=headless_setting,
+                keep_alive=keep_alive_setting,  # type: ignore - browser-use type issue
+            )
+        elif existing_wss_url:
+            print(f"Attempting to connect to existing browser session via WSS: {existing_wss_url}")
             browser_config = BrowserConfig(
                 wss_url=existing_wss_url,
                 headless=headless_setting,
                 keep_alive=keep_alive_setting,  # type: ignore - browser-use type issue
             )
         else:
+            print("No existing browser session found or connectable, launching new instance.")
             browser_path = _get_browser_path()
             if not browser_path:
                 error_msg = (
-                    "No supported browser found (Arc, Chrome, Edge, Firefox, "
-                    "Opera, Brave) for launching. "
-                    "Ensure one is installed and in PATH, or provide path manually."
+                    "No supported browser found (Arc, Chrome, Edge, Firefox, Opera, Brave) "
+                    "for launching. Ensure one is installed and in PATH, or provide path manually."
                 )
                 raise RuntimeError(error_msg)
             browser_config = BrowserConfig(
