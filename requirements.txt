@@ -5,7 +5,7 @@ langchain-ollama==0.2.2
 langchain==0.3.14
 langchain-community==0.3.14
 langchain-anthropic==0.3.3
-langchain-google-genai==2.0.8
+langchain-google-genai==2.1.2
 tiktoken==0.8.0
 uvicorn==0.22.0
 fastapi==0.115.8
