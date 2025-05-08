@@ -14,7 +14,7 @@ setup(
         "langchain-ollama>=0.3.0",
         "langchain-anthropic>=0.3.3",
         "langchain-google-genai>=2.1.2",
-        "langchain>=0.3.14",
+        "langchain>=0.3.21",
         "langchain-community>=0.3.14",
         "python-dotenv>=1.0.1",
         "pydantic>=2.10.6",
