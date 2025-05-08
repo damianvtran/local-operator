@@ -1,10 +1,19 @@
+import asyncio
 import base64
 import fnmatch
+import http.client
+import json
 import os
+import platform
+import shutil
+import socket
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import playwright.async_api as pw
+from browser_use import Agent as BrowserAgent
+from browser_use import Browser, BrowserConfig
+from browser_use import Controller as BrowserController
 from pydantic import SecretStr
 
 from local_operator.clients.fal import FalClient, FalImageGenerationResponse, ImageSize
@@ -16,6 +25,8 @@ from local_operator.clients.radient import (
 from local_operator.clients.serpapi import SerpApiClient, SerpApiResponse
 from local_operator.clients.tavily import TavilyClient, TavilyResponse
 from local_operator.credentials import CredentialManager
+from local_operator.mocks import ChatMock, ChatNoop
+from local_operator.model.configure import ModelConfiguration
 
 
 def _get_git_ignored_files(gitignore_path: str) -> Set[str]:
@@ -796,6 +807,358 @@ def list_credentials_tool(credential_manager: CredentialManager) -> Callable[...
     return list_credentials
 
 
+def _get_browser_path() -> Optional[str]:
+    """Attempt to find the path to a supported browser executable.
+
+    Searches for browsers in the following order: Arc, Chrome, Edge, Firefox, Opera, Brave.
+
+    Returns:
+        Optional[str]: The path to the first found browser executable, or None if not found.
+    """
+    system = platform.system()
+    # Ordered list of browsers to check with their typical executable names or paths
+    browsers_mac = [
+        ("/Applications/Arc.app/Contents/MacOS/Arc", "Arc"),
+        ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "Google Chrome"),
+        ("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge", "Microsoft Edge"),
+        ("/Applications/Firefox.app/Contents/MacOS/firefox", "Firefox"),
+        ("/Applications/Opera.app/Contents/MacOS/Opera", "Opera"),
+        ("/Applications/Brave Browser.app/Contents/MacOS/Brave Browser", "Brave Browser"),
+    ]
+    browsers_windows = [
+        (
+            os.path.join(
+                os.environ.get("ProgramFiles", "C:\\Program Files"),
+                "The Browser Company\\Arc\\Application\\arc.exe",
+            ),
+            "Arc",
+        ),
+        (
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs\\Arc\\arc.exe"),
+            "Arc",
+        ),  # User install
+        (
+            os.path.join(
+                os.environ.get("ProgramFiles", "C:\\Program Files"),
+                "Google\\Chrome\\Application\\chrome.exe",
+            ),
+            "Google Chrome",
+        ),
+        (
+            os.path.join(
+                os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"),
+                "Google\\Chrome\\Application\\chrome.exe",
+            ),
+            "Google Chrome",
+        ),
+        (
+            os.path.join(
+                os.environ.get("LOCALAPPDATA", ""), "Google\\Chrome\\Application\\chrome.exe"
+            ),
+            "Google Chrome",
+        ),
+        (
+            os.path.join(
+                os.environ.get("ProgramFiles", "C:\\Program Files"),
+                "Microsoft\\Edge\\Application\\msedge.exe",
+            ),
+            "Microsoft Edge",
+        ),
+        (
+            os.path.join(
+                os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"),
+                "Microsoft\\Edge\\Application\\msedge.exe",
+            ),
+            "Microsoft Edge",
+        ),
+        (
+            os.path.join(
+                os.environ.get("ProgramFiles", "C:\\Program Files"), "Mozilla Firefox\\firefox.exe"
+            ),
+            "Mozilla Firefox",
+        ),
+        (
+            os.path.join(
+                os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"),
+                "Mozilla Firefox\\firefox.exe",
+            ),
+            "Mozilla Firefox",
+        ),
+        (
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs\\Opera\\launcher.exe"),
+            "Opera",
+        ),
+        (
+            os.path.join(
+                os.environ.get("ProgramFiles", "C:\\Program Files"), "Opera\\launcher.exe"
+            ),
+            "Opera",
+        ),
+        (
+            os.path.join(
+                os.environ.get("ProgramFiles", "C:\\Program Files"),
+                "BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+            ),
+            "Brave Browser",
+        ),
+        (
+            os.path.join(
+                os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"),
+                "BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+            ),
+            "Brave Browser",
+        ),
+        (
+            os.path.join(
+                os.environ.get("LOCALAPPDATA", ""),
+                "BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+            ),
+            "Brave Browser",
+        ),
+    ]
+    browsers_linux = [
+        ("arc", "Arc"),  # Placeholder, Arc not officially on Linux yet
+        ("google-chrome", "Google Chrome"),
+        ("google-chrome-stable", "Google Chrome Stable"),
+        ("microsoft-edge", "Microsoft Edge"),
+        ("microsoft-edge-stable", "Microsoft Edge Stable"),
+        ("firefox", "Firefox"),
+        ("opera", "Opera"),
+        ("brave-browser", "Brave Browser"),
+        ("chromium-browser", "Chromium"),  # Fallback
+        ("chromium", "Chromium"),  # Fallback
+    ]
+
+    possible_paths_os: List[Tuple[str, str]] = []
+    if system == "Darwin":
+        possible_paths_os = browsers_mac
+    elif system == "Windows":
+        possible_paths_os = browsers_windows
+    elif system == "Linux":
+        possible_paths_os = browsers_linux
+
+    for path_candidate, browser_name in possible_paths_os:
+        # For Linux, shutil.which is better for finding executables in PATH
+        if system == "Linux" and not os.path.isabs(path_candidate):
+            found_path = shutil.which(path_candidate)
+            if found_path:
+                # print(f"Found {browser_name} at {found_path}") # Optional: for debugging
+                return found_path
+        # For absolute paths or other OSes, check existence directly
+        elif os.path.exists(path_candidate):
+            # print(f"Found {browser_name} at {path_candidate}") # Optional: for debugging
+            return path_candidate
+        # On macOS, also check user-specific application paths
+        if system == "Darwin":
+            user_path = os.path.expanduser(f"~/Applications/{Path(path_candidate).name}")
+            if os.path.exists(user_path):
+                # print(f"Found {browser_name} at {user_path}") # Optional: for debugging
+                return user_path
+            # Arc specific user path on macOS
+            if browser_name == "Arc":
+                user_arc_path = os.path.expanduser("~/Applications/Arc.app/Contents/MacOS/Arc")
+                if os.path.exists(user_arc_path):
+                    return user_arc_path
+
+    # Fallback for Linux if specific paths weren't found but command might be in PATH
+    if system == "Linux":
+        linux_fallbacks = [
+            "google-chrome",
+            "microsoft-edge",
+            "firefox",
+            "opera",
+            "brave-browser",
+            "chromium",
+        ]
+        for browser_cmd in linux_fallbacks:
+            found_path = shutil.which(browser_cmd)
+            if found_path:
+                # print(f"Found {browser_cmd} (fallback) at {found_path}") # Optional: for debugging
+                return found_path
+    return None
+
+
+DEFAULT_DEBUGGING_PORTS = [
+    9222,
+    9223,
+    9224,
+    9225,
+    9229,
+    9230,
+]  # Common ports for Chrome, Edge, Brave, Opera, Arc etc.
+
+
+def _is_port_open(host: str, port: int, timeout: float = 0.1) -> bool:
+    """Quickly check if a port is open on a host."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect((host, port))
+        s.close()
+        return True
+    except (socket.timeout, ConnectionRefusedError, OSError):
+        return False
+
+
+def _get_browser_connection_urls_from_port(
+    host: str, port: int, timeout: float = 1.0
+) -> Optional[Tuple[Optional[str], Optional[str]]]:
+    """
+    Attempts to get WebSocket debugger URL and construct CDP URL from /json/version.
+    Returns a tuple (wss_url, cdp_url).
+    """
+    wss_url: Optional[str] = None
+    cdp_url: Optional[str] = f"http://{host}:{port}"  # CDP URL is typically the http endpoint
+
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        conn.request("GET", "/json/version")
+        response = conn.getresponse()
+        if response.status == 200:
+            data = response.read()
+            version_info = json.loads(data.decode("utf-8"))
+            if "webSocketDebuggerUrl" in version_info and version_info["webSocketDebuggerUrl"]:
+                retrieved_wss_url = version_info["webSocketDebuggerUrl"]
+                if retrieved_wss_url.startswith("ws://") or retrieved_wss_url.startswith("wss://"):
+                    wss_url = retrieved_wss_url
+            # If we got a 200, even without wss_url, the cdp_url might be valid
+            conn.close()
+            return wss_url, cdp_url
+        conn.close()
+    except (
+        http.client.HTTPException,  # Includes IncompleteRead, etc.
+        socket.error,  # Includes timeout, connection refused if _is_port_open was too optimistic
+        json.JSONDecodeError,
+        ConnectionRefusedError,  # Explicitly catch if connect fails here
+        UnicodeDecodeError,
+    ):
+        # If HTTP request fails, cdp_url might still be considered invalid or unreliable
+        return None, None  # Indicate failure to get reliable connection details
+    return wss_url, cdp_url  # Returns (None, cdp_url) if wss_url not found but HTTP 200
+
+
+def _scan_for_browser_connection_urls() -> Optional[Tuple[Optional[str], Optional[str]]]:
+    """
+    Scans common remote debugging ports for an active browser session.
+    Returns a tuple (wss_url, cdp_url) if a connectable session is found.
+    Prefers wss_url if available.
+    """
+    host = "127.0.0.1"
+    for port in DEFAULT_DEBUGGING_PORTS:
+        if _is_port_open(host, port, timeout=0.2):
+            connection_urls = _get_browser_connection_urls_from_port(host, port, timeout=0.5)
+            if connection_urls and (connection_urls[0] or connection_urls[1]):
+                # Return if either wss_url or cdp_url is found
+                return connection_urls
+    return None
+
+
+def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any]:
+    """Create a tool function to run a browser automation task.
+
+    Args:
+        model_config (ModelConfiguration): The configured model to use for the agent.
+
+    Returns:
+        Callable: An async function that runs a browser automation task.
+    """
+
+    async def run_browser_task(task: str) -> str:
+        """
+        Run a browser automation task using the browser-use library.
+        This will open the user's browser and have a browser agent control it to carry out
+        the task. It will then return the result as a string.
+        Review console output to see if the task was done according to instructions.
+        Ensure instructions to the agent are clear and specific, including any websites,
+        commands, and context the agent will need.  HOW TO HANDLE ERRORS: The agent will attempt 3 times to launch or connect to a browser.  If it fails all 3 times, it will raise an error that you will need to help the user to handle.  Often it's related to an existing browser instance that doesn't have a debug port open, which will need to be closed and reopened when this method runs.  This happens on Arc, but can happen on Chrome and other browsers as well.
+
+        Args:
+            task (str): The task to be performed by the agent.
+
+        Returns:
+            str: The result of the browser automation task.
+
+        Raises:
+            RuntimeError: If Chrome executable is not found or model instance is not available.
+            TypeError: If the configured model instance is not a supported LLM type.
+        """  # noqa: E501
+        if not model_config or not model_config.instance:
+            raise RuntimeError(
+                "ModelConfiguration or model instance is not available for "
+                "the browser task tool."
+            )
+
+        if not model_config.api_key or not model_config.api_key.get_secret_value():
+            raise RuntimeError("API key not set for the model configuration.")
+
+        # Ensure the LLM instance is not a mock or noop, as BrowserAgent needs a functional LLM
+        if isinstance(model_config.instance, (ChatMock, ChatNoop)):
+            error_message = (
+                "Browser task tool cannot use LLM client of type "
+                f"{type(model_config.instance).__name__}. "
+                "A functional LLM client (e.g., ChatOpenAI, ChatAnthropic) is required."
+            )
+            raise TypeError(error_message)
+
+        connection_urls = await asyncio.to_thread(_scan_for_browser_connection_urls)
+        existing_wss_url, existing_cdp_url = connection_urls if connection_urls else (None, None)
+
+        # Common settings for BrowserConfig
+        headless_setting = False  # Default to non-headless for visibility
+        keep_alive_setting = True  # As per original code's intent
+
+        browser_config: BrowserConfig
+        if existing_cdp_url:
+            print(f"Attempting to connect to existing browser session via CDP: {existing_cdp_url}")
+            browser_config = BrowserConfig(
+                cdp_url=existing_cdp_url,  # type: ignore - browser-use might not type this
+                headless=headless_setting,
+                keep_alive=keep_alive_setting,  # type: ignore - browser-use type issue
+            )
+        elif existing_wss_url:
+            print(f"Attempting to connect to existing browser session via WSS: {existing_wss_url}")
+            browser_config = BrowserConfig(
+                wss_url=existing_wss_url,
+                headless=headless_setting,
+                keep_alive=keep_alive_setting,  # type: ignore - browser-use type issue
+            )
+        else:
+            print("No existing browser session found or connectable, launching new instance.")
+            browser_path = _get_browser_path()
+            if not browser_path:
+                error_msg = (
+                    "No supported browser found (Arc, Chrome, Edge, Firefox, Opera, Brave) "
+                    "for launching. Ensure one is installed and in PATH, or provide path manually."
+                )
+                raise RuntimeError(error_msg)
+            browser_config = BrowserConfig(
+                browser_binary_path=browser_path,
+                headless=headless_setting,
+                keep_alive=keep_alive_setting,  # type: ignore - browser-use type issue
+            )
+
+        browser_instance = Browser(config=browser_config)
+        controller = BrowserController()
+
+        # Need to set this due to a browser-use bug
+        os.environ["OPENAI_API_KEY"] = model_config.api_key.get_secret_value()
+
+        agent = BrowserAgent(
+            task=task,
+            llm=model_config.instance,
+            browser=browser_instance,
+            controller=controller,
+        )
+
+        try:
+            result = await agent.run()
+            return str(result)  # Ensure result is a string
+        finally:
+            await browser_instance.close()
+
+    return run_browser_task
+
+
 class ToolRegistry:
     """Registry for tools that can be used by agents.
 
@@ -813,6 +1176,7 @@ class ToolRegistry:
     fal_client: FalClient | None = None
     radient_client: RadientClient | None = None
     credential_manager: CredentialManager | None = None
+    model_configuration: Optional[ModelConfiguration] = None
 
     def __init__(self):
         """Initialize an empty tool registry."""
@@ -859,6 +1223,14 @@ class ToolRegistry:
         """
         self.credential_manager = credential_manager
 
+    def set_model_configuration(self, model_config: ModelConfiguration):
+        """Set the ModelConfiguration for the registry.
+
+        Args:
+            model_config (ModelConfiguration): The ModelConfiguration to set.
+        """
+        self.model_configuration = model_config
+
     def init_tools(self):
         """Initialize the registry with default tools.
 
@@ -871,6 +1243,7 @@ class ToolRegistry:
         - generate_altered_image: Alter existing images using available image generation APIs
         - get_credential: Retrieve a secret credential
         - list_credentials: List available credentials
+        - run_browser_task: Perform a task using an automated browser
         """
         self.add_tool("get_page_html_content", get_page_html_content)
         self.add_tool("get_page_text_content", get_page_text_content)
@@ -896,6 +1269,11 @@ class ToolRegistry:
         if self.credential_manager:
             self.add_tool("get_credential", get_credential_tool(self.credential_manager))
             self.add_tool("list_credentials", list_credentials_tool(self.credential_manager))
+            if self.model_configuration:  # Ensure model_configuration is set
+                self.add_tool("run_browser_task", run_browser_task_tool(self.model_configuration))
+            else:
+                # Optionally log a warning or skip adding the tool if model_config is None
+                print("Warning: ModelConfiguration not set, skipping run_browser_task tool.")
 
     def add_tool(self, name: str, tool: Callable[..., Any]):
         """Add a new tool to the registry.
