@@ -23,7 +23,7 @@ setup(
         "fastapi>=0.115.8",
         "playwright>=1.49.1",
         "requests>=2.32.3",
-        "psutil>=6.1.1",
+        "psutil>=7.0.0",
         "dill>=0.3.9",
         "pyreadline3>=3.5.4",
         "jsonlines>=4.0.0",
