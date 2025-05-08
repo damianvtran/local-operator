@@ -6,8 +6,11 @@ import logging
 import os
 import subprocess
 import sys
+import threading
+import time
 from datetime import datetime
 from enum import Enum
+from logging import StreamHandler
 from multiprocessing import Queue
 from pathlib import Path
 from traceback import format_exception
@@ -1262,7 +1265,7 @@ class LocalCodeExecutor:
         return ConfirmSafetyResult.UNSAFE
 
     async def _execute_with_output(self, response: ResponseJsonSchema) -> CodeExecutionResult:
-        """Execute code and capture stdout/stderr output.
+        """Execute code and capture stdout/stderr output, streaming updates in real time.
 
         Args:
             response (ResponseJsonSchema): The response from the language model
@@ -1273,29 +1276,136 @@ class LocalCodeExecutor:
         Raises:
             Exception: Re-raises any exceptions that occur during code execution
         """
-        old_stdout, old_stderr = sys.stdout, sys.stderr
-        new_stdout, new_stderr = io.StringIO(), io.StringIO()
-        sys.stdout, sys.stderr = new_stdout, new_stderr
 
-        # Get root logger and store original handlers
-        root_logger = logging.getLogger()
-        original_handlers = root_logger.handlers.copy()
-        original_level = root_logger.level
+        # --- StreamingBuffer and StreamingLogHandler implementation ---
+        class StreamingBuffer(io.StringIO):
+            def __init__(self, name, update_callback, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._lock = threading.Lock()
+                self._last_update = 0.0
+                self._name = name
+                self._update_callback = update_callback
+                self._last_value = ""
+                self._throttle = 0.5  # seconds
+                self._closed = False
 
-        # Create a custom handler that safely handles closed file errors
-        class SafeStreamHandler(logging.StreamHandler[io.StringIO]):
+            def write(self, s):
+                with self._lock:
+                    super().write(s)
+                    now = time.time()
+                    value = self.getvalue()
+                    # Only update if new output or enough time has passed
+                    if value != self._last_value and (
+                        now - self._last_update > self._throttle or "\n" in s
+                    ):
+                        self._last_update = now
+                        self._last_value = value
+                        # Robust async scheduling
+                        try:
+                            loop = asyncio.get_running_loop()
+                            if not self._closed:
+                                loop.call_soon_threadsafe(
+                                    lambda: asyncio.create_task(self._update_callback())
+                                )
+                        except RuntimeError:
+                            pass
+                return len(s)
+
+            def close(self):
+                self._closed = True
+                return super().close()
+
+        class StreamingLogHandler(StreamHandler):  # type: ignore
+            def __init__(self, log_buffer, update_callback):
+                super().__init__(log_buffer)
+                self._update_callback = update_callback
+                self._lock = threading.Lock()
+                self._last_update = 0.0
+                self._throttle = 0.5  # seconds
+
             def emit(self, record):
                 try:
                     super().emit(record)
+                    now = time.time()
+                    if now - self._last_update > self._throttle:
+                        self._last_update = now
+                        try:
+                            loop = asyncio.get_running_loop()
+                            loop.call_soon_threadsafe(
+                                lambda: asyncio.create_task(self._update_callback())
+                            )
+                        except RuntimeError:
+                            pass
                 except ValueError as e:
                     if "I/O operation on closed file" not in str(e):
                         raise
 
+        # --- End StreamingBuffer and StreamingLogHandler ---
+
+        # Buffers for output (always initialized)
+        stdout_buffer = None  # type: ignore
+        stderr_buffer = None  # type: ignore
+        log_buffer = None  # type: ignore
+
+        # This dict will be updated by the callback and used for the final result
+        output_state = {
+            "stdout": "",
+            "stderr": "",
+            "logging": "",
+        }
+
+        # The update callback
+        async def stream_update_callback():
+            try:
+                # Defensive: Only update if buffers are initialized and not closed
+                if stdout_buffer is not None and not getattr(stdout_buffer, "_closed", False):
+                    stdout_buffer.flush()
+                    output_state["stdout"] = stdout_buffer.getvalue()
+                if stderr_buffer is not None and not getattr(stderr_buffer, "_closed", False):
+                    stderr_buffer.flush()
+                    output_state["stderr"] = stderr_buffer.getvalue()
+                if log_buffer is not None and not getattr(log_buffer, "_closed", False):
+                    log_buffer.flush()
+                    output_state["logging"] = log_buffer.getvalue()
+
+                # Send update
+                await self.update_job_execution_state(
+                    CodeExecutionResult(
+                        stdout=output_state["stdout"],
+                        stderr=output_state["stderr"],
+                        logging=output_state["logging"],
+                        formatted_print="",
+                        code=response.code,
+                        message=response.response,
+                        role=ConversationRole.ASSISTANT,
+                        status=ProcessResponseStatus.IN_PROGRESS,
+                        files=[],
+                        execution_type=ExecutionType.ACTION,
+                        action=ActionType.CODE,
+                    )
+                )
+            except Exception:
+                pass
+
+        # Save old std streams
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+
+        # Create streaming buffers
+        stdout_buffer = StreamingBuffer("stdout", stream_update_callback)
+        stderr_buffer = StreamingBuffer("stderr", stream_update_callback)
+        sys.stdout, sys.stderr = stdout_buffer, stderr_buffer
+
+        # Set up logging
+        root_logger = logging.getLogger()
+        original_handlers = root_logger.handlers.copy()
+        original_level = root_logger.level
+
+        log_buffer = StreamingBuffer("logging", stream_update_callback)
+        log_handler = StreamingLogHandler(log_buffer, stream_update_callback)
+        log_handler.setLevel(logging.WARNING)
+
         # Remove existing handlers and set new handler
         root_logger.handlers = []
-        log_capture = io.StringIO()
-        log_handler = SafeStreamHandler(log_capture)
-        log_handler.setLevel(logging.WARNING)
         root_logger.addHandler(log_handler)
         root_logger.setLevel(logging.WARNING)
 
@@ -1307,12 +1417,26 @@ class LocalCodeExecutor:
                 specific_logger.addHandler(log_handler)
                 specific_logger.propagate = False
 
+        # --- Start background streaming update task ---
+        stop_streaming = False
+
+        async def periodic_stream_update():
+            try:
+                while not stop_streaming:
+                    await stream_update_callback()
+                    await asyncio.sleep(0.5)
+            except asyncio.CancelledError:
+                pass
+
+        periodic_task = asyncio.create_task(periodic_stream_update())
+
         try:
             await self._run_code(response.code)
-            log_output = log_capture.getvalue()
+            # Final update after execution
+            await stream_update_callback()
 
             condensed_output, condensed_error_output, condensed_log_output = (
-                self._capture_and_record_output(new_stdout, new_stderr, log_output)
+                self._capture_and_record_output(stdout_buffer, stderr_buffer, log_buffer.getvalue())
             )
             formatted_print = format_success_output(
                 (condensed_output, condensed_error_output, condensed_log_output)
@@ -1337,17 +1461,25 @@ class LocalCodeExecutor:
                 action=ActionType.CODE,
             )
         except Exception as e:
-            # Add captured log output to error output if any
-            log_output = log_capture.getvalue()
+            # Final update on error
+            await stream_update_callback()
             condensed_output, condensed_error_output, condensed_log_output = (
-                self._capture_and_record_output(new_stdout, new_stderr, log_output)
+                self._capture_and_record_output(stdout_buffer, stderr_buffer, log_buffer.getvalue())
             )
             raise e
         finally:
+            # Stop the periodic streaming task and wait for it to finish
+            stop_streaming = True
+            try:
+                periodic_task.cancel()
+                await asyncio.gather(periodic_task, return_exceptions=True)
+            except Exception:
+                pass
+
             sys.stdout, sys.stderr = old_stdout, old_stderr
-            new_stdout.close()
-            new_stderr.close()
-            log_capture.close()
+            stdout_buffer.close()
+            stderr_buffer.close()
+            log_buffer.close()
 
             # Restore original logging configuration
             root_logger.handlers = original_handlers
@@ -1397,8 +1529,13 @@ class LocalCodeExecutor:
                             del self.context["__temp_coro"]
                 else:
                     # Regular synchronous code
+                    # Run synchronous exec in a separate thread to avoid blocking the event loop
                     compiled_code = compile(code, "<agent_generated_code>", "exec")
-                    exec(compiled_code, self.context)
+
+                    def _execute_sync_in_thread():
+                        exec(compiled_code, self.context)
+
+                    await asyncio.to_thread(_execute_sync_in_thread)
         except Exception as e:
             code_execution_error = CodeExecutionError(message=str(e), code=code).with_traceback(
                 e.__traceback__
