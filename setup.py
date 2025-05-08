@@ -11,7 +11,7 @@ setup(
     },
     install_requires=[
         "langchain-openai>=0.3.2",
-        "langchain-ollama>=0.2.2",
+        "langchain-ollama>=0.3.0",
         "langchain-anthropic>=0.3.3",
         "langchain-google-genai>=2.1.2",
         "langchain>=0.3.14",
