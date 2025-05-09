@@ -869,10 +869,16 @@ class AgentRegistry:
             elif isinstance(obj, dict):
                 result = {}
                 for k, v in obj.items():
+                    # skip any built-in function or built-in class (always available in context)
+                    if (
+                        inspect.isbuiltin(v) or inspect.isroutine(v) or inspect.isclass(v)
+                    ) and getattr(v, "__module__", None) == "builtins":
+                        continue
                     try:
-                        # Skip keys that can't be pickled instead of converting to strings
                         dill.dumps(k)
-                        result[k] = convert_unpicklable(v)
+                        converted = convert_unpicklable(v)
+                        if converted is not None:
+                            result[k] = converted
                     except Exception:
                         pass
                 return result
