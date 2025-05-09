@@ -1122,6 +1122,7 @@ def test_save_and_load_agent_context(temp_agents_dir: Path):
         "builtin_enumerate": enumerate,
         "builtin_range": range,
         "builtin_zip": zip,
+        "empty_value": None,
     }
 
     # Save the context
@@ -1158,6 +1159,7 @@ def test_save_and_load_agent_context(temp_agents_dir: Path):
     assert "builtin_enumerate" not in loaded_context
     assert "builtin_range" not in loaded_context
     assert "builtin_zip" not in loaded_context
+    assert "empty_value" not in loaded_context
 
     # Verify top-level "tools" key is not saved
     assert "tools" not in loaded_context
