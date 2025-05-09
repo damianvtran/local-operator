@@ -1,4 +1,5 @@
 import asyncio
+import builtins
 import inspect
 import io
 import json
@@ -461,7 +462,7 @@ class LocalCodeExecutor:
                 history to the agent registry after each step
             job_id: Optional identifier for the current job being processed
         """
-        self.context = {}
+        self.context = {"__builtins__": builtins}
         self.model_configuration = model_configuration
         self.agent_state = agent_state
         self.max_conversation_history = max_conversation_history
@@ -482,6 +483,8 @@ class LocalCodeExecutor:
                 agent_context = self.agent_registry.load_agent_context(self.agent.id)
                 if agent_context is not None:
                     self.context = agent_context
+                    # Ensure builtins are always present in the context
+                    self.context["__builtins__"] = builtins
             except Exception as e:
                 print(f"Failed to load agent context: {str(e)}")
 
@@ -2442,6 +2445,8 @@ Format your response as a single sentence with the format:
         """Set the tool registry for the current conversation."""
         self.tool_registry = tool_registry
         self.context["tools"] = tool_registry
+        # Ensure builtins are always present in the context
+        self.context["__builtins__"] = builtins
 
     def get_conversation_history(self) -> list[ConversationRecord]:
         """Get the conversation history as a list of dictionaries.

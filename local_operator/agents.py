@@ -869,6 +869,9 @@ class AgentRegistry:
             elif isinstance(obj, dict):
                 result = {}
                 for k, v in obj.items():
+                    # Always skip __builtins__ key to avoid serializing builtins
+                    if k == "__builtins__":
+                        continue
                     # skip any built-in function or built-in class (always available in context)
                     if (
                         inspect.isbuiltin(v) or inspect.isroutine(v) or inspect.isclass(v)
