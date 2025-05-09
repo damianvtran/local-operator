@@ -840,8 +840,7 @@ class AgentRegistry:
 
         This method serializes the agent's context using dill and saves it to a file
         named "context.pkl" in the agent's directory. It handles unpicklable objects
-        by converting them to a serializable format, including Pydantic
-        models, modules, and builtins.
+        by converting them to a serializable format, including Pydantic models and modules.
 
         Args:
             agent_id (str): The unique identifier of the agent.
@@ -859,39 +858,26 @@ class AgentRegistry:
             agent_dir.mkdir(parents=True, exist_ok=True)
 
         context_file = agent_dir / "context.pkl"
-        tmp_context_file = agent_dir / "context.pkl.tmp"
 
         def convert_unpicklable(obj: Any) -> Any:
-            # Handle Pydantic models
             if isinstance(obj, BaseModel):
+                # Convert Pydantic models to dictionaries
                 return {
                     "__pydantic_model__": obj.__class__.__module__ + "." + obj.__class__.__name__,
                     "data": convert_unpicklable(obj.model_dump()),
                 }
-            # Skip builtins (enumerate, range, etc.)
-            elif (
-                type(obj).__module__ == "builtins"
-                and isinstance(obj, object)
-                and not isinstance(obj, (int, float, str, bool, type(None), list, tuple, dict))
-            ):
-                # Do not store builtins in context
-                return None
             elif isinstance(obj, dict):
                 result = {}
                 for k, v in obj.items():
                     try:
+                        # Skip keys that can't be pickled instead of converting to strings
                         dill.dumps(k)
-                        v_converted = convert_unpicklable(v)
-                        if v_converted is not None:
-                            result[k] = v_converted
+                        result[k] = convert_unpicklable(v)
                     except Exception:
                         pass
                 return result
             elif isinstance(obj, (list, tuple)):
-                # Omit None values (skipped builtins)
-                items = [convert_unpicklable(x) for x in obj]
-                items = [x for x in items if x is not None]
-                return type(obj)(items)
+                return type(obj)(convert_unpicklable(x) for x in obj)
             elif isinstance(obj, (int, float, str, bool, type(None))):
                 return obj
             elif hasattr(obj, "__iter__") and hasattr(obj, "__next__"):
@@ -911,11 +897,8 @@ class AgentRegistry:
                     logging.warning(f"Failed to pickle function {obj.__name__}: {str(e)}")
                     return str(obj)
             else:
-                try:
-                    dill.dumps(obj)
-                    return obj
-                except Exception:
-                    return str(obj)
+                dill.dumps(obj)
+                return obj
 
         try:
             # Make a copy to avoid modifying the original
@@ -930,10 +913,8 @@ class AgentRegistry:
 
             serializable_context = convert_unpicklable(context_copy)
 
-            # Write atomically: write to temp file, then move
-            with tmp_context_file.open("wb") as f:
+            with context_file.open("wb") as f:
                 dill.dump(serializable_context, f)
-            tmp_context_file.replace(context_file)
         except Exception as e:
             logging.error(f"Failed to save agent context: {str(e)}")
 
@@ -942,7 +923,7 @@ class AgentRegistry:
 
         This method deserializes the agent's context using dill from a file
         named "context.pkl" in the agent's directory. It handles the reconstruction
-        of serialized Pydantic models, modules, builtins, and other transformed objects.
+        of serialized Pydantic models, modules, and other transformed objects.
 
         Args:
             agent_id (str): The unique identifier of the agent.
@@ -990,19 +971,11 @@ class AgentRegistry:
                     logging.error(f"Failed to reconstruct callable function: {str(e)}")
                     return None
             elif isinstance(obj, dict):
-                # Remove any keys whose value is None (i.e., skipped builtins)
-                return {
-                    k: v
-                    for k, v in ((k, reconstruct_objects(v)) for k, v in obj.items())
-                    if v is not None
-                }
+                return {k: reconstruct_objects(v) for k, v in obj.items()}
             elif isinstance(obj, list):
-                # Remove None values (skipped builtins)
-                return [item for item in (reconstruct_objects(i) for i in obj) if item is not None]
+                return [reconstruct_objects(item) for item in obj]
             elif isinstance(obj, tuple):
-                return tuple(
-                    item for item in (reconstruct_objects(i) for i in obj) if item is not None
-                )
+                return tuple(reconstruct_objects(item) for item in obj)
             else:
                 try:
                     return dill.loads(obj)

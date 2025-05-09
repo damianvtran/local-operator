@@ -1119,6 +1119,8 @@ def test_save_and_load_agent_context(temp_agents_dir: Path):
         "nested": {"tools": {"should_be_saved": True}},  # This should be saved (nested)
         "os": os,
         "requests": requests,
+        # "builtin_enumerate": enumerate,
+        # "builtin_range": range,
     }
 
     # Save the context
@@ -1152,6 +1154,8 @@ def test_save_and_load_agent_context(temp_agents_dir: Path):
     assert loaded_context["generator"] == [0, 1, 2, 3, 4]
 
     assert "ssl_context" not in loaded_context
+    assert "builtin_enumerate" not in loaded_context
+    assert "builtin_range" not in loaded_context
 
     # Verify top-level "tools" key is not saved
     assert "tools" not in loaded_context
