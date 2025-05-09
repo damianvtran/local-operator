@@ -122,7 +122,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           # Run CLI to create test file
-          local-operator --hosting openrouter --model google/gemini-2.0-flash-001 exec "create a file called test.txt with the text 'hello world' in it" || exit 1
+          local-operator --hosting openrouter --model google/gemini-2.5-flash-preview exec "create a file called test.txt with the text 'hello world' in it" || exit 1
 
           # Check if file exists and contains correct text
           if [ ! -f test.txt ]; then
