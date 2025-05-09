@@ -411,6 +411,7 @@ class Operator:
             tool_registry=self.executor.tool_registry,
             response_format=PlanSystemPrompt,
             agent_system_prompt=self.executor.agent_state.agent_system_prompt,
+            agent=self.current_agent,
         )
 
         messages = [
@@ -560,6 +561,7 @@ class Operator:
             tool_registry=self.executor.tool_registry,
             response_format="",
             agent_system_prompt=self.executor.agent_state.agent_system_prompt,
+            agent=self.current_agent,
         )
 
         messages = [
