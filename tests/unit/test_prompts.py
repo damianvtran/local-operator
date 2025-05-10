@@ -1,11 +1,13 @@
 import os
 import platform
 import subprocess
+from datetime import datetime, timezone
 from typing import Optional
 from unittest.mock import patch
 
 import psutil
 
+from local_operator.agents import AgentData
 from local_operator.prompts import (
     ActionResponseFormatPrompt,
     apply_attachments_to_prompt,
@@ -29,6 +31,30 @@ def test_create_system_prompt():
     mock_home = "/home/test"
     mock_packages = "numpy, pandas + 10 others"
 
+    mock_agent = AgentData(
+        id="mock-id",
+        name="Test Agent",
+        created_date=datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+        version="1.0.0",
+        security_prompt="mock-security-prompt",
+        hosting="openai",
+        model="gpt-4o",
+        description="mock-description",
+        tags=["mock-tag1", "mock-tag2"],
+        categories=["mock-category1"],
+        last_message="mock-last-message",
+        last_message_datetime=datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+        temperature=0.5,
+        top_p=1.0,
+        top_k=10,
+        max_tokens=2048,
+        stop=["mock-stop"],
+        frequency_penalty=0.1,
+        presence_penalty=0.2,
+        seed=42,
+        current_working_directory="/mock/path",
+    )
+
     with (
         patch.multiple(
             platform,
@@ -47,6 +73,7 @@ def test_create_system_prompt():
             tool_registry=None,
             response_format=ActionResponseFormatPrompt,
             agent_system_prompt="Test agent system prompt",
+            agent=mock_agent,
         )
 
         # Verify system details are included
@@ -67,6 +94,10 @@ def test_create_system_prompt():
 
         # Verify agent system prompt is included
         assert "Test agent system prompt" in result
+
+        # Verify agent information is included
+        assert "Test Agent" in result
+        assert "mock-description" in result
 
 
 def test_get_tools_str():
