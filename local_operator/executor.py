@@ -618,6 +618,7 @@ class LocalCodeExecutor:
         system_prompt = create_system_prompt(
             tool_registry=self.tool_registry,
             agent_system_prompt=self.agent_state.agent_system_prompt,
+            agent=self.agent,
         )
 
         history = [
@@ -653,6 +654,7 @@ class LocalCodeExecutor:
         system_prompt = create_system_prompt(
             tool_registry=self.tool_registry,
             agent_system_prompt=self.agent_state.agent_system_prompt,
+            agent=self.agent,
         )
 
         history = [

@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 
 import psutil
 
+from local_operator.agents import AgentData
 from local_operator.tools import ToolRegistry
 
 
@@ -402,6 +403,7 @@ BaseSystemPrompt: str = (
 - 🏆 Always try to accomplish things yourself, don't give up early or assume that you can't do things.  Get creative with your code and find ways to accomplish tasks.  Write your own integrations where needed, look up documentation if you don't know it, and try different approaches until you succeed.
 - 🧑‍💻 You are able to use the user's browser to accomplish tasks with the run_browser_task tool in CODE.  Use it when you need to in order to use the user's existing session and browser profiles to access information for relevant tasks that they ask you to do.  Don't do anything insecure on the browser, and don't do anything that could expose the user's identity or data unless they explicitly ask you to do so.
   - You will need a browser running with the debug port open to use this tool.  If there is an existing browser session open, it could get in the way and cause the tool to fail.  If this happens, explain to the user that they will need to close any open browsers and let them know once you've done that so they can try again.  Explain that they only need to do this once, and then you will be able to use the browser while it's open for any following tasks.
+- 📋 ALWAYS check your work after performing some task.  This is not necessary for conversational tasks or simple responses, but before responding with the DONE action, you must always double-check that you've actually created all the files you needed, that there are no placeholders left in the documents, and that all of the user's requirements have been met.
 
 ⚠️ Pay close attention to all the core principles, make sure that all are applied on every step with no exceptions.
 
@@ -425,7 +427,7 @@ BaseSystemPrompt: str = (
         - Always verify your progress and the results of your work with CODE.
         - Do not respond with DONE if the plan is not completely executed beginning to end.
         - Only pick ONE action at a time, any other actions in the response will be ignored.
-        - If some part of your work is better suited for another agent, then use the DELEGATE action to send a message to another Local Operator agent.  Specify the agent name to send the message to in the "agent" field.  Include the message to send in the "message" field.
+        - If some part of your work is better suited for another agent, then use the DELEGATE action to send a message to another Local Operator agent.  Specify the agent name to send the message to in the "agent" field.  Include the message to send in the "message" field.  Do not delegate to yourself, or it could cause an infinite loop.
         - When choosing an action, avoid providing other text or formatting in the response.  Only pick one action and provide it in the action XML tags schema.  Any other text outside of the action XML tags will be ignored.
         - ONLY use action tags when it is the turn for you to pick an action.  Never use action tags in planning, reflection, or final response steps.
     </action_guidelines>
@@ -773,6 +775,7 @@ DELEGATE usage guidelines:
 - The message should be a detailed description of the task that you want the agent to complete.  Make sure you include all relevant information from your conversation with the user so that the agent has important context to complete the task.  It will not have context without you providing relevant details in the message.
 - In your message, indicate that you are another Local Operator agent delegating a task to the agent so that the other agent knows that the message is coming from an AI and not a human user.
 - The agent that you are delegating to is also a Local Operator agent, so it will have the same system prompt as you do and understand the Local Operator methods of operating.  You will just need to provide context about your current conversation with the user so that the agent can understand the user's request and complete the task, giving you a response that is helpful to you.
+- DO NOT delegate to yourself, this has the potential to create an infinite loop.  Only delegate to other agents.
 
 #### Example for DONE:
 
@@ -819,7 +822,7 @@ ASK usage guidelines:
 PlanSystemPrompt: str = """
 ## Goal Planning
 
-Given the above information about how you will need to operate in execution mode, think aloud about what you will need to do.  What tools do you need to use, which files do you need to read, what websites do you need to visit, etc.  What information do you already have from previous steps that you can use to complete the task?  Is there another Local Operator agent that is potentially better suited to complete parts of the task? Be specific.  What is the best final format to present the information?  Do not ask questions back to the user in the planning message as the user will not be directly responding to it.
+Given the above information about how you will need to operate in execution mode, think aloud about what you will need to do.  What tools do you need to use, which files do you need to read, what websites do you need to visit, etc.  What information do you already have from previous steps that you can use to complete the task?  Is there another Local Operator agent that is potentially better suited to complete parts of the task? Be specific.  What is the best final format to present the information?  How will you double-check your work after performing all tasks?  Do not ask questions back to the user in the planning message as the user will not be directly responding to it.
 
 This information will be kept available to you for the duration of the task, so make it specific, detailed, and useful enough for you to use later as you complete more and more steps for the task.
 
@@ -827,7 +830,7 @@ Respond in natural language, without XML tags or code.  Do not include any code 
 """  # noqa: E501
 
 PlanUserPrompt: str = """
-Given the above information about how you will need to operate in execution mode, think aloud about what you will need to do.  What tools do you need to use, which files do you need to read, what websites do you need to visit, etc.  What information do you already have from previous steps that you can use to complete the task?  Be specific.  Is there another Local Operator agent that is potentially better suited to complete parts of the task?
+Given the above information about how you will need to operate in execution mode, think aloud about what you will need to do.  What tools do you need to use, which files do you need to read, what websites do you need to visit, etc.  What information do you already have from previous steps that you can use to complete the task?  How will you double-check your work after performing all tasks?   Be specific.  Is there another Local Operator agent that is potentially better suited to complete parts of the task?  Remember that you can only delegate to other agents, not yourself.
 
 Respond in natural language, without XML tags or code.  Do not include any code here or markdown code formatting, you will do that after you plan.
 
@@ -2197,8 +2200,9 @@ def create_system_prompt(
     tool_registry: ToolRegistry | None = None,
     response_format: str = ActionResponseFormatPrompt,
     agent_system_prompt: str | None = None,
+    agent: AgentData | None = None,
 ) -> str:
-    """Create the system prompt for the agent."""
+    """Create the system prompt for the agent, including user and agent identity details."""
 
     base_system_prompt = BaseSystemPrompt
     user_system_prompt = Path.home() / ".local-operator" / "system_prompt.md"
@@ -2208,10 +2212,21 @@ def create_system_prompt(
         user_system_prompt = ""
 
     system_details_str = get_system_details_str()
-
     installed_python_packages = get_installed_packages_str()
-
     tools_list = get_tools_str(tool_registry)
+
+    agent_prompt = ""
+    if agent:
+        agent_prompt = f"""
+## Your Agent Identity
+
+You are {agent.name}, a Local Operator agent for autonomous task completion.  Here is your description:
+
+<agent_description>
+Name: {agent.name}
+Description: {agent.description}
+</agent_description>
+"""  # noqa: E501
 
     base_system_prompt = base_system_prompt.format(
         system_details=system_details_str,
@@ -2222,4 +2237,4 @@ def create_system_prompt(
         agent_system_prompt=agent_system_prompt,
     )
 
-    return base_system_prompt
+    return agent_prompt + base_system_prompt
