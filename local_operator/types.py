@@ -99,6 +99,7 @@ class ConversationRecord(BaseModel):
     role: ConversationRole = Field(default=ConversationRole.ASSISTANT)
     should_summarize: Optional[bool] = True
     ephemeral: Optional[bool] = False
+    ephemeral_steps: Optional[int] = 0
     summarized: Optional[bool] = False
     is_system_prompt: Optional[bool] = False
     timestamp: Optional[datetime] = None
@@ -116,6 +117,7 @@ class ConversationRecord(BaseModel):
             "content": self.content,
             "should_summarize": str(self.should_summarize),
             "ephemeral": str(self.ephemeral),
+            "ephemeral_steps": self.ephemeral_steps,
             "summarized": str(self.summarized),
             "is_system_prompt": str(self.is_system_prompt),
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
@@ -134,6 +136,7 @@ class ConversationRecord(BaseModel):
             "content": self.content,
             "should_summarize": str(self.should_summarize),
             "ephemeral": str(self.ephemeral),
+            "ephemeral_steps": self.ephemeral_steps,
             "summarized": str(self.summarized),
             "is_system_prompt": str(self.is_system_prompt),
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
@@ -170,6 +173,7 @@ class ConversationRecord(BaseModel):
             content=data["content"],
             should_summarize=data.get("should_summarize", "true").lower() == "true",
             ephemeral=data.get("ephemeral", "false").lower() == "true",
+            ephemeral_steps=data.get("ephemeral_steps", 0),
             summarized=data.get("summarized", "false").lower() == "true",
             is_system_prompt=data.get("is_system_prompt", "false").lower() == "true",
             timestamp=timestamp,

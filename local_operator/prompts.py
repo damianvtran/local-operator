@@ -746,7 +746,7 @@ existing_file.txt
 </action_response>
 
 EDIT usage guidelines:
-- After you edit the file, you will be shown the contents of the edited file with line numbers and lengths.  Please review and determine if your edit worked as expected.
+- After you edit the file, you will be shown the contents of the edited file with line numbers and lengths.  Please review and determine if your edit worked as expected.  If not, then try another EDIT action to amend the error.  If repeated edits fail, then rewrite the file from scratch instead with a WRITE action, making sure to stay accurate to the original file content.
 - Make sure that you include the replacements in the "replacements" field or you will run into parsing errors.
 - Do not duplicate headers in the replacements.  If you are replacing placeholders, make sure that you pay attention to the other text around the placeholder and don't repeat content that is already present in the file.  For example, if there is a header and then placeholder, don't include the header again in the replacements as it is already above the placeholder.
 - If you have enough information to make multiple edits in a file at a time, you should do so instead of editing one at a time to be less expensive and more efficient.
@@ -795,8 +795,8 @@ Marking the task as complete.
 
 DONE usage guidelines:
 - If the user has a simple request or asks you something that doesn't require multi-step action, provide an empty "response" field and be ready to provide a final response after the DONE action instead.
-- Use the "response" field only, do NOT use the "content" field.
-- When responding with DONE, you are ending the task and will not have the opportunity to run more steps until the user asks you to do so.  Make sure that the task is complete before using this action.
+- Use the "response" field only, do NOT use the "content" field.  In multi-step tasks, you will be asked to provide a final response to the user after the DONE action which should contain the entirety of the information that you need to provide to the user.  Putting it here will waste time and tokens.
+- When responding with DONE, you are ending the task and will not have the opportunity to run more steps until the user asks you to do so.  Make sure that the task is complete before using this action and double check your own work.
 - You will be asked to provide a final response to the user after the DONE action.
 
 #### Example for ASK:
@@ -1359,6 +1359,28 @@ Here is the new message that I am sending to the agent:
 Please respond now with the request classification for this message given the conversation history context in the required XML format.
 """  # noqa: E501
 
+MessageSummarySystemPrompt: str = """
+You are a conversation summarizer. Your task is to summarize what happened in the given conversation step between a user and an AI assistant concisely to reduce the amount of tokens in the conversation history.  Keep your summary under 3 sentences, and ideally aim for a single sentence.
+
+Focus only on capturing critical details that may be relevant for future reference, such as:
+- Key actions taken
+- Important changes made
+- Significant results or outcomes
+- Any errors or issues encountered
+- Key variable names, file names, URLs, headers, or other identifiers
+- Transformations or calculations performed that need to be remembered for later reference
+- Shapes and dimensions of data structures
+- Data schemas, data types, and data formats
+- Key numbers or values
+
+You will be given a conversation step that might be from the user or the AI assistant, you will know which one it is by the <role> tag.  Keep the conversation in the first person between myself and the AI assistant, refer to me as "I" and the AI assistant as "you" in the summary.
+
+You will need to summarize the content in the <message> tag.
+
+Format your response as a single sentence with the format:
+"[SUMMARY] summarized text here"
+"""  # noqa: E501
+
 
 class RequestType(str, Enum):
     """Enum for classifying different types of user requests.
@@ -1654,6 +1676,8 @@ Guidelines:
   are satisfied that the report is complete and accurate.  Don't leave any placeholders
   or sections that are not written.
 - Never try to manipulate natural language with code for summaries, instead load the data into the context window and then report the task as DONE, and then use your own intelligence to write the sections manually.  Write strings manually in your code if needed to avoid using code for this purpose.
+- Make the report genuinely useful and insightful.  Infer what the user wants to learn from the research and make sure to include comprehensive and detailed information that is actionable and specific.  Make the information easy to understand and follow and highlight key insights and findings well with tables, charts, and other visualizations.
+- Do NOT write an outline before you have had the chance to do a preliminary scope of the research.  The report structure will become more clear once you have an initial lay of the land.  Never make assumptions or come up with outlines, sections, or results for a report before you have had a chance to understand the current state of things in the world.
 
 Use your judgement to determine the best type of output for me.  The guidelines
 below are to help you structure your work and ensure that you are thorough and accurate, but you should use your judgement to determine the best type of output for me.
@@ -1674,7 +1698,7 @@ Follow the general flow below:
 7. Make sure to include a bibliography at the end of the report.  Include all the sources you used to write the report.
 8. Make sure to include a conclusion that summarizes the main points of the report.
 9. For HIGH effort tasks only, save the final report to disk in markdown format.  For MEDIUM and LOW effort tasks, summarize the final report to me in the response field and do not save the report to disk.
-10. Read each section over again after you are done and correct any errors or go back to complete research on any sections that you might have missed.  Check for missing citations, incomplete sections, grammatical errors, formatting issues, and other errors or omissions.
+10. Read each section over again after you are done and correct any errors or go back to complete research on any sections that you might have missed.  Check for missing citations, incomplete sections, grammatical errors, formatting issues, duplicated headers, and other errors or omissions.
 11. If there are parts of the report that don't feel complete or are missing information, then go back and do more research to complete those sections and repeat the steps until you are satisfied with the quality of your report.
 
 Always make sure to proof-read your end work and do not report the task as complete until you are sure that all sections of the report are complete, accurate, and well-formatted.  You MUST look for any remaining placeholders, missing sections, missing citations, formatting errors, and other issues before reporting the task as complete.
