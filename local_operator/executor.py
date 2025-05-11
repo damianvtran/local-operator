@@ -46,6 +46,7 @@ from local_operator.helpers import (
 from local_operator.model.configure import ModelConfiguration, calculate_cost
 from local_operator.prompts import (
     AgentHeadsUpDisplayPrompt,
+    MessageSummarySystemPrompt,
     SafetyCheckConversationPrompt,
     SafetyCheckSystemPrompt,
     SafetyCheckUserPrompt,
@@ -2288,8 +2289,11 @@ class LocalCodeExecutor:
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.USER,
-                content=f"The content that you requested has been written to {file_path}.",
-                should_summarize=True,
+                content=f"The content that you requested has been written to {file_path}.\n\n"
+                f"Here is the updated file content:\n\n<file_content>\n{cleaned_content}\n</file_content>\n\n"  # noqa: E501
+                "Make sure to double check that the write was successful after all edits are complete.  If your write did not work as expected, please adjust your response to fix the issue and try another write.  Make sure that you did not erase any original file content if you are writing over an existing file, and that the file content is accurate to the original content.",  # noqa: E501
+                ephemeral=True,
+                ephemeral_steps=1,
             )
         )
 
@@ -2357,10 +2361,11 @@ class LocalCodeExecutor:
                 role=ConversationRole.USER,
                 content=(
                     f"Your edits have been applied to the file: {file_path}\n\n"
-                    "Make sure to check the file content after all edits are complete to ensure that your edits were successful.  If your edit did not work as expected, please adjust your response to fix the issue and try another edit.  If you are unable to fix the issue, please try to WRITE the file from scratch instead, making sure to stay accurate to the original file content."  # noqa: E501
+                    f"Here is the updated file content:\n\n<file_content>\n{file_content}\n</file_content>\n\n"  # noqa: E501
+                    "Make sure to double check that the edits were successful after all edits are complete.  If your edit did not work as expected, please adjust your response to fix the issue and try another edit.  If you are unable to fix the issue, please try to WRITE the file from scratch instead, making sure to stay accurate to the original file content."  # noqa: E501
                 ),
-                should_summarize=True,
-                should_cache=True,
+                ephemeral=True,
+                ephemeral_steps=1,
             )
         )
 
@@ -2411,29 +2416,14 @@ class LocalCodeExecutor:
         Raises:
             ValueError: If the conversation record is not of the expected type.
         """
-        summary_prompt = """
-You are a conversation summarizer. Your task is to summarize what happened in the given conversation step in a single concise sentence. Focus only on capturing critical details that may be relevant for future reference, such as:
-- Key actions taken
-- Important changes made
-- Significant results or outcomes
-- Any errors or issues encountered
-- Key variable names, headers, or other identifiers
-- Transformations or calculations performed that need to be remembered for later reference
-- Shapes and dimensions of data structures
-- Key numbers or values
-
-Format your response as a single sentence with the format:
-"[SUMMARY] {summary}"
-        """  # noqa: E501
-
         step_info = "Please summarize the following conversation step:\n" + "\n".join(
-            f"{msg.role}: {msg.content}"
+            f"<role>{msg.role}</role>\n<message>{msg.content}</message>"
         )
 
         summary_history = [
             ConversationRecord(
                 role=ConversationRole.SYSTEM,
-                content=summary_prompt,
+                content=MessageSummarySystemPrompt,
                 is_system_prompt=True,
                 should_cache=True,
             ),
@@ -2459,9 +2449,16 @@ Format your response as a single sentence with the format:
         return self.agent_state.conversation
 
     def remove_ephemeral_messages(self) -> None:
-        """Remove ephemeral messages from the conversation history."""
+        """Remove ephemeral messages from the conversation history.
+
+        Only removes ephemeral messages with ephemeral_steps=0. Messages with
+        ephemeral_steps>0 will remain in the conversation history until their
+        steps count reaches 0.
+        """
         self.agent_state.conversation = [
-            msg for msg in self.agent_state.conversation if not msg.ephemeral
+            msg
+            for msg in self.agent_state.conversation
+            if not (msg.ephemeral and getattr(msg, "ephemeral_steps", 0) <= 0)
         ]
 
     def format_directory_tree(self, directory_index: Dict[str, List[Tuple[str, str, int]]]) -> str:
@@ -2692,19 +2689,31 @@ Current time: {current_time}
     def update_ephemeral_messages(self) -> None:
         """Add environment details and other ephemeral messages to the conversation history.
 
-        This method performs two main tasks:
-        1. Removes any messages marked as ephemeral (temporary) from the conversation history
-        2. Appends the current environment details as a system message to provide context
+        This method performs three main tasks:
+        1. Decrements ephemeral_steps for ephemeral messages with ephemeral_steps>0
+        2. Removes any messages marked as ephemeral with ephemeral_steps=0
+        3. Appends the current environment details as a system message to provide context
 
         Ephemeral messages are identified by having an 'ephemeral' field set to 'true' in their
         dictionary representation. These messages are meant to be temporary and are removed
-        before the next model invocation.
+        before the next model invocation, unless they have ephemeral_steps>0, in which case
+        they will remain for that many steps before being removed.
 
-        The method updates self.executor.conversation_history in-place.
+        The method updates self.agent_state.conversation in-place.
         """
 
-        # Remove ephemeral messages from conversation history
+        # Remove ephemeral messages with ephemeral_steps=0
         self.remove_ephemeral_messages()
+
+        # Decrement ephemeral_steps for messages with ephemeral_steps>0
+        for msg in self.agent_state.conversation:
+            if (
+                msg.ephemeral
+                and hasattr(msg, "ephemeral_steps")
+                and msg.ephemeral_steps is not None
+                and msg.ephemeral_steps > 0
+            ):
+                msg.ephemeral_steps = msg.ephemeral_steps - 1
 
         # Add environment details to the latest message
         environment_details = self.get_environment_details()
@@ -2736,6 +2745,7 @@ Current time: {current_time}
                 content=hud_message,
                 should_summarize=False,
                 ephemeral=True,
+                ephemeral_steps=0,
             )
         )
 
