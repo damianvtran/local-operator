@@ -46,6 +46,7 @@ from local_operator.helpers import (
 from local_operator.model.configure import ModelConfiguration, calculate_cost
 from local_operator.prompts import (
     AgentHeadsUpDisplayPrompt,
+    MessageSummarySystemPrompt,
     SafetyCheckConversationPrompt,
     SafetyCheckSystemPrompt,
     SafetyCheckUserPrompt,
@@ -2411,29 +2412,14 @@ class LocalCodeExecutor:
         Raises:
             ValueError: If the conversation record is not of the expected type.
         """
-        summary_prompt = """
-You are a conversation summarizer. Your task is to summarize what happened in the given conversation step in a single concise sentence. Focus only on capturing critical details that may be relevant for future reference, such as:
-- Key actions taken
-- Important changes made
-- Significant results or outcomes
-- Any errors or issues encountered
-- Key variable names, headers, or other identifiers
-- Transformations or calculations performed that need to be remembered for later reference
-- Shapes and dimensions of data structures
-- Key numbers or values
-
-Format your response as a single sentence with the format:
-"[SUMMARY] {summary}"
-        """  # noqa: E501
-
         step_info = "Please summarize the following conversation step:\n" + "\n".join(
-            f"{msg.role}: {msg.content}"
+            f"<role>{msg.role}</role>\n<message>{msg.content}</message>"
         )
 
         summary_history = [
             ConversationRecord(
                 role=ConversationRole.SYSTEM,
-                content=summary_prompt,
+                content=MessageSummarySystemPrompt,
                 is_system_prompt=True,
                 should_cache=True,
             ),
