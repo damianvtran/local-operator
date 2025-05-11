@@ -795,8 +795,8 @@ Marking the task as complete.
 
 DONE usage guidelines:
 - If the user has a simple request or asks you something that doesn't require multi-step action, provide an empty "response" field and be ready to provide a final response after the DONE action instead.
-- Use the "response" field only, do NOT use the "content" field.
-- When responding with DONE, you are ending the task and will not have the opportunity to run more steps until the user asks you to do so.  Make sure that the task is complete before using this action.
+- Use the "response" field only, do NOT use the "content" field.  In multi-step tasks, you will be asked to provide a final response to the user after the DONE action which should contain the entirety of the information that you need to provide to the user.  Putting it here will waste time and tokens.
+- When responding with DONE, you are ending the task and will not have the opportunity to run more steps until the user asks you to do so.  Make sure that the task is complete before using this action and double check your own work.
 - You will be asked to provide a final response to the user after the DONE action.
 
 #### Example for ASK:
@@ -1357,6 +1357,28 @@ Here is the new message that I am sending to the agent:
 </user_message>
 
 Please respond now with the request classification for this message given the conversation history context in the required XML format.
+"""  # noqa: E501
+
+MessageSummarySystemPrompt: str = """
+You are a conversation summarizer. Your task is to summarize what happened in the given conversation step between a user and an AI assistant concisely to reduce the amount of tokens in the conversation history.  Keep your summary under 3 sentences, and ideally aim for a single sentence.
+
+Focus only on capturing critical details that may be relevant for future reference, such as:
+- Key actions taken
+- Important changes made
+- Significant results or outcomes
+- Any errors or issues encountered
+- Key variable names, file names, URLs, headers, or other identifiers
+- Transformations or calculations performed that need to be remembered for later reference
+- Shapes and dimensions of data structures
+- Data schemas, data types, and data formats
+- Key numbers or values
+
+You will be given a conversation step that might be from the user or the AI assistant, you will know which one it is by the <role> tag.
+
+You will need to summarize the content in the <message> tag.
+
+Format your response as a single sentence with the format:
+"[SUMMARY] summarized text here"
 """  # noqa: E501
 
 
