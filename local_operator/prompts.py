@@ -826,13 +826,13 @@ Given the above information about how you will need to operate in execution mode
 
 This information will be kept available to you for the duration of the task, so make it specific, detailed, and useful enough for you to use later as you complete more and more steps for the task.
 
-Respond in natural language, without XML tags or code.  Do not include any code here or markdown code formatting, you will do that after you reflect.  No action tags or actions will be interpreted in the planning message.
+Respond in natural language, without XML tags or code.  Do not include any code here or markdown code formatting, you will do that after you reflect.  No action tags or actions will be interpreted in the planning message.  Any action tags or actions you provide in this message will be ignored and will look like an error to the user in the conversation.
 """  # noqa: E501
 
 PlanUserPrompt: str = """
 Given the above information about how you will need to operate in execution mode, think aloud about what you will need to do.  What tools do you need to use, which files do you need to read, what websites do you need to visit, etc.  What information do you already have from previous steps that you can use to complete the task?  How will you double-check your work after performing all tasks?   Be specific.  Is there another Local Operator agent that is potentially better suited to complete parts of the task?  Remember that you can only delegate to other agents, not yourself.
 
-Respond in natural language, without XML tags or code.  Do not include any code here or markdown code formatting, you will do that after you plan.
+Respond in natural language to me in the first person, without XML tags or code.  Do not include any code here or markdown code formatting, you will do that after you plan.
 
 This information will be kept available to you for the duration of the task, so make it specific, detailed, and useful enough for you to use later as you complete more and more steps for the task.
 
@@ -2011,6 +2011,8 @@ For ASK actions:
 - Provide a clear, concise question that will help you to achieve my goal.
 - Provide necessary context for the question to me so I understand the
   background and context for the question.
+
+IMPORTANT: Do not include any action tags, XML, or any non-human readable outputs in this response.  This is not an action turn, any action tags or XML you provide in this turn will be ignored and will look like an error to the user in the conversation.
 
 Please provide the final response now.  Do NOT acknowledge this message in your response, and instead respond directly back to me based on the messages before this one.  Role-play and respond to me directly with all the required information and response formatting according to the guidelines above.  Make sure that you respond in plain text or markdown formatting, do not use the action XML tags for this response.
 """  # noqa: E501
