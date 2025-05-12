@@ -1,7 +1,7 @@
 """Types module containing enums and type definitions used throughout the local-operator package."""
 
 import uuid
-from datetime import datetime, time, timezone  # Added time, timezone
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4  # Added UUID, uuid4
@@ -385,33 +385,40 @@ class Schedule(BaseModel):
     prompt: str
     interval: int
     unit: ScheduleUnit
-    anchor_time_utc: Optional[str] = None  # HH:MM format, implicitly UTC
+    start_time_utc: Optional[datetime] = (
+        None  # Specifies the earliest time the task should start, UTC-aware
+    )
+    end_time_utc: Optional[datetime] = (
+        None  # Specifies the time after which the task should no longer run, UTC-aware
+    )
     last_run_at: Optional[datetime] = None  # Should be UTC-aware
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))  # UTC-aware
     is_active: bool = True
     next_run_at: Optional[datetime] = None  # Informational, UTC-aware
 
-    @validator("anchor_time_utc")
-    def validate_anchor_time_format(cls, v):
+    @validator(
+        "start_time_utc",
+        "end_time_utc",
+        "last_run_at",
+        "created_at",
+        "next_run_at",
+        pre=True,
+        always=True,
+    )
+    def ensure_datetime_utc(cls, v):
         if v is None:
             return v
-        try:
-            # time.fromisoformat expects HH:MM:SS, so add :00 for seconds
-            time.fromisoformat(v + ":00")  # Validates HH:MM format
-            return v
-        except ValueError:
-            raise ValueError("anchor_time_utc must be in HH:MM format")
-
-    @validator("unit")
-    def anchor_time_only_for_days(cls, v, values):
-        if values.get("anchor_time_utc") is not None and v != ScheduleUnit.DAYS:
-            raise ValueError("Anchor time can only be set for schedules with 'days' unit.")
-        return v
-
-    @validator("last_run_at", "created_at", "next_run_at", pre=True, always=True)
-    def ensure_datetime_utc(cls, v):
+        if isinstance(v, str):  # Handle ISO format strings
+            v = datetime.fromisoformat(v)
         if isinstance(v, datetime) and v.tzinfo is None:
             return v.replace(tzinfo=timezone.utc)  # Make naive datetimes UTC-aware
         if isinstance(v, datetime) and v.tzinfo != timezone.utc:
             return v.astimezone(timezone.utc)  # Convert other timezones to UTC
+        return v
+
+    @validator("end_time_utc")
+    def check_end_time_after_start_time(cls, v, values):
+        if v is not None and values.get("start_time_utc") is not None:
+            if v <= values["start_time_utc"]:
+                raise ValueError("end_time_utc must be after start_time_utc")
         return v

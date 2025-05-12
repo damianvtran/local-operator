@@ -2712,11 +2712,18 @@ Current time: {current_time}
         if self.agent_state.schedules:
             for schedule in self.agent_state.schedules:
                 if schedule.is_active:
-                    anchor_info = (
-                        f" at {schedule.anchor_time_utc} UTC" if schedule.anchor_time_utc else ""
+                    start_info = (
+                        f" starting at {schedule.start_time_utc.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+                        if schedule.start_time_utc
+                        else ""
+                    )
+                    end_info = (
+                        f" ending at {schedule.end_time_utc.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+                        if schedule.end_time_utc
+                        else ""
                     )
                     active_schedules_details_list.append(
-                        f'- ID: {schedule.id}, Prompt: "{schedule.prompt}", Runs every {schedule.interval} {schedule.unit.value}{anchor_info}'  # noqa: E501
+                        f'- ID: {schedule.id}, Prompt: "{schedule.prompt}", Runs every {schedule.interval} {schedule.unit.value}{start_info}{end_info}'  # noqa: E501
                     )
 
         active_schedules_details = (

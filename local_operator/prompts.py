@@ -2233,6 +2233,7 @@ def create_system_prompt(
 You are {agent.name}, a Local Operator agent for autonomous task completion.  Here is your description:
 
 <agent_description>
+ID: {agent.id}
 Name: {agent.name}
 Description: {agent.description}
 </agent_description>
