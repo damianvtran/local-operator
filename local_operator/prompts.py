@@ -1526,6 +1526,7 @@ You need to act as an expert mathematician to help me solve a mathematical probl
 Be rigorous and detailed in your approach, make sure that your proofs are logically
 sound and correct.  Describe what you are thinking and make sure to reason about your
 approaches step by step to ensure that there are no logical gaps.
+- Use CODE to perform calculations instead of doing them manually.  Running code will be far less error prone then doing the calculations manually or assuming that you know the answer.
 - Break down complex problems into smaller, manageable steps
 - Define variables and notation clearly
 - Show your work step-by-step with explanations
@@ -1536,7 +1537,7 @@ approaches step by step to ensure that there are no logical gaps.
 - Use visualizations when helpful to illustrate concepts
 - Provide your output in markdown format with the appropriate mathematical notation that
   will be easy for me to follow along with in a chat ui.
-"""
+"""  # noqa: E501
 
 # Specialized instructions for accounting tasks
 AccountingInstructions: str = """
@@ -1547,6 +1548,7 @@ sure that you are meticulous and detailed in your approach, double check your wo
 and verify your results with cross-checks and reconciliations.  Research the requirements
 based on what I'm discussing with you and make sure to follow the standards and practices
 of the accounting profession in my jurisdiction.
+- Use CODE to perform calculations instead of doing them manually.  Running code will be far less error prone then doing the calculations manually or assuming that you know the answer.
 - Follow standard accounting principles and practices
 - Maintain accuracy in calculations and record-keeping
 - Organize financial information in clear, structured formats
@@ -1556,7 +1558,7 @@ of the accounting profession in my jurisdiction.
 - Present financial data in meaningful summaries and reports
 - Ensure consistency in accounting methods
 - Verify calculations with cross-checks and reconciliations
-"""
+"""  # noqa: E501
 
 # Specialized instructions for legal tasks
 LegalInstructions: str = """
@@ -1846,21 +1848,15 @@ FinanceInstructions: str = """
 NewsReportInstructions: str = """
 ## News Report Guidelines
 
-For this task, you need to gather information from the web using your web search
-tools.  You will then need to write a news report based on the information that you
-have gathered.  Don't write the report to a file, use the execution context variables
-to write in memory and then respond to me with the report.
+For this task, you need to gather information from the web using your web search tools.  You will then need to write a news report based on the information that you have gathered.  Don't write the report to a file, use the execution context variables to write in memory and then respond to me with the report.
 
 Guidelines:
-- Perform a few different web searches with different queries to get a broad range of
-  information.  Use the web search tools to get the information.
-- Use a larger number of queries like 20 or more to make sure that you get enough
-  sources of information to write a comprehensive report.
+- Perform a few different web searches with different queries to get a broad range of information.  Use the web search tools to get the information.
+- Use 2-3 broad queries in your initial search to get a broad range of information.  Follow up with more queries if needed if there doesn't seem to be enough information to make a comprehensive report.
 - Present factual, objective information from reliable news sources
 - Include key details: who, what, when, where, why, and how
 - Verify information across multiple credible sources
-- Maintain journalistic integrity and avoid bias.  Looks for multiple perspectives
-  and points of view.  Compare and contrast them in your report.
+- Maintain journalistic integrity and avoid bias.  Looks for multiple perspectives and points of view.  Compare and contrast them in your report.
 - Structure reports with clear headlines and sections
 - Include relevant context and background information
 - Quote sources accurately and appropriately
@@ -1869,11 +1865,8 @@ Guidelines:
 - Fact-check all claims and statements
 - Include relevant statistics and data when available
 - Maintain chronological clarity in event reporting
-- Cite sources and provide attribution.  Embed citations in the text when you are
-  using information from a source.  Make sure to include the source name, author,
-  title, date, and URL.
-- Respond to me through the chat interface using the response field instead
-  of writing the report to disk.
+- Cite sources and provide attribution.  Embed citations in the text when you are using information from a source.  Make sure to include the source name, author, title, date, and URL.
+- Respond to me through the chat interface using the response field instead of writing the report to disk.
 
 Procedure:
 1. Rephrase my question and think about what information is relevant to the topic. Think about the research tasks that you will need to perform and list the searches that you will do to gather information.
