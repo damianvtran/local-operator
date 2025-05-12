@@ -743,7 +743,7 @@ def main() -> int:
 
         # Initialize the operator using the bootstrap function
         try:
-            operator = initialize_operator(
+            operator, _ = initialize_operator(
                 operator_type=OperatorType.CLI,
                 config_manager=config_manager,
                 credential_manager=credential_manager,

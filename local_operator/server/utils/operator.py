@@ -53,7 +53,7 @@ def create_operator(
         f"Agent: {current_agent.name if current_agent else 'None'}, Job ID: {job_id}"
     )
     try:
-        operator = initialize_operator(
+        operator, _ = initialize_operator(
             operator_type=OperatorType.SERVER,
             config_manager=config_manager,
             credential_manager=credential_manager,

@@ -1,6 +1,6 @@
-import asyncio
 import logging
 from datetime import datetime, timezone
+from typing import Any  # Import Any
 
 # from typing import List # No longer needed with Python 3.9+ for List type hint
 from uuid import UUID
@@ -10,7 +10,8 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from local_operator.agents import AgentRegistry
-from local_operator.operator import Operator
+
+# from local_operator.operator import Operator # Removed circular import
 from local_operator.types import Schedule, ScheduleUnit
 
 logger = logging.getLogger(__name__)
@@ -21,7 +22,8 @@ class SchedulerService:
     Service for managing and executing scheduled tasks for agents.
     """
 
-    def __init__(self, agent_registry: AgentRegistry, operator: Operator):
+    # Use type hinting with a forward reference or Any to avoid circular import
+    def __init__(self, agent_registry: AgentRegistry, operator: Any):
         self.agent_registry = agent_registry
         self.operator = operator
         self.scheduler = AsyncIOScheduler(timezone="UTC")
@@ -97,7 +99,8 @@ class SchedulerService:
             )
             logger.info(
                 f"Adding/updating CRON job {job_id} for agent {agent_id_str} "
-                f"at {schedule.anchor_time_utc} UTC every {schedule.interval} {schedule.unit}."
+                f"at {schedule.anchor_time_utc} UTC every {schedule.interval} {schedule.unit}. "
+                "Next run time will be calculated by APScheduler."
             )
         else:
             interval_kwargs = {schedule.unit.value: schedule.interval}
@@ -186,48 +189,3 @@ class SchedulerService:
         if self.scheduler.running:
             self.scheduler.shutdown()
             logger.info("APScheduler shut down.")
-
-
-# Example usage (for testing, not part of the final application structure directly)
-async def main():
-    # This is a placeholder for where AgentRegistry and Operator would be instantiated
-    # In a real app, these would be managed by the FastAPI app or CLI.
-
-    # Mock AgentRegistry and Operator for standalone testing
-    class MockAgentRegistry:
-        def list_agents(self):
-            return []
-
-        def load_agent_state(self, agent_id):
-            return None
-
-        def save_agent_state(self, agent_id, state):
-            pass
-
-    class MockOperator:
-        async def process_message_for_agent(
-            self, agent_id, message_content, is_scheduled_task, schedule_id
-        ):
-            # Shortened print to fit line length
-            print(f"MockOperator: Task for agent {agent_id}, schedule {schedule_id}")
-            print(f"Prompt: {message_content}")
-
-    agent_registry_mock = MockAgentRegistry()
-    operator_mock = MockOperator()
-
-    service = SchedulerService(agent_registry_mock, operator_mock)  # type: ignore
-    await service.start()
-
-    # Keep it running for a bit for testing
-    try:
-        while True:
-            await asyncio.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("Scheduler service stopping...")
-    finally:
-        await service.shutdown()
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    asyncio.run(main())

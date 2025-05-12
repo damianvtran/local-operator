@@ -39,8 +39,8 @@ from local_operator.console import (
     spinner_context,
 )
 from local_operator.helpers import (
-    clean_json_response,
     clean_plain_text_response,
+    process_json_response,
     remove_think_tags,
 )
 from local_operator.model.configure import ModelConfiguration, calculate_cost
@@ -153,29 +153,6 @@ def get_confirm_safety_result(response_content: str) -> ConfirmSafetyResult:
         return ConfirmSafetyResult.UNSAFE
     else:
         return ConfirmSafetyResult.SAFE
-
-
-def process_json_response(response_str: str) -> ResponseJsonSchema:
-    """Process and validate a JSON response string from the language model.
-
-    Args:
-        response_str (str): Raw response string from the model, which may be wrapped in
-            markdown-style JSON code block delimiters (```json) or provided as a plain JSON object.
-
-    Returns:
-        ResponseJsonSchema: Validated response object containing the model's output.
-            See ResponseJsonSchema class for the expected schema.
-
-    Raises:
-        ValidationError: If the JSON response does not match the expected schema.
-        ValueError: If no valid JSON object can be extracted from the response.
-    """
-    response_content = clean_json_response(response_str)
-
-    # Validate the JSON response
-    response_json = ResponseJsonSchema.model_validate_json(response_content)
-
-    return response_json
 
 
 def get_context_vars_str(context_vars: Dict[str, Any]) -> str:
