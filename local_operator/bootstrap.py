@@ -29,9 +29,29 @@ from local_operator.model.configure import (
     validate_model,
 )
 from local_operator.operator import Operator, OperatorType
+from local_operator.scheduler_service import SchedulerService  # Added
 from local_operator.tools import ToolRegistry
 
 logger = get_logger()
+
+
+def initialize_scheduler_service(
+    agent_registry: AgentRegistry, operator: Operator
+) -> SchedulerService:
+    """
+    Initializes the SchedulerService.
+
+    Args:
+        agent_registry: The AgentRegistry instance.
+        operator: The Operator instance.
+
+    Returns:
+        The initialized SchedulerService instance.
+    """
+    logger.debug("Initializing SchedulerService...")
+    scheduler_service = SchedulerService(agent_registry=agent_registry, operator=operator)
+    logger.debug("SchedulerService initialized.")
+    return scheduler_service
 
 
 def build_tool_registry(
@@ -41,6 +61,7 @@ def build_tool_registry(
     credential_manager: CredentialManager,
     env_config: EnvConfig,
     model_configuration: ModelConfiguration,
+    scheduler_service: Optional[SchedulerService] = None,  # Added scheduler_service
 ) -> ToolRegistry:
     """Build and initialize the tool registry.
 
@@ -78,11 +99,15 @@ def build_tool_registry(
         tool_registry.set_fal_client(fal_client)
 
     if radient_api_key:
-        radient_client = RadientClient(radient_api_key, env_config.radient_api_base_url)
+        radient_client = RadientClient(
+            api_key=radient_api_key, base_url=env_config.radient_api_base_url
+        )
         tool_registry.set_radient_client(radient_client)
 
     tool_registry.set_credential_manager(credential_manager)
     tool_registry.set_model_configuration(model_configuration)
+    if scheduler_service:
+        tool_registry.set_scheduler_service(scheduler_service)
     tool_registry.init_tools()
 
     # Admin tools might depend on the executor state, ensure executor is passed
@@ -104,9 +129,11 @@ def initialize_operator(
     auto_save_conversation: bool = False,
     job_id: Optional[str] = None,
     verbosity_level: VerbosityLevel = VerbosityLevel.VERBOSE,
-) -> Operator:
+    initialize_scheduler: bool = True,  # New parameter
+) -> tuple[Operator, Optional[SchedulerService]]:  # Return type changed
     """
-    Initializes and configures the Operator, Executor, and ToolRegistry.
+    Initializes and configures the Operator, Executor, ToolRegistry, and optionally
+    SchedulerService.
 
     This function centralizes the setup logic for creating an Operator instance,
     handling model configuration, agent state loading, and tool registration based
@@ -127,7 +154,8 @@ def initialize_operator(
         verbosity_level: The verbosity level for console output (primarily for CLI).
 
     Returns:
-        The fully configured Operator instance.
+        A tuple containing the fully configured Operator instance and the SchedulerService
+        instance (or None if initialize_scheduler is False).
 
     Raises:
         ValueError: If hosting/model configuration fails or is invalid.
@@ -186,6 +214,7 @@ def initialize_operator(
             conversation=[],
             execution_history=[],
             learnings=[],
+            schedules=[],
             current_plan=None,
             instruction_details=None,
             agent_system_prompt=None,
@@ -229,13 +258,12 @@ def initialize_operator(
         validate_model(hosting, model_name, model_configuration.api_key or SecretStr(""))
         logger.debug(f"Model {model_name} on {hosting} validated successfully.")
 
-    # --- Executor Initialization ---
     executor = LocalCodeExecutor(
         model_configuration=model_configuration,
         max_conversation_history=config_manager.get_config_value("max_conversation_history", 100),
         detail_conversation_length=config_manager.get_config_value("detail_length", 20),
         max_learnings_history=config_manager.get_config_value("max_learnings_history", 50),
-        can_prompt_user=(operator_type == OperatorType.CLI),  # Only CLI can prompt
+        can_prompt_user=(operator_type == OperatorType.CLI),
         agent=current_agent,
         verbosity_level=verbosity_level,
         agent_registry=agent_registry,
@@ -245,28 +273,9 @@ def initialize_operator(
     )
     logger.debug(f"LocalCodeExecutor initialized. Can prompt user: {executor.can_prompt_user}")
 
-    # --- Tool Registry Initialization ---
-    # Pass env_config to build_tool_registry
-    tool_registry = build_tool_registry(
-        executor=executor,
-        agent_registry=agent_registry,
-        config_manager=config_manager,
-        credential_manager=credential_manager,
-        env_config=env_config,
-        model_configuration=model_configuration,
-    )
-    executor.set_tool_registry(tool_registry)
-    logger.debug("ToolRegistry built and set on executor.")
-
-    # Load agent state into executor *after* tool registry is set
-    # (in case tools need access during loading, though unlikely)
-    if agent_state:
-        executor.load_agent_state(agent_state)
-        logger.debug("Agent state loaded into executor.")
-
     # --- Operator Initialization ---
     operator = Operator(
-        executor=executor,
+        executor=executor,  # Pass the final executor instance
         credential_manager=credential_manager,
         model_configuration=model_configuration,
         config_manager=config_manager,
@@ -283,4 +292,32 @@ def initialize_operator(
         f"AutoSave: {operator.auto_save_conversation}"
     )
 
-    return operator
+    # --- Scheduler Service Initialization (conditional) ---
+    scheduler_service: Optional[SchedulerService] = None
+    if initialize_scheduler:
+        scheduler_service = initialize_scheduler_service(
+            agent_registry=agent_registry, operator=operator
+        )
+        logger.debug("SchedulerService initialized and ready for start by caller.")
+    else:
+        logger.debug("SchedulerService initialization skipped as per request.")
+
+    # --- Tool Registry Initialization ---
+    tool_registry = build_tool_registry(
+        executor=executor,
+        agent_registry=agent_registry,
+        config_manager=config_manager,
+        credential_manager=credential_manager,
+        env_config=env_config,
+        model_configuration=model_configuration,
+        scheduler_service=scheduler_service,  # Pass conditional scheduler_service
+    )
+    executor.set_tool_registry(tool_registry)
+    logger.debug("ToolRegistry built and set on executor.")
+
+    # Load agent state into executor *after* tool registry is set
+    if agent_state:
+        executor.load_agent_state(agent_state)
+        logger.debug("Agent state loaded into executor.")
+
+    return operator, scheduler_service

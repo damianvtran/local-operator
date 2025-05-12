@@ -2730,6 +2730,24 @@ Current time: {current_time}
         # Add available agents to the latest message
         available_agents = self.get_available_agents_str()
 
+        # Format active schedules
+        active_schedules_details_list = []
+        if self.agent_state.schedules:
+            for schedule in self.agent_state.schedules:
+                if schedule.is_active:
+                    anchor_info = (
+                        f" at {schedule.anchor_time_utc} UTC" if schedule.anchor_time_utc else ""
+                    )
+                    active_schedules_details_list.append(
+                        f'- ID: {schedule.id}, Prompt: "{schedule.prompt}", Runs every {schedule.interval} {schedule.unit.value}{anchor_info}'  # noqa: E501
+                    )
+
+        active_schedules_details = (
+            "\n".join(active_schedules_details_list)
+            if active_schedules_details_list
+            else "No active schedules."
+        )
+
         # "Heads up display" for the agent
         hud_message = AgentHeadsUpDisplayPrompt.format(
             environment_details=environment_details,
@@ -2737,6 +2755,7 @@ Current time: {current_time}
             current_plan_details=current_plan_details,
             instruction_details=instruction_details,
             available_agents=available_agents,
+            active_schedules_details=active_schedules_details,  # Added this
         )
 
         self.append_to_history(

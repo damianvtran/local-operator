@@ -2047,6 +2047,12 @@ This is the current and original plan that you made based on the user's request.
 {current_plan_details}
 </current_plan_details>
 
+## Active Schedules
+This is a list of tasks that you are currently scheduled to run at regular intervals.
+<schedules>
+{active_schedules_details}
+</schedules>
+
 ## Instruction Details
 This is a set of guidelines about how to best complete the current task or respond to the user's request.  You should take them into account as you work on the current task.
 <instruction_details>
