@@ -18,7 +18,7 @@ from browser_use import Browser, BrowserConfig
 from browser_use import Controller as BrowserController
 from pydantic import SecretStr
 
-from local_operator.agents import AgentRegistry  # Added AgentRegistry
+from local_operator.agents import AgentRegistry
 from local_operator.clients.fal import FalClient, FalImageGenerationResponse, ImageSize
 from local_operator.clients.radient import (
     RadientClient,
@@ -30,7 +30,8 @@ from local_operator.clients.tavily import TavilyClient, TavilyResponse
 from local_operator.credentials import CredentialManager
 from local_operator.mocks import ChatMock, ChatNoop
 from local_operator.model.configure import ModelConfiguration
-from local_operator.types import Schedule, ScheduleUnit  # Added Schedule, ScheduleUnit
+from local_operator.scheduler_service import SchedulerService  # Added SchedulerService
+from local_operator.types import Schedule, ScheduleUnit
 
 
 def _get_git_ignored_files(gitignore_path: str) -> Set[str]:
@@ -1163,8 +1164,11 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
     return run_browser_task
 
 
-def schedule_task_tool(agent_registry: AgentRegistry) -> Callable[..., str]:
-    """Factory to create the schedule_task tool with AgentRegistry dependency."""
+def schedule_task_tool(
+    agent_registry: AgentRegistry, scheduler_service: Optional[SchedulerService]
+) -> Callable[..., str]:
+    """Factory to create the schedule_task tool with AgentRegistry and SchedulerService
+    dependency."""
 
     def schedule_task(
         agent_id: str,
@@ -1225,19 +1229,25 @@ def schedule_task_tool(agent_registry: AgentRegistry) -> Callable[..., str]:
 
         try:
             agent_registry.save_agent_state(agent_id, agent_state)
-            # TODO: Signal SchedulerService to add/update job in APScheduler
-            # This part will be implemented when SchedulerService is available.
-            # For now, we just save it to the agent's state.
-            # Example: scheduler_service.add_or_update_schedule_job(new_schedule)
+            if scheduler_service:
+                scheduler_service.add_or_update_job(new_schedule)
+            else:
+                # Log or handle the case where scheduler_service is not available
+                print(
+                    "Warning: SchedulerService not available. Task saved to agent state but not scheduled."  # noqa: E501
+                )
             return f"Task scheduled successfully with ID: {new_schedule.id}"
         except Exception as e:
-            return f"Error saving new schedule: {str(e)}"
+            return f"Error saving or scheduling new task: {str(e)}"
 
     return schedule_task
 
 
-def stop_schedule_tool(agent_registry: AgentRegistry) -> Callable[..., str]:
-    """Factory to create the stop_schedule tool with AgentRegistry dependency."""
+def stop_schedule_tool(
+    agent_registry: AgentRegistry, scheduler_service: Optional[SchedulerService]
+) -> Callable[..., str]:
+    """Factory to create the stop_schedule tool with AgentRegistry and SchedulerService
+    dependency."""
 
     def stop_schedule(agent_id: str, schedule_id: str) -> str:
         """Stop an active_schedule for an agent.
@@ -1275,11 +1285,16 @@ def stop_schedule_tool(agent_registry: AgentRegistry) -> Callable[..., str]:
         agent_state.schedules = schedules
         try:
             agent_registry.save_agent_state(agent_id, agent_state)
-            # TODO: Signal SchedulerService to remove job from APScheduler
-            # Example: scheduler_service.remove_schedule_job(target_schedule_id)
+            if scheduler_service:
+                scheduler_service.remove_job(target_schedule_id)
+            else:
+                # Log or handle the case where scheduler_service is not available
+                print(
+                    "Warning: SchedulerService not available. Schedule removed from agent state but not from scheduler."  # noqa: E501
+                )
             return f"Schedule '{schedule_id}' stopped successfully."
         except Exception as e:
-            return f"Error saving updated schedule list: {str(e)}"
+            return f"Error saving updated schedule list or removing from scheduler: {str(e)}"
 
     return stop_schedule
 
@@ -1332,7 +1347,8 @@ class ToolRegistry:
     radient_client: RadientClient | None = None
     credential_manager: CredentialManager | None = None
     model_configuration: Optional[ModelConfiguration] = None
-    agent_registry: Optional[AgentRegistry] = None  # Added agent_registry
+    agent_registry: Optional[AgentRegistry] = None
+    scheduler_service: Optional[SchedulerService] = None  # Added scheduler_service
 
     def __init__(self):
         """Initialize an empty tool registry."""
@@ -1395,6 +1411,14 @@ class ToolRegistry:
         """
         self.agent_registry = agent_registry
 
+    def set_scheduler_service(self, scheduler_service: SchedulerService):
+        """Set the SchedulerService for the tool registry.
+
+        Args:
+            scheduler_service (SchedulerService): The SchedulerService instance.
+        """
+        self.scheduler_service = scheduler_service
+
     def init_tools(self):
         """Initialize the registry with default tools.
 
@@ -1444,8 +1468,12 @@ class ToolRegistry:
             print("Warning: ModelConfiguration not set, skipping run_browser_task tool.")
 
         if self.agent_registry:  # Ensure agent_registry is set
-            self.add_tool("schedule_task", schedule_task_tool(self.agent_registry))
-            self.add_tool("stop_schedule", stop_schedule_tool(self.agent_registry))
+            self.add_tool(
+                "schedule_task", schedule_task_tool(self.agent_registry, self.scheduler_service)
+            )
+            self.add_tool(
+                "stop_schedule", stop_schedule_tool(self.agent_registry, self.scheduler_service)
+            )
             self.add_tool("list_schedules", list_schedules_tool(self.agent_registry))
         else:
             print("Warning: AgentRegistry not set, skipping schedule tools.")

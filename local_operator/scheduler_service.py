@@ -46,7 +46,6 @@ class SchedulerService:
             await self.operator.process_message_for_agent(
                 agent_id=agent_id,
                 message_content=prompt,
-                is_scheduled_task=True,
                 schedule_id=schedule_id,
             )
 
