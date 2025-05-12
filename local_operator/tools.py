@@ -1175,36 +1175,33 @@ def schedule_task_tool(
         prompt: str,
         interval: int,
         unit: str,
-        anchor_time: Optional[str] = None,
+        start_time_utc: Optional[datetime] = None,
+        end_time_utc: Optional[datetime] = None,
+        is_active: bool = True,
     ) -> str:
-        """Schedule a new task for an agent to run at a specified frequency.
-        All times are UTC. Anchor time is only valid for 'days' unit.
+        """Schedule a new task for for you or another agent to run at a specified frequency.  Provide a prompt which will be a note about what should be done on each trigger.  The agent (you or another agent) will receive this prompt on each trigger as if from the user.  Specify the interval in minutes, hours, or days.  Optionally specify a start and end time for the schedule.  If no start time is provided, the schedule will start immediately.  If no end time is provided, the schedule will run indefinitely.  If the schedule is active, it will run at the specified interval.  If the schedule is not active, it will not run.
 
         Args:
             agent_id (str): The ID of the agent for whom the task is scheduled.
             prompt (str): The prompt/task for the agent to execute.
             interval (int): The numeric value of the interval (e.g., 5 for 5 minutes).
             unit (str): The unit of the interval ('minutes', 'hours', 'days').
-            anchor_time (Optional[str]): Specific UTC time for daily tasks
-            (HH:MM format, e.g., "09:00").
+            start_time_utc (Optional[datetime]): The UTC datetime when the schedule should start.
+                                                If None, starts as soon as possible.
+            end_time_utc (Optional[datetime]): The UTC datetime after which the schedule
+                                              should no longer run. If None, runs indefinitely.
+            is_active (bool): Whether the schedule should be active immediately. Defaults to True.
 
         Returns:
             str: Confirmation message with the new schedule ID.
-        """
+        """  # noqa: E501
         try:
             agent_uuid = UUID(agent_id)
-            schedule_unit = ScheduleUnit(unit)
+            schedule_unit = ScheduleUnit(unit.lower())
         except ValueError as e:
             return f"Error: Invalid agent_id or unit: {str(e)}"
 
-        # Validate anchor_time format if provided
-        if anchor_time:
-            try:
-                datetime.strptime(anchor_time, "%H:%M")
-            except ValueError:
-                return "Error: Invalid anchor_time format. Must be HH:MM."
-            if schedule_unit != ScheduleUnit.DAYS:
-                return "Error: Anchor time can only be set for schedules with 'days' unit."
+        # Datetime validation is now handled by Pydantic model `Schedule`
 
         # Load current agent state to get existing schedules
         try:
@@ -1215,15 +1212,20 @@ def schedule_task_tool(
         except Exception as e:
             return f"Error loading agent state: {str(e)}"
 
-        new_schedule = Schedule(
-            agent_id=agent_uuid,
-            prompt=prompt,
-            interval=interval,
-            unit=schedule_unit,
-            anchor_time_utc=anchor_time,
-            created_at=datetime.now(timezone.utc),
-            is_active=True,
-        )
+        try:
+            new_schedule = Schedule(
+                agent_id=agent_uuid,
+                prompt=prompt,
+                interval=interval,
+                unit=schedule_unit,
+                start_time_utc=start_time_utc,
+                end_time_utc=end_time_utc,
+                created_at=datetime.now(timezone.utc),
+                is_active=is_active,
+            )
+        except ValueError as ve:  # Catch Pydantic validation errors
+            return f"Error creating schedule: {str(ve)}"
+
         schedules.append(new_schedule)
         agent_state.schedules = schedules
 

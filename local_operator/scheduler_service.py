@@ -33,18 +33,48 @@ class SchedulerService:
     ) -> None:
         """
         The actual function called by APScheduler to trigger an agent's task.
+        Checks end_time_utc before execution.
         """
         logger.info(
-            f"Triggering scheduled task for agent {agent_id_str}, schedule {schedule_id_str}"
+            f"Attempting to trigger task for agent {agent_id_str}, schedule {schedule_id_str}"
         )
         try:
             agent_id = UUID(agent_id_str)
             schedule_id = UUID(schedule_id_str)
 
-            # This is a simplified call; Operator needs a method to handle this.
-            # The Operator would typically manage loading the agent, its context,
-            # and then processing the message.
-            # For now, we assume operator.process_scheduled_task exists or will be created.
+            # Load schedule details to check end_time_utc
+            agent_state = self.agent_registry.load_agent_state(agent_id_str)
+            current_schedule: Schedule | None = None
+            for sched in agent_state.schedules:
+                if sched.id == schedule_id:
+                    current_schedule = sched
+                    break
+
+            if not current_schedule:
+                logger.error(
+                    f"Schedule {schedule_id_str} not found for agent {agent_id_str}. Removing job."
+                )
+                self.remove_job(schedule_id)
+                return
+
+            if not current_schedule.is_active:
+                logger.info(f"Schedule {schedule_id_str} is no longer active. Removing job.")
+                self.remove_job(schedule_id)
+                # Also update agent state to reflect this if necessary, or rely on external update
+                return
+
+            now_utc = datetime.now(timezone.utc)
+            if current_schedule.end_time_utc and now_utc >= current_schedule.end_time_utc:
+                logger.info(
+                    f"Schedule {schedule_id_str} passed end time "
+                    f"({current_schedule.end_time_utc}). Removing job, marking inactive."
+                )
+                current_schedule.is_active = False
+                self.agent_registry.save_agent_state(agent_id_str, agent_state)
+                self.remove_job(schedule_id)
+                return
+
+            logger.info(f"Triggering task for agent {agent_id_str}, schedule {schedule_id_str}")
             await self.operator.process_message_for_agent(
                 agent_id=agent_id,
                 message_content=prompt,
@@ -52,11 +82,12 @@ class SchedulerService:
             )
 
             # Update last_run_at for the schedule
+            # Re-load state in case it was modified by the agent task itself
             agent_state = self.agent_registry.load_agent_state(agent_id_str)
             schedule_updated = False
             for sched in agent_state.schedules:
                 if sched.id == schedule_id:
-                    sched.last_run_at = datetime.now(timezone.utc)
+                    sched.last_run_at = now_utc
                     schedule_updated = True
                     break
             if schedule_updated:
@@ -74,9 +105,11 @@ class SchedulerService:
     def add_or_update_job(self, schedule: Schedule) -> None:
         """
         Adds a new job or updates an existing one in APScheduler based on the Schedule object.
+        Considers start_time_utc and end_time_utc.
         """
         job_id = str(schedule.id)
         agent_id_str = str(schedule.agent_id)
+        now_utc = datetime.now(timezone.utc)
 
         # Remove existing job if it exists, to ensure it's updated
         if self.scheduler.get_job(job_id):
@@ -87,27 +120,53 @@ class SchedulerService:
             logger.info(f"Schedule {job_id} is not active. Not adding to scheduler.")
             return
 
-        trigger_args = [agent_id_str, job_id, schedule.prompt]
+        if schedule.end_time_utc and now_utc >= schedule.end_time_utc:
+            logger.info(
+                f"Schedule {job_id} end time {schedule.end_time_utc} has already passed. "
+                "Not adding to scheduler."
+            )
+            # Optionally mark as inactive in the agent's state here if desired
+            # schedule.is_active = False
+            # self.agent_registry.save_agent_state(...)
+            return
 
-        if schedule.anchor_time_utc and schedule.unit == ScheduleUnit.DAYS:
-            hour_str, minute_str = schedule.anchor_time_utc.split(":")
+        trigger_args = [agent_id_str, job_id, schedule.prompt]
+        trigger_kwargs = {
+            "timezone": "UTC",
+            "start_date": schedule.start_time_utc,  # noqa: E501 APScheduler handles None as "immediate" for start_date
+            "end_date": schedule.end_time_utc,
+        }
+
+        if schedule.unit == ScheduleUnit.DAYS and schedule.start_time_utc:
+            # For daily cron, use start_time_utc to set the hour and minute
             trigger = CronTrigger(
-                hour=int(hour_str),
-                minute=int(minute_str),
+                hour=schedule.start_time_utc.hour,
+                minute=schedule.start_time_utc.minute,
                 day=f"*/{schedule.interval}" if schedule.interval > 0 else "*",
-                timezone="UTC",
+                **trigger_kwargs,
             )
-            logger.info(
-                f"Adding/updating CRON job {job_id} for agent {agent_id_str} "
-                f"at {schedule.anchor_time_utc} UTC every {schedule.interval} {schedule.unit}. "
-                "Next run time will be calculated by APScheduler."
+            start_str = schedule.start_time_utc.strftime("%H:%M")
+            log_msg = (
+                f"Adding/updating CRON job {job_id} for agent {agent_id_str}. "
+                f"Start: {start_str} UTC, End: {schedule.end_time_utc}, "
+                f"Every: {schedule.interval} {schedule.unit}. Next run: APScheduler."
             )
+            logger.info(log_msg)
         else:
-            interval_kwargs = {schedule.unit.value: schedule.interval}
-            trigger = IntervalTrigger(**interval_kwargs, timezone="UTC")
+            # For interval-based schedules (minutes, hours, or days without specific time)
+            interval_unit_value = schedule.unit.value
+            # APScheduler's IntervalTrigger uses 'days', 'hours', 'minutes', 'seconds'
+            # Our ScheduleUnit enum matches these directly for days, hours, minutes.
+            interval_trigger_specific_kwargs = {interval_unit_value: schedule.interval}
+
+            # If start_time_utc is in the past for an interval trigger, APScheduler might
+            # fire immediately if the first scheduled run based on start_time_utc and
+            # interval has passed. This is generally desired behavior.
+            trigger = IntervalTrigger(**interval_trigger_specific_kwargs, **trigger_kwargs)
             logger.info(
-                f"Adding/updating INTERVAL job {job_id} for agent {agent_id_str} "
-                f"every {schedule.interval} {schedule.unit}."
+                f"Adding/updating INTERVAL job {job_id} for agent {agent_id_str}. "
+                f"Start: {schedule.start_time_utc}, End: {schedule.end_time_utc}, "
+                f"Every: {schedule.interval} {schedule.unit}."
             )
 
         try:
