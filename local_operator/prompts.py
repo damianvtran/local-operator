@@ -1713,13 +1713,13 @@ MediaInstructions: str = """
 For this task you will need to work with media files.
 
 Use the following tools to help you process the media files:
-- For video and gif files, use the `ffmpeg` and related tools.
-- For audio files, use the `ffmpeg` and related tools.
+- For video and gif files, use `ffmpeg` and related tools.
+- For audio files, use `ffmpeg` and related tools.
 - For image files and pngs, use the `Pillow` library.
 - For markdown, docx, and pdf conversions, use `pandoc`.
 - For other types of media, use an appropriate library or tool at your own discretion.  Research and look up appropriate free and open source tools for the task as needed.
 
-If there are any libraries or tools that need to be installed outside of python, such as `ffmpeg`, and provide exact instructions and commands to help me install them on my own.  Assume that I don't have much technical expertise, so provide exact instructions and commands to help me install them on my own.
+If there are any libraries or tools that need to be installed outside of python, such as `ffmpeg`, then try to install those on my behalf using the `CODE` action.  Try several different methods to install the tools if needed and make sure that they are available in the PATH so that you can use them.  If all approaches fail, then ask me for help to install the tools and provide very specific instructions and commands to help me install them on my own.
 
 Guidelines:
 - Understand the specific requirements and constraints of the media task
@@ -1735,6 +1735,7 @@ Guidelines:
 
 Additional tool guidelines:
 - For `ffmpeg`, make sure to pass the `-y` flag, otherwise it will prompt for confirmation in interactive mode and you will get stuck.
+- For `pandoc`, use standard letter margins and a1paper size.  Use times new roman font at 12pt.
 """  # noqa: E501
 
 # Specialized instructions for competitive coding tasks
@@ -1879,9 +1880,7 @@ Procedure:
 ConsoleCommandInstructions: str = """
 ## Console Command Guidelines
 
-For this task, you should act as an expert system administrator to help me with
-console command tasks.  You should be able to use the command line to perform a wide
-variety of tasks.
+For this task, you should act as an expert system administrator to help me with console command tasks.  You should be able to use the command line to perform a wide variety of tasks.
 - Verify command syntax and parameters before execution
 - Use safe command options and flags
 - Consider system compatibility and requirements
@@ -1893,46 +1892,33 @@ variety of tasks.
 - Consider cleanup and rollback procedures
 - Follow principle of least privilege
 - Log important command operations
-- Use python subprocess to run the command, and set the pipe of stdout and stderr to
-  strings that you can print to the console.  The console print will be captured and
-  you can then read it to determine if the command was successful or not.
+- Use python subprocess to run the command, and set the pipe of stdout and stderr to strings that you can print to the console.  The console print will be captured and you can then read it to determine if the command was successful or not.
 
-Consider if the console command is a single line command or should be split into
-multiple lines.  If it is a single line command, then you can just run the command
-using the CODE action.  If it is a multi-line command, then you will need to split
-the command into multiple commands, run them one at a time, determine if each was
-successful, and then continue to the next.
+Consider if the console command is a single line command or should be split into multiple lines.  If it is a single line command, then you can just run the command using the CODE action.  If it is a multi-line command, then you will need to split the command into multiple commands, run them one at a time, determine if each was successful, and then continue to the next.
 
-In each case, make sure to read the output of stdout and stderr to determine if the
-command was successful or not.
-"""
+In each case, make sure to read the output of stdout and stderr to determine if the command was successful or not.
+"""  # noqa: E501
 
 # Specialized instructions for personal assistance tasks
 PersonalAssistanceInstructions: str = """
 ## Personal Assistance Guidelines
 
-For this task, you should act as a personal assistant to help me with my tasks.  You
-should be able to use the desktop to perform a wide variety of tasks.
+For this task, you should act as a personal assistant to help me with my tasks.  You should be able to use the desktop to perform a wide variety of tasks.
 
 Guidelines:
 - Understand my organizational needs and preferences
 - Break down complex tasks into manageable steps
 - Use appropriate tools and methods for file/data management
-- Maintain clear documentation and organization.  Write detailed notes about what I
-  am discussing with you and make sure to prioritize all the key details and information
-  that might be important later.
+- Maintain clear documentation and organization.  Write detailed notes about what I am discussing with you and make sure to prioritize all the key details and information that might be important later.
 - Consider efficiency and automation opportunities
 - Follow security best practices for sensitive data
 - Respect my privacy and data protection
 - Always prefer OS native safe delete commands over using destructive commands unless I specifically ask for a permanently destructive action.
 
 For note taking:
-- Write detailed notes to a markdown file.  Keep track of this file and extend it with
-  more notes as we continue to discuss the task.
-- Use bullet points, lists, and other formatting to make the notes easy to read and
-  extend.
-- Fill out what I'm telling you with more verbosity and detail to make the notes more
-  cogent and complete.
+- Write detailed notes to a markdown file.  Keep track of this file and extend it with more notes as we continue to discuss the task.
+- Use bullet points, lists, and other formatting to make the notes easy to read and extend.
+- Fill out what I'm telling you with more verbosity and detail to make the notes more cogent and complete.
 - Use the WRITE action to write the first notes to a new file.
 - Use the READ action to read the notes from the file and then EDIT to perform revisions.
 - Use the EDIT action to add more notes to the file as needed.
@@ -1967,15 +1953,14 @@ OtherInstructions: str = """
 - Understand the specific requirements and context of the task
 - Break complex tasks into manageable steps
 - Perform one task at a time
-- For any web queries, perform a few searches up front to get information and then
-  read the results and write a response that summarizes the data effectively.
+- For any web queries, perform a few searches up front to get information and then read the results and write a response that summarizes the data effectively.
 - Apply domain-specific knowledge and best practices
 - Document your approach and reasoning
 - Verify results and check for errors
 - Present information in a clear, structured format
 - Consider limitations and potential improvements
 - Adapt your approach based on feedback
-"""
+"""  # noqa: E501
 
 # Mapping from request types to specialized instructions
 REQUEST_TYPE_INSTRUCTIONS: Dict[RequestType, str] = {
