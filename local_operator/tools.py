@@ -1179,7 +1179,7 @@ def schedule_task_tool(
         end_time_utc: Optional[datetime] = None,
         is_active: bool = True,
     ) -> str:
-        """Schedule a new task for for you or another agent to run at a specified frequency.  Provide a prompt which will be a note about what should be done on each trigger.  The agent (you or another agent) will receive this prompt on each trigger as if from the user.  Specify the interval in minutes, hours, or days.  Optionally specify a start and end time for the schedule.  If no start time is provided, the schedule will start immediately.  If no end time is provided, the schedule will run indefinitely.  If the schedule is active, it will run at the specified interval.  If the schedule is not active, it will not run.
+        """Schedule a new task for for you or another agent to run at a specified frequency.  The agent ID should be your ID from the agent identity in your system prompt, or the ID of the agent that you were asked to schedule the task for.  Provide a prompt which will be a note about what should be done on each trigger.  The agent (you or another agent) will receive this prompt on each trigger as if from the user.  Specify the interval in minutes, hours, or days.  Optionally specify a start and end time for the schedule.  If no start time is provided, the schedule will start immediately.  If a start time is provided, the scheduled interval will only start after the start time.  If no end time is provided, the schedule will run indefinitely, otherwise it will stop at the end time.  If the schedule is active, it will run at the specified interval.  If the schedule is not active, it will not run.
 
         Args:
             agent_id (str): The ID of the agent for whom the task is scheduled.
