@@ -488,7 +488,7 @@ class AgentRegistry:
         try:
             with jsonlines.open(schedules_file, mode="w") as writer:
                 for schedule_item in schedules:
-                    writer.write(schedule_item.model_dump())
+                    writer.write(schedule_item.model_dump(mode="json"))
         except Exception as e:
             logging.error(f"Failed to save schedules to {schedules_file}: {str(e)}")
             # Optionally, re-raise or handle more gracefully

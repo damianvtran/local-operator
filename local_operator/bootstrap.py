@@ -61,7 +61,7 @@ def build_tool_registry(
     credential_manager: CredentialManager,
     env_config: EnvConfig,
     model_configuration: ModelConfiguration,
-    scheduler_service: Optional[SchedulerService] = None,  # Added scheduler_service
+    scheduler_service: Optional[SchedulerService] = None,
 ) -> ToolRegistry:
     """Build and initialize the tool registry.
 
@@ -106,8 +106,11 @@ def build_tool_registry(
 
     tool_registry.set_credential_manager(credential_manager)
     tool_registry.set_model_configuration(model_configuration)
+    tool_registry.set_agent_registry(agent_registry)
+
     if scheduler_service:
         tool_registry.set_scheduler_service(scheduler_service)
+
     tool_registry.init_tools()
 
     # Admin tools might depend on the executor state, ensure executor is passed
@@ -310,7 +313,7 @@ def initialize_operator(
         credential_manager=credential_manager,
         env_config=env_config,
         model_configuration=model_configuration,
-        scheduler_service=scheduler_service,  # Pass conditional scheduler_service
+        scheduler_service=scheduler_service,
     )
     executor.set_tool_registry(tool_registry)
     logger.debug("ToolRegistry built and set on executor.")
