@@ -7,8 +7,10 @@ import os
 import platform
 import shutil
 import socket
+from datetime import datetime, timezone  # Added timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from uuid import UUID  # Added UUID
 
 import playwright.async_api as pw
 from browser_use import Agent as BrowserAgent
@@ -16,6 +18,7 @@ from browser_use import Browser, BrowserConfig
 from browser_use import Controller as BrowserController
 from pydantic import SecretStr
 
+from local_operator.agents import AgentRegistry  # Added AgentRegistry
 from local_operator.clients.fal import FalClient, FalImageGenerationResponse, ImageSize
 from local_operator.clients.radient import (
     RadientClient,
@@ -27,6 +30,7 @@ from local_operator.clients.tavily import TavilyClient, TavilyResponse
 from local_operator.credentials import CredentialManager
 from local_operator.mocks import ChatMock, ChatNoop
 from local_operator.model.configure import ModelConfiguration
+from local_operator.types import Schedule, ScheduleUnit  # Added Schedule, ScheduleUnit
 
 
 def _get_git_ignored_files(gitignore_path: str) -> Set[str]:
@@ -1159,6 +1163,157 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
     return run_browser_task
 
 
+def schedule_task_tool(agent_registry: AgentRegistry) -> Callable[..., str]:
+    """Factory to create the schedule_task tool with AgentRegistry dependency."""
+
+    def schedule_task(
+        agent_id: str,
+        prompt: str,
+        interval: int,
+        unit: str,
+        anchor_time: Optional[str] = None,
+    ) -> str:
+        """Schedule a new task for an agent to run at a specified frequency.
+        All times are UTC. Anchor time is only valid for 'days' unit.
+
+        Args:
+            agent_id (str): The ID of the agent for whom the task is scheduled.
+            prompt (str): The prompt/task for the agent to execute.
+            interval (int): The numeric value of the interval (e.g., 5 for 5 minutes).
+            unit (str): The unit of the interval ('minutes', 'hours', 'days').
+            anchor_time (Optional[str]): Specific UTC time for daily tasks
+            (HH:MM format, e.g., "09:00").
+
+        Returns:
+            str: Confirmation message with the new schedule ID.
+        """
+        try:
+            agent_uuid = UUID(agent_id)
+            schedule_unit = ScheduleUnit(unit)
+        except ValueError as e:
+            return f"Error: Invalid agent_id or unit: {str(e)}"
+
+        # Validate anchor_time format if provided
+        if anchor_time:
+            try:
+                datetime.strptime(anchor_time, "%H:%M")
+            except ValueError:
+                return "Error: Invalid anchor_time format. Must be HH:MM."
+            if schedule_unit != ScheduleUnit.DAYS:
+                return "Error: Anchor time can only be set for schedules with 'days' unit."
+
+        # Load current agent state to get existing schedules
+        try:
+            agent_state = agent_registry.load_agent_state(agent_id)
+            schedules = agent_state.schedules
+        except KeyError:
+            return f"Error: Agent with ID '{agent_id}' not found."
+        except Exception as e:
+            return f"Error loading agent state: {str(e)}"
+
+        new_schedule = Schedule(
+            agent_id=agent_uuid,
+            prompt=prompt,
+            interval=interval,
+            unit=schedule_unit,
+            anchor_time_utc=anchor_time,
+            created_at=datetime.now(timezone.utc),
+            is_active=True,
+        )
+        schedules.append(new_schedule)
+        agent_state.schedules = schedules
+
+        try:
+            agent_registry.save_agent_state(agent_id, agent_state)
+            # TODO: Signal SchedulerService to add/update job in APScheduler
+            # This part will be implemented when SchedulerService is available.
+            # For now, we just save it to the agent's state.
+            # Example: scheduler_service.add_or_update_schedule_job(new_schedule)
+            return f"Task scheduled successfully with ID: {new_schedule.id}"
+        except Exception as e:
+            return f"Error saving new schedule: {str(e)}"
+
+    return schedule_task
+
+
+def stop_schedule_tool(agent_registry: AgentRegistry) -> Callable[..., str]:
+    """Factory to create the stop_schedule tool with AgentRegistry dependency."""
+
+    def stop_schedule(agent_id: str, schedule_id: str) -> str:
+        """Stop an active_schedule for an agent.
+
+        Args:
+            agent_id (str): The ID of the agent whose schedule is to be stopped.
+            schedule_id (str): The ID of the schedule to stop.
+
+        Returns:
+            str: Confirmation or error message.
+        """
+        try:
+            target_schedule_id = UUID(schedule_id)
+        except ValueError:
+            return "Error: Invalid schedule_id format."
+
+        try:
+            agent_state = agent_registry.load_agent_state(agent_id)
+            schedules = agent_state.schedules
+        except KeyError:
+            return f"Error: Agent with ID '{agent_id}' not found."
+        except Exception as e:
+            return f"Error loading agent state: {str(e)}"
+
+        schedule_found = False
+        for sched in schedules:
+            if sched.id == target_schedule_id:
+                sched.is_active = False
+                schedule_found = True
+                break
+
+        if not schedule_found:
+            return f"Error: Schedule with ID '{schedule_id}' not found for agent '{agent_id}'."
+
+        agent_state.schedules = schedules
+        try:
+            agent_registry.save_agent_state(agent_id, agent_state)
+            # TODO: Signal SchedulerService to remove job from APScheduler
+            # Example: scheduler_service.remove_schedule_job(target_schedule_id)
+            return f"Schedule '{schedule_id}' stopped successfully."
+        except Exception as e:
+            return f"Error saving updated schedule list: {str(e)}"
+
+    return stop_schedule
+
+
+def list_schedules_tool(agent_registry: AgentRegistry) -> Callable[..., List[Dict[str, Any]]]:
+    """Factory to create the list_schedules tool with AgentRegistry dependency."""
+
+    def list_schedules(agent_id: str) -> List[Dict[str, Any]]:
+        """List all active schedules for a given agent.
+
+        Args:
+            agent_id (str): The ID of the agent whose schedules are to be listed.
+
+        Returns:
+            List[Dict[str, Any]]: A list of dictionaries, each representing an active schedule.
+                                 Returns empty list if agent not found or no active schedules.
+        """
+        try:
+            agent_state = agent_registry.load_agent_state(agent_id)
+            active_schedules = [
+                s.model_dump(mode="json") for s in agent_state.schedules if s.is_active
+            ]
+            return active_schedules
+        except KeyError:
+            # Agent not found
+            return []
+        except Exception as e:
+            # Log error or handle as appropriate
+            print(f"Error listing schedules for agent {agent_id}: {str(e)}")
+            return []
+
+    return list_schedules
+
+
 class ToolRegistry:
     """Registry for tools that can be used by agents.
 
@@ -1177,6 +1332,7 @@ class ToolRegistry:
     radient_client: RadientClient | None = None
     credential_manager: CredentialManager | None = None
     model_configuration: Optional[ModelConfiguration] = None
+    agent_registry: Optional[AgentRegistry] = None  # Added agent_registry
 
     def __init__(self):
         """Initialize an empty tool registry."""
@@ -1231,6 +1387,14 @@ class ToolRegistry:
         """
         self.model_configuration = model_config
 
+    def set_agent_registry(self, agent_registry: AgentRegistry):
+        """Set the AgentRegistry for the tool registry.
+
+        Args:
+            agent_registry (AgentRegistry): The AgentRegistry instance.
+        """
+        self.agent_registry = agent_registry
+
     def init_tools(self):
         """Initialize the registry with default tools.
 
@@ -1244,6 +1408,9 @@ class ToolRegistry:
         - get_credential: Retrieve a secret credential
         - list_credentials: List available credentials
         - run_browser_task: Perform a task using an automated browser
+        - schedule_task: Schedule a new task for an agent
+        - stop_schedule: Stop an active schedule for an agent
+        - list_schedules: List active schedules for an agent
         """
         self.add_tool("get_page_html_content", get_page_html_content)
         self.add_tool("get_page_text_content", get_page_text_content)
@@ -1269,11 +1436,19 @@ class ToolRegistry:
         if self.credential_manager:
             self.add_tool("get_credential", get_credential_tool(self.credential_manager))
             self.add_tool("list_credentials", list_credentials_tool(self.credential_manager))
-            if self.model_configuration:  # Ensure model_configuration is set
-                self.add_tool("run_browser_task", run_browser_task_tool(self.model_configuration))
-            else:
-                # Optionally log a warning or skip adding the tool if model_config is None
-                print("Warning: ModelConfiguration not set, skipping run_browser_task tool.")
+
+        if self.model_configuration:  # Ensure model_configuration is set
+            self.add_tool("run_browser_task", run_browser_task_tool(self.model_configuration))
+        else:
+            # Optionally log a warning or skip adding the tool if model_config is None
+            print("Warning: ModelConfiguration not set, skipping run_browser_task tool.")
+
+        if self.agent_registry:  # Ensure agent_registry is set
+            self.add_tool("schedule_task", schedule_task_tool(self.agent_registry))
+            self.add_tool("stop_schedule", stop_schedule_tool(self.agent_registry))
+            self.add_tool("list_schedules", list_schedules_tool(self.agent_registry))
+        else:
+            print("Warning: AgentRegistry not set, skipping schedule tools.")
 
     def add_tool(self, name: str, tool: Callable[..., Any]):
         """Add a new tool to the registry.

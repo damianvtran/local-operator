@@ -1407,3 +1407,71 @@ class Operator:
             max_learnings_history=self.config_manager.get_config_value("max_learnings_history", 50),
             file_path=notebook_path,
         )
+
+    async def process_message_for_agent(
+        self,
+        agent_id: uuid.UUID,
+        message_content: str,
+        is_scheduled_task: bool = False,
+        schedule_id: uuid.UUID | None = None,
+    ) -> None:
+        """
+        Process a message for a specific agent, typically for scheduled tasks.
+        This method sets up the context for the target agent and runs the message.
+        """
+        original_current_agent = self.current_agent
+        original_executor_agent_state = None
+        if self.executor:
+            original_executor_agent_state = self.executor.agent_state
+
+        try:
+            target_agent_data = self.agent_registry.get_agent(str(agent_id))
+            self.current_agent = target_agent_data
+            logging.info(
+                f"Processing scheduled task for agent {target_agent_data.name} (ID: {agent_id})"
+            )
+
+            # Create a new executor or reconfigure for the target agent
+            # This ensures the correct conversation history and state are used.
+            # For simplicity, we'll re-initialize parts of the executor.
+            # A more robust solution might involve a dedicated executor per agent or
+            # a more dynamic way to switch contexts.
+
+            target_agent_state = self.agent_registry.load_agent_state(str(agent_id))
+
+            # Temporarily set the executor's state for this task
+            # This is a simplified approach. A full context switch might be needed.
+            if self.executor:
+                self.executor.agent_state = target_agent_state
+                # self.executor.current_agent = target_agent_data # Removed direct assignment
+                # Ensure the system prompt for the target agent is loaded if different
+                self.executor.initialize_conversation_history()  # Removed force_reload
+
+            # Add a system message to indicate this is a scheduled task
+            scheduled_task_indicator = (
+                f"This is an automated task triggered by schedule ID: {schedule_id}. "
+                f"Execute the following prompt: {message_content}"
+            )
+
+            # Use handle_user_input to process the task
+            # We might need a more direct way to inject and process non-interactive tasks
+            # For now, this simulates user input.
+            await self.handle_user_input(scheduled_task_indicator)
+
+            logging.info(f"Finished processing scheduled task for agent {target_agent_data.name}")
+
+        except Exception as e:
+            logging.error(f"Error processing message for agent {agent_id}: {str(e)}")
+        finally:
+            # Restore original operator state
+            self.current_agent = original_current_agent
+            if self.executor and original_executor_agent_state:
+                self.executor.agent_state = original_executor_agent_state
+                # self.executor.current_agent = original_current_agent # Removed direct assignment
+                if original_current_agent:
+                    self.executor.initialize_conversation_history()  # Removed force_reload
+                else:  # If there was no original agent, clear history
+                    self.executor.agent_state.conversation = []
+                    self.executor.agent_state.execution_history = []
+
+            logging.info("Restored original operator state after scheduled task.")
