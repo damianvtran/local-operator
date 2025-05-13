@@ -42,6 +42,7 @@ def build_tool_registry(
     env_config: EnvConfig,
     model_configuration: ModelConfiguration,
     scheduler_service: Optional[Any] = None,
+    status_queue: Optional[Any] = None,
 ) -> ToolRegistry:
     """Build and initialize the tool registry.
 
@@ -91,6 +92,12 @@ def build_tool_registry(
     if scheduler_service:
         tool_registry.set_scheduler_service(scheduler_service)
 
+    # Register queue and callback to bridge the boundary between the job execution
+    # environment and the server environment.
+    if status_queue:
+        tool_registry.set_tool_execution_callback(executor.tool_execution_callback)
+        tool_registry.set_status_queue(status_queue)
+
     tool_registry.init_tools()
 
     # Admin tools might depend on the executor state, ensure executor is passed
@@ -106,6 +113,7 @@ def initialize_operator(
     agent_registry: AgentRegistry,
     env_config: EnvConfig,
     scheduler_service: Optional[Any] = None,
+    status_queue: Optional[Any] = None,
     request_hosting: Optional[str] = None,
     request_model: Optional[str] = None,
     current_agent: Optional[AgentData] = None,
@@ -277,6 +285,8 @@ def initialize_operator(
         f"AutoSave: {operator.auto_save_conversation}"
     )
 
+    print(f"Creating tool registry with status queue: {status_queue}")
+
     # --- Tool Registry Initialization ---
     # The scheduler_service instance is passed directly from the caller
     tool_registry = build_tool_registry(
@@ -287,6 +297,7 @@ def initialize_operator(
         env_config=env_config,
         model_configuration=model_configuration,
         scheduler_service=scheduler_service,
+        status_queue=status_queue,
     )
     executor.set_tool_registry(tool_registry)
     logger.debug("ToolRegistry built and set on executor.")

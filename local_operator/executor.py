@@ -2873,3 +2873,27 @@ Current time: {current_time}
                     self.status_queue.put(("execution_update", self.job_id, new_code_record))
             except Exception as e:
                 print(f"Failed to update job execution state: {e}")
+
+    def tool_execution_callback(self, tool_name: str, tool_result: Any) -> None:
+        """Callback for tool execution.  Bridges the boundary between the job execution
+        environment and the server environment.
+
+        Args:
+            tool_name (str): The name of the tool that was executed
+            tool_result (str): The result of the tool execution
+        """
+
+        if tool_name == "schedule_task":
+            if self.agent_registry and self.agent:
+                self.agent_state.schedules.append(tool_result)
+                self.agent_registry.save_agent_state(self.agent.id, self.agent_state)
+        elif tool_name == "stop_schedule":
+            if self.agent_registry and self.agent:
+                self.agent_state.schedules = [
+                    schedule
+                    for schedule in self.agent_state.schedules
+                    if schedule.id != tool_result
+                ]
+                self.agent_registry.save_agent_state(self.agent.id, self.agent_state)
+        else:
+            print(f"Unknown tool name: {tool_name}")

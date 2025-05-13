@@ -68,31 +68,22 @@ async def lifespan(app: FastAPI):
     app.state.websocket_manager = WebSocketManager()
     app.state.env_config = get_env_config()
 
-    # Initialize a base operator for the scheduler service
-    # This operator might use default settings or a specific system agent
-    # It's primarily used by the scheduler to trigger agent tasks
-    try:
-        # First, create the SchedulerService instance
-        app.state.scheduler_service = SchedulerService(
-            agent_registry=app.state.agent_registry,
-            config_manager=app.state.config_manager,
-            credential_manager=app.state.credential_manager,
-            env_config=app.state.env_config,
-            operator_type=OperatorType.SERVER,
-            verbosity_level=VerbosityLevel.QUIET,
-        )
+    app.state.scheduler_service = SchedulerService(
+        agent_registry=app.state.agent_registry,
+        config_manager=app.state.config_manager,
+        credential_manager=app.state.credential_manager,
+        env_config=app.state.env_config,
+        operator_type=OperatorType.SERVER,
+        verbosity_level=VerbosityLevel.QUIET,
+    )
 
-        await app.state.scheduler_service.start()
-        logger.info("SchedulerService started and schedules loaded.")
-    except Exception as e:
-        logger.error(f"Failed to initialize or start SchedulerService: {e}", exc_info=True)
-        app.state.scheduler_service = None  # Ensure it's None if startup failed
+    await app.state.scheduler_service.start()
+    logger.info("SchedulerService started and schedules loaded.")
 
     yield
     # Clean up on shutdown
-    if hasattr(app.state, "scheduler_service") and app.state.scheduler_service:
-        await app.state.scheduler_service.shutdown()
-        logger.info("SchedulerService shut down.")
+    await app.state.scheduler_service.shutdown()
+
     app.state.credential_manager = None
     app.state.config_manager = None
     app.state.agent_registry = None

@@ -838,6 +838,7 @@ async def clear_agent_conversation(
                 conversation=[],
                 execution_history=[],
                 learnings=agent_state.learnings,
+                schedules=agent_state.schedules,
                 current_plan="",
                 instruction_details=agent_state.instruction_details,
                 agent_system_prompt=agent_state.agent_system_prompt,
