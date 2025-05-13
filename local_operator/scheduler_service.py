@@ -1,8 +1,5 @@
 import logging
 from datetime import datetime, timezone
-from typing import Any  # Import Any
-
-# from typing import List # No longer needed with Python 3.9+ for List type hint
 from uuid import UUID
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -10,8 +7,11 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from local_operator.agents import AgentRegistry
-
-# from local_operator.operator import Operator # Removed circular import
+from local_operator.bootstrap import initialize_operator  # Added
+from local_operator.config import ConfigManager  # Added
+from local_operator.credentials import CredentialManager  # Added
+from local_operator.env import EnvConfig  # Added
+from local_operator.operator import OperatorType  # Added
 from local_operator.types import Schedule, ScheduleUnit
 
 logger = logging.getLogger(__name__)
@@ -22,10 +22,17 @@ class SchedulerService:
     Service for managing and executing scheduled tasks for agents.
     """
 
-    # Use type hinting with a forward reference or Any to avoid circular import
-    def __init__(self, agent_registry: AgentRegistry, operator: Any):
+    def __init__(
+        self,
+        agent_registry: AgentRegistry,
+        config_manager: ConfigManager,
+        credential_manager: CredentialManager,
+        env_config: EnvConfig,
+    ):
         self.agent_registry = agent_registry
-        self.operator = operator
+        self.config_manager = config_manager
+        self.credential_manager = credential_manager
+        self.env_config = env_config
         self.scheduler = AsyncIOScheduler(timezone="UTC")
 
     async def _trigger_agent_task(
@@ -39,7 +46,7 @@ class SchedulerService:
             f"Attempting to trigger task for agent {agent_id_str}, schedule {schedule_id_str}"
         )
         try:
-            agent_id = UUID(agent_id_str)
+            # agent_id = UUID(agent_id_str) # agent_id_str is used directly, agent_id was unused
             schedule_id = UUID(schedule_id_str)
 
             # Load schedule details to check end_time_utc
@@ -70,16 +77,38 @@ class SchedulerService:
                     f"({current_schedule.end_time_utc}). Removing job, marking inactive."
                 )
                 current_schedule.is_active = False
-                self.agent_registry.save_agent_state(agent_id_str, agent_state)
+                self.agent_registry.save_agent_state(
+                    agent_id_str, agent_state
+                )  # agent_state is already loaded
                 self.remove_job(schedule_id)
                 return
 
             logger.info(f"Triggering task for agent {agent_id_str}, schedule {schedule_id_str}")
-            await self.operator.process_message_for_agent(
-                agent_id=agent_id,
-                message_content=prompt,
-                schedule_id=schedule_id,
-            )
+
+            # Create an operator instance for this specific task execution
+            try:
+                target_agent_data = self.agent_registry.get_agent(agent_id_str)
+                # The scheduler_service itself is passed to initialize_operator,
+                # which then passes it to build_tool_registry.
+                # This ensures tools have access to the *single* scheduler instance.
+                task_operator = initialize_operator(  # Returns a single Operator
+                    operator_type=OperatorType.SERVER,  # Using SERVER as a generic background type
+                    config_manager=self.config_manager,
+                    credential_manager=self.credential_manager,
+                    agent_registry=self.agent_registry,
+                    env_config=self.env_config,
+                    current_agent=target_agent_data,
+                    scheduler_service=self,
+                )
+                await task_operator.handle_user_input(prompt)
+            except Exception as op_error:
+                logger.error(
+                    f"Failed to initialize operator or handle task for agent {agent_id_str}, "
+                    f"schedule {schedule_id_str}: {op_error}",
+                    exc_info=True,
+                )
+                # Optionally, decide if the job should be removed or retried based on op_error
+                return  # Exit if operator init or task handling fails
 
             # Update last_run_at for the schedule
             # Re-load state in case it was modified by the agent task itself
@@ -125,9 +154,6 @@ class SchedulerService:
                 f"Schedule {job_id} end time {schedule.end_time_utc} has already passed. "
                 "Not adding to scheduler."
             )
-            # Optionally mark as inactive in the agent's state here if desired
-            # schedule.is_active = False
-            # self.agent_registry.save_agent_state(...)
             return
 
         trigger_args = [agent_id_str, job_id, schedule.prompt]

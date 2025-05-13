@@ -1239,7 +1239,7 @@ class Operator:
         # Create a new Operator for the target agent
         try:
             # Unpack the tuple returned by initialize_operator
-            delegated_operator, _ = initialize_operator(
+            delegated_operator = initialize_operator(
                 operator_type=self.type,
                 config_manager=self.config_manager,
                 credential_manager=self.credential_manager,

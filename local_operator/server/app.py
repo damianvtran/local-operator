@@ -19,6 +19,7 @@ from local_operator.env import get_env_config
 from local_operator.helpers import setup_cross_platform_environment
 from local_operator.jobs import JobManager
 from local_operator.logger import get_logger
+from local_operator.scheduler_service import SchedulerService  # Added
 from local_operator.server.routes import (
     agents,
     chat,
@@ -64,14 +65,37 @@ async def lifespan(app: FastAPI):
     app.state.job_manager = JobManager()
     app.state.websocket_manager = WebSocketManager()
     app.state.env_config = get_env_config()
+
+    # Initialize a base operator for the scheduler service
+    # This operator might use default settings or a specific system agent
+    # It's primarily used by the scheduler to trigger agent tasks
+    try:
+        # First, create the SchedulerService instance
+        app.state.scheduler_service = SchedulerService(
+            agent_registry=app.state.agent_registry,
+            config_manager=app.state.config_manager,
+            credential_manager=app.state.credential_manager,
+            env_config=app.state.env_config,
+        )
+
+        await app.state.scheduler_service.start()
+        logger.info("SchedulerService started and schedules loaded.")
+    except Exception as e:
+        logger.error(f"Failed to initialize or start SchedulerService: {e}", exc_info=True)
+        app.state.scheduler_service = None  # Ensure it's None if startup failed
+
     yield
     # Clean up on shutdown
+    if hasattr(app.state, "scheduler_service") and app.state.scheduler_service:
+        await app.state.scheduler_service.shutdown()
+        logger.info("SchedulerService shut down.")
     app.state.credential_manager = None
     app.state.config_manager = None
     app.state.agent_registry = None
     app.state.job_manager = None
     app.state.websocket_manager = None
     app.state.env_config = None
+    app.state.scheduler_service = None
 
 
 app = FastAPI(

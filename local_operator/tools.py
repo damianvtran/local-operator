@@ -30,7 +30,6 @@ from local_operator.clients.tavily import TavilyClient, TavilyResponse
 from local_operator.credentials import CredentialManager
 from local_operator.mocks import ChatMock, ChatNoop
 from local_operator.model.configure import ModelConfiguration
-from local_operator.scheduler_service import SchedulerService  # Added SchedulerService
 from local_operator.types import Schedule, ScheduleUnit
 
 
@@ -1165,7 +1164,7 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
 
 
 def schedule_task_tool(
-    agent_registry: AgentRegistry, scheduler_service: Optional[SchedulerService]
+    agent_registry: AgentRegistry, scheduler_service: Optional[Any]
 ) -> Callable[..., str]:
     """Factory to create the schedule_task tool with AgentRegistry and SchedulerService
     dependency."""
@@ -1246,7 +1245,7 @@ def schedule_task_tool(
 
 
 def stop_schedule_tool(
-    agent_registry: AgentRegistry, scheduler_service: Optional[SchedulerService]
+    agent_registry: AgentRegistry, scheduler_service: Optional[Any]
 ) -> Callable[..., str]:
     """Factory to create the stop_schedule tool with AgentRegistry and SchedulerService
     dependency."""
@@ -1350,7 +1349,7 @@ class ToolRegistry:
     credential_manager: CredentialManager | None = None
     model_configuration: Optional[ModelConfiguration] = None
     agent_registry: Optional[AgentRegistry] = None
-    scheduler_service: Optional[SchedulerService] = None  # Added scheduler_service
+    scheduler_service: Optional[Any] = None
 
     def __init__(self):
         """Initialize an empty tool registry."""
@@ -1413,7 +1412,7 @@ class ToolRegistry:
         """
         self.agent_registry = agent_registry
 
-    def set_scheduler_service(self, scheduler_service: SchedulerService):
+    def set_scheduler_service(self, scheduler_service: Any):
         """Set the SchedulerService for the tool registry.
 
         Args:

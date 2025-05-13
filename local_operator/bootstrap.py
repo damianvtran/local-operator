@@ -6,7 +6,7 @@ configuring models, initializing executors, and building tool registries,
 ensuring consistency between different entry points like the CLI and the server.
 """
 
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 from pydantic import SecretStr
 
@@ -29,29 +29,9 @@ from local_operator.model.configure import (
     validate_model,
 )
 from local_operator.operator import Operator, OperatorType
-from local_operator.scheduler_service import SchedulerService  # Added
 from local_operator.tools import ToolRegistry
 
 logger = get_logger()
-
-
-def initialize_scheduler_service(
-    agent_registry: AgentRegistry, operator: Operator
-) -> SchedulerService:
-    """
-    Initializes the SchedulerService.
-
-    Args:
-        agent_registry: The AgentRegistry instance.
-        operator: The Operator instance.
-
-    Returns:
-        The initialized SchedulerService instance.
-    """
-    logger.debug("Initializing SchedulerService...")
-    scheduler_service = SchedulerService(agent_registry=agent_registry, operator=operator)
-    logger.debug("SchedulerService initialized.")
-    return scheduler_service
 
 
 def build_tool_registry(
@@ -61,7 +41,7 @@ def build_tool_registry(
     credential_manager: CredentialManager,
     env_config: EnvConfig,
     model_configuration: ModelConfiguration,
-    scheduler_service: Optional[SchedulerService] = None,
+    scheduler_service: Optional[Any] = None,
 ) -> ToolRegistry:
     """Build and initialize the tool registry.
 
@@ -125,22 +105,23 @@ def initialize_operator(
     credential_manager: CredentialManager,
     agent_registry: AgentRegistry,
     env_config: EnvConfig,
+    scheduler_service: Optional[Any] = None,
     request_hosting: Optional[str] = None,
     request_model: Optional[str] = None,
-    current_agent: Optional[AgentData] = None,  # Use AgentData type hint
+    current_agent: Optional[AgentData] = None,
     persist_conversation: bool = False,
     auto_save_conversation: bool = False,
     job_id: Optional[str] = None,
     verbosity_level: VerbosityLevel = VerbosityLevel.VERBOSE,
-    initialize_scheduler: bool = True,  # New parameter
-) -> tuple[Operator, Optional[SchedulerService]]:  # Return type changed
+) -> Operator:
     """
-    Initializes and configures the Operator, Executor, ToolRegistry, and optionally
-    SchedulerService.
+    Initializes and configures the Operator, Executor, and ToolRegistry.
 
     This function centralizes the setup logic for creating an Operator instance,
     handling model configuration, agent state loading, and tool registration based
-    on the specified operator type (CLI or Server).
+    on the specified operator type (CLI or Server). The SchedulerService is
+    expected to be created and managed by the caller (CLI or Server app) and
+    passed here if its tools need to be registered.
 
     Args:
         operator_type: The type of operator being initialized (CLI or SERVER).
@@ -148,6 +129,8 @@ def initialize_operator(
         credential_manager: The credential manager instance.
         agent_registry: The agent registry instance.
         env_config: The environment configuration instance.
+        scheduler_service: An optional SchedulerService instance. If provided,
+                           scheduling-related tools will be configured.
         request_hosting: Hosting platform override (used by server).
         request_model: Model name override (used by server).
         current_agent: The specific agent to use for this session.
@@ -157,8 +140,7 @@ def initialize_operator(
         verbosity_level: The verbosity level for console output (primarily for CLI).
 
     Returns:
-        A tuple containing the fully configured Operator instance and the SchedulerService
-        instance (or None if initialize_scheduler is False).
+        The fully configured Operator instance.
 
     Raises:
         ValueError: If hosting/model configuration fails or is invalid.
@@ -295,17 +277,8 @@ def initialize_operator(
         f"AutoSave: {operator.auto_save_conversation}"
     )
 
-    # --- Scheduler Service Initialization (conditional) ---
-    scheduler_service: Optional[SchedulerService] = None
-    if initialize_scheduler:
-        scheduler_service = initialize_scheduler_service(
-            agent_registry=agent_registry, operator=operator
-        )
-        logger.debug("SchedulerService initialized and ready for start by caller.")
-    else:
-        logger.debug("SchedulerService initialization skipped as per request.")
-
     # --- Tool Registry Initialization ---
+    # The scheduler_service instance is passed directly from the caller
     tool_registry = build_tool_registry(
         executor=executor,
         agent_registry=agent_registry,
@@ -323,4 +296,4 @@ def initialize_operator(
         executor.load_agent_state(agent_state)
         logger.debug("Agent state loaded into executor.")
 
-    return operator, scheduler_service
+    return operator
