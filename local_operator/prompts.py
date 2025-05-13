@@ -587,9 +587,13 @@ from datetime import datetime
 start_time = datetime(2025, 1, 1, 12, 0, 0) # Should be relative to the current time
 end_time = datetime(2025, 1, 1, 12, 0, 0) # Should be relative to the current time
 
+# The prompt is the note about what should be done on each trigger.  It should be worded as a note to the agent (or your future self) about what should be done on the trigger.  The agent will only receive this context on each trigger, so be sure to include all the information that you will need to know to complete the task.
+
+prompt="Look up the latest news on the stock market and summarize it."
+
 tools.schedule_task(
     agent_id="your_agent_id",
-    prompt="Look up the latest news on the stock market and summarize it.",
+    prompt=prompt,
     interval=1,
     unit="days",
     start_time=start_time,
