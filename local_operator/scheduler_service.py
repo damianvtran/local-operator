@@ -4,7 +4,6 @@ from uuid import UUID
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
 
 from local_operator.agents import AgentRegistry
 from local_operator.bootstrap import initialize_operator  # Added
@@ -157,43 +156,93 @@ class SchedulerService:
             return
 
         trigger_args = [agent_id_str, job_id, schedule.prompt]
-        trigger_kwargs = {
-            "timezone": "UTC",
-            "start_date": schedule.start_time_utc,  # noqa: E501 APScheduler handles None as "immediate" for start_date
-            "end_date": schedule.end_time_utc,
+
+        def get_cron_interval_field(interval_value: int) -> str:
+            if interval_value <= 0:  # Treat 0 or negative as "every"
+                return "*"
+            # For interval_value == 1, "*/1" is equivalent to "*", but explicit is fine.
+            return f"*/{interval_value}"
+
+        # Base cron parameters, default to "every" for all fields
+        cron_expression_params = {
+            "year": "*",
+            "month": "*",
+            "day": "*",
+            "day_of_week": "*",
+            "hour": "*",
+            "minute": "*",
         }
 
-        if schedule.unit == ScheduleUnit.DAYS and schedule.start_time_utc:
-            # For daily cron, use start_time_utc to set the hour and minute
-            trigger = CronTrigger(
-                hour=schedule.start_time_utc.hour,
-                minute=schedule.start_time_utc.minute,
-                day=f"*/{schedule.interval}" if schedule.interval > 0 else "*",
-                **trigger_kwargs,
-            )
-            start_str = schedule.start_time_utc.strftime("%H:%M")
-            log_msg = (
-                f"Adding/updating CRON job {job_id} for agent {agent_id_str}. "
-                f"Start: {start_str} UTC, End: {schedule.end_time_utc}, "
-                f"Every: {schedule.interval} {schedule.unit}. Next run: APScheduler."
-            )
-            logger.info(log_msg)
-        else:
-            # For interval-based schedules (minutes, hours, or days without specific time)
-            interval_unit_value = schedule.unit.value
-            # APScheduler's IntervalTrigger uses 'days', 'hours', 'minutes', 'seconds'
-            # Our ScheduleUnit enum matches these directly for days, hours, minutes.
-            interval_trigger_specific_kwargs = {interval_unit_value: schedule.interval}
+        effective_end_date = schedule.end_time_utc
+        log_details = ""
 
-            # If start_time_utc is in the past for an interval trigger, APScheduler might
-            # fire immediately if the first scheduled run based on start_time_utc and
-            # interval has passed. This is generally desired behavior.
-            trigger = IntervalTrigger(**interval_trigger_specific_kwargs, **trigger_kwargs)
-            logger.info(
-                f"Adding/updating INTERVAL job {job_id} for agent {agent_id_str}. "
-                f"Start: {schedule.start_time_utc}, End: {schedule.end_time_utc}, "
-                f"Every: {schedule.interval} {schedule.unit}."
+        if schedule.one_time:
+            if not schedule.start_time_utc:
+                logger.error(
+                    f"One-time schedule {job_id} for agent {agent_id_str} "
+                    "requires a start_time_utc. Skipping job creation."
+                )
+                return
+            cron_expression_params["year"] = str(schedule.start_time_utc.year)
+            cron_expression_params["month"] = str(schedule.start_time_utc.month)
+            cron_expression_params["day"] = str(schedule.start_time_utc.day)
+            cron_expression_params["hour"] = str(schedule.start_time_utc.hour)
+            cron_expression_params["minute"] = str(schedule.start_time_utc.minute)
+            # For a one-time job, end_date should be shortly after start_date to ensure it runs once
+            # and then is considered "ended" by the _trigger_agent_task logic.
+            # If an explicit end_time_utc is provided and it's different from start_time_utc,
+            # it might imply a window, but for "one_time", we enforce a single execution.
+            # Setting end_date to start_date effectively makes it run once.
+            effective_end_date = schedule.start_time_utc
+            log_details = f"One-time at {schedule.start_time_utc.strftime('%Y-%m-%d %H:%M:%S %Z')}."
+        else:
+            # Determine specific cron fields based on schedule unit and interval for recurring jobs
+            if schedule.unit == ScheduleUnit.MINUTES:
+                cron_expression_params["minute"] = get_cron_interval_field(schedule.interval)
+            elif schedule.unit == ScheduleUnit.HOURS:
+                cron_expression_params["minute"] = str(
+                    schedule.start_time_utc.minute if schedule.start_time_utc else 0
+                )
+                cron_expression_params["hour"] = get_cron_interval_field(schedule.interval)
+            elif schedule.unit == ScheduleUnit.DAYS:
+                cron_expression_params["minute"] = str(
+                    schedule.start_time_utc.minute if schedule.start_time_utc else 0
+                )
+                cron_expression_params["hour"] = str(
+                    schedule.start_time_utc.hour if schedule.start_time_utc else 0
+                )
+                cron_expression_params["day"] = get_cron_interval_field(schedule.interval)
+            else:
+                logger.error(
+                    f"Unsupported schedule unit: {schedule.unit} for recurring schedule {job_id}. "
+                    "Skipping job creation."
+                )
+                return
+            log_details = (
+                f"Recurring every {schedule.interval} {schedule.unit.value}. "
+                f"Cron: (M='{cron_expression_params['minute']}', "
+                f"H='{cron_expression_params['hour']}', "
+                f"DoM='{cron_expression_params['day']}', "
+                f"Mon='{cron_expression_params['month']}', "
+                f"DoW='{cron_expression_params['day_of_week']}')."
             )
+
+        cron_trigger_constructor_kwargs = {
+            "timezone": "UTC",
+            "start_date": schedule.start_time_utc,  # Can be None for "immediate" start
+            "end_date": effective_end_date,  # Use modified end_date for one-time tasks
+            **cron_expression_params,
+        }
+
+        trigger = CronTrigger(**cron_trigger_constructor_kwargs)
+
+        start_log = schedule.start_time_utc or "Immediate (if cron matches)"
+        end_log = effective_end_date or "Never"
+        log_msg = (
+            f"Adding/updating CRON job {job_id} for agent {agent_id_str}. {log_details} "
+            f"Effective Start: {start_log}, Effective End: {end_log}."
+        )
+        logger.info(log_msg)
 
         try:
             self.scheduler.add_job(

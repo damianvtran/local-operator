@@ -395,6 +395,7 @@ class Schedule(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))  # UTC-aware
     is_active: bool = True
     next_run_at: Optional[datetime] = None  # Informational, UTC-aware
+    one_time: bool = False  # If true, the task runs once at start_time_utc
 
     @validator(
         "start_time_utc",
