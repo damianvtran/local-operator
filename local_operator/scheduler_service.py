@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -239,18 +239,22 @@ class SchedulerService:
 
         effective_end_date = schedule.end_time_utc
         log_details = ""
+        misfire_grace_time_seconds = 600  # Default 10 minutes
 
         if schedule.one_time:
             # Prefer interval/unit if provided, otherwise use start_time_utc
             if schedule.interval and schedule.unit:
-                # Treat as recurring (one-time with interval/unit)
+                # This is a one-time job that behaves like a recurring job until it runs once.
+                # We use CronTrigger for this.
                 if schedule.unit == ScheduleUnit.MINUTES:
                     cron_expression_params["minute"] = get_cron_interval_field(schedule.interval)
+                    misfire_grace_time_seconds = max(60, int(schedule.interval * 60 / 2))
                 elif schedule.unit == ScheduleUnit.HOURS:
                     cron_expression_params["minute"] = str(
                         schedule.start_time_utc.minute if schedule.start_time_utc else 0
                     )
                     cron_expression_params["hour"] = get_cron_interval_field(schedule.interval)
+                    misfire_grace_time_seconds = max(60, int(schedule.interval * 60 * 60 / 2))
                 elif schedule.unit == ScheduleUnit.DAYS:
                     cron_expression_params["minute"] = str(
                         schedule.start_time_utc.minute if schedule.start_time_utc else 0
@@ -259,6 +263,7 @@ class SchedulerService:
                         schedule.start_time_utc.hour if schedule.start_time_utc else 0
                     )
                     cron_expression_params["day"] = get_cron_interval_field(schedule.interval)
+                    misfire_grace_time_seconds = max(60, int(schedule.interval * 24 * 60 * 60 / 2))
                 else:
                     logger.error(
                         f"Unsupported schedule unit: {schedule.unit} for one-time "
@@ -273,54 +278,43 @@ class SchedulerService:
                     f"H='{cron_expression_params['hour']}', "
                     f"DoM='{cron_expression_params['day']}', "
                     f"Mon='{cron_expression_params['month']}', "
-                    f"DoW='{cron_expression_params['day_of_week']}')."
+                    f"DoW='{cron_expression_params['day_of_week']}'). "
+                    f"Grace: {misfire_grace_time_seconds}s."
                 )
                 effective_end_date = schedule.end_time_utc
-                cron_trigger_constructor_kwargs = {
-                    "timezone": "UTC",
-                    "start_date": schedule.start_time_utc,  # Can be None for "immediate" start
-                    "end_date": effective_end_date,
+                trigger = CronTrigger(
+                    timezone="UTC",
+                    start_date=schedule.start_time_utc,
+                    end_date=effective_end_date,
                     **cron_expression_params,
-                }
-                logger.debug(
-                    "[SchedulerService] One-time schedule with interval CRON expression: %s, "
-                    "end_date: %s",
-                    cron_expression_params,
-                    effective_end_date,
                 )
-                trigger = CronTrigger(**cron_trigger_constructor_kwargs)
-                logger.debug(f"[SchedulerService] CronTrigger string: {trigger}")
             elif schedule.start_time_utc:
                 # Use DateTrigger for one-time jobs with only start_time_utc
-                date_trigger_kwargs = {
-                    "run_date": schedule.start_time_utc,
-                    "timezone": "UTC",
-                    "misfire_grace_time": 60,  # Allow 60 seconds for misfires
-                }
+                misfire_grace_time_seconds = 60  # Fixed 60s for specific date triggers
                 log_details = (
-                    f"One-time at {schedule.start_time_utc.strftime('%Y-%m-%d %H:%M:%S %Z')}."
+                    f"One-time at {schedule.start_time_utc.strftime('%Y-%m-%d %H:%M:%S %Z')}. "
+                    f"Grace: {misfire_grace_time_seconds}s."
                 )
-                logger.debug(
-                    f"[SchedulerService] One-time job DateTrigger kwargs: {date_trigger_kwargs}"
-                )
-                logger.debug("[SchedulerService] Using DateTrigger for one-time job.")
-                trigger = DateTrigger(**date_trigger_kwargs)
-                logger.debug(f"[SchedulerService] DateTrigger string: {trigger}")
+                trigger = DateTrigger(
+                    run_date=schedule.start_time_utc,
+                    timezone="UTC",
+                )  # misfire_grace_time is an add_job param
             else:
                 logger.error(
                     f"One-time schedule {job_id} for agent {agent_id_str} requires either "
                     "interval/unit or start_time_utc. Skipping job creation."
                 )
                 return
-        else:
-            # Determine specific cron fields based on schedule unit and interval for recurring jobs
+        else:  # Recurring job
             if schedule.unit == ScheduleUnit.MINUTES:
                 cron_expression_params["minute"] = get_cron_interval_field(schedule.interval)
+                misfire_grace_time_seconds = max(60, int(schedule.interval * 60 / 2))
             elif schedule.unit == ScheduleUnit.HOURS:
                 cron_expression_params["minute"] = str(
                     schedule.start_time_utc.minute if schedule.start_time_utc else 0
                 )
                 cron_expression_params["hour"] = get_cron_interval_field(schedule.interval)
+                misfire_grace_time_seconds = max(60, int(schedule.interval * 60 * 60 / 2))
             elif schedule.unit == ScheduleUnit.DAYS:
                 cron_expression_params["minute"] = str(
                     schedule.start_time_utc.minute if schedule.start_time_utc else 0
@@ -329,6 +323,7 @@ class SchedulerService:
                     schedule.start_time_utc.hour if schedule.start_time_utc else 0
                 )
                 cron_expression_params["day"] = get_cron_interval_field(schedule.interval)
+                misfire_grace_time_seconds = max(60, int(schedule.interval * 24 * 60 * 60 / 2))
             else:
                 logger.error(
                     f"Unsupported schedule unit: {schedule.unit} for recurring schedule {job_id}. "
@@ -341,23 +336,16 @@ class SchedulerService:
                 f"H='{cron_expression_params['hour']}', "
                 f"DoM='{cron_expression_params['day']}', "
                 f"Mon='{cron_expression_params['month']}', "
-                f"DoW='{cron_expression_params['day_of_week']}')."
+                f"DoW='{cron_expression_params['day_of_week']}'). "
+                f"Grace: {misfire_grace_time_seconds}s."
             )
             effective_end_date = schedule.end_time_utc
-            cron_trigger_constructor_kwargs = {
-                "timezone": "UTC",
-                "start_date": schedule.start_time_utc,  # Can be None for "immediate" start
-                "end_date": effective_end_date,
+            trigger = CronTrigger(
+                timezone="UTC",
+                start_date=schedule.start_time_utc,
+                end_date=effective_end_date,
                 **cron_expression_params,
-            }
-            logger.debug(
-                "[SchedulerService] Recurring job CRON expression: %s, " "end_date: %s",
-                cron_expression_params,
-                effective_end_date,
             )
-            # Use CronTrigger for recurring jobs
-            trigger = CronTrigger(**cron_trigger_constructor_kwargs)
-            logger.debug(f"[SchedulerService] CronTrigger string: {trigger}")
 
         start_log = schedule.start_time_utc or "Immediate (if cron matches)"
         end_log = effective_end_date or "Never"
@@ -366,6 +354,7 @@ class SchedulerService:
             f"Effective Start: {start_log}, Effective End: {end_log}."
         )
         logger.debug(log_msg)
+        logger.debug(f"[SchedulerService] Trigger details: {trigger}")
 
         try:
             self.scheduler.add_job(
@@ -375,9 +364,13 @@ class SchedulerService:
                 id=job_id,
                 name=f"Agent {agent_id_str} - Schedule {job_id}",
                 replace_existing=True,
-                misfire_grace_time=600,  # 10 minutes
+                misfire_grace_time=misfire_grace_time_seconds,
+                coalesce=True,
             )
-            logger.debug(f"Successfully added/updated job {job_id} to scheduler.")
+            logger.debug(
+                f"Successfully added/updated job {job_id} to scheduler with "
+                f"misfire_grace_time {misfire_grace_time_seconds}s."
+            )
         except Exception as e:
             logger.error(f"Failed to add/update job {job_id} to scheduler: {str(e)}")
 
@@ -510,11 +503,71 @@ class SchedulerService:
                             continue
 
                         # D. Handle active recurring schedules
-                        log_msg_recurring = (
-                            f"Active recurring schedule {job_id_str} for agent {agent_id_str}. "
-                            "Adding/updating in scheduler."
-                        )
-                        logger.debug(log_msg_recurring)
+                        # Check if a recurring job was missed and needs to be run
+                        triggered_missed_recurring = False
+                        if (
+                            not schedule_item.one_time
+                            and schedule_item.last_run_at
+                            and schedule_item.interval > 0
+                            and schedule_item.unit
+                        ):
+
+                            delta = timedelta()
+                            if schedule_item.unit == ScheduleUnit.MINUTES:
+                                delta = timedelta(minutes=schedule_item.interval)
+                            elif schedule_item.unit == ScheduleUnit.HOURS:
+                                delta = timedelta(hours=schedule_item.interval)
+                            elif schedule_item.unit == ScheduleUnit.DAYS:
+                                delta = timedelta(days=schedule_item.interval)
+
+                            if delta > timedelta(0):  # Ensure valid delta
+                                next_expected_run_time = schedule_item.last_run_at + delta
+                                grace_period_seconds = 0
+                                if schedule_item.unit == ScheduleUnit.MINUTES:
+                                    grace_period_seconds = int(schedule_item.interval * 60 / 2)
+                                elif schedule_item.unit == ScheduleUnit.HOURS:
+                                    grace_period_seconds = int(schedule_item.interval * 60 * 60 / 2)
+                                elif schedule_item.unit == ScheduleUnit.DAYS:
+                                    grace_period_seconds = int(
+                                        schedule_item.interval * 24 * 60 * 60 / 2
+                                    )
+                                grace_period_seconds = max(
+                                    60, grace_period_seconds
+                                )  # Min 60s grace
+
+                                grace_delta = timedelta(seconds=grace_period_seconds)
+
+                                if now_utc > next_expected_run_time and now_utc <= (
+                                    next_expected_run_time + grace_delta
+                                ):
+                                    logger.debug(
+                                        f"Missed recurring schedule {job_id_str} for "
+                                        f"agent {agent_id_str} "
+                                        f"(last run: {schedule_item.last_run_at}, "
+                                        f"next expected: {next_expected_run_time}, "
+                                        f"grace: {grace_delta}). Triggering now (non-blocking)."
+                                    )
+                                    asyncio.create_task(
+                                        self._trigger_agent_task(
+                                            agent_id_str=agent_id_str,
+                                            schedule_id_str=job_id_str,
+                                            prompt=schedule_item.prompt,
+                                        )
+                                    )
+                                    triggered_missed_recurring = True
+                                    # The task itself will update last_run_at.
+                                    # We still add the job to the scheduler for future runs.
+
+                        if (
+                            not triggered_missed_recurring
+                        ):  # If not triggered as missed, or if it's first run
+                            log_msg_recurring = (
+                                f"Active recurring schedule {job_id_str} for agent {agent_id_str}. "
+                                "Adding/updating in scheduler."
+                            )
+                            logger.debug(log_msg_recurring)
+
+                        # Always ensure the job is (re)added to the scheduler for future runs
                         self.add_or_update_job(schedule_item)
 
                     if agent_state_needs_saving:
