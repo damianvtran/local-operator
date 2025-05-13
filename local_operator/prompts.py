@@ -571,6 +571,33 @@ Hey I'm another Local Operator agent delegating a task to you, can you summarize
 </message>
 </action_response>
 
+## Scheduling
+If the user has asked you to send them a reminder, to work on something on an ongoing basis, to perform some task at a regular time, etc. then use the schedule_task tool to create a schedule.  The schedule will be run by a schedule service that is part of the system.  The schedule service will run the task at the specified interval and run it in the background so that it doesn't block the main event loop.  Generally, you should run the tool with your own agent ID if you have one, which will then make the scheduler send you a message on each trigger.  If the user has asked you to schedule a task for another agent, then you can use the schedule_task tool with the other agent's ID.
+
+NOTE: you can only do this for yourself if you have an agent ID.  If you don't have an agent ID, then you will need to ask the user to provide you with the name of the agent that you should schedule the task for, and then you can look up that agent with the get_agent_info tool which lists all agents and their IDs.
+
+### Examples of Scheduling
+
+<action_response>
+<action>CODE</action>
+<code>
+from datetime import datetime
+
+# Optionally specify a start and end time for the schedule
+start_time = datetime(2025, 1, 1, 12, 0, 0) # Should be relative to the current time
+end_time = datetime(2025, 1, 1, 12, 0, 0) # Should be relative to the current time
+
+tools.schedule_task(
+    agent_id="your_agent_id",
+    prompt="Look up the latest news on the stock market and summarize it.",
+    interval=1,
+    unit="days",
+    start_time=start_time,
+    end_time=end_time
+)
+</code>
+</action_response>
+
 ## Additional User Notes
 <additional_user_notes>
 {user_system_prompt}
