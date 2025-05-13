@@ -78,7 +78,6 @@ async def lifespan(app: FastAPI):
     )
 
     await app.state.scheduler_service.start()
-    logger.info("SchedulerService started and schedules loaded.")
 
     yield
     # Clean up on shutdown

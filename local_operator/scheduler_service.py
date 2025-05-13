@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime, timezone
 from uuid import UUID
@@ -486,13 +487,15 @@ class SchedulerService:
                                     f"Past-due active one-time schedule {job_id_str} for "
                                     f"agent {agent_id_str} "
                                     f"(start: {schedule_item.start_time_utc}). "
-                                    "Triggering now."
+                                    "Triggering now (non-blocking)."
                                 )
                                 logger.debug(log_msg_past_due)
-                                await self._trigger_agent_task(
-                                    agent_id_str=agent_id_str,
-                                    schedule_id_str=job_id_str,
-                                    prompt=schedule_item.prompt,
+                                asyncio.create_task(
+                                    self._trigger_agent_task(
+                                        agent_id_str=agent_id_str,
+                                        schedule_id_str=job_id_str,
+                                        prompt=schedule_item.prompt,
+                                    )
                                 )
                                 # The task itself should mark it inactive and it will be removed.
                                 # No need to call add_or_update_job for this one.
