@@ -1177,9 +1177,8 @@ def schedule_task_tool(
         start_time_utc: Optional[datetime] = None,
         end_time_utc: Optional[datetime] = None,
         one_time: bool = False,
-        is_active: bool = True,
     ) -> str:
-        """Schedule a new task for for you or another agent to run at a specified frequency.  The agent ID should be your ID from the agent identity in your system prompt, or the ID of the agent that you were asked to schedule the task for.  Provide a prompt which will be a note about what should be done on each trigger.  The agent (you or another agent) will receive this prompt on each trigger as if from the user.  Specify the interval in minutes, hours, or days.  Optionally specify a start and end time for the schedule.  If no start time is provided, the schedule will start immediately.  If a start time is provided, the scheduled interval will only start after the start time.  If no end time is provided, the schedule will run indefinitely, otherwise it will stop at the end time.  Specify one_time as True if the user has asked for a one time reminder, otherwise omit it or set it to False for a recurring task with or without start or end times.  If the schedule is active, it will run at the specified interval.  If the schedule is not active, it will not run.
+        """Schedule a new task for for you or another agent to run at a specified frequency.  The agent ID should be your ID from the agent identity in your system prompt, or the ID of the agent that you were asked to schedule the task for.  Provide a prompt which will be a note about what should be done on each trigger.  The agent (you or another agent) will receive this prompt on each trigger as if from the user.  Specify the interval in minutes, hours, or days.  Optionally specify a start and end time for the schedule.  If no start time is provided, the schedule will start immediately.  If a start time is provided, the scheduled interval will only start after the start time.  If no end time is provided, the schedule will run indefinitely, otherwise it will stop at the end time.  Specify one_time as True if the user has asked for a one time reminder, otherwise omit it or set it to False for a recurring task with or without start or end times.
 
         Args:
             agent_id (str): The ID of the agent for whom the task is scheduled.
@@ -1191,7 +1190,6 @@ def schedule_task_tool(
             end_time_utc (Optional[datetime]): The UTC datetime after which the schedule
                                               should no longer run. If None, runs indefinitely.
             one_time (bool): Whether the schedule should be a one-time task. Defaults to False.
-            is_active (bool): Whether the schedule should be active immediately. Defaults to True.
 
         Returns:
             str: Confirmation message with the new schedule ID.
@@ -1222,7 +1220,7 @@ def schedule_task_tool(
                 start_time_utc=start_time_utc,
                 end_time_utc=end_time_utc,
                 created_at=datetime.now(timezone.utc),
-                is_active=is_active,
+                is_active=True,
                 one_time=one_time,
             )
         except ValueError as ve:  # Catch Pydantic validation errors
