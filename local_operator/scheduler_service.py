@@ -114,19 +114,50 @@ class SchedulerService:
                 return  # Exit if operator init or task handling fails
 
             # Update last_run_at for the schedule
-            # Re-load state in case it was modified by the agent task itself
-            agent_state = self.agent_registry.load_agent_state(agent_id_str)
-            schedule_updated = False
-            for sched in agent_state.schedules:
-                if sched.id == schedule_id:
-                    sched.last_run_at = now_utc
-                    schedule_updated = True
-                    break
-            if schedule_updated:
-                self.agent_registry.save_agent_state(agent_id_str, agent_state)
-            logger.info(
-                f"Successfully triggered and updated last_run_at for schedule {schedule_id_str}"
-            )
+            # Re-load state in case it was modified by the agent task itself or needs deactivation
+            agent_state_after_task = self.agent_registry.load_agent_state(agent_id_str)
+            schedule_to_update: Schedule | None = None
+            for sched_idx, sched_item in enumerate(agent_state_after_task.schedules):
+                if sched_item.id == schedule_id:
+                    sched_item.last_run_at = now_utc  # now_utc from the beginning of this method
+                    schedule_to_update = sched_item
+
+                    # If it's a one-time job, mark it inactive and remove from scheduler
+                    if sched_item.one_time:
+                        logger.info(
+                            f"One-time schedule {schedule_id_str} executed. "
+                            "Marking inactive and removing."
+                        )
+                        sched_item.is_active = False
+                        # The job removal from APScheduler will be handled by the end_time_utc check
+                        # or explicitly if needed, but marking inactive is key.
+                        # We can also remove it here explicitly.
+                        self.remove_job(schedule_id)
+
+                    # If end_time_utc is now passed (could be due to one_time logic setting it)
+                    # or was already passed, ensure it's inactive.
+                    # This check is also present at the start, but good to re-verify.
+                    if sched_item.end_time_utc and now_utc >= sched_item.end_time_utc:
+                        if sched_item.is_active:  # Only log/change if it wasn't already inactive
+                            logger.info(
+                                f"Schedule {schedule_id_str} passed end time "
+                                f"({sched_item.end_time_utc}) after task. Marking inactive."
+                            )
+                            sched_item.is_active = False
+                        self.remove_job(schedule_id)  # Ensure removal if end time passed
+
+                    break  # Found the schedule
+
+            if schedule_to_update:  # If any changes were made to the schedule object
+                self.agent_registry.save_agent_state(agent_id_str, agent_state_after_task)
+                logger.info(
+                    f"Successfully triggered and updated state for schedule {schedule_id_str}"
+                )
+            else:
+                logger.warning(
+                    f"Schedule {schedule_id_str} not found in agent state after task "
+                    "execution for update."
+                )
 
         except Exception as e:
             logger.error(
@@ -288,29 +319,114 @@ class SchedulerService:
     async def load_all_agent_schedules(self) -> None:
         """
         Loads all active schedules for all agents and adds them to the scheduler.
+        Handles past-due one-time jobs by triggering them immediately.
         """
         logger.info("Loading all agent schedules into APScheduler...")
+        now_utc = datetime.now(timezone.utc)
         try:
             all_agents = self.agent_registry.list_agents()
             for agent_data in all_agents:
+                agent_state_needs_saving = False
                 try:
                     agent_state = self.agent_registry.load_agent_state(agent_data.id)
-                    if agent_state.schedules:
-                        logger.info(
-                            f"Found {len(agent_state.schedules)} schedules "
-                            f"for agent {agent_data.id}"
-                        )
-                        for schedule_item in agent_state.schedules:
-                            if schedule_item.is_active:
-                                self.add_or_update_job(schedule_item)
-                            else:
-                                # Ensure inactive schedules are not in the scheduler
-                                self.remove_job(schedule_item.id)
-                    else:
+                    if not agent_state.schedules:
                         logger.info(f"No schedules found for agent {agent_data.id}")
+                        continue
+
+                    logger.info(
+                        f"Processing {len(agent_state.schedules)} schedules "
+                        f"for agent {agent_data.id}"
+                    )
+
+                    schedules_to_process = list(agent_state.schedules)
+
+                    for schedule_item in schedules_to_process:
+                        job_id_str = str(schedule_item.id)
+                        agent_id_str = str(schedule_item.agent_id)
+
+                        # A. Handle schedules that have ended
+                        if schedule_item.end_time_utc and now_utc >= schedule_item.end_time_utc:
+                            log_msg_ended = (
+                                f"Schedule {job_id_str} for agent {agent_id_str} has passed its "
+                                f"end time ({schedule_item.end_time_utc}). Ensuring "
+                                "inactive and removed."
+                            )
+                            logger.info(log_msg_ended)
+                            if schedule_item.is_active:
+                                schedule_item.is_active = False
+                                agent_state_needs_saving = True
+                            self.remove_job(schedule_item.id)
+                            continue  # Move to the next schedule
+
+                        # B. Handle explicitly inactive schedules
+                        if not schedule_item.is_active:
+                            log_msg_inactive = (
+                                f"Schedule {job_id_str} for agent {agent_id_str} is "
+                                "marked inactive. Ensuring removal from scheduler."
+                            )
+                            logger.info(log_msg_inactive)
+                            self.remove_job(schedule_item.id)
+                            continue  # Move to the next schedule
+
+                        # At this point, the schedule is active and not past its end_time_utc
+
+                        # C. Handle active one-time schedules
+                        if schedule_item.one_time:
+                            if not schedule_item.start_time_utc:
+                                log_msg_no_start = (
+                                    f"Active one-time schedule {job_id_str} "
+                                    f"for agent {agent_id_str} lacks start_time_utc. "
+                                    "Marking inactive."
+                                )
+                                logger.error(log_msg_no_start)
+                                schedule_item.is_active = False
+                                agent_state_needs_saving = True
+                                self.remove_job(schedule_item.id)
+                                continue
+
+                            if now_utc > schedule_item.start_time_utc:
+                                log_msg_past_due = (
+                                    f"Past-due active one-time schedule {job_id_str} for "
+                                    f"agent {agent_id_str} "
+                                    f"(start: {schedule_item.start_time_utc}). "
+                                    "Triggering now."
+                                )
+                                logger.info(log_msg_past_due)
+                                await self._trigger_agent_task(
+                                    agent_id_str=agent_id_str,
+                                    schedule_id_str=job_id_str,
+                                    prompt=schedule_item.prompt,
+                                )
+                                # The task itself should mark it inactive and it will be removed.
+                                # No need to call add_or_update_job for this one.
+                            else:
+                                # Future one-time job, add it to scheduler
+                                log_msg_future_one_time = (
+                                    f"Future active one-time schedule {job_id_str} for "
+                                    f"agent {agent_id_str}. Adding to scheduler."
+                                )
+                                logger.info(log_msg_future_one_time)
+                                self.add_or_update_job(schedule_item)
+                            continue
+
+                        # D. Handle active recurring schedules
+                        log_msg_recurring = (
+                            f"Active recurring schedule {job_id_str} for agent {agent_id_str}. "
+                            "Adding/updating in scheduler."
+                        )
+                        logger.info(log_msg_recurring)
+                        self.add_or_update_job(schedule_item)
+
+                    if agent_state_needs_saving:
+                        self.agent_registry.save_agent_state(agent_data.id, agent_state)
+
                 except Exception as e:
-                    logger.error(f"Error loading schedules for agent {agent_data.id}: {str(e)}")
-            logger.info("Finished loading agent schedules.")
+                    logger.error(
+                        f"Error loading or processing schedules for "
+                        f"agent {agent_data.id}: {str(e)}",
+                        exc_info=True,
+                    )
+            logger.info("Finished loading and processing agent schedules.")
         except Exception as e:
             logger.error(
                 f"An unexpected error occurred while loading all agent schedules: {str(e)}"
