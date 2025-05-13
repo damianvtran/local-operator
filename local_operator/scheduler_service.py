@@ -8,6 +8,7 @@ from apscheduler.triggers.cron import CronTrigger
 from local_operator.agents import AgentRegistry
 from local_operator.bootstrap import initialize_operator  # Added
 from local_operator.config import ConfigManager  # Added
+from local_operator.console import VerbosityLevel
 from local_operator.credentials import CredentialManager  # Added
 from local_operator.env import EnvConfig  # Added
 from local_operator.operator import OperatorType  # Added
@@ -91,13 +92,16 @@ class SchedulerService:
                 # which then passes it to build_tool_registry.
                 # This ensures tools have access to the *single* scheduler instance.
                 task_operator = initialize_operator(  # Returns a single Operator
-                    operator_type=OperatorType.SERVER,  # Using SERVER as a generic background type
+                    operator_type=OperatorType.SERVER,
                     config_manager=self.config_manager,
                     credential_manager=self.credential_manager,
                     agent_registry=self.agent_registry,
                     env_config=self.env_config,
                     current_agent=target_agent_data,
                     scheduler_service=self,
+                    persist_conversation=True,
+                    auto_save_conversation=False,
+                    verbosity_level=VerbosityLevel.QUIET,
                 )
                 await task_operator.handle_user_input(prompt)
             except Exception as op_error:
