@@ -188,11 +188,7 @@ class SchedulerService:
             cron_expression_params["day"] = str(schedule.start_time_utc.day)
             cron_expression_params["hour"] = str(schedule.start_time_utc.hour)
             cron_expression_params["minute"] = str(schedule.start_time_utc.minute)
-            # For a one-time job, end_date should be shortly after start_date to ensure it runs once
-            # and then is considered "ended" by the _trigger_agent_task logic.
-            # If an explicit end_time_utc is provided and it's different from start_time_utc,
-            # it might imply a window, but for "one_time", we enforce a single execution.
-            # Setting end_date to start_date effectively makes it run once.
+
             effective_end_date = schedule.start_time_utc
             log_details = f"One-time at {schedule.start_time_utc.strftime('%Y-%m-%d %H:%M:%S %Z')}."
         else:
