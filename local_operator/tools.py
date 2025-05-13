@@ -24,6 +24,7 @@ from local_operator.clients.radient import (
     RadientClient,
     RadientImageGenerationResponse,
     RadientSearchResponse,
+    RadientSendEmailResponseData,
 )
 from local_operator.clients.serpapi import SerpApiClient, SerpApiResponse
 from local_operator.clients.tavily import TavilyClient, TavilyResponse
@@ -1342,6 +1343,45 @@ def list_schedules_tool(agent_registry: AgentRegistry) -> Callable[..., List[Dic
     return list_schedules
 
 
+def send_email_to_user_tool(
+    radient_client: RadientClient,
+) -> Callable[..., RadientSendEmailResponseData]:
+    """Create a tool function to send an email to the authenticated user via Radient API.
+
+    Args:
+        radient_client (RadientClient): The Radient API client to use.
+
+    Returns:
+        Callable: A function that sends an email with a subject and body.
+    """
+
+    def send_email_to_user(subject: str, body: str) -> RadientSendEmailResponseData:
+        """Send an email to the authenticated user. This tool uses the Radient API to send an email with the provided subject and body to the email address associated with the current Radient API key.  Make sure the body is neatly formatted with HTML formatting (<br /> for line breaks, and other tags for bold, italics, and other formatting) and easy to read, and contains all the information the user needs.  Make sure to add a signature to the email with your agent name so that the user knows that it is from you.
+
+        Args:
+            subject (str): The subject of the email. Must be between 1 and 255 characters.
+            body (str): The body of the email. Can be HTML or plain text. Must be at least 1 character.
+
+        Returns:
+            RadientSendEmailResponseData: A response containing a confirmation message and optionally a message ID.
+
+        Raises:
+            RuntimeError: If the Radient client is not available or the request fails.
+        """  # noqa: E501
+        if not radient_client.api_key:
+            raise RuntimeError("RADIENT_API_KEY is not configured. Cannot send email.")
+
+        # Basic validation based on OpenAPI spec
+        if not (1 <= len(subject) <= 255):
+            raise ValueError("Subject must be between 1 and 255 characters.")
+        if not (len(body) >= 1):
+            raise ValueError("Body must be at least 1 character long.")
+
+        return radient_client.send_email_to_self(subject=subject, body=body)
+
+    return send_email_to_user
+
+
 class ToolRegistry:
     """Registry for tools that can be used by agents.
 
@@ -1468,6 +1508,7 @@ class ToolRegistry:
         - schedule_task: Schedule a new task for an agent
         - stop_schedule: Stop an active schedule for an agent
         - list_schedules: List active schedules for an agent
+        - send_email_to_user: Send an email to the authenticated user
         """
         self.add_tool("get_page_html_content", get_page_html_content)
         self.add_tool("get_page_text_content", get_page_text_content)
@@ -1520,6 +1561,10 @@ class ToolRegistry:
             self.add_tool("list_schedules", list_schedules_tool(self.agent_registry))
         else:
             print("Warning: AgentRegistry not set, skipping schedule tools.")
+
+        # Add send_email_to_user tool if Radient client and API key are available
+        if self.radient_client and self.radient_client.api_key:
+            self.add_tool("send_email_to_user", send_email_to_user_tool(self.radient_client))
 
     def add_tool(self, name: str, tool: Callable[..., Any]):
         """Add a new tool to the registry.
