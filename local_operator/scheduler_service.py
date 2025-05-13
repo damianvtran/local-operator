@@ -4,6 +4,7 @@ from uuid import UUID
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 
 from local_operator.agents import AgentRegistry
 from local_operator.bootstrap import initialize_operator  # Added
@@ -245,14 +246,21 @@ class SchedulerService:
                     "requires a start_time_utc. Skipping job creation."
                 )
                 return
-            cron_expression_params["year"] = str(schedule.start_time_utc.year)
-            cron_expression_params["month"] = str(schedule.start_time_utc.month)
-            cron_expression_params["day"] = str(schedule.start_time_utc.day)
-            cron_expression_params["hour"] = str(schedule.start_time_utc.hour)
-            cron_expression_params["minute"] = str(schedule.start_time_utc.minute)
-
-            effective_end_date = schedule.start_time_utc
+            # Use DateTrigger for one-time jobs
+            date_trigger_kwargs = {
+                "run_date": schedule.start_time_utc,
+                "timezone": "UTC",
+                "misfire_grace_time": 60,  # Allow 60 seconds for misfires
+            }
             log_details = f"One-time at {schedule.start_time_utc.strftime('%Y-%m-%d %H:%M:%S %Z')}."
+            logger.info(
+                f"[SchedulerService] One-time job DateTrigger kwargs: {date_trigger_kwargs}"
+            )
+            logger.info("[SchedulerService] Using DateTrigger for one-time job.")
+            # Use DateTrigger for one-time jobs
+            trigger = DateTrigger(**date_trigger_kwargs)
+            logger.info(f"[SchedulerService] DateTrigger string: {trigger}")
+            print(f"[SchedulerService] DateTrigger string: {trigger}")
         else:
             # Determine specific cron fields based on schedule unit and interval for recurring jobs
             if schedule.unit == ScheduleUnit.MINUTES:
@@ -284,23 +292,30 @@ class SchedulerService:
                 f"Mon='{cron_expression_params['month']}', "
                 f"DoW='{cron_expression_params['day_of_week']}')."
             )
-
-        cron_trigger_constructor_kwargs = {
-            "timezone": "UTC",
-            "start_date": schedule.start_time_utc,  # Can be None for "immediate" start
-            "end_date": effective_end_date,  # Use modified end_date for one-time tasks
-            **cron_expression_params,
-        }
-
-        trigger = CronTrigger(**cron_trigger_constructor_kwargs)
+            effective_end_date = schedule.end_time_utc
+            cron_trigger_constructor_kwargs = {
+                "timezone": "UTC",
+                "start_date": schedule.start_time_utc,  # Can be None for "immediate" start
+                "end_date": effective_end_date,
+                **cron_expression_params,
+            }
+            logger.info(
+                f"[SchedulerService] Recurring job CRON expression: {cron_expression_params}, "
+                f"end_date: {effective_end_date}"
+            )
+            # Use CronTrigger for recurring jobs
+            trigger = CronTrigger(**cron_trigger_constructor_kwargs)
+            logger.info(f"[SchedulerService] CronTrigger string: {trigger}")
+            print(f"[SchedulerService] CronTrigger string: {trigger}")
 
         start_log = schedule.start_time_utc or "Immediate (if cron matches)"
         end_log = effective_end_date or "Never"
         log_msg = (
-            f"Adding/updating CRON job {job_id} for agent {agent_id_str}. {log_details} "
+            f"Adding/updating job {job_id} for agent {agent_id_str}. {log_details} "
             f"Effective Start: {start_log}, Effective End: {end_log}."
         )
         logger.info(log_msg)
+        print(log_msg)
 
         try:
             self.scheduler.add_job(
@@ -312,6 +327,7 @@ class SchedulerService:
                 replace_existing=True,
                 misfire_grace_time=600,  # 10 minutes
             )
+            print(f"Job {job_id} added to scheduler: {self.scheduler.get_job(job_id)}")
             logger.info(f"Successfully added/updated job {job_id} to scheduler.")
         except Exception as e:
             logger.error(f"Failed to add/update job {job_id} to scheduler: {str(e)}")
@@ -337,9 +353,13 @@ class SchedulerService:
         logger.info("Starting SchedulerService...")
         if not self.scheduler.running:
             self.scheduler.start()
-            logger.info("APScheduler started.")
+            logger.info("APScheduler started. (is running: %s)", self.scheduler.running)
         else:
-            logger.info("APScheduler already running.")
+            logger.info("APScheduler already running. (is running: %s)", self.scheduler.running)
+
+        # DEBUG: Log all jobs currently scheduled
+        jobs = self.scheduler.get_jobs()
+        logger.debug("Current scheduled jobs at start: %s", jobs)
 
         await self.load_all_agent_schedules()
 
