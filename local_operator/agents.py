@@ -3,7 +3,7 @@ import importlib
 import inspect
 import json
 import logging
-import os
+import os  # Added os
 import shutil
 import tempfile
 import time
@@ -486,9 +486,23 @@ class AgentRegistry:
         """Save schedules to schedules.jsonl."""
         schedules_file = agent_dir / "schedules.jsonl"
         try:
-            with jsonlines.open(schedules_file, mode="w") as writer:
-                for schedule_item in schedules:
-                    writer.write(schedule_item.model_dump(mode="json"))
+            # Ensure the directory exists
+            schedules_file.parent.mkdir(parents=True, exist_ok=True)
+
+            with open(schedules_file, "wb") as f_binary:  # Open in binary for fd
+                # Use a jsonlines writer that writes to the binary file object
+                # We need to encode to bytes before writing
+                with jsonlines.Writer(f_binary) as writer:
+                    for schedule_item in schedules:
+                        # jsonlines.Writer expects dicts, not already encoded json strings
+                        # model_dump(mode="json") returns a dict suitable for json.dumps
+                        # but jsonlines handles the serialization to json string and then to bytes.
+                        writer.write(schedule_item.model_dump(mode="json"))
+
+                # After the writer context closes, flush OS buffers
+                f_binary.flush()
+                os.fsync(f_binary.fileno())
+
         except Exception as e:
             logging.error(f"Failed to save schedules to {schedules_file}: {str(e)}")
             # Optionally, re-raise or handle more gracefully
