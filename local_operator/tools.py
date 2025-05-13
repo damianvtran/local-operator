@@ -946,17 +946,14 @@ def _get_browser_path() -> Optional[str]:
         if system == "Linux" and not os.path.isabs(path_candidate):
             found_path = shutil.which(path_candidate)
             if found_path:
-                # print(f"Found {browser_name} at {found_path}") # Optional: for debugging
                 return found_path
         # For absolute paths or other OSes, check existence directly
         elif os.path.exists(path_candidate):
-            # print(f"Found {browser_name} at {path_candidate}") # Optional: for debugging
             return path_candidate
         # On macOS, also check user-specific application paths
         if system == "Darwin":
             user_path = os.path.expanduser(f"~/Applications/{Path(path_candidate).name}")
             if os.path.exists(user_path):
-                # print(f"Found {browser_name} at {user_path}") # Optional: for debugging
                 return user_path
             # Arc specific user path on macOS
             if browser_name == "Arc":
@@ -1167,7 +1164,6 @@ def schedule_task_tool(
     tool_registry: "ToolRegistry",
     agent_registry: AgentRegistry,
     scheduler_service: Optional[Any],
-    tool_execution_callback: Optional[Callable[[str, Any], None]] = None,
 ) -> Callable[..., str]:
     """Factory to create the schedule_task tool with AgentRegistry and SchedulerService
     dependency. This closure expects to be bound as a method of ToolRegistry."""
@@ -1255,7 +1251,6 @@ def stop_schedule_tool(
     tool_registry: "ToolRegistry",
     agent_registry: AgentRegistry,
     scheduler_service: Optional[Any],
-    tool_execution_callback: Optional[Callable[[str, Any], None]] = None,
 ) -> Callable[..., str]:
     """Factory to create the stop_schedule tool with AgentRegistry and SchedulerService
     dependency. This closure expects to be bound as a method of ToolRegistry."""
@@ -1512,7 +1507,6 @@ class ToolRegistry:
                     self,
                     self.agent_registry,
                     self.scheduler_service,
-                    self.tool_execution_callback,
                 ),
             )
             self.add_tool(
@@ -1521,7 +1515,6 @@ class ToolRegistry:
                     self,
                     self.agent_registry,
                     self.scheduler_service,
-                    self.tool_execution_callback,
                 ),
             )
             self.add_tool("list_schedules", list_schedules_tool(self.agent_registry))
