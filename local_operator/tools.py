@@ -1164,10 +1164,13 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
 
 
 def schedule_task_tool(
-    agent_registry: AgentRegistry, scheduler_service: Optional[Any]
+    tool_registry: "ToolRegistry",
+    agent_registry: AgentRegistry,
+    scheduler_service: Optional[Any],
+    tool_execution_callback: Optional[Callable[[str, Any], None]] = None,
 ) -> Callable[..., str]:
     """Factory to create the schedule_task tool with AgentRegistry and SchedulerService
-    dependency."""
+    dependency. This closure expects to be bound as a method of ToolRegistry."""
 
     def schedule_task(
         agent_id: str,
@@ -1178,38 +1181,34 @@ def schedule_task_tool(
         end_time_utc: Optional[datetime] = None,
         one_time: bool = False,
     ) -> str:
-        """Schedule a new task for for you or another agent to run at a specified frequency.  The agent ID should be your ID from the agent identity in your system prompt, or the ID of the agent that you were asked to schedule the task for.  Provide a prompt which will be a note about what should be done on each trigger.  The agent (you or another agent) will receive this prompt on each trigger as if from the user.  Specify the interval as an integer with the unit as one of "minutes", "hours", or "days".  Optionally specify a start and end time for the schedule as datetime objects.  If no start time is provided, the schedule will start immediately.  If a start time is provided, the scheduled interval will only start after the start time.  If no end time is provided, the schedule will run indefinitely, otherwise it will stop at the end time.  Specify one_time as True if the user has asked for a one time reminder, otherwise omit it or set it to False for a recurring task with or without start or end times.
+        """Schedule a new task for for you or another agent to run at a specified frequency.  The agent ID should be your ID from the agent identity in your system prompt, or the ID of the agent that you were asked to schedule the task for.  Provide a prompt which will be a note about what should be done on each trigger.  The agent (you or another agent) will receive this prompt on each trigger as if from the user.  Specify the interval as an integer with the unit as one of "minutes", "hours", or "days".  Optionally specify a start and end time for the schedule as datetime objects.  If no start time is provided, the schedule will start immediately.  If a start time is provided, the scheduled interval will only start after the start time.  If no end time is provided, the schedule will run indefinitely, otherwise it will stop at the end time.  Specify one_time as True if the user has asked for a one time reminder, otherwise omit it or set it to False for a recurring task with or without start or end times.  If you use one_time, you MUST provide a start time.
 
-        Args:
-            agent_id (str): The ID of the agent for whom the task is scheduled.
-            prompt (str): The prompt/task for the agent to execute.
-            interval (int): The numeric value of the interval (e.g., 5 for 5 minutes).
-            unit (str): The unit of the interval ('minutes', 'hours', 'days').
-            start_time_utc (Optional[datetime]): The UTC datetime when the schedule should start.
-                                                If None, starts as soon as possible.
-            end_time_utc (Optional[datetime]): The UTC datetime after which the schedule
-                                              should no longer run. If None, runs indefinitely.
-            one_time (bool): Whether the schedule should be a one-time task. Defaults to False.
+        If status_queue is present on the tool registry, send a message through the queue
+        to request scheduling, otherwise call scheduler_service directly if available.
 
         Returns:
             str: Confirmation message with the new schedule ID.
         """  # noqa: E501
+        # self is the ToolRegistry instance if this is bound as a method
         try:
             agent_uuid = UUID(agent_id)
             schedule_unit = ScheduleUnit(unit.lower())
         except ValueError as e:
-            return f"Error: Invalid agent_id or unit: {str(e)}"
+            raise ValueError(f"Error: Invalid agent_id or unit: {str(e)}")
 
-        # Datetime validation is now handled by Pydantic model `Schedule`
+        if one_time and not start_time_utc and (not interval or not unit):
+            raise ValueError(
+                "Error: start_time_utc, or interval and unit is required when one_time is True."
+            )
 
         # Load current agent state to get existing schedules
         try:
             agent_state = agent_registry.load_agent_state(agent_id)
             schedules = agent_state.schedules
         except KeyError:
-            return f"Error: Agent with ID '{agent_id}' not found."
+            raise ValueError(f"Error: Agent with ID '{agent_id}' not found.")
         except Exception as e:
-            return f"Error loading agent state: {str(e)}"
+            raise ValueError(f"Error loading agent state: {str(e)}")
 
         try:
             new_schedule = Schedule(
@@ -1224,20 +1223,27 @@ def schedule_task_tool(
                 one_time=one_time,
             )
         except ValueError as ve:  # Catch Pydantic validation errors
-            return f"Error creating schedule: {str(ve)}"
+            raise ValueError(f"Error creating schedule: {str(ve)}")
 
         schedules.append(new_schedule)
         agent_state.schedules = schedules
 
         try:
-            agent_registry.save_agent_state(agent_id, agent_state)
-            if scheduler_service:
+            # Use status_queue if present on the ToolRegistry instance
+            status_queue = tool_registry.status_queue
+
+            if status_queue is not None:
+                status_queue.put(("schedule_add", new_schedule))
+
+                if tool_registry.tool_execution_callback:
+                    tool_registry.tool_execution_callback("schedule_task", new_schedule)
+
+            elif scheduler_service:
+                agent_registry.save_agent_state(agent_id, agent_state)
                 scheduler_service.add_or_update_job(new_schedule)
             else:
-                # Log or handle the case where scheduler_service is not available
-                print(
-                    "Warning: SchedulerService not available. Task saved to agent state but not scheduled."  # noqa: E501
-                )
+                raise ValueError("Error: SchedulerService not available.")
+
             return f"Task scheduled successfully with ID: {new_schedule.id}"
         except Exception as e:
             return f"Error saving or scheduling new task: {str(e)}"
@@ -1246,17 +1252,19 @@ def schedule_task_tool(
 
 
 def stop_schedule_tool(
-    agent_registry: AgentRegistry, scheduler_service: Optional[Any]
+    tool_registry: "ToolRegistry",
+    agent_registry: AgentRegistry,
+    scheduler_service: Optional[Any],
+    tool_execution_callback: Optional[Callable[[str, Any], None]] = None,
 ) -> Callable[..., str]:
     """Factory to create the stop_schedule tool with AgentRegistry and SchedulerService
-    dependency."""
+    dependency. This closure expects to be bound as a method of ToolRegistry."""
 
     def stop_schedule(agent_id: str, schedule_id: str) -> str:
         """Stop an active_schedule for an agent.
 
-        Args:
-            agent_id (str): The ID of the agent whose schedule is to be stopped.
-            schedule_id (str): The ID of the schedule to stop.
+        If status_queue is present on the tool registry, send a message through the queue
+        to request schedule removal, otherwise call scheduler_service directly if available.
 
         Returns:
             str: Confirmation or error message.
@@ -1264,15 +1272,15 @@ def stop_schedule_tool(
         try:
             target_schedule_id = UUID(schedule_id)
         except ValueError:
-            return "Error: Invalid schedule_id format."
+            raise ValueError("Error: Invalid schedule_id format.")
 
         try:
             agent_state = agent_registry.load_agent_state(agent_id)
             schedules = agent_state.schedules
         except KeyError:
-            return f"Error: Agent with ID '{agent_id}' not found."
+            raise ValueError(f"Error: Agent with ID '{agent_id}' not found.")
         except Exception as e:
-            return f"Error loading agent state: {str(e)}"
+            raise ValueError(f"Error loading agent state: {str(e)}")
 
         schedule_found = False
         for sched in schedules:
@@ -1282,21 +1290,32 @@ def stop_schedule_tool(
                 break
 
         if not schedule_found:
-            return f"Error: Schedule with ID '{schedule_id}' not found for agent '{agent_id}'."
+            raise ValueError(
+                f"Error: Schedule with ID '{schedule_id}' not found for agent '{agent_id}'."
+            )
 
         agent_state.schedules = schedules
+
         try:
-            agent_registry.save_agent_state(agent_id, agent_state)
-            if scheduler_service:
+            status_queue = tool_registry.status_queue
+
+            if status_queue is not None:
+                status_queue.put(("schedule_remove", target_schedule_id))
+
+                if tool_registry.tool_execution_callback:
+                    tool_registry.tool_execution_callback("stop_schedule", target_schedule_id)
+
+            elif scheduler_service:
+                agent_registry.save_agent_state(agent_id, agent_state)
                 scheduler_service.remove_job(target_schedule_id)
             else:
-                # Log or handle the case where scheduler_service is not available
-                print(
-                    "Warning: SchedulerService not available. Schedule removed from agent state but not from scheduler."  # noqa: E501
-                )
+                raise ValueError("Error: SchedulerService not available.")
+
             return f"Schedule '{schedule_id}' stopped successfully."
         except Exception as e:
-            return f"Error saving updated schedule list or removing from scheduler: {str(e)}"
+            raise ValueError(
+                f"Error saving updated schedule list or removing from scheduler: {str(e)}"
+            )
 
     return stop_schedule
 
@@ -1321,12 +1340,9 @@ def list_schedules_tool(agent_registry: AgentRegistry) -> Callable[..., List[Dic
             ]
             return active_schedules
         except KeyError:
-            # Agent not found
-            return []
+            raise ValueError(f"Error: Agent with ID '{agent_id}' not found.")
         except Exception as e:
-            # Log error or handle as appropriate
-            print(f"Error listing schedules for agent {agent_id}: {str(e)}")
-            return []
+            raise ValueError(f"Error listing schedules for agent {agent_id}: {str(e)}")
 
     return list_schedules
 
@@ -1351,11 +1367,31 @@ class ToolRegistry:
     model_configuration: Optional[ModelConfiguration] = None
     agent_registry: Optional[AgentRegistry] = None
     scheduler_service: Optional[Any] = None
+    status_queue: Optional[Any] = None
+    tool_execution_callback: Optional[Callable[[str, Any], None]] = None
 
     def __init__(self):
         """Initialize an empty tool registry."""
         super().__init__()
         object.__setattr__(self, "_tools", {})
+
+    def set_tool_execution_callback(self, tool_execution_callback: Callable[[str, Any], None]):
+        """Set the tool execution callback for the registry.  This is used to bridge the boundary
+        between the job execution environment and the server environment.
+
+        Args:
+            tool_execution_callback (Callable[[str, Any], None]): The tool
+            execution callback to set.
+        """
+        self.tool_execution_callback = tool_execution_callback
+
+    def set_status_queue(self, status_queue: Any):
+        """Set the status queue for broadcasting tool/scheduler updates.
+
+        Args:
+            status_queue (Any): The status queue to set.
+        """
+        self.status_queue = status_queue
 
     def set_serp_api_client(self, serp_api_client: SerpApiClient):
         """Set the SERP API client for the registry.
@@ -1471,10 +1507,22 @@ class ToolRegistry:
 
         if self.agent_registry:  # Ensure agent_registry is set
             self.add_tool(
-                "schedule_task", schedule_task_tool(self.agent_registry, self.scheduler_service)
+                "schedule_task",
+                schedule_task_tool(
+                    self,
+                    self.agent_registry,
+                    self.scheduler_service,
+                    self.tool_execution_callback,
+                ),
             )
             self.add_tool(
-                "stop_schedule", stop_schedule_tool(self.agent_registry, self.scheduler_service)
+                "stop_schedule",
+                stop_schedule_tool(
+                    self,
+                    self.agent_registry,
+                    self.scheduler_service,
+                    self.tool_execution_callback,
+                ),
             )
             self.add_tool("list_schedules", list_schedules_tool(self.agent_registry))
         else:

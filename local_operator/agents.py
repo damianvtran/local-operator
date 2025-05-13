@@ -500,10 +500,6 @@ class AgentRegistry:
                         # but jsonlines handles the serialization to json string and then to bytes.
                         writer.write(schedule_item.model_dump(mode="json"))
 
-                # After the writer context closes, flush OS buffers
-                f_binary.flush()
-                os.fsync(f_binary.fileno())
-
         except Exception as e:
             logging.error(f"Failed to save schedules to {schedules_file}: {str(e)}")
             # Optionally, re-raise or handle more gracefully

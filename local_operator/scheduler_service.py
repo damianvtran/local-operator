@@ -240,27 +240,79 @@ class SchedulerService:
         log_details = ""
 
         if schedule.one_time:
-            if not schedule.start_time_utc:
+            # Prefer interval/unit if provided, otherwise use start_time_utc
+            if schedule.interval and schedule.unit:
+                # Treat as recurring (one-time with interval/unit)
+                if schedule.unit == ScheduleUnit.MINUTES:
+                    cron_expression_params["minute"] = get_cron_interval_field(schedule.interval)
+                elif schedule.unit == ScheduleUnit.HOURS:
+                    cron_expression_params["minute"] = str(
+                        schedule.start_time_utc.minute if schedule.start_time_utc else 0
+                    )
+                    cron_expression_params["hour"] = get_cron_interval_field(schedule.interval)
+                elif schedule.unit == ScheduleUnit.DAYS:
+                    cron_expression_params["minute"] = str(
+                        schedule.start_time_utc.minute if schedule.start_time_utc else 0
+                    )
+                    cron_expression_params["hour"] = str(
+                        schedule.start_time_utc.hour if schedule.start_time_utc else 0
+                    )
+                    cron_expression_params["day"] = get_cron_interval_field(schedule.interval)
+                else:
+                    logger.error(
+                        f"Unsupported schedule unit: {schedule.unit} for one-time "
+                        f"schedule {job_id} with interval. "
+                        "Skipping job creation."
+                    )
+                    return
+                log_details = (
+                    f"One-time schedule with interval: every {schedule.interval} "
+                    f"{schedule.unit.value}. "
+                    f"Cron: (M='{cron_expression_params['minute']}', "
+                    f"H='{cron_expression_params['hour']}', "
+                    f"DoM='{cron_expression_params['day']}', "
+                    f"Mon='{cron_expression_params['month']}', "
+                    f"DoW='{cron_expression_params['day_of_week']}')."
+                )
+                effective_end_date = schedule.end_time_utc
+                cron_trigger_constructor_kwargs = {
+                    "timezone": "UTC",
+                    "start_date": schedule.start_time_utc,  # Can be None for "immediate" start
+                    "end_date": effective_end_date,
+                    **cron_expression_params,
+                }
+                logger.info(
+                    "[SchedulerService] One-time schedule with interval CRON expression: %s, "
+                    "end_date: %s",
+                    cron_expression_params,
+                    effective_end_date,
+                )
+                trigger = CronTrigger(**cron_trigger_constructor_kwargs)
+                logger.info(f"[SchedulerService] CronTrigger string: {trigger}")
+                print(f"[SchedulerService] CronTrigger string: {trigger}")
+            elif schedule.start_time_utc:
+                # Use DateTrigger for one-time jobs with only start_time_utc
+                date_trigger_kwargs = {
+                    "run_date": schedule.start_time_utc,
+                    "timezone": "UTC",
+                    "misfire_grace_time": 60,  # Allow 60 seconds for misfires
+                }
+                log_details = (
+                    f"One-time at {schedule.start_time_utc.strftime('%Y-%m-%d %H:%M:%S %Z')}."
+                )
+                logger.info(
+                    f"[SchedulerService] One-time job DateTrigger kwargs: {date_trigger_kwargs}"
+                )
+                logger.info("[SchedulerService] Using DateTrigger for one-time job.")
+                trigger = DateTrigger(**date_trigger_kwargs)
+                logger.info(f"[SchedulerService] DateTrigger string: {trigger}")
+                print(f"[SchedulerService] DateTrigger string: {trigger}")
+            else:
                 logger.error(
-                    f"One-time schedule {job_id} for agent {agent_id_str} "
-                    "requires a start_time_utc. Skipping job creation."
+                    f"One-time schedule {job_id} for agent {agent_id_str} requires either "
+                    "interval/unit or start_time_utc. Skipping job creation."
                 )
                 return
-            # Use DateTrigger for one-time jobs
-            date_trigger_kwargs = {
-                "run_date": schedule.start_time_utc,
-                "timezone": "UTC",
-                "misfire_grace_time": 60,  # Allow 60 seconds for misfires
-            }
-            log_details = f"One-time at {schedule.start_time_utc.strftime('%Y-%m-%d %H:%M:%S %Z')}."
-            logger.info(
-                f"[SchedulerService] One-time job DateTrigger kwargs: {date_trigger_kwargs}"
-            )
-            logger.info("[SchedulerService] Using DateTrigger for one-time job.")
-            # Use DateTrigger for one-time jobs
-            trigger = DateTrigger(**date_trigger_kwargs)
-            logger.info(f"[SchedulerService] DateTrigger string: {trigger}")
-            print(f"[SchedulerService] DateTrigger string: {trigger}")
         else:
             # Determine specific cron fields based on schedule unit and interval for recurring jobs
             if schedule.unit == ScheduleUnit.MINUTES:
@@ -300,8 +352,9 @@ class SchedulerService:
                 **cron_expression_params,
             }
             logger.info(
-                f"[SchedulerService] Recurring job CRON expression: {cron_expression_params}, "
-                f"end_date: {effective_end_date}"
+                "[SchedulerService] Recurring job CRON expression: %s, " "end_date: %s",
+                cron_expression_params,
+                effective_end_date,
             )
             # Use CronTrigger for recurring jobs
             trigger = CronTrigger(**cron_trigger_constructor_kwargs)

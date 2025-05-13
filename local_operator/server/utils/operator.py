@@ -28,6 +28,8 @@ def create_operator(
     current_agent: Optional[AgentData] = None,  # Use AgentData type hint
     persist_conversation: bool = False,
     job_id: Optional[str] = None,
+    scheduler_service=None,
+    status_queue=None,
 ) -> Operator:
     """Create an Operator instance for a server request using the centralized bootstrap logic.
 
@@ -66,6 +68,8 @@ def create_operator(
             auto_save_conversation=False,  # Server typically doesn't auto-save this way
             job_id=job_id,
             verbosity_level=VerbosityLevel.QUIET,  # Server usually runs quietly
+            scheduler_service=scheduler_service,
+            status_queue=status_queue,
         )
         logger.info("Server operator created successfully.")
         return operator
