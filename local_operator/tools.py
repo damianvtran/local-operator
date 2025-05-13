@@ -1356,7 +1356,7 @@ def send_email_to_user_tool(
     """
 
     def send_email_to_user(subject: str, body: str) -> RadientSendEmailResponseData:
-        """Send an email to the authenticated user. This tool uses the Radient API to send an email with the provided subject and body to the email address associated with the current Radient API key.  Make sure the body is neatly formatted with HTML formatting (<br /> for line breaks, and other tags for bold, italics, and other formatting) and easy to read, and contains all the information the user needs.  Make sure to add a signature to the email with your agent name so that the user knows that it is from you.
+        """Send an email to the authenticated user, it will go to email address associated with the current Radient API key. This tool uses the Radient API to send an email with the provided subject and body to the email address associated with the current Radient API key.  Make sure the body is neatly formatted with HTML formatting (<br /> for line breaks, and other tags for bold, italics, and other formatting) and easy to read, and contains all the information the user needs.  Make sure to add a signature to the email with your agent name so that the user knows that it is from you.
 
         Args:
             subject (str): The subject of the email. Must be between 1 and 255 characters.
