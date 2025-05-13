@@ -47,7 +47,7 @@ class SchedulerService:
         The actual function called by APScheduler to trigger an agent's task.
         Checks end_time_utc before execution.
         """
-        logger.info(
+        logger.debug(
             f"Attempting to trigger task for agent {agent_id_str}, schedule {schedule_id_str}"
         )
         try:
@@ -70,7 +70,7 @@ class SchedulerService:
                 return
 
             if not current_schedule.is_active:
-                logger.info(f"Schedule {schedule_id_str} is no longer active. Removing job.")
+                logger.debug(f"Schedule {schedule_id_str} is no longer active. Removing job.")
                 self.remove_job(schedule_id)
 
                 # Remove from agent state
@@ -84,7 +84,7 @@ class SchedulerService:
 
             now_utc = datetime.now(timezone.utc)
             if current_schedule.end_time_utc and now_utc >= current_schedule.end_time_utc:
-                logger.info(
+                logger.debug(
                     f"Schedule {schedule_id_str} passed end time "
                     f"({current_schedule.end_time_utc}). Removing job, marking inactive."
                 )
@@ -100,7 +100,7 @@ class SchedulerService:
                 self.remove_job(schedule_id)
                 return
 
-            logger.info(f"Triggering task for agent {agent_id_str}, schedule {schedule_id_str}")
+            logger.debug(f"Triggering task for agent {agent_id_str}, schedule {schedule_id_str}")
 
             # Create an operator instance for this specific task execution
             try:
@@ -143,7 +143,7 @@ class SchedulerService:
 
                     # If it's a one-time job, remove it from schedules and from scheduler
                     if sched_item.one_time:
-                        logger.info(
+                        logger.debug(
                             f"One-time schedule {schedule_id_str} executed. "
                             "Removing from agent state and scheduler."
                         )
@@ -151,7 +151,7 @@ class SchedulerService:
                         self.remove_job(schedule_id)
                         del agent_state_after_task.schedules[sched_idx]
                         self.agent_registry.save_agent_state(agent_id_str, agent_state_after_task)
-                        logger.info(
+                        logger.debug(
                             f"One-time schedule {schedule_id_str} removed "
                             "from agent state and scheduler after execution."
                         )
@@ -162,7 +162,7 @@ class SchedulerService:
                     # This check is also present at the start, but good to re-verify.
                     if sched_item.end_time_utc and now_utc >= sched_item.end_time_utc:
                         if sched_item.is_active:  # Only log/change if it wasn't already inactive
-                            logger.info(
+                            logger.debug(
                                 f"Schedule {schedule_id_str} passed end time "
                                 f"({sched_item.end_time_utc}) after task. Marking inactive."
                             )
@@ -173,7 +173,7 @@ class SchedulerService:
 
             if schedule_to_update:  # If any changes were made to the schedule object
                 self.agent_registry.save_agent_state(agent_id_str, agent_state_after_task)
-                logger.info(
+                logger.debug(
                     f"Successfully triggered and updated state for schedule {schedule_id_str}"
                 )
             else:
@@ -205,14 +205,14 @@ class SchedulerService:
         # Remove existing job if it exists, to ensure it's updated
         if self.scheduler.get_job(job_id):
             self.scheduler.remove_job(job_id)
-            logger.info(f"Removed existing job {job_id} to update schedule.")
+            logger.debug(f"Removed existing job {job_id} to update schedule.")
 
         if not schedule.is_active:
-            logger.info(f"Schedule {job_id} is not active. Not adding to scheduler.")
+            logger.debug(f"Schedule {job_id} is not active. Not adding to scheduler.")
             return
 
         if schedule.end_time_utc and now_utc >= schedule.end_time_utc:
-            logger.info(
+            logger.debug(
                 f"Schedule {job_id} end time {schedule.end_time_utc} has already passed. "
                 "Not adding to scheduler."
             )
@@ -281,15 +281,14 @@ class SchedulerService:
                     "end_date": effective_end_date,
                     **cron_expression_params,
                 }
-                logger.info(
+                logger.debug(
                     "[SchedulerService] One-time schedule with interval CRON expression: %s, "
                     "end_date: %s",
                     cron_expression_params,
                     effective_end_date,
                 )
                 trigger = CronTrigger(**cron_trigger_constructor_kwargs)
-                logger.info(f"[SchedulerService] CronTrigger string: {trigger}")
-                print(f"[SchedulerService] CronTrigger string: {trigger}")
+                logger.debug(f"[SchedulerService] CronTrigger string: {trigger}")
             elif schedule.start_time_utc:
                 # Use DateTrigger for one-time jobs with only start_time_utc
                 date_trigger_kwargs = {
@@ -300,13 +299,12 @@ class SchedulerService:
                 log_details = (
                     f"One-time at {schedule.start_time_utc.strftime('%Y-%m-%d %H:%M:%S %Z')}."
                 )
-                logger.info(
+                logger.debug(
                     f"[SchedulerService] One-time job DateTrigger kwargs: {date_trigger_kwargs}"
                 )
-                logger.info("[SchedulerService] Using DateTrigger for one-time job.")
+                logger.debug("[SchedulerService] Using DateTrigger for one-time job.")
                 trigger = DateTrigger(**date_trigger_kwargs)
-                logger.info(f"[SchedulerService] DateTrigger string: {trigger}")
-                print(f"[SchedulerService] DateTrigger string: {trigger}")
+                logger.debug(f"[SchedulerService] DateTrigger string: {trigger}")
             else:
                 logger.error(
                     f"One-time schedule {job_id} for agent {agent_id_str} requires either "
@@ -351,15 +349,14 @@ class SchedulerService:
                 "end_date": effective_end_date,
                 **cron_expression_params,
             }
-            logger.info(
+            logger.debug(
                 "[SchedulerService] Recurring job CRON expression: %s, " "end_date: %s",
                 cron_expression_params,
                 effective_end_date,
             )
             # Use CronTrigger for recurring jobs
             trigger = CronTrigger(**cron_trigger_constructor_kwargs)
-            logger.info(f"[SchedulerService] CronTrigger string: {trigger}")
-            print(f"[SchedulerService] CronTrigger string: {trigger}")
+            logger.debug(f"[SchedulerService] CronTrigger string: {trigger}")
 
         start_log = schedule.start_time_utc or "Immediate (if cron matches)"
         end_log = effective_end_date or "Never"
@@ -367,8 +364,7 @@ class SchedulerService:
             f"Adding/updating job {job_id} for agent {agent_id_str}. {log_details} "
             f"Effective Start: {start_log}, Effective End: {end_log}."
         )
-        logger.info(log_msg)
-        print(log_msg)
+        logger.debug(log_msg)
 
         try:
             self.scheduler.add_job(
@@ -380,8 +376,7 @@ class SchedulerService:
                 replace_existing=True,
                 misfire_grace_time=600,  # 10 minutes
             )
-            print(f"Job {job_id} added to scheduler: {self.scheduler.get_job(job_id)}")
-            logger.info(f"Successfully added/updated job {job_id} to scheduler.")
+            logger.debug(f"Successfully added/updated job {job_id} to scheduler.")
         except Exception as e:
             logger.error(f"Failed to add/update job {job_id} to scheduler: {str(e)}")
 
@@ -393,22 +388,22 @@ class SchedulerService:
         if self.scheduler.get_job(job_id):
             try:
                 self.scheduler.remove_job(job_id)
-                logger.info(f"Successfully removed job {job_id} from scheduler.")
+                logger.debug(f"Successfully removed job {job_id} from scheduler.")
             except Exception as e:
                 logger.error(f"Failed to remove job {job_id} from scheduler: {str(e)}")
         else:
-            logger.info(f"Job {job_id} not found in scheduler, no action taken.")
+            logger.debug(f"Job {job_id} not found in scheduler, no action taken.")
 
     async def start(self) -> None:
         """
         Starts the APScheduler and loads all existing active schedules.
         """
-        logger.info("Starting SchedulerService...")
+        logger.debug("Starting SchedulerService...")
         if not self.scheduler.running:
             self.scheduler.start()
-            logger.info("APScheduler started. (is running: %s)", self.scheduler.running)
+            logger.debug("APScheduler started. (is running: %s)", self.scheduler.running)
         else:
-            logger.info("APScheduler already running. (is running: %s)", self.scheduler.running)
+            logger.debug("APScheduler already running. (is running: %s)", self.scheduler.running)
 
         # DEBUG: Log all jobs currently scheduled
         jobs = self.scheduler.get_jobs()
@@ -421,7 +416,7 @@ class SchedulerService:
         Loads all active schedules for all agents and adds them to the scheduler.
         Handles past-due one-time jobs by triggering them immediately.
         """
-        logger.info("Loading all agent schedules into APScheduler...")
+        logger.debug("Loading all agent schedules into APScheduler...")
         now_utc = datetime.now(timezone.utc)
         try:
             all_agents = self.agent_registry.list_agents()
@@ -430,10 +425,10 @@ class SchedulerService:
                 try:
                     agent_state = self.agent_registry.load_agent_state(agent_data.id)
                     if not agent_state.schedules:
-                        logger.info(f"No schedules found for agent {agent_data.id}")
+                        logger.debug(f"No schedules found for agent {agent_data.id}")
                         continue
 
-                    logger.info(
+                    logger.debug(
                         f"Processing {len(agent_state.schedules)} schedules "
                         f"for agent {agent_data.id}"
                     )
@@ -451,7 +446,7 @@ class SchedulerService:
                                 f"end time ({schedule_item.end_time_utc}). Ensuring "
                                 "inactive and removed."
                             )
-                            logger.info(log_msg_ended)
+                            logger.debug(log_msg_ended)
                             if schedule_item.is_active:
                                 schedule_item.is_active = False
                                 agent_state_needs_saving = True
@@ -464,7 +459,7 @@ class SchedulerService:
                                 f"Schedule {job_id_str} for agent {agent_id_str} is "
                                 "marked inactive. Ensuring removal from scheduler."
                             )
-                            logger.info(log_msg_inactive)
+                            logger.debug(log_msg_inactive)
                             self.remove_job(schedule_item.id)
                             agent_state_needs_saving = True
 
@@ -493,7 +488,7 @@ class SchedulerService:
                                     f"(start: {schedule_item.start_time_utc}). "
                                     "Triggering now."
                                 )
-                                logger.info(log_msg_past_due)
+                                logger.debug(log_msg_past_due)
                                 await self._trigger_agent_task(
                                     agent_id_str=agent_id_str,
                                     schedule_id_str=job_id_str,
@@ -507,7 +502,7 @@ class SchedulerService:
                                     f"Future active one-time schedule {job_id_str} for "
                                     f"agent {agent_id_str}. Adding to scheduler."
                                 )
-                                logger.info(log_msg_future_one_time)
+                                logger.debug(log_msg_future_one_time)
                                 self.add_or_update_job(schedule_item)
                             continue
 
@@ -516,7 +511,7 @@ class SchedulerService:
                             f"Active recurring schedule {job_id_str} for agent {agent_id_str}. "
                             "Adding/updating in scheduler."
                         )
-                        logger.info(log_msg_recurring)
+                        logger.debug(log_msg_recurring)
                         self.add_or_update_job(schedule_item)
 
                     if agent_state_needs_saving:
@@ -533,7 +528,7 @@ class SchedulerService:
                         f"agent {agent_data.id}: {str(e)}",
                         exc_info=True,
                     )
-            logger.info("Finished loading and processing agent schedules.")
+            logger.debug("Finished loading and processing agent schedules.")
         except Exception as e:
             logger.error(
                 f"An unexpected error occurred while loading all agent schedules: {str(e)}"
@@ -545,4 +540,4 @@ class SchedulerService:
         """
         if self.scheduler.running:
             self.scheduler.shutdown()
-            logger.info("APScheduler shut down.")
+            logger.debug("APScheduler shut down.")
