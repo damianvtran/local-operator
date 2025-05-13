@@ -71,7 +71,14 @@ class SchedulerService:
             if not current_schedule.is_active:
                 logger.info(f"Schedule {schedule_id_str} is no longer active. Removing job.")
                 self.remove_job(schedule_id)
-                # Also update agent state to reflect this if necessary, or rely on external update
+
+                # Remove from agent state
+                agent_state = self.agent_registry.load_agent_state(agent_id_str)
+                agent_state.schedules = [
+                    sched for sched in agent_state.schedules if sched.id != schedule_id
+                ]
+                self.agent_registry.save_agent_state(agent_id_str, agent_state)
+
                 return
 
             now_utc = datetime.now(timezone.utc)
@@ -81,9 +88,14 @@ class SchedulerService:
                     f"({current_schedule.end_time_utc}). Removing job, marking inactive."
                 )
                 current_schedule.is_active = False
-                self.agent_registry.save_agent_state(
-                    agent_id_str, agent_state
-                )  # agent_state is already loaded
+
+                # Remove from agent state
+                agent_state = self.agent_registry.load_agent_state(agent_id_str)
+                agent_state.schedules = [
+                    sched for sched in agent_state.schedules if sched.id != schedule_id
+                ]
+                self.agent_registry.save_agent_state(agent_id_str, agent_state)
+
                 self.remove_job(schedule_id)
                 return
 
@@ -101,6 +113,8 @@ class SchedulerService:
                     credential_manager=self.credential_manager,
                     agent_registry=self.agent_registry,
                     env_config=self.env_config,
+                    request_hosting=target_agent_data.hosting,
+                    request_model=target_agent_data.model,
                     current_agent=target_agent_data,
                     scheduler_service=self,
                     persist_conversation=True,
@@ -126,17 +140,21 @@ class SchedulerService:
                     sched_item.last_run_at = now_utc  # now_utc from the beginning of this method
                     schedule_to_update = sched_item
 
-                    # If it's a one-time job, mark it inactive and remove from scheduler
+                    # If it's a one-time job, remove it from schedules and from scheduler
                     if sched_item.one_time:
                         logger.info(
                             f"One-time schedule {schedule_id_str} executed. "
-                            "Marking inactive and removing."
+                            "Removing from agent state and scheduler."
                         )
-                        sched_item.is_active = False
-                        # The job removal from APScheduler will be handled by the end_time_utc check
-                        # or explicitly if needed, but marking inactive is key.
-                        # We can also remove it here explicitly.
+                        # Remove from schedules list
                         self.remove_job(schedule_id)
+                        del agent_state_after_task.schedules[sched_idx]
+                        self.agent_registry.save_agent_state(agent_id_str, agent_state_after_task)
+                        logger.info(
+                            f"One-time schedule {schedule_id_str} removed "
+                            "from agent state and scheduler after execution."
+                        )
+                        return  # Exit after removal to avoid further processing
 
                     # If end_time_utc is now passed (could be due to one_time logic setting it)
                     # or was already passed, ensure it's inactive.
@@ -177,6 +195,11 @@ class SchedulerService:
         job_id = str(schedule.id)
         agent_id_str = str(schedule.agent_id)
         now_utc = datetime.now(timezone.utc)
+
+        # Ensure the scheduler is running before adding jobs
+        if not self.scheduler.running:
+            logger.error("Scheduler is not running. Cannot add/update job.")
+            return
 
         # Remove existing job if it exists, to ensure it's updated
         if self.scheduler.get_job(job_id):
@@ -370,6 +393,8 @@ class SchedulerService:
                             )
                             logger.info(log_msg_inactive)
                             self.remove_job(schedule_item.id)
+                            agent_state_needs_saving = True
+
                             continue  # Move to the next schedule
 
                         # At this point, the schedule is active and not past its end_time_utc
@@ -422,6 +447,11 @@ class SchedulerService:
                         self.add_or_update_job(schedule_item)
 
                     if agent_state_needs_saving:
+                        # Remove inactive schedules from agent state
+                        agent_state.schedules = [
+                            sched for sched in agent_state.schedules if sched.is_active
+                        ]
+
                         self.agent_registry.save_agent_state(agent_data.id, agent_state)
 
                 except Exception as e:

@@ -485,6 +485,7 @@ class AgentRegistry:
     def _save_schedules(self, agent_dir: Path, schedules: List[Schedule]) -> None:
         """Save schedules to schedules.jsonl."""
         schedules_file = agent_dir / "schedules.jsonl"
+
         try:
             # Ensure the directory exists
             schedules_file.parent.mkdir(parents=True, exist_ok=True)
