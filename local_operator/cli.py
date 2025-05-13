@@ -753,6 +753,8 @@ def main() -> int:
                 config_manager=config_manager,
                 credential_manager=credential_manager,
                 env_config=env_config,
+                operator_type=OperatorType.CLI,
+                verbosity_level=verbosity,
             )
 
             operator = initialize_operator(

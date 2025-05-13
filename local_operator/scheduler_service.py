@@ -28,12 +28,16 @@ class SchedulerService:
         config_manager: ConfigManager,
         credential_manager: CredentialManager,
         env_config: EnvConfig,
+        operator_type: OperatorType,
+        verbosity_level: VerbosityLevel,
     ):
         self.agent_registry = agent_registry
         self.config_manager = config_manager
         self.credential_manager = credential_manager
         self.env_config = env_config
         self.scheduler = AsyncIOScheduler(timezone="UTC")
+        self.operator_type = operator_type
+        self.verbosity_level = verbosity_level
 
     async def _trigger_agent_task(
         self, agent_id_str: str, schedule_id_str: str, prompt: str
@@ -92,7 +96,7 @@ class SchedulerService:
                 # which then passes it to build_tool_registry.
                 # This ensures tools have access to the *single* scheduler instance.
                 task_operator = initialize_operator(  # Returns a single Operator
-                    operator_type=OperatorType.SERVER,
+                    operator_type=self.operator_type,
                     config_manager=self.config_manager,
                     credential_manager=self.credential_manager,
                     agent_registry=self.agent_registry,
@@ -101,7 +105,7 @@ class SchedulerService:
                     scheduler_service=self,
                     persist_conversation=True,
                     auto_save_conversation=False,
-                    verbosity_level=VerbosityLevel.QUIET,
+                    verbosity_level=self.verbosity_level,
                 )
                 await task_operator.handle_user_input(prompt)
             except Exception as op_error:

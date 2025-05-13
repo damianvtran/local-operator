@@ -14,11 +14,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
+from local_operator.console import VerbosityLevel
 from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config
 from local_operator.helpers import setup_cross_platform_environment
 from local_operator.jobs import JobManager
 from local_operator.logger import get_logger
+from local_operator.operator import OperatorType
 from local_operator.scheduler_service import SchedulerService  # Added
 from local_operator.server.routes import (
     agents,
@@ -76,6 +78,8 @@ async def lifespan(app: FastAPI):
             config_manager=app.state.config_manager,
             credential_manager=app.state.credential_manager,
             env_config=app.state.env_config,
+            operator_type=OperatorType.SERVER,
+            verbosity_level=VerbosityLevel.QUIET,
         )
 
         await app.state.scheduler_service.start()
