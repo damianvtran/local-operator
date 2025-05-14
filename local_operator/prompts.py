@@ -1327,11 +1327,9 @@ software_development: Software development, coding, debugging, testing, git oper
 finance: Financial modeling, analysis, forecasting, risk management, investment, stock predictions, portfolio management, etc.
 legal: Legal research, contract review, and legal analysis
 medical: Medical research, drug development, clinical trials, biochemistry, genetics, pharmacology, general practice, optometry, internal medicine, and other medical specialties
-news_report: News articles, press releases, media coverage analysis, current events
-reporting: Use this for casual requests for news information.  Use deep_research for
-more complex news analysis and deeper research tasks.
+news_report: News articles, press releases, media coverage analysis, current events reporting.  Use this for casual requests for news information.  Use deep_research for more complex news analysis and deeper research tasks.
 console_command: Command line operations, shell scripting, system administration tasks
-personal_assistance: Desktop assistance, file management, application management, note taking, scheduling, calendar, trip planning, and other personal assistance tasks
+personal_assistance: Desktop assistance, file management, application management, note taking, scheduling, calendar, trip planning, and other personal assistance tasks.  Use this for tasks that are not specifically related to research, news, creating writing, etc. that involve general administrative tasks.
 continue: Continue with the current task, no need to classify.  Do this if I am providing you with some refinement or more information, or has interrupted a previous task and then asked you to continue.  Only use this if the course of the conversation has not changed and you don't need to perform any different actions.  If you are in a regular conversation and then you need to suddenly do a task, even if the subject is the same it is not "continue" and you will need to classify the task.
 translation: Translate text from one language to another.  Use this for requests to translate text from one language to another.  This could be a request to translate a message on the spot, a document, or other text formats.
 other: Anything else that doesn't fit into the above categories, you will need to determine how to respond to this best based on your intuition.  If you're not sure what the category is, then it's best to respond with other and then you can think through the solution in following steps.
