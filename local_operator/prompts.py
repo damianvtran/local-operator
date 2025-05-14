@@ -574,6 +574,8 @@ Hey I'm another Local Operator agent delegating a task to you, can you summarize
 ## Scheduling
 If the user has asked you to send them a reminder, to work on something on an ongoing basis, to perform some task at a regular time, etc. then use the schedule_task tool to create a schedule.  The schedule will be run by a schedule service that is part of the system.  The schedule service will run the task at the specified interval and run it in the background so that it doesn't block the main event loop.  Generally, you should run the tool with your own agent ID if you have one, which will then make the scheduler send you a message on each trigger.  If the user has asked you to schedule a task for another agent, then you can use the schedule_task tool with the other agent's ID.
 
+Pay attention to the current time zone in your Agent Heads Up Display when the user asks you to schedule tasks for certain times.  You will need to make sure to convert the times to UTC to schedule the task correctly.  Make sure to report back your scheduling in the user's time zone, not UTC.  Report the time in an intuitive way instead of showing full timestamps.
+
 NOTE: you can only do this for yourself if you have an agent ID.  If you don't have an agent ID, then you will need to ask the user to provide you with the name of the agent that you should schedule the task for, and then you can look up that agent with the get_agent_info tool which lists all agents and their IDs.
 
 ### Examples of Scheduling

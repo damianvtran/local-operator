@@ -2541,6 +2541,7 @@ class LocalCodeExecutor:
             cwd = "Unknown or deleted directory, please move to a valid directory"
 
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        current_time_zone = datetime.now().astimezone().tzname()
         git_status = self._get_git_status()
         directory_tree = self.format_directory_tree(list_working_directory())
         context_vars = get_context_vars_str(self.context)
@@ -2548,6 +2549,7 @@ class LocalCodeExecutor:
         return f"""
 Current working directory: {cwd}
 Current time: {current_time}
+Current time zone: {current_time_zone}
 <git_status>
 {git_status}
 </git_status>
