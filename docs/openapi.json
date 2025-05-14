@@ -3,7 +3,7 @@
   "info": {
     "title": "Local Operator API",
     "description": "REST API interface for Local Operator agent",
-    "version": "0.4.7"
+    "version": "0.11.0"
   },
   "paths": {
     "/health": {
@@ -697,6 +697,155 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/{agent_id}/upload": {
+      "post": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Upload (push) an agent to Radient Agent Hub",
+        "description": "Upload (push) the agent with the given ID to the Radient agents marketplace. Requires RADIENT_API_KEY.",
+        "operationId": "upload_agent_to_radient_v1_agents__agent_id__upload_post",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "ID of the agent to upload",
+              "examples": [
+                "agent123"
+              ],
+              "title": "Agent Id"
+            },
+            "description": "ID of the agent to upload"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent uploaded to Radient successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "Agent uploaded to Radient successfully",
+                  "result": {
+                    "agent_id": "radient-agent-id"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Error uploading agent to Radient"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "RADIENT_API_KEY is required"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/{agent_id}/download": {
+      "get": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Download (pull) an agent from Radient Agent Hub",
+        "description": "Download (pull) an agent from the Radient agents marketplace by agent ID.",
+        "operationId": "download_agent_from_radient_v1_agents__agent_id__download_get",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "ID of the agent to download from Radient",
+              "examples": [
+                "radient-agent-id"
+              ],
+              "title": "Agent Id"
+            },
+            "description": "ID of the agent to download from Radient"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent downloaded from Radient successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_Agent_"
+                },
+                "example": {
+                  "status": 200,
+                  "message": "Agent downloaded from Radient successfully",
+                  "result": {
+                    "id": "imported-agent-123",
+                    "name": "Imported Agent",
+                    "created_date": "2024-01-01T00:00:00",
+                    "version": "0.2.16",
+                    "security_prompt": "Example security prompt",
+                    "hosting": "openrouter",
+                    "model": "openai/gpt-4o-mini",
+                    "description": "An imported agent",
+                    "last_message": "",
+                    "last_message_datetime": "2024-01-01T00:00:00"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Error downloading agent from Radient"
                 }
               }
             }
@@ -1728,7 +1877,7 @@
                     },
                     "values": {
                       "conversation_length": 100,
-                      "detail_length": 35,
+                      "detail_length": 15,
                       "max_learnings_history": 50,
                       "hosting": "openrouter",
                       "model_name": "openai/gpt-4o-mini",
@@ -2274,6 +2423,328 @@
           }
         }
       }
+    },
+    "/v1/agents/{agent_id}/schedules": {
+      "post": {
+        "tags": [
+          "Schedules"
+        ],
+        "summary": "Create a new schedule for an agent",
+        "description": "Create a new schedule for a specific agent.",
+        "operationId": "create_schedule_for_agent_v1_agents__agent_id__schedules_post",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Agent Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduleCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ScheduleResponse_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Schedules"
+        ],
+        "summary": "List schedules for a specific agent",
+        "description": "Retrieve a paginated list of schedules for a specific agent.",
+        "operationId": "list_schedules_for_agent_v1_agents__agent_id__schedules_get",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Agent Id"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Page number",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number"
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Number of schedules per page",
+              "default": 10,
+              "title": "Per Page"
+            },
+            "description": "Number of schedules per page"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ScheduleListResponse_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/schedules": {
+      "get": {
+        "tags": [
+          "Schedules"
+        ],
+        "summary": "List all schedules",
+        "description": "Retrieve a paginated list of all schedules across all agents.",
+        "operationId": "list_all_schedules_v1_schedules_get",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Page number",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number"
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Number of schedules per page",
+              "default": 10,
+              "title": "Per Page"
+            },
+            "description": "Number of schedules per page"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ScheduleListResponse_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/schedules/{schedule_id}": {
+      "get": {
+        "tags": [
+          "Schedules"
+        ],
+        "summary": "Get a single schedule by ID",
+        "description": "Retrieve a single schedule by its ID.",
+        "operationId": "get_schedule_by_id_v1_schedules__schedule_id__get",
+        "parameters": [
+          {
+            "name": "schedule_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Schedule Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ScheduleResponse_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Schedules"
+        ],
+        "summary": "Edit an existing schedule",
+        "description": "Edit an existing schedule by its ID.",
+        "operationId": "edit_schedule_v1_schedules__schedule_id__patch",
+        "parameters": [
+          {
+            "name": "schedule_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Schedule Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduleUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ScheduleResponse_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Schedules"
+        ],
+        "summary": "Remove a schedule by ID",
+        "description": "Remove a schedule by its ID.",
+        "operationId": "remove_schedule_v1_schedules__schedule_id__delete",
+        "parameters": [
+          {
+            "name": "schedule_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Schedule Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2287,7 +2758,8 @@
           "DONE",
           "ASK",
           "BYE",
-          "READ"
+          "READ",
+          "DELEGATE"
         ],
         "title": "ActionType",
         "description": "Enum representing the different types of actions that can be taken in a conversation.\n\nUsed to track the type of action being taken in a conversation."
@@ -2338,6 +2810,36 @@
             "title": "Description",
             "description": "A description of the agent. Defaults to ''.",
             "default": ""
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tags",
+            "description": "Tags for the agent. Defaults to an empty list."
+          },
+          "categories": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Categories",
+            "description": "Categories for the agent. Defaults to an empty list."
           },
           "last_message": {
             "type": "string",
@@ -2944,6 +3446,36 @@
             "title": "Description",
             "description": "A description of the agent.  Defaults to ''."
           },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tags",
+            "description": "Tags for the agent.  Defaults to an empty list."
+          },
+          "categories": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Categories",
+            "description": "Categories for the agent.  Defaults to an empty list."
+          },
           "temperature": {
             "anyOf": [
               {
@@ -3411,6 +3943,62 @@
         ],
         "title": "CRUDResponse[ProviderListResponse]"
       },
+      "CRUDResponse_ScheduleListResponse_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScheduleListResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[ScheduleListResponse]"
+      },
+      "CRUDResponse_ScheduleResponse_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScheduleResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[ScheduleResponse]"
+      },
       "CRUDResponse_SystemPromptResponse_": {
         "properties": {
           "status": {
@@ -3739,11 +4327,21 @@
             "type": "string",
             "title": "Task Classification",
             "default": ""
+          },
+          "is_complete": {
+            "type": "boolean",
+            "title": "Is Complete",
+            "default": false
+          },
+          "is_streamable": {
+            "type": "boolean",
+            "title": "Is Streamable",
+            "default": false
           }
         },
         "type": "object",
         "title": "CodeExecutionResult",
-        "description": "Represents the result of a code execution.\n\nAttributes:\n    id (str): The unique identifier for the code execution\n    stdout (str): The standard output from the code execution.\n    stderr (str): The standard error from the code execution.\n    logging (str): Any logging output generated during the code execution.\n    message (str): The message to display to the user about the code execution.\n    code (str): The code that was executed.\n    formatted_print (str): The formatted print output from the code execution.\n    role (ConversationRole): The role of the message sender (user/assistant/system)\n    status (ProcessResponseStatus): The status of the code execution\n    timestamp (datetime): The timestamp of the code execution\n    files (List[str]): The files that were created or modified during the code execution\n    action (ActionType): The action that was taken during the code execution\n    execution_type (ExecutionType): The type of execution that was performed\n    task_classification (str): The classification of the task that was performed"
+        "description": "Represents the result of a code execution.\n\nAttributes:\n    id (str): The unique identifier for the code execution\n    stdout (str): The standard output from the code execution.\n    stderr (str): The standard error from the code execution.\n    logging (str): Any logging output generated during the code execution.\n    message (str): The message to display to the user about the code execution.\n    code (str): The code that was executed.\n    formatted_print (str): The formatted print output from the code execution.\n    role (ConversationRole): The role of the message sender (user/assistant/system)\n    status (ProcessResponseStatus): The status of the code execution\n    timestamp (datetime): The timestamp of the code execution\n    files (List[str]): The files that were created or modified during the code execution\n    action (ActionType): The action that was taken during the code execution\n    execution_type (ExecutionType): The type of execution that was performed\n    task_classification (str): The classification of the task that was performed\n    is_complete (bool): Whether the execution is complete\n    is_streamable (bool): Whether the result can be streamed"
       },
       "ConfigResponse": {
         "properties": {
@@ -3889,6 +4487,18 @@
             "title": "Ephemeral",
             "default": false
           },
+          "ephemeral_steps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ephemeral Steps",
+            "default": 0
+          },
           "summarized": {
             "anyOf": [
               {
@@ -4014,6 +4624,7 @@
         "type": "string",
         "enum": [
           "plan",
+          "pre_action",
           "action",
           "reflection",
           "response",
@@ -4021,10 +4632,11 @@
           "classification",
           "system",
           "user_input",
+          "delegate",
           "none"
         ],
         "title": "ExecutionType",
-        "description": "Enum representing the different types of execution in a conversation workflow.\n\nUsed to track the execution phase within the agent's thought process:\n- PLAN: Initial planning phase where the agent outlines its approach\n- ACTION: Execution of specific actions like running code or accessing resources\n- REFLECTION: Analysis and evaluation of previous actions and their results\n- RESPONSE: Final response generation based on the execution results\n- SECURITY_CHECK: Security check phase where the agent checks the safety of the code\n- CLASSIFICATION: Classification phase where the agent classifies the user's request\n- SYSTEM: An automatic static response from the system, such as an action cancellation."
+        "description": "Enum representing the different types of execution in a conversation workflow.\n\nUsed to track the execution phase within the agent's thought process:\n- PLAN: Initial planning phase where the agent outlines its approach\n- PRE_ACTION: The agent is generating a response for the action interpreter to\n  review and produce a structured system message.\n- ACTION: Execution of specific actions like running code or accessing resources\n- REFLECTION: Analysis and evaluation of previous actions and their results\n- RESPONSE: Final response generation based on the execution results\n- SECURITY_CHECK: Security check phase where the agent checks the safety of the code\n- CLASSIFICATION: Classification phase where the agent classifies the user's request\n- SYSTEM: An automatic static response from the system, such as an action cancellation."
       },
       "HTTPValidationError": {
         "properties": {
@@ -4562,6 +5174,373 @@
           ]
         }
       },
+      "ScheduleCreateRequest": {
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "title": "Prompt",
+            "description": "The prompt for the scheduled task."
+          },
+          "interval": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Interval",
+            "description": "The interval value for the schedule (e.g., 5 for every 5 minutes)."
+          },
+          "unit": {
+            "$ref": "#/components/schemas/ScheduleUnit",
+            "description": "The unit for the interval (MINUTES, HOURS, DAYS)."
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active",
+            "description": "Whether the schedule is active upon creation.",
+            "default": true
+          },
+          "one_time": {
+            "type": "boolean",
+            "title": "One Time",
+            "description": "Whether this is a one-time schedule.",
+            "default": false
+          },
+          "start_time_utc": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Time Utc",
+            "description": "Optional UTC start time for the schedule."
+          },
+          "end_time_utc": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Time Utc",
+            "description": "Optional UTC end time for the schedule."
+          }
+        },
+        "type": "object",
+        "required": [
+          "prompt",
+          "interval",
+          "unit"
+        ],
+        "title": "ScheduleCreateRequest",
+        "description": "Request model for creating a new schedule.",
+        "examples": [
+          {
+            "interval": 1,
+            "is_active": true,
+            "name": "Weekly Newsletter",
+            "one_time": false,
+            "prompt": "Send weekly newsletter",
+            "start_time_utc": "2024-06-01T09:00:00Z",
+            "unit": "DAYS"
+          }
+        ]
+      },
+      "ScheduleListResponse": {
+        "properties": {
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "description": "Total number of schedules."
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page",
+            "description": "Current page number."
+          },
+          "per_page": {
+            "type": "integer",
+            "title": "Per Page",
+            "description": "Number of schedules per page."
+          },
+          "schedules": {
+            "items": {
+              "$ref": "#/components/schemas/ScheduleResponse"
+            },
+            "type": "array",
+            "title": "Schedules",
+            "description": "List of schedules for the current page."
+          }
+        },
+        "type": "object",
+        "required": [
+          "total",
+          "page",
+          "per_page",
+          "schedules"
+        ],
+        "title": "ScheduleListResponse",
+        "description": "Response model for a paginated list of schedules.",
+        "examples": [
+          {
+            "page": 1,
+            "per_page": 10,
+            "schedules": [
+              {
+                "agent_id": "b2c3d4e5-f6a7-8901-2345-67890abcdef0",
+                "created_at": "2024-05-15T10:00:00Z",
+                "id": "a1b2c3d4-e5f6-7890-1234-567890abcdef",
+                "interval": 1,
+                "is_active": true,
+                "one_time": false,
+                "prompt": "Run daily report",
+                "unit": "DAYS"
+              }
+            ],
+            "total": 100
+          }
+        ]
+      },
+      "ScheduleResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "agent_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Agent Id"
+          },
+          "prompt": {
+            "type": "string",
+            "title": "Prompt"
+          },
+          "interval": {
+            "type": "integer",
+            "title": "Interval"
+          },
+          "unit": {
+            "$ref": "#/components/schemas/ScheduleUnit"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active"
+          },
+          "one_time": {
+            "type": "boolean",
+            "title": "One Time"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "last_run_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Run At"
+          },
+          "start_time_utc": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Time Utc"
+          },
+          "end_time_utc": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Time Utc"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "agent_id",
+          "prompt",
+          "interval",
+          "unit",
+          "is_active",
+          "one_time",
+          "created_at"
+        ],
+        "title": "ScheduleResponse",
+        "description": "Response model for a schedule.",
+        "examples": [
+          {
+            "agent_id": "b2c3d4e5-f6a7-8901-2345-67890abcdef0",
+            "created_at": "2024-05-15T10:00:00Z",
+            "description": "Generates the daily sales report.",
+            "id": "a1b2c3d4-e5f6-7890-1234-567890abcdef",
+            "interval": 1,
+            "is_active": true,
+            "last_run_at": "2024-05-14T10:00:00Z",
+            "name": "Daily Report Generation",
+            "one_time": false,
+            "prompt": "Run daily report",
+            "start_time_utc": "2024-01-01T00:00:00Z",
+            "unit": "DAYS"
+          }
+        ]
+      },
+      "ScheduleUnit": {
+        "type": "string",
+        "enum": [
+          "minutes",
+          "hours",
+          "days"
+        ],
+        "title": "ScheduleUnit",
+        "description": "Enum representing the units for a schedule interval."
+      },
+      "ScheduleUpdateRequest": {
+        "properties": {
+          "prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt",
+            "description": "The prompt for the scheduled task."
+          },
+          "interval": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interval",
+            "description": "The interval value for the schedule."
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScheduleUnit"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The unit for the interval."
+          },
+          "is_active": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Active",
+            "description": "Whether the schedule is active."
+          },
+          "one_time": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "One Time",
+            "description": "Whether this is a one-time schedule."
+          },
+          "start_time_utc": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Time Utc",
+            "description": "Optional UTC start time for the schedule."
+          },
+          "end_time_utc": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Time Utc",
+            "description": "Optional UTC end time for the schedule."
+          }
+        },
+        "type": "object",
+        "title": "ScheduleUpdateRequest",
+        "description": "Request model for updating an existing schedule. All fields are optional.",
+        "examples": [
+          {
+            "interval": 8,
+            "is_active": false,
+            "prompt": "Run nightly backup",
+            "unit": "HOURS"
+          }
+        ]
+      },
       "SystemPromptResponse": {
         "properties": {
           "content": {
@@ -4661,6 +5640,10 @@
     {
       "name": "Models",
       "description": "Model management endpoints"
+    },
+    {
+      "name": "Schedules",
+      "description": "Schedule management endpoints"
     },
     {
       "name": "Static",
