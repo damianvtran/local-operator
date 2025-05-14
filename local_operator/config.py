@@ -92,7 +92,7 @@ DEFAULT_CONFIG = Config(
         },
         "values": {
             "conversation_length": 100,
-            "detail_length": 35,
+            "detail_length": 15,
             "max_learnings_history": 50,
             "hosting": "",
             "model_name": "",
