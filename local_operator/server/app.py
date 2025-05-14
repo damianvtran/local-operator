@@ -21,7 +21,7 @@ from local_operator.helpers import setup_cross_platform_environment
 from local_operator.jobs import JobManager
 from local_operator.logger import get_logger
 from local_operator.operator import OperatorType
-from local_operator.scheduler_service import SchedulerService  # Added
+from local_operator.scheduler_service import SchedulerService
 from local_operator.server.routes import (
     agents,
     chat,
@@ -30,6 +30,7 @@ from local_operator.server.routes import (
     health,
     jobs,
     models,
+    schedules,
     static,
     websockets,
 )
@@ -75,8 +76,8 @@ async def lifespan(app: FastAPI):
         env_config=app.state.env_config,
         operator_type=OperatorType.SERVER,
         verbosity_level=VerbosityLevel.QUIET,
-        job_manager=app.state.job_manager,  # Added
-        websocket_manager=app.state.websocket_manager,  # Added
+        job_manager=app.state.job_manager,
+        websocket_manager=app.state.websocket_manager,
     )
 
     await app.state.scheduler_service.start()
@@ -110,6 +111,7 @@ app = FastAPI(
         {"name": "Configuration", "description": "Configuration management endpoints"},
         {"name": "Credentials", "description": "Credential management endpoints"},
         {"name": "Models", "description": "Model management endpoints"},
+        {"name": "Schedules", "description": "Schedule management endpoints"},  # Added
         {"name": "Static", "description": "Static file hosting endpoints"},
     ],
 )
@@ -166,4 +168,9 @@ app.include_router(
 # /v1/ws
 app.include_router(
     websockets.router,
+)
+
+# /v1/schedules
+app.include_router(
+    schedules.router,
 )

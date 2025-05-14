@@ -8,13 +8,18 @@ in the Local Operator API.
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, Generic, List, Optional, TypeVar
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
 # AgentEditFields will be used in the routes module
 from local_operator.jobs import JobResult, JobStatus
 from local_operator.model.registry import ModelInfo, ProviderDetail
-from local_operator.types import CodeExecutionResult, ConversationRecord
+from local_operator.types import (  # Added ScheduleUnit
+    CodeExecutionResult,
+    ConversationRecord,
+    ScheduleUnit,
+)
 
 
 class ChatOptions(BaseModel):
@@ -718,3 +723,146 @@ class WebsocketConnectionType(str, Enum):
 
     MESSAGE = "message"
     HEALTH = "health"
+
+
+# Schedule Schemas
+class ScheduleResponse(BaseModel):
+    """Response model for a schedule."""
+
+    id: UUID
+    agent_id: UUID
+    prompt: str
+    interval: int
+    unit: ScheduleUnit
+    is_active: bool
+    one_time: bool
+    created_at: datetime
+    last_run_at: Optional[datetime] = None
+    start_time_utc: Optional[datetime] = None
+    end_time_utc: Optional[datetime] = None
+    name: Optional[str] = None
+    description: Optional[str] = None
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "id": "a1b2c3d4-e5f6-7890-1234-567890abcdef",
+                    "agent_id": "b2c3d4e5-f6a7-8901-2345-67890abcdef0",
+                    "prompt": "Run daily report",
+                    "interval": 1,
+                    "unit": "DAYS",
+                    "is_active": True,
+                    "one_time": False,
+                    "created_at": "2024-05-15T10:00:00Z",
+                    "last_run_at": "2024-05-14T10:00:00Z",
+                    "start_time_utc": "2024-01-01T00:00:00Z",
+                    "end_time_utc": None,
+                    "name": "Daily Report Generation",
+                    "description": "Generates the daily sales report.",
+                }
+            ]
+        }
+    }
+
+
+class ScheduleCreateRequest(BaseModel):
+    """Request model for creating a new schedule."""
+
+    prompt: str = Field(..., description="The prompt for the scheduled task.")
+    interval: int = Field(
+        ..., gt=0, description="The interval value for the schedule (e.g., 5 for every 5 minutes)."
+    )
+    unit: ScheduleUnit = Field(..., description="The unit for the interval (MINUTES, HOURS, DAYS).")
+    is_active: bool = Field(True, description="Whether the schedule is active upon creation.")
+    one_time: bool = Field(False, description="Whether this is a one-time schedule.")
+    start_time_utc: Optional[datetime] = Field(
+        None, description="Optional UTC start time for the schedule."
+    )
+    end_time_utc: Optional[datetime] = Field(
+        None, description="Optional UTC end time for the schedule."
+    )
+    name: Optional[str] = Field(None, description="Optional name for the schedule.")
+    description: Optional[str] = Field(None, description="Optional description for the schedule.")
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "prompt": "Send weekly newsletter",
+                    "interval": 1,
+                    "unit": "DAYS",  # Assuming ScheduleUnit.DAYS, will be "DAYS" as string
+                    "is_active": True,
+                    "one_time": False,
+                    "start_time_utc": "2024-06-01T09:00:00Z",
+                    "name": "Weekly Newsletter",
+                }
+            ]
+        }
+    }
+
+
+class ScheduleUpdateRequest(BaseModel):
+    """Request model for updating an existing schedule. All fields are optional."""
+
+    prompt: Optional[str] = Field(None, description="The prompt for the scheduled task.")
+    interval: Optional[int] = Field(None, gt=0, description="The interval value for the schedule.")
+    unit: Optional[ScheduleUnit] = Field(None, description="The unit for the interval.")
+    is_active: Optional[bool] = Field(None, description="Whether the schedule is active.")
+    one_time: Optional[bool] = Field(None, description="Whether this is a one-time schedule.")
+    start_time_utc: Optional[datetime] = Field(
+        None, description="Optional UTC start time for the schedule."
+    )
+    end_time_utc: Optional[datetime] = Field(
+        None, description="Optional UTC end time for the schedule."
+    )
+    name: Optional[str] = Field(None, description="Optional name for the schedule.")
+    description: Optional[str] = Field(None, description="Optional description for the schedule.")
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "prompt": "Run nightly backup",
+                    "is_active": False,
+                    "interval": 8,
+                    "unit": "HOURS",
+                }
+            ]
+        }
+    }
+
+
+class ScheduleListResponse(BaseModel):
+    """Response model for a paginated list of schedules."""
+
+    total: int = Field(..., description="Total number of schedules.")
+    page: int = Field(..., description="Current page number.")
+    per_page: int = Field(..., description="Number of schedules per page.")
+    schedules: List[ScheduleResponse] = Field(
+        ..., description="List of schedules for the current page."
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "total": 100,
+                    "page": 1,
+                    "per_page": 10,
+                    "schedules": [
+                        {
+                            "id": "a1b2c3d4-e5f6-7890-1234-567890abcdef",
+                            "agent_id": "b2c3d4e5-f6a7-8901-2345-67890abcdef0",
+                            "prompt": "Run daily report",
+                            "interval": 1,
+                            "unit": "DAYS",
+                            "is_active": True,
+                            "one_time": False,
+                            "created_at": "2024-05-15T10:00:00Z",
+                        }
+                    ],
+                }
+            ]
+        }
+    }
