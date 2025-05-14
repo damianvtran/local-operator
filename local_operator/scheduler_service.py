@@ -677,11 +677,9 @@ class SchedulerService:
                         triggered_missed_recurring = False
                         if (
                             not schedule_item.one_time
-                            and schedule_item.last_run_at
                             and schedule_item.interval > 0
                             and schedule_item.unit
                         ):
-
                             delta = timedelta()
                             if schedule_item.unit == ScheduleUnit.MINUTES:
                                 delta = timedelta(minutes=schedule_item.interval)
@@ -691,7 +689,6 @@ class SchedulerService:
                                 delta = timedelta(days=schedule_item.interval)
 
                             if delta > timedelta(0):  # Ensure valid delta
-                                next_expected_run_time = schedule_item.last_run_at + delta
                                 grace_period_seconds = 0
                                 if schedule_item.unit == ScheduleUnit.MINUTES:
                                     grace_period_seconds = int(schedule_item.interval * 60 / 2)
@@ -701,33 +698,57 @@ class SchedulerService:
                                     grace_period_seconds = int(
                                         schedule_item.interval * 24 * 60 * 60 / 2
                                     )
-                                grace_period_seconds = max(
-                                    60, grace_period_seconds
-                                )  # Min 60s grace
-
+                                grace_period_seconds = max(60, grace_period_seconds)
                                 grace_delta = timedelta(seconds=grace_period_seconds)
 
-                                if now_utc > next_expected_run_time and now_utc <= (
-                                    next_expected_run_time + grace_delta
-                                ):
-                                    logger.debug(
-                                        f"Missed recurring schedule {job_id_str} for "
-                                        f"agent {agent_id_str} "
-                                        f"(last run: {schedule_item.last_run_at}, "
-                                        f"next expected: {next_expected_run_time}, "
-                                        f"grace: {grace_delta}). Triggering now (non-blocking)."
-                                    )
-                                    # Similarly, run _trigger_agent_task in a non-blocking way.
-                                    asyncio.create_task(
-                                        self._trigger_agent_task(
-                                            agent_id_str=agent_id_str,
-                                            schedule_id_str=job_id_str,
-                                            prompt=schedule_item.prompt,
+                                # If last_run_at exists, use it to determine missed run
+                                if schedule_item.last_run_at:
+                                    next_expected_run_time = schedule_item.last_run_at + delta
+                                    if now_utc > next_expected_run_time and now_utc <= (
+                                        next_expected_run_time + grace_delta
+                                    ):
+                                        logger.debug(
+                                            f"Missed recurring schedule {job_id_str} for "
+                                            f"agent {agent_id_str} "
+                                            f"(last run: {schedule_item.last_run_at}, "
+                                            f"next expected: {next_expected_run_time}, "
+                                            f"grace: {grace_delta}). Triggering now (non-blocking)."
                                         )
-                                    )
-                                    triggered_missed_recurring = True
-                                    # Job process handles last_run_at.
-                                    # We still add the job to the scheduler for future runs.
+                                        asyncio.create_task(
+                                            self._trigger_agent_task(
+                                                agent_id_str=agent_id_str,
+                                                schedule_id_str=job_id_str,
+                                                prompt=schedule_item.prompt,
+                                            )
+                                        )
+                                        triggered_missed_recurring = True
+                                # If no last_run_at, check if the first run
+                                # was missed based on start_time_utc
+                                elif schedule_item.start_time_utc:
+                                    first_expected_run_time = schedule_item.start_time_utc
+                                    if now_utc > first_expected_run_time and now_utc <= (
+                                        first_expected_run_time + grace_delta
+                                    ):
+                                        logger.debug(
+                                            f"Missed first recurring schedule {job_id_str} for "
+                                            f"agent {agent_id_str} "
+                                            f"(start: {first_expected_run_time}, "
+                                            f"grace: {grace_delta}). Triggering now (non-blocking)."
+                                        )
+                                        asyncio.create_task(
+                                            self._trigger_agent_task(
+                                                agent_id_str=agent_id_str,
+                                                schedule_id_str=job_id_str,
+                                                prompt=schedule_item.prompt,
+                                            )
+                                        )
+                                        triggered_missed_recurring = True
+                                    # If now_utc is past the grace window, do
+                                    # not trigger, just add to scheduler
+                                    # If now_utc is before start_time_utc, do
+                                    # nothing (future run)
+                                    # If no start_time_utc, do nothing
+                                    # (If both last_run_at and start_time_utc are None, do nothing)
 
                         if (
                             not triggered_missed_recurring
