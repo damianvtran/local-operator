@@ -12,17 +12,17 @@ from pydantic import ValidationError
 
 from local_operator.agents import AgentData, AgentRegistry, AgentState
 from local_operator.config import ConfigManager
-from local_operator.console import VerbosityLevel  # Corrected import for VerbosityLevel
+from local_operator.console import VerbosityLevel
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
-from local_operator.jobs import Job, JobManager, JobStatus  # Changed JobEntry to Job
+from local_operator.jobs import Job, JobManager, JobStatus
 from local_operator.operator import OperatorType
 from local_operator.scheduler_service import (
     SchedulerService,
     _execute_scheduled_task_logic,
 )
 from local_operator.server.utils.websocket_manager import WebSocketManager
-from local_operator.types import Schedule, ScheduleUnit  # Added ConversationRecord
+from local_operator.types import Schedule, ScheduleUnit
 
 
 @pytest.fixture
