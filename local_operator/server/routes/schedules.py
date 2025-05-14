@@ -9,6 +9,8 @@ from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 
 from local_operator.agents import AgentRegistry
 from local_operator.scheduler_service import SchedulerService
@@ -42,28 +44,24 @@ async def create_schedule_for_agent(
     Create a new schedule for a specific agent.
     """
     try:
-        # Check if agent exists
-        agent_registry.get_agent(str(agent_id))  # Throws KeyError if not found
+        agent_registry.get_agent(str(agent_id))
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
-
     try:
         new_schedule_model = ScheduleModel(agent_id=agent_id, **schedule_data.model_dump())
-
-        # Add to agent's state
         agent_state = agent_registry.load_agent_state(str(agent_id))
         agent_state.schedules.append(new_schedule_model)
         agent_registry.save_agent_state(str(agent_id), agent_state)
-
-        # Add to APScheduler
         if new_schedule_model.is_active:
             scheduler_service.add_or_update_job(new_schedule_model)
-
-        return CRUDResponse(
+        response = CRUDResponse(
             status=201,
             message="Schedule created successfully",
-            result=ScheduleResponse.model_validate(new_schedule_model),
+            result=ScheduleResponse.model_validate(new_schedule_model.model_dump()).model_dump(),
         )
+        return JSONResponse(status_code=201, content=jsonable_encoder(response))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception(f"Error creating schedule for agent {agent_id}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -88,25 +86,26 @@ async def list_all_schedules(
         for agent_data in agents:
             agent_state = agent_registry.load_agent_state(agent_data.id)
             all_schedules.extend(agent_state.schedules)
-
-        # Sort by creation date descending for consistent pagination
         all_schedules.sort(key=lambda s: s.created_at, reverse=True)
-
         total = len(all_schedules)
         start_idx = (page - 1) * per_page
         end_idx = start_idx + per_page
         paginated_schedules = all_schedules[start_idx:end_idx]
-
-        return CRUDResponse(
+        response = CRUDResponse(
             status=200,
             message="Schedules retrieved successfully",
             result=ScheduleListResponse(
                 total=total,
                 page=page,
                 per_page=per_page,
-                schedules=[ScheduleResponse.model_validate(s) for s in paginated_schedules],
-            ),
+                schedules=[
+                    ScheduleResponse.model_validate(s.model_dump()) for s in paginated_schedules
+                ],
+            ).model_dump(),
         )
+        return JSONResponse(status_code=200, content=jsonable_encoder(response))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Error listing all schedules")
         raise HTTPException(status_code=500, detail=str(e))
@@ -127,30 +126,31 @@ async def list_schedules_for_agent(
     Retrieve a paginated list of schedules for a specific agent.
     """
     try:
-        # Check if agent exists
-        agent_registry.get_agent(str(agent_id))  # Throws KeyError if not found
+        agent_registry.get_agent(str(agent_id))
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
-
     try:
         agent_state = agent_registry.load_agent_state(str(agent_id))
         agent_schedules = sorted(agent_state.schedules, key=lambda s: s.created_at, reverse=True)
-
         total = len(agent_schedules)
         start_idx = (page - 1) * per_page
         end_idx = start_idx + per_page
         paginated_schedules = agent_schedules[start_idx:end_idx]
-
-        return CRUDResponse(
+        response = CRUDResponse(
             status=200,
             message=f"Schedules for agent {agent_id} retrieved successfully",
             result=ScheduleListResponse(
                 total=total,
                 page=page,
                 per_page=per_page,
-                schedules=[ScheduleResponse.model_validate(s) for s in paginated_schedules],
-            ),
+                schedules=[
+                    ScheduleResponse.model_validate(s.model_dump()) for s in paginated_schedules
+                ],
+            ).model_dump(),
         )
+        return JSONResponse(status_code=200, content=jsonable_encoder(response))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception(f"Error listing schedules for agent {agent_id}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -174,11 +174,12 @@ async def get_schedule_by_id(
             agent_state = agent_registry.load_agent_state(agent_data.id)
             for schedule in agent_state.schedules:
                 if schedule.id == schedule_id:
-                    return CRUDResponse(
+                    response = CRUDResponse(
                         status=200,
                         message=f"Schedule {schedule_id} retrieved successfully",
-                        result=ScheduleResponse.model_validate(schedule),
+                        result=ScheduleResponse.model_validate(schedule.model_dump()).model_dump(),
                     )
+                    return JSONResponse(status_code=200, content=jsonable_encoder(response))
         raise HTTPException(status_code=404, detail=f"Schedule with ID {schedule_id} not found")
     except HTTPException:
         raise
@@ -211,11 +212,7 @@ async def edit_schedule(
             for i, existing_schedule in enumerate(agent_state.schedules):
                 if existing_schedule.id == schedule_id:
                     update_data = schedule_data.model_dump(exclude_unset=True)
-
-                    # Create a new ScheduleModel instance with updated fields
-                    # Pydantic's update_forward_refs or copy(update=...) is good here
                     updated_schedule_model = existing_schedule.model_copy(update=update_data)
-
                     agent_state.schedules[i] = updated_schedule_model
                     agent_registry.save_agent_state(agent_data.id, agent_state)
                     schedule_found = True
@@ -226,17 +223,19 @@ async def edit_schedule(
         if not schedule_found or not updated_schedule_model:
             raise HTTPException(status_code=404, detail=f"Schedule with ID {schedule_id} not found")
 
-        # Update in APScheduler
         if updated_schedule_model.is_active:
             scheduler_service.add_or_update_job(updated_schedule_model)
         else:
             scheduler_service.remove_job(updated_schedule_model.id)
 
-        return CRUDResponse(
+        response = CRUDResponse(
             status=200,
             message=f"Schedule {schedule_id} updated successfully",
-            result=ScheduleResponse.model_validate(updated_schedule_model),
+            result=ScheduleResponse.model_validate(
+                updated_schedule_model.model_dump()
+            ).model_dump(),
         )
+        return JSONResponse(status_code=200, content=jsonable_encoder(response))
     except HTTPException:
         raise
     except Exception as e:
@@ -275,11 +274,12 @@ async def remove_schedule(
         if not schedule_found_and_removed:
             raise HTTPException(status_code=404, detail=f"Schedule with ID {schedule_id} not found")
 
-        return CRUDResponse(
+        response = CRUDResponse(
             status=200,
             message=f"Schedule {schedule_id} removed successfully",
             result={},
         )
+        return JSONResponse(status_code=200, content=jsonable_encoder(response))
     except HTTPException:
         raise
     except Exception as e:

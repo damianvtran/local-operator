@@ -782,8 +782,6 @@ class ScheduleCreateRequest(BaseModel):
     end_time_utc: Optional[datetime] = Field(
         None, description="Optional UTC end time for the schedule."
     )
-    name: Optional[str] = Field(None, description="Optional name for the schedule.")
-    description: Optional[str] = Field(None, description="Optional description for the schedule.")
 
     model_config = {
         "json_schema_extra": {
@@ -816,8 +814,6 @@ class ScheduleUpdateRequest(BaseModel):
     end_time_utc: Optional[datetime] = Field(
         None, description="Optional UTC end time for the schedule."
     )
-    name: Optional[str] = Field(None, description="Optional name for the schedule.")
-    description: Optional[str] = Field(None, description="Optional description for the schedule.")
 
     model_config = {
         "json_schema_extra": {
