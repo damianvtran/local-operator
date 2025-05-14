@@ -10,7 +10,7 @@ import asyncio
 import logging
 import multiprocessing
 from multiprocessing import Process, Queue
-from typing import Callable, List, Optional
+from typing import TYPE_CHECKING, Callable, List, Optional  # Added TYPE_CHECKING
 from uuid import UUID
 
 from local_operator.agents import AgentRegistry
@@ -18,10 +18,14 @@ from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.jobs import JobContext, JobContextRecord, JobManager, JobStatus
-from local_operator.scheduler_service import SchedulerService
+
+# from local_operator.scheduler_service import SchedulerService # Moved to TYPE_CHECKING
 from local_operator.server.utils.operator import create_operator
 from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import ConversationRecord, Schedule
+
+if TYPE_CHECKING:
+    from local_operator.scheduler_service import SchedulerService
 
 logger = logging.getLogger("local_operator.server.utils.job_processor_queue")
 
@@ -285,7 +289,7 @@ def create_and_start_job_process_with_queue(
     args: tuple[object, ...],
     job_manager: JobManager,
     websocket_manager: WebSocketManager,
-    scheduler_service: SchedulerService,
+    scheduler_service: "SchedulerService",  # Changed to string literal
 ) -> Process:
     """
     Create and start a process for a job, and set up a queue monitor to update the job status.

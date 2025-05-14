@@ -75,6 +75,8 @@ async def lifespan(app: FastAPI):
         env_config=app.state.env_config,
         operator_type=OperatorType.SERVER,
         verbosity_level=VerbosityLevel.QUIET,
+        job_manager=app.state.job_manager,  # Added
+        websocket_manager=app.state.websocket_manager,  # Added
     )
 
     await app.state.scheduler_service.start()
