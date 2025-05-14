@@ -54,7 +54,7 @@ SYSTEM_PROMPT_FILE = Path(os.path.expanduser("~/.local-operator/system_prompt.md
                                 },
                                 "values": {
                                     "conversation_length": 100,
-                                    "detail_length": 35,
+                                    "detail_length": 15,
                                     "max_learnings_history": 50,
                                     "hosting": "openrouter",
                                     "model_name": "openai/gpt-4o-mini",
