@@ -30,6 +30,7 @@ setup(
         "python-multipart==0.0.20",
         "websockets>=15.0.1",
         "browser-use>=0.1.45",
+        "apscheduler>=3.11.0",
     ],
     python_requires=">=3.12",
     extras_require={

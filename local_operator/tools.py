@@ -7,8 +7,10 @@ import os
 import platform
 import shutil
 import socket
+from datetime import datetime, timezone  # Added timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from uuid import UUID  # Added UUID
 
 import playwright.async_api as pw
 from browser_use import Agent as BrowserAgent
@@ -16,17 +18,20 @@ from browser_use import Browser, BrowserConfig
 from browser_use import Controller as BrowserController
 from pydantic import SecretStr
 
+from local_operator.agents import AgentRegistry
 from local_operator.clients.fal import FalClient, FalImageGenerationResponse, ImageSize
 from local_operator.clients.radient import (
     RadientClient,
     RadientImageGenerationResponse,
     RadientSearchResponse,
+    RadientSendEmailResponseData,
 )
 from local_operator.clients.serpapi import SerpApiClient, SerpApiResponse
 from local_operator.clients.tavily import TavilyClient, TavilyResponse
 from local_operator.credentials import CredentialManager
 from local_operator.mocks import ChatMock, ChatNoop
 from local_operator.model.configure import ModelConfiguration
+from local_operator.types import Schedule, ScheduleUnit
 
 
 def _get_git_ignored_files(gitignore_path: str) -> Set[str]:
@@ -942,17 +947,14 @@ def _get_browser_path() -> Optional[str]:
         if system == "Linux" and not os.path.isabs(path_candidate):
             found_path = shutil.which(path_candidate)
             if found_path:
-                # print(f"Found {browser_name} at {found_path}") # Optional: for debugging
                 return found_path
         # For absolute paths or other OSes, check existence directly
         elif os.path.exists(path_candidate):
-            # print(f"Found {browser_name} at {path_candidate}") # Optional: for debugging
             return path_candidate
         # On macOS, also check user-specific application paths
         if system == "Darwin":
             user_path = os.path.expanduser(f"~/Applications/{Path(path_candidate).name}")
             if os.path.exists(user_path):
-                # print(f"Found {browser_name} at {user_path}") # Optional: for debugging
                 return user_path
             # Arc specific user path on macOS
             if browser_name == "Arc":
@@ -1159,6 +1161,226 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
     return run_browser_task
 
 
+def schedule_task_tool(
+    tool_registry: "ToolRegistry",
+    agent_registry: AgentRegistry,
+    scheduler_service: Optional[Any],
+) -> Callable[..., str]:
+    """Factory to create the schedule_task tool with AgentRegistry and SchedulerService
+    dependency. This closure expects to be bound as a method of ToolRegistry."""
+
+    def schedule_task(
+        agent_id: str,
+        prompt: str,
+        interval: int,
+        unit: str,
+        start_time_utc: datetime,
+        end_time_utc: Optional[datetime] = None,
+        one_time: bool = False,
+    ) -> str:
+        """Schedule a new task for for you or another agent to run at a specified frequency.  The agent ID should be your ID from the agent identity in your system prompt, or the ID of the agent that you were asked to schedule the task for.  Provide a prompt which will be a note about what should be done on each trigger.  It should be written from the perspective of a user that is going to be asking the agent (you) to do the task in the future.  The agent (you or another agent) will receive this prompt on each trigger as if from the user.  Specify the interval as an integer with the unit as one of "minutes", "hours", or "days".  Always specify a start time for the schedule as a datetime object, it can either be right now or at a point in the future.  Optionally specify an end time for the schedule as a datetime object to stop the recurrence at a certain point. If no end time is provided, the schedule will run indefinitely, otherwise it will stop at the end time.  Specify one_time as True if the user has asked for a one time reminder, otherwise omit it or set it to False for a recurring task with or without start or end times.  If you use one_time, you MUST provide a start time.  The start_time will be the exact timestamp in UTC that the task will be scheduled to run, and the interval and unit will be ignored (you can provide 1 minute as a placeholder).
+
+        If status_queue is present on the tool registry, send a message through the queue to request scheduling, otherwise call scheduler_service directly if available.
+
+        Returns:
+            str: Confirmation message with the new schedule ID.
+        """  # noqa: E501
+        # self is the ToolRegistry instance if this is bound as a method
+        try:
+            agent_uuid = UUID(agent_id)
+            schedule_unit = ScheduleUnit(unit.lower())
+        except ValueError as e:
+            raise ValueError(f"Error: Invalid agent_id or unit: {str(e)}")
+
+        if one_time and not start_time_utc and (not interval or not unit):
+            raise ValueError(
+                "Error: start_time_utc, or interval and unit is required when one_time is True."
+            )
+
+        # Load current agent state to get existing schedules
+        try:
+            agent_state = agent_registry.load_agent_state(agent_id)
+            schedules = agent_state.schedules
+        except KeyError:
+            raise ValueError(f"Error: Agent with ID '{agent_id}' not found.")
+        except Exception as e:
+            raise ValueError(f"Error loading agent state: {str(e)}")
+
+        try:
+            new_schedule = Schedule(
+                agent_id=agent_uuid,
+                prompt=prompt,
+                interval=interval,
+                unit=schedule_unit,
+                start_time_utc=start_time_utc,
+                end_time_utc=end_time_utc,
+                created_at=datetime.now(timezone.utc),
+                is_active=True,
+                one_time=one_time,
+            )
+        except ValueError as ve:  # Catch Pydantic validation errors
+            raise ValueError(f"Error creating schedule: {str(ve)}")
+
+        schedules.append(new_schedule)
+        agent_state.schedules = schedules
+
+        try:
+            # Use status_queue if present on the ToolRegistry instance
+            status_queue = tool_registry.status_queue
+
+            if status_queue is not None:
+                status_queue.put(("schedule_add", new_schedule))
+
+                if tool_registry.tool_execution_callback:
+                    tool_registry.tool_execution_callback("schedule_task", new_schedule)
+
+            elif scheduler_service:
+                agent_registry.save_agent_state(agent_id, agent_state)
+                scheduler_service.add_or_update_job(new_schedule)
+            else:
+                raise ValueError("Error: SchedulerService not available.")
+
+            return f"Task scheduled successfully with ID: {new_schedule.id}"
+        except Exception as e:
+            return f"Error saving or scheduling new task: {str(e)}"
+
+    return schedule_task
+
+
+def stop_schedule_tool(
+    tool_registry: "ToolRegistry",
+    agent_registry: AgentRegistry,
+    scheduler_service: Optional[Any],
+) -> Callable[..., str]:
+    """Factory to create the stop_schedule tool with AgentRegistry and SchedulerService
+    dependency. This closure expects to be bound as a method of ToolRegistry."""
+
+    def stop_schedule(agent_id: str, schedule_id: str) -> str:
+        """Stop an active_schedule for an agent.
+
+        If status_queue is present on the tool registry, send a message through the queue
+        to request schedule removal, otherwise call scheduler_service directly if available.
+
+        Returns:
+            str: Confirmation or error message.
+        """
+        try:
+            target_schedule_id = UUID(schedule_id)
+        except ValueError:
+            raise ValueError("Error: Invalid schedule_id format.")
+
+        try:
+            agent_state = agent_registry.load_agent_state(agent_id)
+            schedules = agent_state.schedules
+        except KeyError:
+            raise ValueError(f"Error: Agent with ID '{agent_id}' not found.")
+        except Exception as e:
+            raise ValueError(f"Error loading agent state: {str(e)}")
+
+        schedule_found = False
+        for sched in schedules:
+            if sched.id == target_schedule_id:
+                sched.is_active = False
+                schedule_found = True
+                break
+
+        if not schedule_found:
+            raise ValueError(
+                f"Error: Schedule with ID '{schedule_id}' not found for agent '{agent_id}'."
+            )
+
+        agent_state.schedules = schedules
+
+        try:
+            status_queue = tool_registry.status_queue
+
+            if status_queue is not None:
+                status_queue.put(("schedule_remove", target_schedule_id))
+
+                if tool_registry.tool_execution_callback:
+                    tool_registry.tool_execution_callback("stop_schedule", target_schedule_id)
+
+            elif scheduler_service:
+                agent_registry.save_agent_state(agent_id, agent_state)
+                scheduler_service.remove_job(target_schedule_id)
+            else:
+                raise ValueError("Error: SchedulerService not available.")
+
+            return f"Schedule '{schedule_id}' stopped successfully."
+        except Exception as e:
+            raise ValueError(
+                f"Error saving updated schedule list or removing from scheduler: {str(e)}"
+            )
+
+    return stop_schedule
+
+
+def list_schedules_tool(agent_registry: AgentRegistry) -> Callable[..., List[Dict[str, Any]]]:
+    """Factory to create the list_schedules tool with AgentRegistry dependency."""
+
+    def list_schedules(agent_id: str) -> List[Dict[str, Any]]:
+        """List all active schedules for a given agent.
+
+        Args:
+            agent_id (str): The ID of the agent whose schedules are to be listed.
+
+        Returns:
+            List[Dict[str, Any]]: A list of dictionaries, each representing an active schedule.
+                                 Returns empty list if agent not found or no active schedules.
+        """
+        try:
+            agent_state = agent_registry.load_agent_state(agent_id)
+            active_schedules = [
+                s.model_dump(mode="json") for s in agent_state.schedules if s.is_active
+            ]
+            return active_schedules
+        except KeyError:
+            raise ValueError(f"Error: Agent with ID '{agent_id}' not found.")
+        except Exception as e:
+            raise ValueError(f"Error listing schedules for agent {agent_id}: {str(e)}")
+
+    return list_schedules
+
+
+def send_email_to_user_tool(
+    radient_client: RadientClient,
+) -> Callable[..., RadientSendEmailResponseData]:
+    """Create a tool function to send an email to the authenticated user via Radient API.
+
+    Args:
+        radient_client (RadientClient): The Radient API client to use.
+
+    Returns:
+        Callable: A function that sends an email with a subject and body.
+    """
+
+    def send_email_to_user(subject: str, body: str) -> RadientSendEmailResponseData:
+        """Send an email to the authenticated user, it will go to email address associated with the current Radient API key. This tool uses the Radient API to send an email with the provided subject and body to the email address associated with the current Radient API key.  Make sure the body is neatly formatted with HTML formatting (<br /> for line breaks, and other tags for bold, italics, and other formatting) and easy to read, and contains all the information the user needs.  Make sure to add a signature to the email with your agent name so that the user knows that it is from you.
+
+        Args:
+            subject (str): The subject of the email. Must be between 1 and 255 characters.
+            body (str): The body of the email. Can be HTML or plain text. Must be at least 1 character.
+
+        Returns:
+            RadientSendEmailResponseData: A response containing a confirmation message and optionally a message ID.
+
+        Raises:
+            RuntimeError: If the Radient client is not available or the request fails.
+        """  # noqa: E501
+        if not radient_client.api_key:
+            raise RuntimeError("RADIENT_API_KEY is not configured. Cannot send email.")
+
+        # Basic validation based on OpenAPI spec
+        if not (1 <= len(subject) <= 255):
+            raise ValueError("Subject must be between 1 and 255 characters.")
+        if not (len(body) >= 1):
+            raise ValueError("Body must be at least 1 character long.")
+
+        return radient_client.send_email_to_self(subject=subject, body=body)
+
+    return send_email_to_user
+
+
 class ToolRegistry:
     """Registry for tools that can be used by agents.
 
@@ -1177,11 +1399,33 @@ class ToolRegistry:
     radient_client: RadientClient | None = None
     credential_manager: CredentialManager | None = None
     model_configuration: Optional[ModelConfiguration] = None
+    agent_registry: Optional[AgentRegistry] = None
+    scheduler_service: Optional[Any] = None
+    status_queue: Optional[Any] = None
+    tool_execution_callback: Optional[Callable[[str, Any], None]] = None
 
     def __init__(self):
         """Initialize an empty tool registry."""
         super().__init__()
         object.__setattr__(self, "_tools", {})
+
+    def set_tool_execution_callback(self, tool_execution_callback: Callable[[str, Any], None]):
+        """Set the tool execution callback for the registry.  This is used to bridge the boundary
+        between the job execution environment and the server environment.
+
+        Args:
+            tool_execution_callback (Callable[[str, Any], None]): The tool
+            execution callback to set.
+        """
+        self.tool_execution_callback = tool_execution_callback
+
+    def set_status_queue(self, status_queue: Any):
+        """Set the status queue for broadcasting tool/scheduler updates.
+
+        Args:
+            status_queue (Any): The status queue to set.
+        """
+        self.status_queue = status_queue
 
     def set_serp_api_client(self, serp_api_client: SerpApiClient):
         """Set the SERP API client for the registry.
@@ -1231,6 +1475,22 @@ class ToolRegistry:
         """
         self.model_configuration = model_config
 
+    def set_agent_registry(self, agent_registry: AgentRegistry):
+        """Set the AgentRegistry for the tool registry.
+
+        Args:
+            agent_registry (AgentRegistry): The AgentRegistry instance.
+        """
+        self.agent_registry = agent_registry
+
+    def set_scheduler_service(self, scheduler_service: Any):
+        """Set the SchedulerService for the tool registry.
+
+        Args:
+            scheduler_service (SchedulerService): The SchedulerService instance.
+        """
+        self.scheduler_service = scheduler_service
+
     def init_tools(self):
         """Initialize the registry with default tools.
 
@@ -1244,6 +1504,10 @@ class ToolRegistry:
         - get_credential: Retrieve a secret credential
         - list_credentials: List available credentials
         - run_browser_task: Perform a task using an automated browser
+        - schedule_task: Schedule a new task for an agent
+        - stop_schedule: Stop an active schedule for an agent
+        - list_schedules: List active schedules for an agent
+        - send_email_to_user: Send an email to the authenticated user
         """
         self.add_tool("get_page_html_content", get_page_html_content)
         self.add_tool("get_page_text_content", get_page_text_content)
@@ -1269,11 +1533,37 @@ class ToolRegistry:
         if self.credential_manager:
             self.add_tool("get_credential", get_credential_tool(self.credential_manager))
             self.add_tool("list_credentials", list_credentials_tool(self.credential_manager))
-            if self.model_configuration:  # Ensure model_configuration is set
-                self.add_tool("run_browser_task", run_browser_task_tool(self.model_configuration))
-            else:
-                # Optionally log a warning or skip adding the tool if model_config is None
-                print("Warning: ModelConfiguration not set, skipping run_browser_task tool.")
+
+        if self.model_configuration:  # Ensure model_configuration is set
+            self.add_tool("run_browser_task", run_browser_task_tool(self.model_configuration))
+        else:
+            # Optionally log a warning or skip adding the tool if model_config is None
+            print("Warning: ModelConfiguration not set, skipping run_browser_task tool.")
+
+        if self.agent_registry:  # Ensure agent_registry is set
+            self.add_tool(
+                "schedule_task",
+                schedule_task_tool(
+                    self,
+                    self.agent_registry,
+                    self.scheduler_service,
+                ),
+            )
+            self.add_tool(
+                "stop_schedule",
+                stop_schedule_tool(
+                    self,
+                    self.agent_registry,
+                    self.scheduler_service,
+                ),
+            )
+            self.add_tool("list_schedules", list_schedules_tool(self.agent_registry))
+        else:
+            print("Warning: AgentRegistry not set, skipping schedule tools.")
+
+        # Add send_email_to_user tool if Radient client and API key are available
+        if self.radient_client and self.radient_client.api_key:
+            self.add_tool("send_email_to_user", send_email_to_user_tool(self.radient_client))
 
     def add_tool(self, name: str, tool: Callable[..., Any]):
         """Add a new tool to the registry.

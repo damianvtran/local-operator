@@ -5,6 +5,7 @@ This module contains the FastAPI route handlers for chat-related endpoints.
 """
 
 import logging
+from typing import TYPE_CHECKING  # Added
 
 from fastapi import APIRouter, Depends, HTTPException, Path
 from fastapi.encoders import jsonable_encoder
@@ -16,12 +17,15 @@ from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.jobs import JobManager
+
+# from local_operator.scheduler_service import SchedulerService # Moved to TYPE_CHECKING
 from local_operator.server.dependencies import (
     get_agent_registry,
     get_config_manager,
     get_credential_manager,
     get_env_config,
     get_job_manager,
+    get_scheduler_service,
     get_websocket_manager,
 )
 from local_operator.server.models.schemas import (
@@ -42,6 +46,10 @@ from local_operator.server.utils.job_processor_queue import (
 from local_operator.server.utils.operator import create_operator
 from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import ConversationRecord
+
+if TYPE_CHECKING:
+    from local_operator.scheduler_service import SchedulerService
+
 
 router = APIRouter(tags=["Chat"])
 logger = logging.getLogger("local_operator.server.routes.chat")
@@ -320,6 +328,9 @@ async def chat_async_endpoint(
     job_manager: JobManager = Depends(get_job_manager),
     websocket_manager: WebSocketManager = Depends(get_websocket_manager),
     env_config: EnvConfig = Depends(get_env_config),
+    scheduler_service: "SchedulerService" = Depends(
+        get_scheduler_service
+    ),  # Changed to string literal
 ):
     """
     Process a chat request asynchronously and return a job ID.
@@ -371,6 +382,7 @@ async def chat_async_endpoint(
             ),
             job_manager=job_manager,
             websocket_manager=websocket_manager,
+            scheduler_service=scheduler_service,
         )
 
         # Return job information
@@ -439,6 +451,9 @@ async def chat_with_agent_async(
     job_manager: JobManager = Depends(get_job_manager),
     websocket_manager: WebSocketManager = Depends(get_websocket_manager),
     env_config: EnvConfig = Depends(get_env_config),
+    scheduler_service: "SchedulerService" = Depends(
+        get_scheduler_service
+    ),  # Changed to string literal
     agent_id: str = Path(
         ..., description="ID of the agent to use for the chat", examples=["agent123"]
     ),
@@ -502,6 +517,7 @@ async def chat_with_agent_async(
             ),
             job_manager=job_manager,
             websocket_manager=websocket_manager,
+            scheduler_service=scheduler_service,
         )
 
         # Return job information

@@ -15,6 +15,7 @@ from pydantic import SecretStr
 
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
+from local_operator.console import VerbosityLevel
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.executor import ExecutorInitError
@@ -22,6 +23,8 @@ from local_operator.jobs import JobManager
 from local_operator.mocks import ChatMock
 from local_operator.model.configure import ModelConfiguration
 from local_operator.model.registry import ModelInfo
+from local_operator.operator import OperatorType
+from local_operator.scheduler_service import SchedulerService
 from local_operator.server.app import app
 from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import (
@@ -203,6 +206,20 @@ def test_app_client(temp_dir):
     mock_agent_registry = AgentRegistry(config_dir=temp_dir, refresh_interval=1.0)
     mock_job_manager = JobManager()
     mock_websocket_manager = WebSocketManager()
+    mock_env_config = EnvConfig(
+        radient_api_base_url="https://api.radienthq.com/v1",
+    )
+    mock_scheduler_service = SchedulerService(
+        agent_registry=mock_agent_registry,
+        job_manager=mock_job_manager,
+        config_manager=mock_config_manager,
+        credential_manager=mock_credential_manager,
+        env_config=mock_env_config,
+        operator_type=OperatorType.SERVER,
+        websocket_manager=mock_websocket_manager,
+        verbosity_level=VerbosityLevel.QUIET,
+    )
+    _ = mock_scheduler_service.start()
 
     mock_credential_manager.get_credential = lambda key: SecretStr("test-credential")
 
@@ -211,9 +228,8 @@ def test_app_client(temp_dir):
     app.state.agent_registry = mock_agent_registry
     app.state.job_manager = mock_job_manager
     app.state.websocket_manager = mock_websocket_manager
-    app.state.env_config = EnvConfig(
-        radient_api_base_url="https://api.radienthq.com/v1",
-    )
+    app.state.env_config = mock_env_config
+    app.state.scheduler_service = mock_scheduler_service
 
     # Create and yield the test client
     transport = ASGITransport(app=app)

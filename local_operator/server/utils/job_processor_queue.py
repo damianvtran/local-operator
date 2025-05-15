@@ -10,16 +10,22 @@ import asyncio
 import logging
 import multiprocessing
 from multiprocessing import Process, Queue
-from typing import Callable, List, Optional
+from typing import TYPE_CHECKING, Callable, List, Optional  # Added TYPE_CHECKING
+from uuid import UUID
 
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.jobs import JobContext, JobContextRecord, JobManager, JobStatus
+
+# from local_operator.scheduler_service import SchedulerService # Moved to TYPE_CHECKING
 from local_operator.server.utils.operator import create_operator
 from local_operator.server.utils.websocket_manager import WebSocketManager
-from local_operator.types import ConversationRecord
+from local_operator.types import ConversationRecord, Schedule
+
+if TYPE_CHECKING:
+    from local_operator.scheduler_service import SchedulerService
 
 logger = logging.getLogger("local_operator.server.utils.job_processor_queue")
 
@@ -90,6 +96,7 @@ def run_job_in_process_with_queue(
                     agent_registry=agent_registry,
                     job_id=job_id,
                     env_config=env_config,
+                    status_queue=status_queue,
                 )
 
                 # Set the status queue on the executor for execution state updates
@@ -238,6 +245,7 @@ def run_agent_job_in_process_with_queue(
                     persist_conversation=persist_conversation,
                     job_id=job_id,
                     env_config=env_config,
+                    status_queue=status_queue,
                 )
 
                 # Set the status queue on the executor for execution state updates
@@ -281,6 +289,7 @@ def create_and_start_job_process_with_queue(
     args: tuple[object, ...],
     job_manager: JobManager,
     websocket_manager: WebSocketManager,
+    scheduler_service: "SchedulerService",  # Changed to string literal
 ) -> Process:
     """
     Create and start a process for a job, and set up a queue monitor to update the job status.
@@ -322,7 +331,7 @@ def create_and_start_job_process_with_queue(
                     # Handle different message types
                     if isinstance(message, tuple):
                         # Check message format based on first element
-                        if len(message) >= 3 and isinstance(message[0], str):
+                        if len(message) >= 2 and isinstance(message[0], str):
                             msg_type = message[0]
 
                             if msg_type == "status_update" and len(message) == 4:
@@ -340,6 +349,44 @@ def create_and_start_job_process_with_queue(
                                 _, received_job_id, message = message
 
                                 await websocket_manager.broadcast_update(received_job_id, message)
+                            elif msg_type == "schedule_add" and len(message) == 2:
+                                # Schedule add message: (type, schedule)
+                                _, schedule = message
+
+                                if schedule is not None and isinstance(schedule, Schedule):
+                                    try:
+                                        scheduler_service.add_or_update_job(schedule)
+                                    except Exception as e:
+                                        logger.error(
+                                            f"Failed to add schedule via status_queue: {e}"
+                                        )
+                                else:
+                                    logger.error(
+                                        "schedule_add message did not contain a valid"
+                                        f"Schedule object: {schedule}"
+                                    )
+                            elif msg_type == "schedule_remove" and len(message) == 2:
+                                # Schedule remove message: (type, schedule_id)
+                                _, schedule_id = message
+
+                                if schedule_id is not None and (
+                                    isinstance(schedule_id, UUID) or isinstance(schedule_id, str)
+                                ):
+                                    try:
+                                        if isinstance(schedule_id, str):
+                                            schedule_id_uuid = UUID(schedule_id)
+                                        else:
+                                            schedule_id_uuid = schedule_id
+                                        scheduler_service.remove_job(schedule_id_uuid)
+                                    except Exception as e:
+                                        logger.error(
+                                            f"Failed to remove schedule via status_queue: {e}"
+                                        )
+                                else:
+                                    logger.error(
+                                        "schedule_remove message did not contain a valid"
+                                        f"schedule_id: {schedule_id}"
+                                    )
                         elif len(message) == 3:
                             # Legacy format: (job_id, status, result)
                             received_job_id, status, result = message

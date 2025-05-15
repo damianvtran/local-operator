@@ -228,6 +228,60 @@ class RadientListModelsResponse(BaseModel):
         return super().model_dump(*args, **kwargs)
 
 
+# Email Sending Models
+class RadientSendEmailRequest(BaseModel):
+    """Request model for sending an email to self.
+
+    Attributes:
+        subject (str): The subject of the email.
+        body (str): The body of the email (can be HTML or plain text).
+    """
+
+    subject: str
+    body: str
+    model_config = {"extra": "allow"}
+
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        return super().model_dump(*args, **kwargs)
+
+
+class RadientSendEmailResponseData(BaseModel):
+    """Data part of the response when sending an email to self.
+
+    Attributes:
+        message (str): Confirmation message.
+        message_id (Optional[str]): Message ID from the email provider, if available.
+    """
+
+    message: str
+    message_id: Optional[str] = None
+    model_config = {"extra": "allow"}
+
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        return super().model_dump(*args, **kwargs)
+
+
+class RadientSendEmailAPIResponse(BaseModel):
+    """Overall API response structure for sending an email.
+
+    Attributes:
+        result (RadientSendEmailResponseData): The actual email sending result.
+        error (Optional[str]): Error message if any.
+        msg (Optional[str]): Additional message if any.
+    """
+
+    result: Optional[RadientSendEmailResponseData] = None
+    error: Optional[str] = None
+    msg: Optional[str] = None
+    model_config = {"extra": "allow"}
+
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        return super().model_dump(*args, **kwargs)
+
+
 class RadientClient:
     """Client for interacting with the Radient API.
 
@@ -746,3 +800,45 @@ class RadientClient:
                 f"Failed to delete agent from Radient Agent Hub: {str(e)}, "
                 f"Response Body: {error_body}"
             ) from e
+
+    def send_email_to_self(self, subject: str, body: str) -> RadientSendEmailResponseData:
+        """Send an email to the authenticated user's email address.
+
+        Args:
+            subject (str): The subject of the email.
+            body (str): The body of the email (can be HTML or plain text).
+
+        Returns:
+            RadientSendEmailResponseData: Response data containing confirmation message.
+
+        Raises:
+            RuntimeError: If the API key is not set or the request fails.
+        """
+        url = f"{self.base_url}/email/self/send"  # Corrected path based on OpenAPI
+        headers = self._get_headers(require_api_key=True)
+        payload = RadientSendEmailRequest(subject=subject, body=body).dict()
+
+        try:
+            response = requests.post(url, headers=headers, json=payload)
+            response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+            api_response_data = response.json()
+            api_response = RadientSendEmailAPIResponse.model_validate(api_response_data)
+
+            if api_response.error:
+                raise RuntimeError(
+                    f"Failed to send email: {api_response.error} - {api_response.msg}"
+                )
+            if not api_response.result:
+                raise RuntimeError("Failed to send email: No result data in response.")
+            return api_response.result
+        except requests.exceptions.RequestException as e:
+            error_body = (
+                e.response.content.decode()
+                if hasattr(e, "response") and e.response
+                else "No response body"
+            )
+            raise RuntimeError(
+                f"Failed to send email: {str(e)}, Response Body: {error_body}"
+            ) from e
+        except Exception as e:
+            raise RuntimeError(f"Failed to send email: {str(e)}") from e

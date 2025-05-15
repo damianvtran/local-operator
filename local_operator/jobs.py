@@ -151,7 +151,12 @@ class JobManager:
         self._processes: Dict[str, Process] = {}
 
     async def create_job(
-        self, prompt: str, model: str, hosting: str, agent_id: Optional[str] = None
+        self,
+        prompt: str,
+        model: str,
+        hosting: str,
+        agent_id: Optional[str] = None,
+        job_id: Optional[str] = None,  # Added optional job_id
     ) -> Job:
         """
         Create a new job and add it to the manager.
@@ -161,11 +166,20 @@ class JobManager:
             model: The model being used
             hosting: The hosting provider
             agent_id: Optional ID of the associated agent
+            job_id: Optional ID to use for the job. If None, a new UUID is generated.
 
         Returns:
             The created Job object
         """
-        job = Job(prompt=prompt, model=model, hosting=hosting, agent_id=agent_id)
+        # Use provided job_id or generate a new one
+        effective_job_id = job_id if job_id else str(uuid.uuid4())
+        job = Job(
+            id=effective_job_id,  # Use effective_job_id
+            prompt=prompt,
+            model=model,
+            hosting=hosting,
+            agent_id=agent_id,
+        )
 
         async with self._lock:
             self.jobs[job.id] = job

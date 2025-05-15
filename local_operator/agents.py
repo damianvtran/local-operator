@@ -3,7 +3,7 @@ import importlib
 import inspect
 import json
 import logging
-import os
+import os  # Added os
 import shutil
 import tempfile
 import time
@@ -19,6 +19,7 @@ import jsonlines
 import yaml
 from pydantic import BaseModel, Field
 
+from local_operator.types import Schedule  # Added Schedule
 from local_operator.types import (
     AgentState,
     CodeExecutionResult,
@@ -167,6 +168,7 @@ class AgentRegistry:
     - conversation.jsonl: Conversation history
     - execution_history.jsonl: Execution history
     - learnings.jsonl: Learnings from the conversation
+    - schedules.jsonl: Scheduled tasks for the agent
     - context.pkl: Agent context
     """
 
@@ -313,21 +315,17 @@ class AgentRegistry:
             self._agents.pop(agent_metadata.id)
             raise Exception(f"Failed to save agent metadata: {str(e)}")
 
-        # Create empty conversation.jsonl file
+        # Create empty data files
         try:
-            conversation_file = agent_dir / "conversation.jsonl"
-            if not conversation_file.exists():
-                conversation_file.touch()
-
-            # Create empty execution_history.jsonl file
-            execution_history_file = agent_dir / "execution_history.jsonl"
-            if not execution_history_file.exists():
-                execution_history_file.touch()
-
-            # Create empty learnings.jsonl file
-            learnings_file = agent_dir / "learnings.jsonl"
-            if not learnings_file.exists():
-                learnings_file.touch()
+            for filename in [
+                "conversation.jsonl",
+                "execution_history.jsonl",
+                "learnings.jsonl",
+                "schedules.jsonl",  # Added schedules.jsonl
+            ]:
+                file_path = agent_dir / filename
+                if not file_path.exists():
+                    file_path.touch()
         except Exception as e:
             # Clean up metadata if file creation fails
             self._agents.pop(agent_metadata.id)
@@ -471,6 +469,42 @@ class AgentRegistry:
             self.delete_agent(new_agent.id)
             raise Exception(f"Failed to copy agent files: {str(e)}")
 
+    def _load_schedules(self, agent_dir: Path) -> List[Schedule]:
+        """Load schedules from schedules.jsonl."""
+        schedules_file = agent_dir / "schedules.jsonl"
+        schedules: List[Schedule] = []
+        if schedules_file.exists() and schedules_file.stat().st_size > 0:
+            try:
+                with jsonlines.open(schedules_file, mode="r") as reader:
+                    for record in reader:
+                        schedules.append(Schedule.model_validate(record))
+            except Exception as e:
+                logging.error(f"Failed to load schedules from {schedules_file}: {str(e)}")
+        return schedules
+
+    def _save_schedules(self, agent_dir: Path, schedules: List[Schedule]) -> None:
+        """Save schedules to schedules.jsonl."""
+        schedules_file = agent_dir / "schedules.jsonl"
+
+        try:
+            # Ensure the directory exists
+            schedules_file.parent.mkdir(parents=True, exist_ok=True)
+
+            with open(schedules_file, "wb") as f_binary:  # Open in binary for fd
+                # Use a jsonlines writer that writes to the binary file object
+                # We need to encode to bytes before writing
+                with jsonlines.Writer(f_binary) as writer:
+                    for schedule_item in schedules:
+                        # jsonlines.Writer expects dicts, not already encoded json strings
+                        # model_dump(mode="json") returns a dict suitable for json.dumps
+                        # but jsonlines handles the serialization to json string and then to bytes.
+                        writer.write(schedule_item.model_dump(mode="json"))
+
+        except Exception as e:
+            logging.error(f"Failed to save schedules to {schedules_file}: {str(e)}")
+            # Optionally, re-raise or handle more gracefully
+            raise Exception(f"Failed to save schedules: {str(e)}") from e
+
     def _refresh_if_needed(self) -> None:
         """
         Refresh agent metadata from disk if the refresh interval has elapsed.
@@ -572,6 +606,7 @@ class AgentRegistry:
         - conversation.jsonl: Conversation history
         - execution_history.jsonl: Execution history
         - learnings.jsonl: Learnings from the conversation
+        - schedules.jsonl: Scheduled tasks
 
         Args:
             agent_id (str): The unique identifier of the agent.
@@ -594,6 +629,7 @@ class AgentRegistry:
         conversation_records = []
         execution_history_records = []
         learnings_list = []
+        schedules_list: List[Schedule] = []  # Initialize schedules list
         current_plan = None
         instruction_details = None
         agent_system_prompt = ""
@@ -634,6 +670,9 @@ class AgentRegistry:
                 except Exception as e:
                     logging.error(f"Failed to load learnings: {str(e)}")
 
+            # Load schedules
+            schedules_list = self._load_schedules(agent_dir)
+
             # Load plan and instruction details if they exist
             plan_file = agent_dir / "current_plan.txt"
             if plan_file.exists():
@@ -662,6 +701,7 @@ class AgentRegistry:
             conversation=conversation_records,
             execution_history=execution_history_records,
             learnings=learnings_list,
+            schedules=schedules_list,  # Pass loaded schedules
             current_plan=current_plan,
             instruction_details=instruction_details,
             agent_system_prompt=agent_system_prompt,
@@ -679,6 +719,7 @@ class AgentRegistry:
         - conversation.jsonl: Conversation history
         - execution_history.jsonl: Execution history
         - learnings.jsonl: Learnings from the conversation
+        - schedules.jsonl: Scheduled tasks
         - current_plan.txt: Current plan text
         - instruction_details.txt: Instruction details text
 
@@ -710,6 +751,9 @@ class AgentRegistry:
             with jsonlines.open(learnings_file, mode="w") as writer:
                 for learning in agent_state.learnings:
                     writer.write({"learning": learning})
+
+            # Save schedules
+            self._save_schedules(agent_dir, agent_state.schedules)
 
             # Save current plan if provided
             if agent_state.current_plan is not None:
@@ -803,6 +847,7 @@ class AgentRegistry:
                 conversation=conversation,
                 execution_history=execution_history,
                 learnings=[],
+                schedules=[],  # Add empty schedules for autosave
                 current_plan=None,
                 instruction_details=None,
                 agent_system_prompt="",
