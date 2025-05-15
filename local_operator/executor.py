@@ -39,8 +39,8 @@ from local_operator.console import (
     spinner_context,
 )
 from local_operator.helpers import (
-    clean_json_response,
     clean_plain_text_response,
+    process_json_response,
     remove_think_tags,
 )
 from local_operator.model.configure import ModelConfiguration, calculate_cost
@@ -153,29 +153,6 @@ def get_confirm_safety_result(response_content: str) -> ConfirmSafetyResult:
         return ConfirmSafetyResult.UNSAFE
     else:
         return ConfirmSafetyResult.SAFE
-
-
-def process_json_response(response_str: str) -> ResponseJsonSchema:
-    """Process and validate a JSON response string from the language model.
-
-    Args:
-        response_str (str): Raw response string from the model, which may be wrapped in
-            markdown-style JSON code block delimiters (```json) or provided as a plain JSON object.
-
-    Returns:
-        ResponseJsonSchema: Validated response object containing the model's output.
-            See ResponseJsonSchema class for the expected schema.
-
-    Raises:
-        ValidationError: If the JSON response does not match the expected schema.
-        ValueError: If no valid JSON object can be extracted from the response.
-    """
-    response_content = clean_json_response(response_str)
-
-    # Validate the JSON response
-    response_json = ResponseJsonSchema.model_validate_json(response_content)
-
-    return response_json
 
 
 def get_context_vars_str(context_vars: Dict[str, Any]) -> str:
@@ -2564,6 +2541,7 @@ class LocalCodeExecutor:
             cwd = "Unknown or deleted directory, please move to a valid directory"
 
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        current_time_zone = datetime.now().astimezone().tzname()
         git_status = self._get_git_status()
         directory_tree = self.format_directory_tree(list_working_directory())
         context_vars = get_context_vars_str(self.context)
@@ -2571,6 +2549,7 @@ class LocalCodeExecutor:
         return f"""
 Current working directory: {cwd}
 Current time: {current_time}
+Current time zone: {current_time_zone}
 <git_status>
 {git_status}
 </git_status>
@@ -2686,6 +2665,23 @@ Current time: {current_time}
 
         return "\n".join(lines)
 
+    def get_agent_info(self) -> str:
+        """Get the agent info for the current conversation.
+
+        Returns:
+            str: Formatted string containing agent info
+        """
+        if not self.agent:
+            return ""
+
+        agent_info = f"""
+Agent ID: {self.agent.id}
+Agent Name: {self.agent.name}
+Agent Description: {self.agent.description}
+Agent Created At: {self.agent.created_date}
+"""
+        return agent_info
+
     def update_ephemeral_messages(self) -> None:
         """Add environment details and other ephemeral messages to the conversation history.
 
@@ -2727,8 +2723,36 @@ Current time: {current_time}
         # Add instruction details to the latest message
         instruction_details = self.get_instruction_details()
 
+        # Add agent info such as ID, name, description, and created date
+        agent_info = self.get_agent_info()
+
         # Add available agents to the latest message
         available_agents = self.get_available_agents_str()
+
+        # Format active schedules
+        active_schedules_details_list = []
+        if self.agent_state.schedules:
+            for schedule in self.agent_state.schedules:
+                if schedule.is_active:
+                    start_info = (
+                        f" starting at {schedule.start_time_utc.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+                        if schedule.start_time_utc
+                        else ""
+                    )
+                    end_info = (
+                        f" ending at {schedule.end_time_utc.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+                        if schedule.end_time_utc
+                        else ""
+                    )
+                    active_schedules_details_list.append(
+                        f'- ID: {schedule.id}, Prompt: "{schedule.prompt}", Runs every {schedule.interval} {schedule.unit.value}{start_info}{end_info}'  # noqa: E501
+                    )
+
+        active_schedules_details = (
+            "\n".join(active_schedules_details_list)
+            if active_schedules_details_list
+            else "No active schedules."
+        )
 
         # "Heads up display" for the agent
         hud_message = AgentHeadsUpDisplayPrompt.format(
@@ -2737,6 +2761,8 @@ Current time: {current_time}
             current_plan_details=current_plan_details,
             instruction_details=instruction_details,
             available_agents=available_agents,
+            active_schedules_details=active_schedules_details,
+            agent_info=agent_info,
         )
 
         self.append_to_history(
@@ -2870,3 +2896,27 @@ Current time: {current_time}
                     self.status_queue.put(("execution_update", self.job_id, new_code_record))
             except Exception as e:
                 print(f"Failed to update job execution state: {e}")
+
+    def tool_execution_callback(self, tool_name: str, tool_result: Any) -> None:
+        """Callback for tool execution.  Bridges the boundary between the job execution
+        environment and the server environment.
+
+        Args:
+            tool_name (str): The name of the tool that was executed
+            tool_result (str): The result of the tool execution
+        """
+
+        if tool_name == "schedule_task":
+            if self.agent_registry and self.agent:
+                self.agent_state.schedules.append(tool_result)
+                self.agent_registry.save_agent_state(self.agent.id, self.agent_state)
+        elif tool_name == "stop_schedule":
+            if self.agent_registry and self.agent:
+                self.agent_state.schedules = [
+                    schedule
+                    for schedule in self.agent_state.schedules
+                    if schedule.id != tool_result
+                ]
+                self.agent_registry.save_agent_state(self.agent.id, self.agent_state)
+        else:
+            print(f"Unknown tool name: {tool_name}")

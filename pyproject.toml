@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.11.4"
+version = "0.12.0"
 description = "A Python-based agent for local command execution"
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damian@local-operator.com" }]
@@ -35,6 +35,7 @@ dependencies = [
     "jsonlines",
     "python-multipart",
     "browser-use",
+    "apscheduler",
     # Constraints
     "certifi>=2024.7.4",
     "configobj>=5.0.9",

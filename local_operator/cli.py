@@ -36,7 +36,10 @@ from local_operator.console import VerbosityLevel  # Import VerbosityLevel
 from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config
 from local_operator.helpers import setup_cross_platform_environment
+from local_operator.jobs import JobManager  # Added
 from local_operator.operator import OperatorType
+from local_operator.scheduler_service import SchedulerService  # Added
+from local_operator.server.utils.websocket_manager import WebSocketManager  # Added
 
 CLI_DESCRIPTION = """
     Local Operator - An environment for agentic AI models to perform tasks on the local device.
@@ -742,13 +745,33 @@ def main() -> int:
         verbosity = VerbosityLevel.DEBUG if args.debug else VerbosityLevel.VERBOSE
 
         # Initialize the operator using the bootstrap function
+        scheduler_service: Optional[SchedulerService] = (
+            None  # Initialize scheduler_service variable
+        )
         try:
+            # First, create the SchedulerService instance
+            # Instantiate JobManager and WebSocketManager for CLI context
+            job_manager = JobManager()
+            websocket_manager = WebSocketManager()  # Will be unused but needed for constructor
+
+            scheduler_service = SchedulerService(
+                agent_registry=agent_registry,
+                config_manager=config_manager,
+                credential_manager=credential_manager,
+                env_config=env_config,
+                operator_type=OperatorType.CLI,
+                verbosity_level=verbosity,
+                job_manager=job_manager,  # Added
+                websocket_manager=websocket_manager,  # Added
+            )
+
             operator = initialize_operator(
                 operator_type=OperatorType.CLI,
                 config_manager=config_manager,
                 credential_manager=credential_manager,
                 agent_registry=agent_registry,
                 env_config=env_config,
+                scheduler_service=scheduler_service,  # Pass the created scheduler_service
                 current_agent=current_agent,
                 persist_conversation=training_mode,
                 auto_save_conversation=auto_save_active,
@@ -758,14 +781,23 @@ def main() -> int:
             print(f"\n\033[1;31mError initializing operator: {e}\033[0m")
             return -1
 
-        # Start the async chat interface or execute single command
-        if single_execution_mode:
-            _, final_response = asyncio.run(operator.execute_single_command(args.command))
-            if final_response:
-                print(final_response)
-            return 0
-        else:
-            asyncio.run(operator.chat())
+        # Create an async main function to handle operator and scheduler start
+        async def async_main_cli():
+            if scheduler_service:
+                await scheduler_service.start()  # Start the scheduler
+
+            # Start the async chat interface or execute single command
+            if single_execution_mode:
+                _, final_response = await operator.execute_single_command(args.command)
+                if final_response:
+                    print(final_response)
+            else:
+                await operator.chat()
+
+            if scheduler_service:  # Shutdown scheduler gracefully
+                await scheduler_service.shutdown()
+
+        asyncio.run(async_main_cli())  # Run the new async main
 
         return 0
     except Exception as e:

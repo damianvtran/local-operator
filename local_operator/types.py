@@ -1,11 +1,12 @@
 """Types module containing enums and type definitions used throughout the local-operator package."""
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
+from uuid import UUID, uuid4  # Added UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator  # Added validator
 
 
 class ConversationRole(str, Enum):
@@ -363,3 +364,62 @@ class AgentState(BaseModel):
         None, description="The details of the instructions for the agent"
     )
     agent_system_prompt: str | None = Field(None, description="The system prompt for the agent")
+    schedules: List["Schedule"] = Field(
+        default_factory=list, description="The list of scheduled tasks for the agent"
+    )
+
+
+class ScheduleUnit(str, Enum):
+    """Enum representing the units for a schedule interval."""
+
+    MINUTES = "minutes"
+    HOURS = "hours"
+    DAYS = "days"
+
+
+class Schedule(BaseModel):
+    """Model representing a scheduled task for an agent."""
+
+    id: UUID = Field(default_factory=uuid4)
+    agent_id: UUID
+    prompt: str
+    interval: int
+    unit: ScheduleUnit
+    start_time_utc: Optional[datetime] = (
+        None  # Specifies the earliest time the task should start, UTC-aware
+    )
+    end_time_utc: Optional[datetime] = (
+        None  # Specifies the time after which the task should no longer run, UTC-aware
+    )
+    last_run_at: Optional[datetime] = None  # Should be UTC-aware
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))  # UTC-aware
+    is_active: bool = True
+    next_run_at: Optional[datetime] = None  # Informational, UTC-aware
+    one_time: bool = False  # If true, the task runs once at start_time_utc
+
+    @validator(
+        "start_time_utc",
+        "end_time_utc",
+        "last_run_at",
+        "created_at",
+        "next_run_at",
+        pre=True,
+        always=True,
+    )
+    def ensure_datetime_utc(cls, v):
+        if v is None:
+            return v
+        if isinstance(v, str):  # Handle ISO format strings
+            v = datetime.fromisoformat(v)
+        if isinstance(v, datetime) and v.tzinfo is None:
+            return v.replace(tzinfo=timezone.utc)  # Make naive datetimes UTC-aware
+        if isinstance(v, datetime) and v.tzinfo != timezone.utc:
+            return v.astimezone(timezone.utc)  # Convert other timezones to UTC
+        return v
+
+    @validator("end_time_utc")
+    def check_end_time_after_start_time(cls, v, values):
+        if v is not None and values.get("start_time_utc") is not None:
+            if v <= values["start_time_utc"]:
+                raise ValueError("end_time_utc must be after start_time_utc")
+        return v

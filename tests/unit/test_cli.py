@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 from pathlib import Path  # Add Path import
 from unittest.mock import MagicMock, patch
@@ -94,6 +95,14 @@ def mock_operator():
     operator = MagicMock()
     operator.chat = MagicMock()
     return operator
+
+
+@pytest.fixture
+def mock_scheduler_service():
+    scheduler_service = MagicMock()
+    scheduler_service.start = MagicMock()
+    scheduler_service.shutdown = MagicMock()
+    return scheduler_service
 
 
 def test_build_cli_parser():
@@ -194,10 +203,14 @@ def test_serve_command():
         assert result == 0
 
 
-def test_main_success(mock_operator, mock_agent_registry, mock_agent):
-    # Mock the get_env_config function
+def test_main_success(mock_operator, mock_agent_registry, mock_agent, mock_scheduler_service):
+    """
+    Test the main function for a successful CLI run.
+
+    Ensures that the main function initializes all components, sets up the environment,
+    and calls asyncio.run with the async_main_cli coroutine.
+    """
     with patch("local_operator.cli.get_env_config") as mock_get_env_config:
-        # Configure the mock env_config object
         mock_env_config = MagicMock()
         mock_get_env_config.return_value = mock_env_config
 
@@ -206,22 +219,21 @@ def test_main_success(mock_operator, mock_agent_registry, mock_agent):
             patch("local_operator.cli.CredentialManager") as mock_credential_manager_cls,
             patch(
                 "local_operator.cli.initialize_operator", return_value=mock_operator
-            ) as mock_initialize_operator,  # Patch initialize_operator
+            ) as mock_initialize_operator,
             patch("local_operator.cli.AgentRegistry", return_value=mock_agent_registry),
+            patch("local_operator.cli.SchedulerService", return_value=mock_scheduler_service),
             patch("local_operator.cli.asyncio.run") as mock_asyncio_run,
-            patch("local_operator.cli.os.chdir") as mock_chdir,  # Mock os.chdir
-            patch("local_operator.cli.Path.is_dir", return_value=True),  # Mock Path.is_dir
+            patch("local_operator.cli.os.chdir") as mock_chdir,
+            patch("local_operator.cli.Path.is_dir", return_value=True),
             patch("local_operator.cli.Path.resolve", return_value=Path("/test/dir")),
         ):
             mock_config_manager = mock_config_manager_cls.return_value
             mock_credential_manager = mock_credential_manager_cls.return_value
 
-            # Simulate config values
             mock_config_manager.get_config_value.side_effect = lambda key, default=None: {
                 "auto_save_conversation": True,
             }.get(key, default)
 
-            # Simulate agent found
             mock_agent_registry.get_agent_by_name.return_value = mock_agent
 
             with patch(
@@ -251,12 +263,18 @@ def test_main_success(mock_operator, mock_agent_registry, mock_agent):
                     credential_manager=mock_credential_manager,
                     agent_registry=mock_agent_registry,
                     env_config=mock_env_config,
+                    scheduler_service=mock_scheduler_service,
                     current_agent=mock_agent,
-                    persist_conversation=True,  # --train flag
-                    auto_save_conversation=True,  # auto_save_conversation is True
-                    verbosity_level=VerbosityLevel.VERBOSE,  # Default verbosity
+                    persist_conversation=True,
+                    auto_save_conversation=True,
+                    verbosity_level=VerbosityLevel.VERBOSE,
                 )
-                mock_asyncio_run.assert_called_once_with(mock_operator.chat())
+                assert mock_asyncio_run.call_count == 1
+                called_arg = mock_asyncio_run.call_args[0][0]
+                assert asyncio.iscoroutine(called_arg)
+
+                # Check that the coroutine is the async_main_cli function
+                assert called_arg.__name__ == "async_main_cli"
 
 
 def test_main_model_not_found():

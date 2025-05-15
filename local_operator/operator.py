@@ -1238,6 +1238,7 @@ class Operator:
 
         # Create a new Operator for the target agent
         try:
+            # Unpack the tuple returned by initialize_operator
             delegated_operator = initialize_operator(
                 operator_type=self.type,
                 config_manager=self.config_manager,
@@ -1407,3 +1408,32 @@ class Operator:
             max_learnings_history=self.config_manager.get_config_value("max_learnings_history", 50),
             file_path=notebook_path,
         )
+
+    async def process_message_for_agent(
+        self,
+        agent_id: uuid.UUID,
+        message_content: str,
+        schedule_id: uuid.UUID | None = None,
+    ) -> None:
+        """
+        Process a message for a specific agent, typically for scheduled tasks.
+        This method sets up the context for the target agent and runs the message.
+        """
+        try:
+            logging.info(f"Processing scheduled task for agent {agent_id}")
+
+            # Add a system message to indicate this is a scheduled task
+            scheduled_task_indicator = (
+                f"This is an automated task triggered by schedule ID: {schedule_id}. "
+                f"Execute the following prompt: {message_content}"
+            )
+
+            # Use handle_user_input to process the task
+            # We might need a more direct way to inject and process non-interactive tasks
+            # For now, this simulates user input.
+            await self.handle_user_input(scheduled_task_indicator)
+
+            logging.info(f"Finished processing scheduled task for agent {agent_id}")
+
+        except Exception as e:
+            logging.error(f"Error processing message for agent {agent_id}: {str(e)}")
