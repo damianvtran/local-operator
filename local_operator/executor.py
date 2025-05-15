@@ -2665,6 +2665,23 @@ Current time zone: {current_time_zone}
 
         return "\n".join(lines)
 
+    def get_agent_info(self) -> str:
+        """Get the agent info for the current conversation.
+
+        Returns:
+            str: Formatted string containing agent info
+        """
+        if not self.agent:
+            return ""
+
+        agent_info = f"""
+Agent ID: {self.agent.id}
+Agent Name: {self.agent.name}
+Agent Description: {self.agent.description}
+Agent Created At: {self.agent.created_date}
+"""
+        return agent_info
+
     def update_ephemeral_messages(self) -> None:
         """Add environment details and other ephemeral messages to the conversation history.
 
@@ -2706,6 +2723,9 @@ Current time zone: {current_time_zone}
         # Add instruction details to the latest message
         instruction_details = self.get_instruction_details()
 
+        # Add agent info such as ID, name, description, and created date
+        agent_info = self.get_agent_info()
+
         # Add available agents to the latest message
         available_agents = self.get_available_agents_str()
 
@@ -2741,7 +2761,8 @@ Current time zone: {current_time_zone}
             current_plan_details=current_plan_details,
             instruction_details=instruction_details,
             available_agents=available_agents,
-            active_schedules_details=active_schedules_details,  # Added this
+            active_schedules_details=active_schedules_details,
+            agent_info=agent_info,
         )
 
         self.append_to_history(

@@ -2154,6 +2154,12 @@ This is a set of guidelines about how to best complete the current task or respo
 {instruction_details}
 </instruction_details>
 
+## Your Agent Info
+This is information about you.  Use it to help you complete tasks that might require your agent ID, or to include context about your identity in your responses.
+<your_agent_info>
+{agent_info}
+</your_agent_info>
+
 ## Available Agents
 This is a list of the agents that are available to you.  You can use them with the DELEGATE action to help you complete the current task.  Review their names and descriptions to help you decide if there is an agent that is best suited to handle this part of the task.
 <available_agents>
