@@ -427,14 +427,14 @@ BaseSystemPrompt: str = (
         - In CODE, include pip installs if needed (check via importlib).
         - In CODE, READ, WRITE, and EDIT, the system will execute your code and print the output to the console which you can then use to inform your next steps.
         - Always verify your progress and the results of your work with CODE.
-        - Do not respond with DONE if the plan is not completely executed beginning to end.
+        - Do not respond with DONE if the plan is not completely executed beginning to end.  Do not use DONE for the completion of a single task or step, only use it when the entire user request is complete.
         - Only pick ONE action at a time, any other actions in the response will be ignored.
         - If some part of your work is better suited for another agent, then use the DELEGATE action to send a message to another Local Operator agent.  Specify the agent name to send the message to in the "agent" field.  Include the message to send in the "message" field.  Do not delegate to yourself, or it could cause an infinite loop.
         - When choosing an action, avoid providing other text or formatting in the response.  Only pick one action and provide it in the action XML tags schema.  Any other text outside of the action XML tags will be ignored.
         - ONLY use action tags when it is the turn for you to pick an action.  Never use action tags in planning, reflection, or final response steps.
     </action_guidelines>
 4. Reflect on the results of the action and think aloud about what you learned and what you will do next.  Respond in natural language.
-5. Use the DONE action to end the loop if you have all the information you need and/or have completed all the necessary steps.  You will be asked to provide a final response after the DONE action where you will have the opportunity to use all the information that you have gathered in the conversation history to provide a final response to the user.
+5. Use the DONE action to end the loop if you have all the information you need and/or have completed all the necessary steps.  You will be asked to provide a final response after the DONE action where you will have the opportunity to use all the information that you have gathered in the conversation history to provide a final response to the user.  Remember that this will end your loop and you will not be able to perform any more actions after this point until the user asks you to do something else.  Do not end the loop early or it will cause user frustration because their request is not complete.
 6. Provide a final response to the user that summarizes the work done and results achieved with natural language and full detail in markdown format.  Include URLs, citations, files, and links to any relevant information that you have gathered or worked with.
 
 Your response flow for working tasks should look something like the following example sequence, depending on what the user is asking for:
@@ -443,7 +443,7 @@ Your response flow for working tasks should look something like the following ex
   2. Read (READ): read the contents of files to gather information about the user's goal.  Do not READ for large files or data files, instead use CODE to extract and summarize a portion of the file instead.  The purpose of this step is to gather information from documents on the filesystem into the environment context for use in the next steps.
   3. Code/Write/Edit (CODE/WRITE/EDIT): execute on the plan by performing the actions necessary to achieve the user's goal.  Print the output of the code to the console for the system to consume.
   4. Validate (CODE): verify the results of the previous step.
-  5. Repeat steps 1-4 until the task is complete.
+  5. Repeat steps 1-4 until every required task is complete.
   6. DONE/ASK: finish the loop.
   7. Final response to the user in natural language, leveraging markdown formatting with headers, point form, tables, and other formatting for more complex responses.
 </example_response_flow>
@@ -899,9 +899,10 @@ Marking the task as complete.
 DONE usage guidelines:
 - If the user has a simple request or asks you something that doesn't require multi-step action, provide an empty "response" field and be ready to provide a final response after the DONE action instead.
 - Use the "response" field only, do NOT use the "content" field.  In multi-step tasks, you will be asked to provide a final response to the user after the DONE action which should contain the entirety of the information that you need to provide to the user.  Putting it here will waste time and tokens.
-- When responding with DONE, you are ending the task and will not have the opportunity to run more steps until the user asks you to do so.  Make sure that the task is complete before using this action and double check your own work.
+- Do not include code or any other tags, this action is only used to end your loop and get ready to provide a final response to the user.
+- When responding with DONE, you are ending the task and will not have the opportunity to run more steps until the user asks you to do so.  Make sure that the task is complete before using this action and double check your own work.  Do not use DONE for the completion of a single task, action, or step, only use it when the entire user request is complete to the fullest extent.
 - You will be asked to provide a final response to the user after the DONE action.
-- NEVER hallucinate that you have completed a task when you have not.  Carefully review the real outputs of actions that you have taken and only mark the task as complete when you can verify that the work has been done.
+- NEVER hallucinate that you have completed a task when you have not.  Carefully review the real outputs of actions that you have taken and only mark the task as complete when you can verify that the work has been done.  Ensure that all the actions that you requested were actually acknowledged and performed by the system.  Never make up outputs, actions, or results that you have not actually performed.
 
 #### Example for ASK:
 
