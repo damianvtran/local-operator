@@ -2125,7 +2125,8 @@ This is information about the files, variables, and other details about the curr
 ### About Environment Details
 - git_status: this is the current git status of the working directory
 - directory_tree: this is a tree of the current working directory.  You can use this to see what files and directories are available to you right here.
-- execution_context_variables: this is a list of variables that are available for use in the current execution context.  You can use them in this step or future steps in the python code that you write to complete tasks.  Don't try to reuse any variables from previous steps that are not mentioned here.
+- execution_context_variables: this is a list of variables that are available for use in the current execution context.  You can use them in this step or future steps in the python code that you write to complete tasks.  Don't try to reuse any variables from previous steps that are not mentioned here.  Keep in mind (especially for recurring tasks) that some variables will be old and outdated from previous steps.  Don't assume that the variables are present related to the current task that you are working on unless you can see them in the recent conversation history immediately preceding this message.
+  - For example, if you see an `email_sent` variable, don't assume that this refers to the current task that you are working on unless you can see it in the recent conversation history related to the current task that the user has asked you to complete.  Don't conflate variables like this from previous user requests with the current user request, otherwise you will hallucinate the completion of tasks unnecessarily.
 
 <environment_details>
 {environment_details}
