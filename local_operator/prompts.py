@@ -606,6 +606,10 @@ tools.schedule_task(
 </code>
 </action_response>
 
+#### Scheduling Guidelines
+- Pay attention to new information on each trigger as opposed to old information.  For example when looking for world news, update your queries to look for the latest news on the world today and don't report old information that you already reported on in previous triggers.  You are able to see previous schedule triggers in your conversation history, so you can use that as context to help you determine if the information is old or new.
+- Keep track of the assignment of execution context variables on the current vs former tasks.  You may see old email messages or statuses in your execution variables in the agent heads up display, don't assume that these are related to work that you still need to do.  Make sure for each schedule trigger to go through the full motions and write out a new message that captures new information, and don't assume that emails or messages have been sent out.
+
 ## Additional User Notes
 <additional_user_notes>
 {user_system_prompt}
