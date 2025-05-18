@@ -15,6 +15,10 @@ from apscheduler.triggers.date import DateTrigger
 from local_operator.agents import AgentData  # Moved AgentData import
 from local_operator.agents import AgentRegistry
 from local_operator.bootstrap import initialize_operator
+from local_operator.clients.google_client import (
+    GoogleAPIError,
+    refresh_google_access_token,
+)
 from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel
 from local_operator.credentials import CredentialManager
@@ -37,6 +41,16 @@ from local_operator.types import (  # Kept Schedule and ScheduleUnit here
 )
 
 logger = logging.getLogger(__name__)
+
+# Constants for Google Credentials
+GOOGLE_CLIENT_ID_KEY = "GOOGLE_CLIENT_ID"
+GOOGLE_CLIENT_SECRET_KEY = "GOOGLE_CLIENT_SECRET"
+GOOGLE_ACCESS_TOKEN_KEY = "GOOGLE_ACCESS_TOKEN"
+GOOGLE_REFRESH_TOKEN_KEY = "GOOGLE_REFRESH_TOKEN"
+GOOGLE_TOKEN_EXPIRY_TIMESTAMP_KEY = "GOOGLE_TOKEN_EXPIRY_TIMESTAMP"
+GOOGLE_TOKEN_REFRESH_JOB_ID = "google_token_refresh_job"
+# Refresh every 45 minutes, Google access tokens typically last 1 hour (3600s)
+GOOGLE_TOKEN_REFRESH_CRON_MINUTES = "*/45"
 
 
 def _execute_scheduled_task_logic(
@@ -234,6 +248,121 @@ class SchedulerService:
         self.verbosity_level = verbosity_level
         self.job_manager = job_manager  # Added
         self.websocket_manager = websocket_manager  # Added
+
+    async def _execute_google_token_refresh_task(self) -> None:
+        """
+        Task executed by the scheduler to refresh Google OAuth tokens.
+        """
+        logger.info("Attempting to refresh Google OAuth access token...")
+        try:
+            client_id_secret = self.credential_manager.get_credential(GOOGLE_CLIENT_ID_KEY)
+            client_secret_secret = self.credential_manager.get_credential(GOOGLE_CLIENT_SECRET_KEY)
+            refresh_token_secret = self.credential_manager.get_credential(GOOGLE_REFRESH_TOKEN_KEY)
+
+            if not (client_id_secret and client_secret_secret and refresh_token_secret):
+                logger.warning(
+                    "Google client ID, client secret, or refresh token not found in credentials. "
+                    "Skipping token refresh."
+                )
+                # Optionally, remove the refresh job if essential credentials are missing
+                # self.scheduler.remove_job(GOOGLE_TOKEN_REFRESH_JOB_ID)
+                return
+
+            client_id = client_id_secret.get_secret_value()
+            client_secret = client_secret_secret.get_secret_value()
+            refresh_token = refresh_token_secret.get_secret_value()
+
+            if not all([client_id, client_secret, refresh_token]):
+                logger.warning(
+                    "Google OAuth credentials (client_id, client_secret, refresh_token) are empty. "
+                    "Skipping token refresh."
+                )
+                return
+
+            logger.debug("Retrieved Google credentials for token refresh.")
+
+            refresh_response = refresh_google_access_token(
+                client_id=client_id, client_secret=client_secret, refresh_token=refresh_token
+            )
+
+            new_access_token = refresh_response.get("access_token")
+            expires_in = refresh_response.get("expires_in")  # Seconds
+
+            if not new_access_token or expires_in is None:
+                logger.error(
+                    "Failed to get new access token or expiry from refresh response: %s",
+                    refresh_response,
+                )
+                return
+
+            # Calculate new expiry timestamp
+            # Add a small buffer (e.g., 60 seconds) to be safe
+            expiry_timestamp = int(datetime.now(timezone.utc).timestamp()) + expires_in - 60
+
+            self.credential_manager.set_credential(
+                GOOGLE_ACCESS_TOKEN_KEY, new_access_token, write=False
+            )
+            self.credential_manager.set_credential(
+                GOOGLE_TOKEN_EXPIRY_TIMESTAMP_KEY, str(expiry_timestamp), write=False
+            )
+            self.credential_manager.write_to_file()  # Persist all changes
+
+            logger.info(
+                "Successfully refreshed Google OAuth access token. New expiry (UTC): %s",
+                datetime.fromtimestamp(expiry_timestamp, tz=timezone.utc).isoformat(),
+            )
+
+        except GoogleAPIError as e:
+            logger.error(f"Google API error during token refresh: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Unexpected error during Google token refresh: {e}", exc_info=True)
+
+    def _schedule_google_token_refresh(self) -> None:
+        """
+        Schedules the Google token refresh job if the necessary credentials exist.
+        """
+        if not self.scheduler.running:
+            logger.error("Scheduler is not running. Cannot schedule Google token refresh.")
+            return
+
+        # Check if GOOGLE_REFRESH_TOKEN is set, as it's essential
+        refresh_token_secret = self.credential_manager.get_credential(GOOGLE_REFRESH_TOKEN_KEY)
+        if not (refresh_token_secret and refresh_token_secret.get_secret_value()):
+            logger.info(
+                "Google refresh token not found or empty. "
+                "Google token auto-refresh job will not be scheduled."
+            )
+            # If the job was previously scheduled and token removed, remove the job
+            if self.scheduler.get_job(GOOGLE_TOKEN_REFRESH_JOB_ID):
+                try:
+                    self.scheduler.remove_job(GOOGLE_TOKEN_REFRESH_JOB_ID)
+                    logger.info(
+                        "Removed existing Google token refresh job as token is now missing."
+                    )
+                except Exception as e_remove:
+                    logger.error(f"Failed to remove existing Google token refresh job: {e_remove}")
+            return
+
+        if self.scheduler.get_job(GOOGLE_TOKEN_REFRESH_JOB_ID):
+            logger.debug("Google token refresh job already scheduled.")
+            return
+
+        try:
+            self.scheduler.add_job(
+                self._execute_google_token_refresh_task,
+                trigger=CronTrigger(minute=GOOGLE_TOKEN_REFRESH_CRON_MINUTES, timezone="UTC"),
+                id=GOOGLE_TOKEN_REFRESH_JOB_ID,
+                name="Google OAuth Token Refresh",
+                replace_existing=True,
+                misfire_grace_time=300,  # 5 minutes
+                coalesce=True,
+            )
+            logger.info(
+                "Scheduled Google token refresh job with CRON expression: "
+                f"minute='{GOOGLE_TOKEN_REFRESH_CRON_MINUTES}'."
+            )
+        except Exception as e:
+            logger.error(f"Failed to schedule Google token refresh job: {e}", exc_info=True)
 
     async def _trigger_agent_task(
         self, agent_id_str: str, schedule_id_str: str, prompt: str
@@ -560,20 +689,36 @@ class SchedulerService:
 
     async def start(self) -> None:
         """
-        Starts the APScheduler and loads all existing active schedules.
+        Starts the APScheduler, loads all existing active schedules,
+        and schedules the Google token refresh job.
         """
         logger.debug("Starting SchedulerService...")
         if not self.scheduler.running:
-            self.scheduler.start()
-            logger.debug("APScheduler started. (is running: %s)", self.scheduler.running)
+            try:
+                self.scheduler.start(paused=False)  # Ensure it's not started in paused state
+                logger.debug("APScheduler started. (is running: %s)", self.scheduler.running)
+            except Exception as e:
+                logger.error(f"Failed to start APScheduler: {e}", exc_info=True)
+                return  # Cannot proceed if scheduler doesn't start
         else:
             logger.debug("APScheduler already running. (is running: %s)", self.scheduler.running)
 
+        # Schedule Google token refresh
+        self._schedule_google_token_refresh()
+
         # DEBUG: Log all jobs currently scheduled
         jobs = self.scheduler.get_jobs()
-        logger.debug("Current scheduled jobs at start: %s", jobs)
+        logger.debug("Current scheduled jobs at start (after Google refresh schedule): %s", jobs)
 
         await self.load_all_agent_schedules()
+
+    def add_google_token_refresh_job_if_needed(self) -> None:
+        """
+        Public method to explicitly try to add the Google token refresh job.
+        Useful if credentials are added after initial startup.
+        """
+        logger.info("Explicitly checking and scheduling Google token refresh job if needed.")
+        self._schedule_google_token_refresh()
 
     async def load_all_agent_schedules(self) -> None:
         """

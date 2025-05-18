@@ -20,6 +20,7 @@ from pydantic import SecretStr
 
 from local_operator.agents import AgentRegistry
 from local_operator.clients.fal import FalClient, FalImageGenerationResponse, ImageSize
+from local_operator.clients.google_client import GoogleAPIError, GoogleClient
 from local_operator.clients.radient import (
     RadientClient,
     RadientImageGenerationResponse,
@@ -32,6 +33,13 @@ from local_operator.credentials import CredentialManager
 from local_operator.mocks import ChatMock, ChatNoop
 from local_operator.model.configure import ModelConfiguration
 from local_operator.types import Schedule, ScheduleUnit
+
+# Constants for Google Credentials (matching scheduler_service.py)
+GOOGLE_CLIENT_ID_KEY = "GOOGLE_CLIENT_ID"
+GOOGLE_CLIENT_SECRET_KEY = "GOOGLE_CLIENT_SECRET"
+GOOGLE_ACCESS_TOKEN_KEY = "GOOGLE_ACCESS_TOKEN"
+GOOGLE_REFRESH_TOKEN_KEY = "GOOGLE_REFRESH_TOKEN"
+GOOGLE_TOKEN_EXPIRY_TIMESTAMP_KEY = "GOOGLE_TOKEN_EXPIRY_TIMESTAMP"
 
 
 def _get_git_ignored_files(gitignore_path: str) -> Set[str]:
@@ -1381,6 +1389,193 @@ def send_email_to_user_tool(
     return send_email_to_user
 
 
+# --- Gmail Tools ---
+
+
+def list_gmail_messages_tool(credential_manager: CredentialManager) -> Callable[..., str]:
+    """Factory to create the list_gmail_messages tool."""
+
+    def list_gmail_messages(
+        query: Optional[str] = None,
+        max_results: Optional[int] = None,
+        page_token: Optional[str] = None,
+    ) -> str:
+        """Lists messages in the user's Gmail mailbox.
+
+        Args:
+            query (Optional[str]): Query string to filter messages
+            (e.g., "from:example@example.com", "is:unread").
+            max_results (Optional[int]): Maximum number of messages to return.
+            page_token (Optional[str]): Token for pagination.
+
+        Returns:
+            str: JSON string of GmailListMessagesResponse or error message.
+        """
+        access_token_secret = credential_manager.get_credential(GOOGLE_ACCESS_TOKEN_KEY)
+        if not access_token_secret or not access_token_secret.get_secret_value():
+            return json.dumps({"error": "Google access token not found or empty."})
+        try:
+            client = GoogleClient(access_token_secret.get_secret_value())
+            response = client.list_gmail_messages(
+                query=query, max_results=max_results, page_token=page_token
+            )
+            return response.model_dump_json()
+        except GoogleAPIError as e:
+            return json.dumps(
+                {"error": f"Google API Error: {str(e)}", "status_code": e.status_code}
+            )
+        except Exception as e:
+            return json.dumps({"error": f"An unexpected error occurred: {str(e)}"})
+
+    return list_gmail_messages
+
+
+def get_gmail_message_tool(credential_manager: CredentialManager) -> Callable[..., str]:
+    """Factory to create the get_gmail_message tool."""
+
+    def get_gmail_message(message_id: str, format: str = "full") -> str:
+        """Gets the specified Gmail message.
+
+        Args:
+            message_id (str): The ID of the message to retrieve.
+            format (str): The format to return the message in
+            (e.g., "full", "metadata", "raw"). Defaults to "full".
+
+        Returns:
+            str: JSON string of GmailMessage or error message.
+        """
+        access_token_secret = credential_manager.get_credential(GOOGLE_ACCESS_TOKEN_KEY)
+        if not access_token_secret or not access_token_secret.get_secret_value():
+            return json.dumps({"error": "Google access token not found or empty."})
+        try:
+            client = GoogleClient(access_token_secret.get_secret_value())
+            response = client.get_gmail_message(message_id=message_id, format=format)
+            return response.model_dump_json()
+        except GoogleAPIError as e:
+            return json.dumps(
+                {"error": f"Google API Error: {str(e)}", "status_code": e.status_code}
+            )
+        except Exception as e:
+            return json.dumps({"error": f"An unexpected error occurred: {str(e)}"})
+
+    return get_gmail_message
+
+
+def create_gmail_draft_tool(credential_manager: CredentialManager) -> Callable[..., str]:
+    """Factory to create the create_gmail_draft tool."""
+
+    def create_gmail_draft(
+        to: List[str],
+        subject: str,
+        body: str,
+        cc: Optional[List[str]] = None,
+        bcc: Optional[List[str]] = None,
+        sender: Optional[str] = None,
+    ) -> str:
+        """Creates a new draft email in Gmail.
+
+        Args:
+            to (List[str]): List of recipient email addresses.
+            subject (str): The subject of the email.
+            body (str): The plain text body of the email.
+            cc (Optional[List[str]]): Optional list of CC recipient email addresses.
+            bcc (Optional[List[str]]): Optional list of BCC recipient email addresses.
+            sender (Optional[str]): Optional sender email address.
+
+        Returns:
+            str: JSON string of GmailDraft or error message.
+        """
+        access_token_secret = credential_manager.get_credential(GOOGLE_ACCESS_TOKEN_KEY)
+        if not access_token_secret or not access_token_secret.get_secret_value():
+            return json.dumps({"error": "Google access token not found or empty."})
+        try:
+            client = GoogleClient(access_token_secret.get_secret_value())
+            response = client.create_gmail_draft(
+                to=to, subject=subject, body=body, cc=cc, bcc=bcc, sender=sender
+            )
+            return response.model_dump_json()
+        except GoogleAPIError as e:
+            return json.dumps(
+                {"error": f"Google API Error: {str(e)}", "status_code": e.status_code}
+            )
+        except Exception as e:
+            return json.dumps({"error": f"An unexpected error occurred: {str(e)}"})
+
+    return create_gmail_draft
+
+
+def send_gmail_message_tool(credential_manager: CredentialManager) -> Callable[..., str]:
+    """Factory to create the send_gmail_message tool."""
+
+    def send_gmail_message(
+        to: List[str],
+        subject: str,
+        body: str,
+        cc: Optional[List[str]] = None,
+        bcc: Optional[List[str]] = None,
+        sender: Optional[str] = None,
+    ) -> str:
+        """Sends an email message directly using Gmail.
+
+        Args:
+            to (List[str]): List of recipient email addresses.
+            subject (str): The subject of the email.
+            body (str): The plain text body of the email.
+            cc (Optional[List[str]]): Optional list of CC recipient email addresses.
+            bcc (Optional[List[str]]): Optional list of BCC recipient email addresses.
+            sender (Optional[str]): Optional sender email address.
+
+        Returns:
+            str: JSON string of GmailMessage (representing the sent message) or error message.
+        """
+        access_token_secret = credential_manager.get_credential(GOOGLE_ACCESS_TOKEN_KEY)
+        if not access_token_secret or not access_token_secret.get_secret_value():
+            return json.dumps({"error": "Google access token not found or empty."})
+        try:
+            client = GoogleClient(access_token_secret.get_secret_value())
+            response = client.send_gmail_message(
+                to=to, subject=subject, body=body, cc=cc, bcc=bcc, sender=sender
+            )
+            return response.model_dump_json()
+        except GoogleAPIError as e:
+            return json.dumps(
+                {"error": f"Google API Error: {str(e)}", "status_code": e.status_code}
+            )
+        except Exception as e:
+            return json.dumps({"error": f"An unexpected error occurred: {str(e)}"})
+
+    return send_gmail_message
+
+
+def send_gmail_draft_tool(credential_manager: CredentialManager) -> Callable[..., str]:
+    """Factory to create the send_gmail_draft tool."""
+
+    def send_gmail_draft(draft_id: str) -> str:
+        """Sends an existing Gmail draft message.
+
+        Args:
+            draft_id (str): The ID of the draft to send.
+
+        Returns:
+            str: JSON string of GmailMessage (representing the sent message) or error message.
+        """
+        access_token_secret = credential_manager.get_credential(GOOGLE_ACCESS_TOKEN_KEY)
+        if not access_token_secret or not access_token_secret.get_secret_value():
+            return json.dumps({"error": "Google access token not found or empty."})
+        try:
+            client = GoogleClient(access_token_secret.get_secret_value())
+            response = client.send_gmail_draft(draft_id=draft_id)
+            return response.model_dump_json()
+        except GoogleAPIError as e:
+            return json.dumps(
+                {"error": f"Google API Error: {str(e)}", "status_code": e.status_code}
+            )
+        except Exception as e:
+            return json.dumps({"error": f"An unexpected error occurred: {str(e)}"})
+
+    return send_gmail_draft
+
+
 class ToolRegistry:
     """Registry for tools that can be used by agents.
 
@@ -1533,6 +1728,12 @@ class ToolRegistry:
         if self.credential_manager:
             self.add_tool("get_credential", get_credential_tool(self.credential_manager))
             self.add_tool("list_credentials", list_credentials_tool(self.credential_manager))
+            # Add Gmail tools if credential manager is available
+            self.add_tool("list_gmail_messages", list_gmail_messages_tool(self.credential_manager))
+            self.add_tool("get_gmail_message", get_gmail_message_tool(self.credential_manager))
+            self.add_tool("create_gmail_draft", create_gmail_draft_tool(self.credential_manager))
+            self.add_tool("send_gmail_message", send_gmail_message_tool(self.credential_manager))
+            self.add_tool("send_gmail_draft", send_gmail_draft_tool(self.credential_manager))
 
         if self.model_configuration:  # Ensure model_configuration is set
             self.add_tool("run_browser_task", run_browser_task_tool(self.model_configuration))
