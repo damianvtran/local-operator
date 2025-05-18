@@ -959,7 +959,11 @@ class Operator:
         )
 
     async def handle_user_input(
-        self, user_input: str, user_message_id: str | None = None, attachments: List[str] = []
+        self,
+        user_input: str,
+        user_message_id: str | None = None,
+        attachments: List[str] = [],
+        additional_instructions: str | None = None,
     ) -> tuple[ResponseJsonSchema | None, str]:
         """Process user input and generate agent responses.
 
@@ -974,6 +978,12 @@ class Operator:
 
         Args:
             user_input: The text input provided by the user
+            user_message_id: The ID of the user message, will be generated
+            if not provided
+            attachments: A list of attachments to include in the user input
+            additional_instructions: Additional instructions to include in the
+            user input.  These will not be shown in the execution history but
+            will be used as context in the conversation history.
 
         Returns:
             tuple[ResponseJsonSchema | None, str]: The processed response from
@@ -983,6 +993,11 @@ class Operator:
         self.executor.update_ephemeral_messages()
 
         user_input_with_attachments = apply_attachments_to_prompt(user_input, attachments)
+
+        if additional_instructions:
+            user_input_with_attachments += (
+                f"\n\n## Additional Instructions\n\n{additional_instructions}"
+            )
 
         self.executor.add_to_code_history(
             CodeExecutionResult(

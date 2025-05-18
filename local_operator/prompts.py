@@ -2194,6 +2194,17 @@ Here are some guidelines for how to respond to this type of message:
 Follow these guidelines if they make sense for the task at hand.  If the guidelines don't properly apply or make sense based on the user's message and the conversation history, then you can use your discretion to respond in a way makes the most sense and/or helps the user achieve their goals in the most correct and effective way possible.
 """  # noqa: E501
 
+ScheduleInstructionsPrompt: str = """
+This is the next scheduled task that you must run again
+
+Make sure to complete the task completely and with all required steps and details.  Compare any results with the previous task and update as needed.  Don't assume any steps have already been completed.
+
+Don't make assumptions about variables or data that are already in your context and conversation history.  Even if you see completed text and statuses in your context variables, these are likely stale now and need to be re-done.  Fetch new information as needed, and if you are running a recurring task that depends on new information, make sure to consider the new information in your response if there is any.  Write summaries, emails, reports, and any other text based on the new information and make sure that you are appropriately communicating the new information to the user.
+"""  # noqa: E501
+"""
+Specialized instructions for scheduled tasks
+"""
+
 
 def get_request_type_instructions(request_type: RequestType) -> str:
     """Get the specialized instructions for a given request type."""

@@ -26,6 +26,7 @@ from local_operator.jobs import (  # Added
     JobStatus,
 )
 from local_operator.operator import OperatorType
+from local_operator.prompts import ScheduleInstructionsPrompt
 from local_operator.server.utils.job_processor_queue import (
     create_and_start_job_process_with_queue,  # Added
 )
@@ -120,7 +121,11 @@ def _execute_scheduled_task_logic(
                 if status_queue and hasattr(task_operator, "executor"):
                     task_operator.executor.status_queue = status_queue
 
-                _, final_response = await task_operator.handle_user_input(prompt)
+                additional_instructions = ScheduleInstructionsPrompt
+
+                _, final_response = await task_operator.handle_user_input(
+                    prompt, additional_instructions=additional_instructions
+                )
                 log_msg_response = final_response[:100] if final_response else ""
                 logger.debug(
                     f"Process {job_id}: Task completed for agent {agent_id_str}. "
