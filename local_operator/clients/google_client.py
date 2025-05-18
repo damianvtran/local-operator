@@ -489,6 +489,75 @@ class GoogleClient:
         # The response for sending a draft is actually a Message resource
         return GmailMessage(**response_data)
 
+    def update_gmail_draft(
+        self,
+        draft_id: str,
+        to: List[str],
+        subject: str,
+        body: str,
+        cc: Optional[List[str]] = None,
+        bcc: Optional[List[str]] = None,
+        sender: Optional[str] = None,
+    ) -> GmailDraft:
+        """
+        Updates an existing draft email.
+        The message contained in the draft is replaced with the new content.
+
+        Args:
+            draft_id: The ID of the draft to update.
+            to: List of recipient email addresses for the updated message.
+            subject: The subject of the updated email.
+            body: The plain text body of the updated email.
+            cc: Optional list of CC recipient email addresses.
+            bcc: Optional list of BCC recipient email addresses.
+            sender: Optional sender email address.
+
+        Returns:
+            A GmailDraft object representing the updated draft.
+        """
+        mime_message_lines = []
+        if sender:
+            mime_message_lines.append(f"From: {sender}")
+        mime_message_lines.append(f"To: {', '.join(to)}")
+        if cc:
+            mime_message_lines.append(f"Cc: {', '.join(cc)}")
+        if bcc:
+            mime_message_lines.append(f"Bcc: {', '.join(bcc)}")
+        mime_message_lines.append(f"Subject: {subject}")
+        mime_message_lines.append('Content-Type: text/plain; charset="UTF-8"')
+        mime_message_lines.append("")  # Blank line before body
+        mime_message_lines.append(body)
+
+        mime_message = "\r\n".join(mime_message_lines)
+        raw_message = base64.urlsafe_b64encode(mime_message.encode("utf-8")).decode("utf-8")
+
+        # Construct the message part of the draft payload
+        # The API expects the draft ID in the URL, and the message in the body.
+        # The GmailDraft model includes an 'id' field, but for an update,
+        # the API expects the message content directly under a 'message' key in the payload.
+        data = {"message": {"raw": raw_message}}
+
+        url = f"{GMAIL_API_BASE_URL}drafts/{draft_id}"
+        response_data = self._request("PUT", url, data=data)
+        # The response includes the draft ID and the new message.
+        return GmailDraft(**response_data)
+
+    def delete_gmail_draft(self, draft_id: str) -> None:
+        """
+        Permanently deletes the specified draft.
+
+        Args:
+            draft_id: The ID of the draft to delete.
+
+        Returns:
+            None. Raises GoogleAPIError on failure.
+        """
+        url = f"{GMAIL_API_BASE_URL}drafts/{draft_id}"
+        self._request("DELETE", url)
+        # A successful DELETE request to Gmail API for drafts returns a 204 No Content.
+        # The _request method handles this by returning an empty dict, which we ignore.
+        return
+
     # --- Google Calendar API Methods ---
 
     def list_calendar_events(
