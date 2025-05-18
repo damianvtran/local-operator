@@ -1670,6 +1670,87 @@ def create_calendar_event_tool(credential_manager: CredentialManager) -> Callabl
     return create_calendar_event
 
 
+def update_calendar_event_tool(credential_manager: CredentialManager) -> Callable[..., str]:
+    """Factory to create the update_calendar_event tool."""
+
+    def update_calendar_event(
+        event_id: str,
+        event_data: Dict[str, Any],
+        calendar_id: str = "primary",
+        send_updates: Optional[str] = None,
+    ) -> str:
+        """Updates an existing event on the specified Google Calendar. The event_data schema must match the  CalendarEvent model for the fields being updated: {'summary': str, 'start': {'date': str (YYYY-MM-DD) or 'dateTime': str (ISO 8601), 'timeZone': Optional[str]}, 'end': {'date': str (YYYY-MM-DD) or 'dateTime': str (ISO 8601), 'timeZone': Optional[str]}, 'location': Optional[str], 'description': Optional[str], 'attendees': Optional[List[{'email': str, 'displayName': Optional[str], 'organizer': Optional[bool], 'self': Optional[bool], 'resource': Optional[bool], 'optional': Optional[bool], 'responseStatus': Optional[str], 'comment': Optional[str], 'additionalGuests': Optional[int]}]], 'reminders': Optional[{'useDefault': bool, 'overrides': Optional[List[{'method': str, 'minutes': int}]]}], 'status': Optional[str], 'htmlLink': Optional[str], 'created': Optional[str], 'updated': Optional[str], 'organizer': Optional[Dict[str, Any]], 'creator': Optional[Dict[str, Any]], 'recurringEventId': Optional[str]}
+
+        Args:
+            event_id (str): Event identifier.
+            event_data (Dict[str, Any]): Dictionary with fields to update.
+                                         Example: {"summary": "Updated Meeting Title"}
+            calendar_id (str): Calendar identifier. Defaults to "primary".
+            send_updates (Optional[str]): Who gets notifications ("all", "externalOnly", "none").
+
+        Returns:
+            str: JSON string of the updated CalendarEvent or error message.
+        """  # noqa: E501
+        access_token_secret = credential_manager.get_credential(GOOGLE_ACCESS_TOKEN_KEY)
+        if not access_token_secret or not access_token_secret.get_secret_value():
+            return json.dumps({"error": "Google access token not found or empty."})
+        try:
+            client = GoogleClient(access_token_secret.get_secret_value())
+            # The client expects CalendarEvent or Dict, we pass Dict from tool input
+            response = client.update_calendar_event(
+                calendar_id=calendar_id,
+                event_id=event_id,
+                event_data=event_data,
+                send_updates=send_updates,
+            )
+            return response.model_dump_json()
+        except GoogleAPIError as e:
+            return json.dumps(
+                {"error": f"Google API Error: {str(e)}", "status_code": e.status_code}
+            )
+        except ValueError as ve:
+            return json.dumps({"error": f"Validation Error: {str(ve)}"})
+        except Exception as e:
+            return json.dumps({"error": f"An unexpected error occurred: {str(e)}"})
+
+    return update_calendar_event
+
+
+def delete_calendar_event_tool(credential_manager: CredentialManager) -> Callable[..., str]:
+    """Factory to create the delete_calendar_event tool."""
+
+    def delete_calendar_event(
+        event_id: str, calendar_id: str = "primary", send_updates: Optional[str] = None
+    ) -> str:
+        """Deletes an event from the specified Google Calendar.
+
+        Args:
+            event_id (str): Event identifier.
+            calendar_id (str): Calendar identifier. Defaults to "primary".
+            send_updates (Optional[str]): Who gets notifications ("all", "externalOnly", "none").
+
+        Returns:
+            str: JSON string confirming deletion or error message.
+        """
+        access_token_secret = credential_manager.get_credential(GOOGLE_ACCESS_TOKEN_KEY)
+        if not access_token_secret or not access_token_secret.get_secret_value():
+            return json.dumps({"error": "Google access token not found or empty."})
+        try:
+            client = GoogleClient(access_token_secret.get_secret_value())
+            client.delete_calendar_event(
+                calendar_id=calendar_id, event_id=event_id, send_updates=send_updates
+            )
+            return json.dumps({"status": "success", "message": f"Event {event_id} deleted."})
+        except GoogleAPIError as e:
+            return json.dumps(
+                {"error": f"Google API Error: {str(e)}", "status_code": e.status_code}
+            )
+        except Exception as e:
+            return json.dumps({"error": f"An unexpected error occurred: {str(e)}"})
+
+    return delete_calendar_event
+
+
 # --- Google Drive Tools ---
 
 
@@ -2103,6 +2184,12 @@ class ToolRegistry:
                 )
                 self.add_tool(
                     "create_calendar_event", create_calendar_event_tool(self.credential_manager)
+                )
+                self.add_tool(
+                    "update_calendar_event", update_calendar_event_tool(self.credential_manager)
+                )
+                self.add_tool(
+                    "delete_calendar_event", delete_calendar_event_tool(self.credential_manager)
                 )
                 # Add Google Drive tools
                 self.add_tool("list_drive_files", list_drive_files_tool(self.credential_manager))

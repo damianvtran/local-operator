@@ -565,6 +565,74 @@ class GoogleClient:
         response_data = self._request("POST", url, data=payload)
         return CalendarEvent(**response_data)
 
+    def update_calendar_event(
+        self,
+        calendar_id: str,
+        event_id: str,
+        event_data: CalendarEvent | Dict[str, Any],
+        send_updates: Optional[str] = None,  # "all", "externalOnly", "none"
+    ) -> CalendarEvent:
+        """
+        Updates an existing event on the specified calendar.
+
+        Args:
+            calendar_id: Calendar identifier.
+            event_id: Event identifier.
+            event_data: An CalendarEvent object or a dictionary with fields to update.
+                        Must include 'start', 'end', and 'summary' if they are being changed.
+            send_updates: Guests who should receive notifications about the update.
+                          Acceptable values are "all", "externalOnly", "none".
+                          Default is "none" if not specified by the API.
+
+        Returns:
+            A CalendarEvent object representing the updated event.
+        """
+        if isinstance(event_data, CalendarEvent):
+            payload = event_data.model_dump(exclude_none=True, exclude_unset=True)
+        else:
+            payload = event_data
+
+        # The API requires start and end times if they are part of the update.
+        # However, a PATCH request can update only specific fields.
+        # We'll let the API validate the presence of required fields for an update.
+
+        url = f"{CALENDAR_API_BASE_URL}calendars/{calendar_id}/events/{event_id}"
+        params: Dict[str, Any] = {}
+        if send_updates:
+            params["sendUpdates"] = send_updates
+
+        response_data = self._request("PATCH", url, params=params, data=payload)
+        return CalendarEvent(**response_data)
+
+    def delete_calendar_event(
+        self,
+        calendar_id: str,
+        event_id: str,
+        send_updates: Optional[str] = None,  # "all", "externalOnly", "none"
+    ) -> None:
+        """
+        Deletes an event from the specified calendar.
+
+        Args:
+            calendar_id: Calendar identifier.
+            event_id: Event identifier.
+            send_updates: Guests who should receive notifications about the deletion.
+                          Acceptable values are "all", "externalOnly", "none".
+                          Default is "none" if not specified by the API.
+
+        Returns:
+            None. Raises GoogleAPIError on failure.
+        """
+        url = f"{CALENDAR_API_BASE_URL}calendars/{calendar_id}/events/{event_id}"
+        params: Dict[str, Any] = {}
+        if send_updates:
+            params["sendUpdates"] = send_updates
+
+        self._request("DELETE", url, params=params)
+        # A successful DELETE request to Google Calendar API returns a 204 No Content status.
+        # The _request method handles this by returning an empty dict, which we ignore here.
+        return
+
     # --- Google Drive API Methods ---
 
     def list_drive_files(
