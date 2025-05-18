@@ -34,6 +34,11 @@ class EnvConfig:
         description="Base URL for the Radient API.",
     )
 
+    radient_client_id: str = Field(
+        default="",
+        description="Client ID for the Radient API.",
+    )
+
 
 def get_env_config() -> EnvConfig:
     """

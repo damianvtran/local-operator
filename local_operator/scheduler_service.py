@@ -1,10 +1,8 @@
 import asyncio
 import logging
-
-# import multiprocessing # No longer needed directly
 from datetime import datetime, timedelta, timezone
-from multiprocessing import Queue  # Process removed, Queue is still used
-from pathlib import Path  # Added Path
+from multiprocessing import Queue
+from pathlib import Path
 from typing import Optional
 from uuid import UUID
 
@@ -12,8 +10,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
-from local_operator.agents import AgentData  # Moved AgentData import
-from local_operator.agents import AgentRegistry
+from local_operator.agents import AgentData, AgentRegistry
 from local_operator.bootstrap import initialize_operator
 from local_operator.clients.google_client import (
     GoogleAPIError,
@@ -23,22 +20,14 @@ from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
-from local_operator.jobs import (  # Added
-    JobContext,
-    JobContextRecord,
-    JobManager,
-    JobStatus,
-)
+from local_operator.jobs import JobContext, JobContextRecord, JobManager, JobStatus
 from local_operator.operator import OperatorType
 from local_operator.prompts import ScheduleInstructionsPrompt
 from local_operator.server.utils.job_processor_queue import (
-    create_and_start_job_process_with_queue,  # Added
+    create_and_start_job_process_with_queue,
 )
-from local_operator.server.utils.websocket_manager import WebSocketManager  # Added
-from local_operator.types import (  # Kept Schedule and ScheduleUnit here
-    Schedule,
-    ScheduleUnit,
-)
+from local_operator.server.utils.websocket_manager import WebSocketManager
+from local_operator.types import Schedule, ScheduleUnit
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +38,8 @@ GOOGLE_ACCESS_TOKEN_KEY = "GOOGLE_ACCESS_TOKEN"
 GOOGLE_REFRESH_TOKEN_KEY = "GOOGLE_REFRESH_TOKEN"
 GOOGLE_TOKEN_EXPIRY_TIMESTAMP_KEY = "GOOGLE_TOKEN_EXPIRY_TIMESTAMP"
 GOOGLE_TOKEN_REFRESH_JOB_ID = "google_token_refresh_job"
-# Refresh every 45 minutes, Google access tokens typically last 1 hour (3600s)
-GOOGLE_TOKEN_REFRESH_CRON_MINUTES = "*/45"
+# Refresh every 15 minutes, Google access tokens typically last 1 hour (3600s)
+GOOGLE_TOKEN_REFRESH_CRON_MINUTES = "*/15"
 
 
 def _execute_scheduled_task_logic(
@@ -75,15 +64,9 @@ def _execute_scheduled_task_logic(
     asyncio.set_event_loop(loop)
 
     # Reconstruct managers
-    # This assumes AgentRegistry, ConfigManager, CredentialManager can be initialized
-    # with file paths or basic configuration.
-    agent_registry = AgentRegistry(config_dir=Path(agent_registry_config_dir))  # Converted to Path
-    config_manager = ConfigManager(
-        config_dir=Path(agent_registry_config_dir)  # Use config_dir only
-    )
-    credential_manager = CredentialManager(
-        config_dir=Path(agent_registry_config_dir)  # Use config_dir only
-    )
+    agent_registry = AgentRegistry(config_dir=Path(agent_registry_config_dir))
+    config_manager = ConfigManager(config_dir=Path(agent_registry_config_dir))
+    credential_manager = CredentialManager(config_dir=Path(agent_registry_config_dir))
     operator_type = OperatorType[operator_type_str]
     verbosity_level = VerbosityLevel[verbosity_level_str]
 

@@ -8,11 +8,7 @@ from local_operator.clients.google_client import GoogleAPIError, GoogleClient
 from local_operator.credentials import CredentialManager
 
 # Constants for Google Credentials (matching scheduler_service.py)
-GOOGLE_CLIENT_ID_KEY = "GOOGLE_CLIENT_ID"
-GOOGLE_CLIENT_SECRET_KEY = "GOOGLE_CLIENT_SECRET"
 GOOGLE_ACCESS_TOKEN_KEY = "GOOGLE_ACCESS_TOKEN"
-GOOGLE_REFRESH_TOKEN_KEY = "GOOGLE_REFRESH_TOKEN"
-GOOGLE_TOKEN_EXPIRY_TIMESTAMP_KEY = "GOOGLE_TOKEN_EXPIRY_TIMESTAMP"
 
 # --- Gmail Tools ---
 
