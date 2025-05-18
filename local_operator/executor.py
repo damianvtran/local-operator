@@ -52,7 +52,7 @@ from local_operator.prompts import (
     SafetyCheckUserPrompt,
     create_system_prompt,
 )
-from local_operator.tools import ToolRegistry, list_working_directory
+from local_operator.tools.general import ToolRegistry, list_working_directory
 from local_operator.types import (
     ActionType,
     AgentState,

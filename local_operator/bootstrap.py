@@ -29,7 +29,7 @@ from local_operator.model.configure import (
     validate_model,
 )
 from local_operator.operator import Operator, OperatorType
-from local_operator.tools import ToolRegistry
+from local_operator.tools.general import ToolRegistry
 
 logger = get_logger()
 

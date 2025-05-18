@@ -12,7 +12,7 @@ from local_operator.operator import (
     process_classification_response,
 )
 from local_operator.prompts import RequestType
-from local_operator.tools import ToolRegistry
+from local_operator.tools.general import ToolRegistry
 from local_operator.types import (
     ActionType,
     RelativeEffortLevel,

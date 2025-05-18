@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
 
-from local_operator.tools import (
+from local_operator.tools.general import (
     _get_git_ignored_files,
     get_page_text_content,
     list_working_directory,

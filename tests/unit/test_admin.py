@@ -31,7 +31,7 @@ from local_operator.admin import (
 )
 from local_operator.agents import AgentEditFields
 from local_operator.config import Config, ConfigManager
-from local_operator.tools import ToolRegistry
+from local_operator.tools.general import ToolRegistry
 from local_operator.types import (
     CodeExecutionResult,
     ConversationRecord,
