@@ -1576,6 +1576,86 @@ def send_gmail_draft_tool(credential_manager: CredentialManager) -> Callable[...
     return send_gmail_draft
 
 
+def update_gmail_draft_tool(credential_manager: CredentialManager) -> Callable[..., str]:
+    """Factory to create the update_gmail_draft tool."""
+
+    def update_gmail_draft(
+        draft_id: str,
+        to: List[str],
+        subject: str,
+        body: str,
+        cc: Optional[List[str]] = None,
+        bcc: Optional[List[str]] = None,
+        sender: Optional[str] = None,
+    ) -> str:
+        """Updates an existing Gmail draft.
+
+        Args:
+            draft_id (str): The ID of the draft to update.
+            to (List[str]): List of recipient email addresses.
+            subject (str): The subject of the email.
+            body (str): The plain text body of the email.
+            cc (Optional[List[str]]): Optional list of CC recipients.
+            bcc (Optional[List[str]]): Optional list of BCC recipients.
+            sender (Optional[str]): Optional sender email address.
+
+        Returns:
+            str: JSON string of the updated GmailDraft or error message.
+        """
+        access_token_secret = credential_manager.get_credential(GOOGLE_ACCESS_TOKEN_KEY)
+        if not access_token_secret or not access_token_secret.get_secret_value():
+            return json.dumps({"error": "Google access token not found or empty."})
+        try:
+            client = GoogleClient(access_token_secret.get_secret_value())
+            response = client.update_gmail_draft(
+                draft_id=draft_id,
+                to=to,
+                subject=subject,
+                body=body,
+                cc=cc,
+                bcc=bcc,
+                sender=sender,
+            )
+            return response.model_dump_json()
+        except GoogleAPIError as e:
+            return json.dumps(
+                {"error": f"Google API Error: {str(e)}", "status_code": e.status_code}
+            )
+        except Exception as e:
+            return json.dumps({"error": f"An unexpected error occurred: {str(e)}"})
+
+    return update_gmail_draft
+
+
+def delete_gmail_draft_tool(credential_manager: CredentialManager) -> Callable[..., str]:
+    """Factory to create the delete_gmail_draft tool."""
+
+    def delete_gmail_draft(draft_id: str) -> str:
+        """Permanently deletes the specified Gmail draft.
+
+        Args:
+            draft_id (str): The ID of the draft to delete.
+
+        Returns:
+            str: JSON string confirming deletion or error message.
+        """
+        access_token_secret = credential_manager.get_credential(GOOGLE_ACCESS_TOKEN_KEY)
+        if not access_token_secret or not access_token_secret.get_secret_value():
+            return json.dumps({"error": "Google access token not found or empty."})
+        try:
+            client = GoogleClient(access_token_secret.get_secret_value())
+            client.delete_gmail_draft(draft_id=draft_id)
+            return json.dumps({"status": "success", "message": f"Draft {draft_id} deleted."})
+        except GoogleAPIError as e:
+            return json.dumps(
+                {"error": f"Google API Error: {str(e)}", "status_code": e.status_code}
+            )
+        except Exception as e:
+            return json.dumps({"error": f"An unexpected error occurred: {str(e)}"})
+
+    return delete_gmail_draft
+
+
 # --- Google Calendar Tools ---
 
 
@@ -2178,6 +2258,12 @@ class ToolRegistry:
                     "send_gmail_message", send_gmail_message_tool(self.credential_manager)
                 )
                 self.add_tool("send_gmail_draft", send_gmail_draft_tool(self.credential_manager))
+                self.add_tool(
+                    "update_gmail_draft", update_gmail_draft_tool(self.credential_manager)
+                )
+                self.add_tool(
+                    "delete_gmail_draft", delete_gmail_draft_tool(self.credential_manager)
+                )
                 # Add Google Calendar tools
                 self.add_tool(
                     "list_calendar_events", list_calendar_events_tool(self.credential_manager)
