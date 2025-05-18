@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 import psutil
 
 from local_operator.agents import AgentData
-from local_operator.tools import ToolRegistry
+from local_operator.tools.general import ToolRegistry
 
 
 def get_installed_packages_str() -> str:

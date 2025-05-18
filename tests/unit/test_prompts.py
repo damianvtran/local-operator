@@ -15,7 +15,7 @@ from local_operator.prompts import (
     get_system_details_str,
     get_tools_str,
 )
-from local_operator.tools import ToolRegistry
+from local_operator.tools.general import ToolRegistry
 
 
 def test_create_system_prompt():
