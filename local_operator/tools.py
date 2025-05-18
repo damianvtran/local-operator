@@ -1728,12 +1728,24 @@ class ToolRegistry:
         if self.credential_manager:
             self.add_tool("get_credential", get_credential_tool(self.credential_manager))
             self.add_tool("list_credentials", list_credentials_tool(self.credential_manager))
-            # Add Gmail tools if credential manager is available
-            self.add_tool("list_gmail_messages", list_gmail_messages_tool(self.credential_manager))
-            self.add_tool("get_gmail_message", get_gmail_message_tool(self.credential_manager))
-            self.add_tool("create_gmail_draft", create_gmail_draft_tool(self.credential_manager))
-            self.add_tool("send_gmail_message", send_gmail_message_tool(self.credential_manager))
-            self.add_tool("send_gmail_draft", send_gmail_draft_tool(self.credential_manager))
+
+            has_google_access_token = bool(
+                self.credential_manager.get_credential(GOOGLE_ACCESS_TOKEN_KEY).get_secret_value()
+            )
+
+            if has_google_access_token:
+                # Add Gmail tools if credential manager is available
+                self.add_tool(
+                    "list_gmail_messages", list_gmail_messages_tool(self.credential_manager)
+                )
+                self.add_tool("get_gmail_message", get_gmail_message_tool(self.credential_manager))
+                self.add_tool(
+                    "create_gmail_draft", create_gmail_draft_tool(self.credential_manager)
+                )
+                self.add_tool(
+                    "send_gmail_message", send_gmail_message_tool(self.credential_manager)
+                )
+                self.add_tool("send_gmail_draft", send_gmail_draft_tool(self.credential_manager))
 
         if self.model_configuration:  # Ensure model_configuration is set
             self.add_tool("run_browser_task", run_browser_task_tool(self.model_configuration))
