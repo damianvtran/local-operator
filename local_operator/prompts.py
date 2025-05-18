@@ -1951,7 +1951,7 @@ For this task, you need to gather information from the web using your web search
 
 Guidelines:
 - Perform a few different web searches with different queries to get a broad range of information.  Use the web search tools to get the information.
-- Use 2-3 broad queries in your initial search to get a broad range of information.  Follow up with more queries if needed if there doesn't seem to be enough information to make a comprehensive report.
+- Use 2-3 broad queries in one step in your initial search to get a broad range of information.  Follow up with more specific queries that are formulated from the results of the first step in additional steps if needed if there doesn't seem to be enough information to make a comprehensive report.
 - Present factual, objective information from reliable news sources
 - Include key details: who, what, when, where, why, and how
 - Verify information across multiple credible sources
