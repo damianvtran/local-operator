@@ -282,6 +282,60 @@ class RadientSendEmailAPIResponse(BaseModel):
         return super().model_dump(*args, **kwargs)
 
 
+# Token Refresh Models
+class RadientTokenRefreshRequest(BaseModel):
+    """Request model for refreshing an access token.
+
+    Attributes:
+        client_id (str): The client ID.
+        grant_type (str): The grant type, typically "refresh_token".
+        refresh_token (SecretStr): The refresh token.
+    """
+
+    client_id: str
+    grant_type: str = "refresh_token"
+    refresh_token: SecretStr
+    model_config = {"extra": "allow"}
+
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        payload = super().model_dump(*args, **kwargs)
+        payload["refresh_token"] = self.refresh_token.get_secret_value()
+        return payload
+
+
+class RadientTokenResponse(BaseModel):
+    """Response model for token-related operations.
+
+    Attributes:
+        access_token (SecretStr): The new access token.
+        expires_in (int): The lifetime in seconds of the access token.
+        token_type (str): The token type, typically "Bearer".
+        refresh_token (Optional[SecretStr]): The new refresh token, if issued.
+        id_token (Optional[SecretStr]): The ID token (OpenID Connect).
+        scope (Optional[str]): The scope of the access token.
+    """
+
+    access_token: SecretStr
+    expires_in: int
+    token_type: str
+    refresh_token: Optional[SecretStr] = None
+    id_token: Optional[SecretStr] = None
+    scope: Optional[str] = None
+    model_config = {"extra": "allow"}
+
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        payload = super().model_dump(*args, **kwargs)
+        if self.access_token:
+            payload["access_token"] = self.access_token.get_secret_value()
+        if self.refresh_token:
+            payload["refresh_token"] = self.refresh_token.get_secret_value()
+        if self.id_token:
+            payload["id_token"] = self.id_token.get_secret_value()
+        return payload
+
+
 class RadientClient:
     """Client for interacting with the Radient API.
 
@@ -842,3 +896,57 @@ class RadientClient:
             ) from e
         except Exception as e:
             raise RuntimeError(f"Failed to send email: {str(e)}") from e
+
+    # Token Refresh Methods
+    def refresh_token(
+        self, client_id: str, refresh_token: SecretStr, provider: Optional[str] = None
+    ) -> RadientTokenResponse:
+        """Refresh an access token using a refresh token.
+
+        Args:
+            client_id (str): The client ID.
+            refresh_token (SecretStr): The refresh token.
+            provider (Optional[str]): The provider ("google" or "microsoft").
+                                      If None, uses the generic /auth/token endpoint.
+
+        Returns:
+            RadientTokenResponse: The new token information.
+
+        Raises:
+            RuntimeError: If the API request fails.
+        """
+        if provider and provider.lower() == "google":
+            url = f"{self.base_url}/auth/google/refresh"
+        elif provider and provider.lower() == "microsoft":
+            url = f"{self.base_url}/auth/microsoft/refresh"
+        else:
+            url = f"{self.base_url}/auth/token"
+
+        headers = self._get_headers(require_api_key=False)  # Refresh usually doesn't need API key
+        payload = RadientTokenRefreshRequest(
+            client_id=client_id, refresh_token=refresh_token
+        ).dict()
+
+        try:
+            response = requests.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            data = response.json()
+            # Ensure SecretStr fields are properly handled if they come from JSON
+            if "access_token" in data:
+                data["access_token"] = SecretStr(data["access_token"])
+            if "refresh_token" in data and data["refresh_token"]:
+                data["refresh_token"] = SecretStr(data["refresh_token"])
+            if "id_token" in data and data["id_token"]:
+                data["id_token"] = SecretStr(data["id_token"])
+            return RadientTokenResponse.model_validate(data)
+        except requests.exceptions.RequestException as e:
+            error_body = (
+                e.response.content.decode()
+                if hasattr(e, "response") and e.response
+                else "No response body"
+            )
+            raise RuntimeError(
+                f"Failed to refresh token: {str(e)}, Response Body: {error_body}"
+            ) from e
+        except Exception as e:
+            raise RuntimeError(f"Failed to refresh token: {str(e)}") from e
