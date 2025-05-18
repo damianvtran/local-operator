@@ -12,10 +12,7 @@ from apscheduler.triggers.date import DateTrigger
 
 from local_operator.agents import AgentData, AgentRegistry
 from local_operator.bootstrap import initialize_operator
-from local_operator.clients.google_client import (
-    GoogleAPIError,
-    refresh_google_access_token,
-)
+from local_operator.clients.radient import RadientClient, RadientTokenResponse
 from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel
 from local_operator.credentials import CredentialManager
@@ -31,15 +28,13 @@ from local_operator.types import Schedule, ScheduleUnit
 
 logger = logging.getLogger(__name__)
 
-# Constants for Google Credentials
-GOOGLE_CLIENT_ID_KEY = "GOOGLE_CLIENT_ID"
-GOOGLE_CLIENT_SECRET_KEY = "GOOGLE_CLIENT_SECRET"
+# Constants for Google Credentials (some retained for storing token)
 GOOGLE_ACCESS_TOKEN_KEY = "GOOGLE_ACCESS_TOKEN"
-GOOGLE_REFRESH_TOKEN_KEY = "GOOGLE_REFRESH_TOKEN"
+GOOGLE_REFRESH_TOKEN_KEY = "GOOGLE_REFRESH_TOKEN"  # This is the token we use to refresh
 GOOGLE_TOKEN_EXPIRY_TIMESTAMP_KEY = "GOOGLE_TOKEN_EXPIRY_TIMESTAMP"
-GOOGLE_TOKEN_REFRESH_JOB_ID = "google_token_refresh_job"
+RADIENT_TOKEN_REFRESH_JOB_ID = "radient_google_token_refresh_job"
 # Refresh every 15 minutes, Google access tokens typically last 1 hour (3600s)
-GOOGLE_TOKEN_REFRESH_CRON_MINUTES = "*/15"
+TOKEN_REFRESH_CRON_MINUTES = "*/15"  # Generic name, can be used for other providers too
 
 
 def _execute_scheduled_task_logic(
@@ -232,52 +227,56 @@ class SchedulerService:
         self.job_manager = job_manager  # Added
         self.websocket_manager = websocket_manager  # Added
 
-    async def _execute_google_token_refresh_task(self) -> None:
+    async def _execute_radient_token_refresh_task(self) -> None:
         """
-        Task executed by the scheduler to refresh Google OAuth tokens.
+        Task executed by the scheduler to refresh Google OAuth tokens via Radient.
         """
-        logger.info("Attempting to refresh Google OAuth access token...")
+        logger.info("Attempting to refresh Google OAuth access token via Radient...")
         try:
-            client_id_secret = self.credential_manager.get_credential(GOOGLE_CLIENT_ID_KEY)
-            client_secret_secret = self.credential_manager.get_credential(GOOGLE_CLIENT_SECRET_KEY)
-            refresh_token_secret = self.credential_manager.get_credential(GOOGLE_REFRESH_TOKEN_KEY)
-
-            if not (client_id_secret and client_secret_secret and refresh_token_secret):
-                logger.warning(
-                    "Google client ID, client secret, or refresh token not found in credentials. "
-                    "Skipping token refresh."
-                )
-                # Optionally, remove the refresh job if essential credentials are missing
-                # self.scheduler.remove_job(GOOGLE_TOKEN_REFRESH_JOB_ID)
-                return
-
-            client_id = client_id_secret.get_secret_value()
-            client_secret = client_secret_secret.get_secret_value()
-            refresh_token = refresh_token_secret.get_secret_value()
-
-            if not all([client_id, client_secret, refresh_token]):
-                logger.warning(
-                    "Google OAuth credentials (client_id, client_secret, refresh_token) are empty. "
-                    "Skipping token refresh."
-                )
-                return
-
-            logger.debug("Retrieved Google credentials for token refresh.")
-
-            refresh_response = refresh_google_access_token(
-                client_id=client_id, client_secret=client_secret, refresh_token=refresh_token
+            radient_client_id = self.env_config.radient_client_id
+            google_refresh_token_secret = self.credential_manager.get_credential(
+                GOOGLE_REFRESH_TOKEN_KEY
             )
 
-            new_access_token = refresh_response.get("access_token")
-            expires_in = refresh_response.get("expires_in")  # Seconds
-
-            if not new_access_token or expires_in is None:
-                logger.error(
-                    "Failed to get new access token or expiry from refresh response: %s",
-                    refresh_response,
+            if not radient_client_id:
+                logger.warning(
+                    "RADIENT_CLIENT_ID not found in environment configuration. "
+                    "Skipping token refresh."
                 )
                 return
 
+            if not (google_refresh_token_secret and google_refresh_token_secret.get_secret_value()):
+                logger.warning(
+                    "Google refresh token not found or empty in credentials. "
+                    "Skipping token refresh."
+                )
+                return
+
+            logger.debug("Retrieved Radient Client ID and Google refresh token for token refresh.")
+
+            radient_api_key = self.credential_manager.get_credential("RADIENT_API_KEY")
+            radient_client = RadientClient(
+                api_key=radient_api_key, base_url=self.env_config.radient_api_base_url
+            )
+
+            refresh_response: RadientTokenResponse = await asyncio.to_thread(
+                radient_client.refresh_token,
+                client_id=radient_client_id,
+                refresh_token=google_refresh_token_secret,
+                provider="google",  # Specify Google provider for Radient endpoint
+            )
+
+            new_access_token_secret = refresh_response.access_token
+            expires_in = refresh_response.expires_in  # Seconds
+
+            if not new_access_token_secret or expires_in is None:
+                logger.error(
+                    "Failed to get new access token or expiry from Radient refresh response: %s",
+                    refresh_response.dict(),
+                )
+                return
+
+            new_access_token = new_access_token_secret.get_secret_value()
             # Calculate new expiry timestamp
             # Add a small buffer (e.g., 60 seconds) to be safe
             expiry_timestamp = int(datetime.now(timezone.utc).timestamp()) + expires_in - 60
@@ -288,64 +287,60 @@ class SchedulerService:
             self.credential_manager.set_credential(
                 GOOGLE_TOKEN_EXPIRY_TIMESTAMP_KEY, str(expiry_timestamp), write=False
             )
+            # If Radient issues a new refresh token, store it (optional, depends on Radient's flow)
+            if refresh_response.refresh_token:
+                self.credential_manager.set_credential(
+                    GOOGLE_REFRESH_TOKEN_KEY,
+                    refresh_response.refresh_token.get_secret_value(),
+                    write=False,
+                )
             self.credential_manager.write_to_file()  # Persist all changes
 
             logger.info(
-                "Successfully refreshed Google OAuth access token. New expiry (UTC): %s",
+                (
+                    "Successfully refreshed Google OAuth access token via Radient. "
+                    "New expiry (UTC): %s"
+                ),
                 datetime.fromtimestamp(expiry_timestamp, tz=timezone.utc).isoformat(),
             )
 
-        except GoogleAPIError as e:
-            logger.error(f"Google API error during token refresh: {e}", exc_info=True)
         except Exception as e:
-            logger.error(f"Unexpected error during Google token refresh: {e}", exc_info=True)
+            logger.error(
+                f"Unexpected error during Radient Google token refresh: {e}", exc_info=True
+            )
 
-    def _schedule_google_token_refresh(self) -> None:
+    def _schedule_radient_token_refresh(self) -> None:
         """
-        Schedules the Google token refresh job if the necessary credentials exist.
+        Schedules the Radient Google token refresh job if the necessary credentials exist.
         """
         if not self.scheduler.running:
-            logger.error("Scheduler is not running. Cannot schedule Google token refresh.")
+            logger.error("Scheduler is not running. Cannot schedule Radient token refresh.")
             return
 
         # Check if GOOGLE_REFRESH_TOKEN is set, as it's essential
-        refresh_token_secret = self.credential_manager.get_credential(GOOGLE_REFRESH_TOKEN_KEY)
-        if not (refresh_token_secret and refresh_token_secret.get_secret_value()):
-            logger.info(
-                "Google refresh token not found or empty. "
-                "Google token auto-refresh job will not be scheduled."
-            )
-            # If the job was previously scheduled and token removed, remove the job
-            if self.scheduler.get_job(GOOGLE_TOKEN_REFRESH_JOB_ID):
-                try:
-                    self.scheduler.remove_job(GOOGLE_TOKEN_REFRESH_JOB_ID)
-                    logger.info(
-                        "Removed existing Google token refresh job as token is now missing."
-                    )
-                except Exception as e_remove:
-                    logger.error(f"Failed to remove existing Google token refresh job: {e_remove}")
-            return
-
-        if self.scheduler.get_job(GOOGLE_TOKEN_REFRESH_JOB_ID):
-            logger.debug("Google token refresh job already scheduled.")
+        # The job will now always be scheduled.
+        # The execution task (_execute_radient_token_refresh_task)
+        # will check for credentials at runtime.
+        if self.scheduler.get_job(RADIENT_TOKEN_REFRESH_JOB_ID):
+            logger.debug("Radient Google token refresh job already scheduled. Skipping re-adding.")
             return
 
         try:
             self.scheduler.add_job(
-                self._execute_google_token_refresh_task,
-                trigger=CronTrigger(minute=GOOGLE_TOKEN_REFRESH_CRON_MINUTES, timezone="UTC"),
-                id=GOOGLE_TOKEN_REFRESH_JOB_ID,
-                name="Google OAuth Token Refresh",
+                self._execute_radient_token_refresh_task,
+                trigger=CronTrigger(minute=TOKEN_REFRESH_CRON_MINUTES, timezone="UTC"),
+                id=RADIENT_TOKEN_REFRESH_JOB_ID,
+                name="Radient Google OAuth Token Refresh",
                 replace_existing=True,
                 misfire_grace_time=300,  # 5 minutes
                 coalesce=True,
             )
             logger.info(
-                "Scheduled Google token refresh job with CRON expression: "
-                f"minute='{GOOGLE_TOKEN_REFRESH_CRON_MINUTES}'."
+                "Scheduled Radient Google token refresh job with CRON expression: "
+                f"minute='{TOKEN_REFRESH_CRON_MINUTES}'."
             )
         except Exception as e:
-            logger.error(f"Failed to schedule Google token refresh job: {e}", exc_info=True)
+            logger.error(f"Failed to schedule Radient Google token refresh job: {e}", exc_info=True)
 
     async def _trigger_agent_task(
         self, agent_id_str: str, schedule_id_str: str, prompt: str
@@ -686,22 +681,26 @@ class SchedulerService:
         else:
             logger.debug("APScheduler already running. (is running: %s)", self.scheduler.running)
 
-        # Schedule Google token refresh
-        self._schedule_google_token_refresh()
+        # Schedule Radient Google token refresh
+        self._schedule_radient_token_refresh()
 
         # DEBUG: Log all jobs currently scheduled
         jobs = self.scheduler.get_jobs()
-        logger.debug("Current scheduled jobs at start (after Google refresh schedule): %s", jobs)
+        logger.debug(
+            "Current scheduled jobs at start (after Radient Google refresh schedule): %s", jobs
+        )
 
         await self.load_all_agent_schedules()
 
-    def add_google_token_refresh_job_if_needed(self) -> None:
+    def add_radient_token_refresh_job_if_needed(self) -> None:
         """
-        Public method to explicitly try to add the Google token refresh job.
+        Public method to explicitly try to add the Radient Google token refresh job.
         Useful if credentials are added after initial startup.
         """
-        logger.info("Explicitly checking and scheduling Google token refresh job if needed.")
-        self._schedule_google_token_refresh()
+        logger.info(
+            "Explicitly checking and scheduling Radient Google token refresh job if needed."
+        )
+        self._schedule_radient_token_refresh()
 
     async def load_all_agent_schedules(self) -> None:
         """
