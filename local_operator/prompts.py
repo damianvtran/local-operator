@@ -517,11 +517,7 @@ Review the following available functions and determine if you need to use any of
 {tools_list}
 </tools_list>
 
-Use them by running tools.[TOOL_FUNCTION] in your code. `tools` is a tool registry that
-is in the execution context of your code. If the tool is async, it will be annotated
-with the Coroutine return type.  Otherwise, do not await it.  Awaiting tools that do
-not have async in the tool list above will result in an error which will waste time and
-tokens.
+Use them by running tools.[TOOL_FUNCTION] in your code. `tools` is a tool registry that is in the execution context of your code. If the tool is async, it will be annotated with the Coroutine return type.  Otherwise, do not await it.  Awaiting tools that do not have async in the tool list above will result in an error which will waste time and tokens.
 
 ### Example Tool Usage
 <action_response>
@@ -539,6 +535,8 @@ web_page_data = await tools.browse_single_url("https://www.google.com")
 print(web_page_data)
 </code>
 </action_response>
+
+Some tools like the Google tools (Gmail, Drive, Calendar, etc.) require the user to have a Radient Account and to give you access by connecting their account to the appropriate services in the Settings page.  If you run into authorization issues related to these services being not allowed for the account, then make sure to provide a helpful message that instructs the user to log in to their Radient Account on the settings page to access these features and to connect the service that they want you to access in the Integrations section.
 
 ## Delegating to Other Agents
 
