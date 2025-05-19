@@ -266,13 +266,14 @@ class SchedulerService:
                 provider="google",  # Specify Google provider for Radient endpoint
             )
 
+            # The refresh_response is now directly the RadientTokenResponse model
             new_access_token_secret = refresh_response.access_token
             expires_in = refresh_response.expires_in  # Seconds
 
             if not new_access_token_secret or expires_in is None:
                 logger.error(
                     "Failed to get new access token or expiry from Radient refresh response: %s",
-                    refresh_response.dict(),
+                    refresh_response.dict(),  # .dict() is available on RadientTokenResponse
                 )
                 return
 

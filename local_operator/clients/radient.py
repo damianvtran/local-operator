@@ -336,6 +336,35 @@ class RadientTokenResponse(BaseModel):
         return payload
 
 
+class RadientTokenRefreshResult(BaseModel):
+    """Result part of the token refresh response."""
+
+    token_response: RadientTokenResponse
+    account_created: bool
+    model_config = {"extra": "allow"}
+
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        return super().model_dump(*args, **kwargs)
+
+
+class RadientTokenRefreshAPIResponse(BaseModel):
+    """Overall API response structure for token refresh.
+
+    Attributes:
+        msg (str): Confirmation or status message.
+        result (RadientTokenRefreshResult): The actual token refresh result.
+    """
+
+    msg: str
+    result: RadientTokenRefreshResult
+    model_config = {"extra": "allow"}
+
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        return super().model_dump(*args, **kwargs)
+
+
 class RadientClient:
     """Client for interacting with the Radient API.
 
@@ -930,15 +959,13 @@ class RadientClient:
         try:
             response = requests.post(url, headers=headers, json=payload)
             response.raise_for_status()
-            data = response.json()
-            # Ensure SecretStr fields are properly handled if they come from JSON
-            if "access_token" in data:
-                data["access_token"] = SecretStr(data["access_token"])
-            if "refresh_token" in data and data["refresh_token"]:
-                data["refresh_token"] = SecretStr(data["refresh_token"])
-            if "id_token" in data and data["id_token"]:
-                data["id_token"] = SecretStr(data["id_token"])
-            return RadientTokenResponse.model_validate(data)
+            api_response_data = response.json()
+            api_response = RadientTokenRefreshAPIResponse.model_validate(api_response_data)
+
+            # The actual token data is nested
+            token_data = api_response.result.token_response
+
+            return token_data
         except requests.exceptions.RequestException as e:
             error_body = (
                 e.response.content.decode()
