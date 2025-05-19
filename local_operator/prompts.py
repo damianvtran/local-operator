@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 import psutil
 
 from local_operator.agents import AgentData
-from local_operator.tools import ToolRegistry
+from local_operator.tools.general import ToolRegistry
 
 
 def get_installed_packages_str() -> str:
@@ -127,7 +127,6 @@ def _format_tool_documentation(
 
     # Get first line of docstring
     doc = tool.__doc__ or "No description available"
-    doc = doc.split("\n")[0].strip()
 
     # Format function signature
     sig = inspect.signature(tool)
@@ -518,11 +517,7 @@ Review the following available functions and determine if you need to use any of
 {tools_list}
 </tools_list>
 
-Use them by running tools.[TOOL_FUNCTION] in your code. `tools` is a tool registry that
-is in the execution context of your code. If the tool is async, it will be annotated
-with the Coroutine return type.  Otherwise, do not await it.  Awaiting tools that do
-not have async in the tool list above will result in an error which will waste time and
-tokens.
+Use them by running tools.[TOOL_FUNCTION] in your code. `tools` is a tool registry that is in the execution context of your code. If the tool is async, it will be annotated with the Coroutine return type.  Otherwise, do not await it.  Awaiting tools that do not have async in the tool list above will result in an error which will waste time and tokens.
 
 ### Example Tool Usage
 <action_response>
@@ -540,6 +535,8 @@ web_page_data = await tools.browse_single_url("https://www.google.com")
 print(web_page_data)
 </code>
 </action_response>
+
+Some tools like the Google tools (Gmail, Drive, Calendar, etc.) require the user to have a Radient Account and to give you access by connecting their account to the appropriate services in the Settings page.  If you run into authorization issues related to these services being not allowed for the account, then make sure to provide a helpful message that instructs the user to log in to their Radient Account on the settings page to access these features and to connect the service that they want you to access in the Integrations section.
 
 ## Delegating to Other Agents
 
@@ -1789,9 +1786,9 @@ Once you start this task, aside from initial clarifying questions, do not stop t
 Follow the general flow below:
 1. Define the research question and objectives
 2. Gather initial data to understand the lay of the land with a broad search
-3. Plan to provide a detailed and useful response with a structured and logical flow. Based on the level of effort that you classified for this task, do the following:
-     - Low or medium effort tasks: do the work in memory and don't save information to a file intermediate.  This will fit in your context window. Save the sections to variables in the execution context and then assemble and summarize the final response to me.
-     - High effort tasks: write the report to a file intermediate and use the WRITE command to save the report to the file.  Write an outline of the report to the file first with placeholders, and then use the EDIT action to replace each placeholder with the content of each section.  This will allow you to write each section one at a time without overflowing your context window.  Make sure to account for all placeholders before marking the task as complete.  In your final response, make sure to direct me to the file to open and read the report.
+3. Plan to provide a detailed and useful response with a structured and logical flow. Based on the length of the output that you expect, do the following:
+     - Small to medium reports (news, research, analysis, etc.): do the work in memory and don't save information to a file intermediate.  This will fit in your context window. Save the sections to variables in the execution context and then assemble and summarize the final response to me.
+     - Large reports (extensive competitor research, long essays, etc.): write the report to a file intermediate and use the WRITE command to save the report to the file.  Write an outline of the report to the file first with placeholders, and then use the EDIT action to replace each placeholder with the content of each section.  This will allow you to write each section one at a time without overflowing your context window.  Make sure to account for all placeholders before marking the task as complete.  In your final response, make sure to direct me to the file to open and read the report.
 4. Iteratively go through each section and research the information, write the section with citations, and then replace the placeholder section in the markdown with the new content.  Make sure that you don't lose track of sections and don't leave any sections empty.  Embed your citations with links in markdown format.  If you have enough information to fill in multiple placeholders at once, then do so instead of editing one at a time to be less expensive and more efficient.
 5. Write the report in a way that is easy to understand and follow.  Use bullet points, lists, and other formatting to make the report easy to read.  Use tables to present data in a clear and easy to understand format.
 6. Make sure to cite your sources and provide proper citations.  Embed citations in all parts of the report where you are using information from a source so that I can click on them to follow the source right where the fact is written in the text. Make sure to include the source name, author, title, date, and URL.
@@ -1904,8 +1901,8 @@ Follow the general flow below for software development tasks:
 - If you are using public assets downloaded from the internet for your work, make sure to check the license of the assets and only use royalty free assets, non-copy left assets, or assets that you have permission to use.  Using assets that you do not have permission to use will result in a violation of the license and could result in getting me into trouble, so make sure to keep me safe against this issue.
 
 Follow the general flow below for tasks that require integrating functionality into the code base:
-1. Define the problem clearly and identify key questions.  List the files that you will need to read to understand the code base and the problem at hand.  Ask me for clarification if there are any unclear requirements.  Plan out what documentation and resources you will need to consult to understand the background and potential solutions to the problem.
-2. Gather relevant data and information from the code base and/or the web using your web search tools and READ actions.  Read the relevant files one at a time and reflect on each to think aloud about the function of each.
+1. Define the problem clearly and identify key questions.  List the files that you will need to read to understand the code base and the problem at hand.  Ask me for clarification if there are any unclear requirements.  Plan out what documentation and resources you will need to consult to understand the background and potential solutions to the problem.  Consider what is already in your context and conversation history and be efficient, don't re-read resources that you have already read.
+2. Gather any new and relevant data and information from the code base and/or the web using your web search tools and READ actions.  Read the relevant files one at a time and reflect on each to think aloud about the function of each.
 3. Describe the way that the code is structured and integrated.  Confirm if you have found the issue or understood how the functionality needs to be integrated.  If you don't yet understand or have not yet found the issue, then look for more files to read and reflect on to connect the dots.
 4. Plan the changes that you will need to make once you understand the problem.  If you have found the issue or understood how to integrate the functionality, then go ahead and plan to make the changes to the code base.  Summarize the steps that you will take for your own reference.
 5. Follow the plan and make the changes one file at a time.  Use the WRITE and EDIT commands to make the changes and save the results to each file.  Make sure to always READ files before you EDIT so that you understand the context of the changes you are making.  Do not assume the content of files.
@@ -1951,7 +1948,7 @@ For this task, you need to gather information from the web using your web search
 
 Guidelines:
 - Perform a few different web searches with different queries to get a broad range of information.  Use the web search tools to get the information.
-- Use 2-3 broad queries in your initial search to get a broad range of information.  Follow up with more queries if needed if there doesn't seem to be enough information to make a comprehensive report.
+- Use 2-3 broad queries in one step in your initial search to get a broad range of information.  Follow up with more specific queries that are formulated from the results of the first step in additional steps if needed if there doesn't seem to be enough information to make a comprehensive report.
 - Present factual, objective information from reliable news sources
 - Include key details: who, what, when, where, why, and how
 - Verify information across multiple credible sources
@@ -2193,6 +2190,17 @@ Here are some guidelines for how to respond to this type of message:
 
 Follow these guidelines if they make sense for the task at hand.  If the guidelines don't properly apply or make sense based on the user's message and the conversation history, then you can use your discretion to respond in a way makes the most sense and/or helps the user achieve their goals in the most correct and effective way possible.
 """  # noqa: E501
+
+ScheduleInstructionsPrompt: str = """
+This is the next scheduled task that you must run again
+
+Make sure to complete the task completely and with all required steps and details.  Compare any results with the previous task and update as needed.  Don't assume any steps have already been completed.
+
+Don't make assumptions about variables or data that are already in your context and conversation history.  Even if you see completed text and statuses in your context variables, these are likely stale now and need to be re-done.  Fetch new information as needed, and if you are running a recurring task that depends on new information, make sure to consider the new information in your response if there is any.  Write summaries, emails, reports, and any other text based on the new information and make sure that you are appropriately communicating the new information to the user.
+"""  # noqa: E501
+"""
+Specialized instructions for scheduled tasks
+"""
 
 
 def get_request_type_instructions(request_type: RequestType) -> str:

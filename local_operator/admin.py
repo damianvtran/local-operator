@@ -37,7 +37,7 @@ from local_operator.config import Config, ConfigManager
 from local_operator.executor import LocalCodeExecutor
 from local_operator.notebook import save_code_history_to_notebook
 from local_operator.operator import ConversationRole
-from local_operator.tools import ToolRegistry
+from local_operator.tools.general import ToolRegistry
 from local_operator.types import AgentState
 
 
