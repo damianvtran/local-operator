@@ -336,28 +336,16 @@ class RadientTokenResponse(BaseModel):
         return payload
 
 
-class RadientTokenRefreshResult(BaseModel):
-    """Result part of the token refresh response."""
-
-    token_response: RadientTokenResponse
-    account_created: bool
-    model_config = {"extra": "allow"}
-
-    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
-        """Convert model to dictionary, making it JSON serializable."""
-        return super().model_dump(*args, **kwargs)
-
-
 class RadientTokenRefreshAPIResponse(BaseModel):
     """Overall API response structure for token refresh.
 
     Attributes:
         msg (str): Confirmation or status message.
-        result (RadientTokenRefreshResult): The actual token refresh result.
+        result (RadientTokenResponse): The actual token refresh result.
     """
 
     msg: str
-    result: RadientTokenRefreshResult
+    result: RadientTokenResponse
     model_config = {"extra": "allow"}
 
     def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
@@ -962,10 +950,8 @@ class RadientClient:
             api_response_data = response.json()
             api_response = RadientTokenRefreshAPIResponse.model_validate(api_response_data)
 
-            # The actual token data is nested
-            token_data = api_response.result.token_response
-
-            return token_data
+            # The actual token data is in api_response.result
+            return api_response.result
         except requests.exceptions.RequestException as e:
             error_body = (
                 e.response.content.decode()

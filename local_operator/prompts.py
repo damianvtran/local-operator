@@ -127,7 +127,6 @@ def _format_tool_documentation(
 
     # Get first line of docstring
     doc = tool.__doc__ or "No description available"
-    doc = doc.split("\n")[0].strip()
 
     # Format function signature
     sig = inspect.signature(tool)
