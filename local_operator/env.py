@@ -30,8 +30,13 @@ class EnvConfig:
     """
 
     radient_api_base_url: str = Field(
-        default="",
+        default="https://api.radienthq.com/v1",
         description="Base URL for the Radient API.",
+    )
+
+    radient_client_id: str = Field(
+        default="",
+        description="Client ID for Radient API OAuth flows.",
     )
 
 
@@ -43,5 +48,6 @@ def get_env_config() -> EnvConfig:
         EnvConfig: The loaded environment configuration.
     """
     return EnvConfig(
-        radient_api_base_url=os.getenv("RADIENT_API_BASE_URL", "https://api.radienthq.com/v1")
+        radient_api_base_url=os.getenv("RADIENT_API_BASE_URL", "https://api.radienthq.com/v1"),
+        radient_client_id=os.getenv("RADIENT_CLIENT_ID", "b0fd1aa8-05a2-4ca2-bac2-82db293e7584"),
     )

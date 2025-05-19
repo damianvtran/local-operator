@@ -21,7 +21,7 @@ from local_operator.executor import (
     process_json_response,
 )
 from local_operator.operator import Operator, OperatorType
-from local_operator.tools import ToolRegistry
+from local_operator.tools.general import ToolRegistry
 from local_operator.types import (
     ActionType,
     AgentState,

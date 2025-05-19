@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.12.1"
+version = "0.13.0"
 description = "A Python-based agent for local command execution"
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damian@local-operator.com" }]
@@ -46,6 +46,7 @@ dependencies = [
     "twisted>=24.7.0rc1",
     "urllib3>=2.2.2",
     "websockets>=15.0.1",
+    "setuptools>=78.1.1",
 ]
 requires-python = ">=3.12"
 

@@ -15,7 +15,7 @@ from local_operator.prompts import (
     get_system_details_str,
     get_tools_str,
 )
-from local_operator.tools import ToolRegistry
+from local_operator.tools.general import ToolRegistry
 
 
 def test_create_system_prompt():
@@ -141,14 +141,48 @@ def test_get_tools_str():
             "expected": (
                 """
 - async get_page_html_content(url: str) -> Coroutine[str]: Browse to a URL using Playwright to render JavaScript and return the full HTML page content.  Use this for any URL that you want to get the full HTML content of for scraping and understanding the HTML format of the page.
+
+    Uses stealth mode and waits for network idle to avoid bot detection.
+
+    Args:
+        url: The URL to browse to
+
+    Returns:
+        str: The rendered page content
+
+    Raises:
+        RuntimeError: If page loading fails or bot detection is triggered
+    
 - async get_page_text_content(url: str) -> Coroutine[str]: Browse to a URL using Playwright to render JavaScript and extract clean text content.  Use this for any URL that you want to read the content for, for research purposes. Extracts text from semantic elements like headings, paragraphs, lists etc. and returns a cleaned text representation of the page content.
+
+    Uses stealth mode and waits for network idle to avoid bot detection.
+    Extracts text from semantic elements and returns cleaned content.
+
+    Args:
+        url: The URL to get the text content of
+
+    Returns:
+        str: The cleaned text content extracted from the page's semantic elements
+
+    Raises:
+        RuntimeError: If page loading or text extraction fails
+    
 - list_working_directory(max_depth: int = 3) -> Dict: List the files in the current directory showing files and their metadata.
+    If in a git repo, only shows unignored files. If not in a git repo, shows all files.
+
+    Args:
+        max_depth: Maximum directory depth to traverse. Defaults to 3.
+
+    Returns:
+        Dict mapping directory paths to lists of (filename, file_type, size_bytes) tuples.
+        File types are: 'code', 'doc', 'data', 'image', 'config', 'other'
+    
 
 ## Response Type Formats
 
 ### Dict
 Custom return type (print the output to the console to read and interpret in following steps)
-""".strip()  # noqa: E501
+""".strip()  # noqa: E501, W293 whitespace is expected here
             ),
         },
         {
