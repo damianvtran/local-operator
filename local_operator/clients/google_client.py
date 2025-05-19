@@ -376,7 +376,7 @@ class GoogleClient:
                         # Using 'metadata' to get snippet, headers, labels, etc.,
                         # without fetching the full payload for efficiency in a list.
                         detailed_message = self.get_gmail_message(
-                            message_id=message_stub["id"], format="full"
+                            message_id=message_stub["id"], format="metadata"
                         )
                         detailed_messages.append(detailed_message)
                     except GoogleAPIError as e:
