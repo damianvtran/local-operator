@@ -364,8 +364,33 @@ class GoogleClient:
             params["pageToken"] = page_token
 
         url = f"{GMAIL_API_BASE_URL}messages"
-        response_data = self._request("GET", url, params=params)
-        return GmailListMessagesResponse(**response_data)
+        # Initial call to get message IDs and page token
+        list_response_data = self._request("GET", url, params=params)
+
+        detailed_messages: List[GmailMessage] = []
+        if list_response_data.get("messages"):
+            for message_stub in list_response_data["messages"]:
+                if "id" in message_stub:
+                    try:
+                        # Fetch more details for each message.
+                        # Using 'metadata' to get snippet, headers, labels, etc.,
+                        # without fetching the full payload for efficiency in a list.
+                        detailed_message = self.get_gmail_message(
+                            message_id=message_stub["id"], format="full"
+                        )
+                        detailed_messages.append(detailed_message)
+                    except GoogleAPIError as e:
+                        # Log error and potentially skip this message or add a placeholder
+                        logger.error(f"Failed to get details for message {message_stub['id']}: {e}")
+                else:
+                    # Handle cases where a message stub might not have an ID (should be rare)
+                    logger.warning(f"Message stub without ID found: {message_stub}")
+
+        return GmailListMessagesResponse(
+            messages=detailed_messages if detailed_messages else None,
+            nextPageToken=list_response_data.get("nextPageToken"),
+            resultSizeEstimate=list_response_data.get("resultSizeEstimate"),
+        )
 
     def get_gmail_message(self, message_id: str, format: str = "full") -> GmailMessage:
         """

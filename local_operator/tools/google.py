@@ -21,7 +21,7 @@ def list_gmail_messages_tool(credential_manager: CredentialManager) -> Callable[
         max_results: Optional[int] = None,
         page_token: Optional[str] = None,
     ) -> str:
-        """Lists messages in the user's Gmail mailbox.
+        """Lists messages in the user's Gmail mailbox.  This will provide a full message object for each message.  Be sure to query enough messages to be able to present a representative sample to the user based on their request.  Query the last 50 messages by default if asked for summaries unless otherwise specified.
 
         Args:
             query (Optional[str]): Query string to filter messages
@@ -31,7 +31,7 @@ def list_gmail_messages_tool(credential_manager: CredentialManager) -> Callable[
 
         Returns:
             str: JSON string of GmailListMessagesResponse or error message.
-        """
+        """  # noqa: E501
         access_token_secret = credential_manager.get_credential(GOOGLE_ACCESS_TOKEN_KEY)
         if not access_token_secret or not access_token_secret.get_secret_value():
             return json.dumps({"error": "Google access token not found or empty."})
