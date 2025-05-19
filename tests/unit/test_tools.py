@@ -62,7 +62,7 @@ def mock_file_system():
         ),
         patch("os.stat", side_effect=mock_stat_size),
         patch("pathlib.Path.stat", new=fake_path_stat),
-        patch("local_operator.tools.os.path.join", side_effect=fake_join),
+        patch("os.path.join", side_effect=fake_join),
     ):
         yield mock_files
 

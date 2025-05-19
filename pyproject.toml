@@ -46,6 +46,7 @@ dependencies = [
     "twisted>=24.7.0rc1",
     "urllib3>=2.2.2",
     "websockets>=15.0.1",
+    "setuptools>=78.1.1",
 ]
 requires-python = ">=3.12"
 
