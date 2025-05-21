@@ -1336,7 +1336,8 @@ class AgentRegistry:
                 import_execution_record = CodeExecutionResult(
                     message=(
                         "This is an imported agent. All prior conversation and execution "
-                        "records are from the agent's training conversations."
+                        "records are from the agent's training conversations.  "
+                        "Send a message to continue and have the agent do something for you."
                     ),
                     status=ProcessResponseStatus.SUCCESS,
                     execution_type=ExecutionType.INFO,
