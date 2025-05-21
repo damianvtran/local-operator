@@ -1042,7 +1042,8 @@ class Operator:
                     role=ConversationRole.USER,
                     content=(
                         "I would like to change the subject.  Please stop the current task "
-                        "and pay attention to my new message."
+                        "and pay attention to my new message.  Don't acknowledge "
+                        "this message directly."
                     ),
                     should_summarize=False,
                 )
