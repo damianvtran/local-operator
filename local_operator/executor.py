@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import builtins
 import inspect
 import io
@@ -564,7 +565,11 @@ class LocalCodeExecutor:
         except Exception:
             tokenizer = encoding_for_model("gpt-4o")
 
-        return sum(len(tokenizer.encode(entry.content)) for entry in messages)
+        total_tokens = 0
+        for entry in messages:
+            if entry.content:  # Ensure content is not None or empty before encoding
+                total_tokens += len(tokenizer.encode(entry.content))
+        return total_tokens
 
     def get_session_token_usage(self) -> int:
         """Get the total token count for the current session."""
@@ -747,33 +752,103 @@ class LocalCodeExecutor:
         )
 
         for record in messages:
-            # Skip empty messages to prevent provider errors
-            if not record.content:
-                continue
-
-            msg = {
-                "role": record.role,
-                "content": [
+            content_parts = []
+            # Add main text content if it exists
+            if record.content:
+                content_parts.append(
                     {
                         "type": "text",
                         "text": record.content,
                     }
-                ],
+                )
+
+            # Add multimodal parts if they exist
+            if record.files:
+                for file in record.files:
+                    file_lower = file.lower()
+                    try:
+                        if file_lower.endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")):
+                            with open(file, "rb") as image_file:
+                                image_data = base64.b64encode(image_file.read()).decode("utf-8")
+                            # Determine mime type
+                            if file_lower.endswith(".png"):
+                                mime_type = "image/png"
+                            elif file_lower.endswith(".jpg") or file_lower.endswith(".jpeg"):
+                                mime_type = "image/jpeg"
+                            elif file_lower.endswith(".gif"):
+                                mime_type = "image/gif"
+                            elif file_lower.endswith(".bmp"):
+                                mime_type = "image/bmp"
+                            elif file_lower.endswith(".webp"):
+                                mime_type = "image/webp"
+                            else:
+                                mime_type = "application/octet-stream"
+                            data_url = f"data:{mime_type};base64,{image_data}"
+                            content_parts.append(
+                                {"type": "image_url", "image_url": {"url": data_url}}
+                            )
+                        elif file_lower.endswith(".pdf"):
+                            with open(file, "rb") as pdf_file:
+                                pdf_data = base64.b64encode(pdf_file.read()).decode("utf-8")
+                            data_url = f"data:application/pdf;base64,{pdf_data}"
+                            content_parts.append(
+                                {
+                                    "type": "file",
+                                    "file": {"filename": Path(file).name, "file_data": data_url},
+                                }
+                            )
+                    except Exception as e:
+                        logging.error(f"Failed to read or encode file '{file}': {e}")
+
+            # Skip empty messages to prevent provider errors
+            if not content_parts:
+                continue
+
+            msg = {
+                "role": record.role,
+                "content": content_parts,
             }
             messages_list.append(msg)
 
         if should_manual_cache_control:
             cache_count = 0
-            for idx, msg in reversed(list(enumerate(messages_list))):
-                if messages[idx].should_cache:
-                    msg["content"][0]["cache_control"] = {
-                        "type": "ephemeral",
-                    }
-                    cache_count += 1
-
-                    # Only 4 cache checkpoints allowed
-                    if cache_count >= 4:
-                        break
+            # Iterate over a copy of messages_list for safe modification if needed,
+            # or ensure logic correctly maps indices if messages_list can change.
+            # For cache control, we are modifying `msg` which is part of `messages_list`.
+            for idx, msg_container in reversed(list(enumerate(messages_list))):
+                # msg_container is the dict like {"role": ..., "content": [...]}
+                # messages[idx] is the original ConversationRecord
+                if messages[idx].should_cache and msg_container["content"]:
+                    # Apply cache control to the first part of the content list,
+                    # assuming it's the primary text part or a significant part.
+                    # This might need adjustment based on how providers handle cache control
+                    # for multipart messages.
+                    # Ensure there's content to apply cache control to.
+                    if (
+                        isinstance(msg_container["content"], list)
+                        and len(msg_container["content"]) > 0
+                    ):
+                        # Ensure the first part is a dictionary before adding cache_control
+                        if isinstance(msg_container["content"][0], dict):
+                            msg_container["content"][0]["cache_control"] = {
+                                "type": "ephemeral",
+                            }
+                            cache_count += 1
+                            # Only 4 cache checkpoints allowed
+                            if cache_count >= 4:
+                                break
+                        else:
+                            # Log or handle cases where the first content
+                            # part isn't a dict as expected
+                            logging.warning(
+                                "Cache control: First content part for "
+                                f"message {idx} is not a dict."
+                            )
+                    else:
+                        # Log or handle cases where content is unexpectedly not a list or is empty
+                        logging.warning(
+                            f"Cache control: Content for message {idx} is not a list or is empty."
+                        )
 
         model_instance = self.model_configuration.instance
 
