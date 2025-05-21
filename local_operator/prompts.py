@@ -2297,7 +2297,10 @@ def apply_attachments_to_prompt(prompt: str, attachments: List[str] | None) -> s
         return prompt
 
     attachments_section = (
-        "\n\n## Attachments\n\nPlease use the following files to help with my request:\n\n"
+        "\n\n## Attachments\n\nThese are the file paths on the local device for\n\n"
+        "the files that I have included.  If you are able to read the files straight\n\n"
+        "from your context, then please do so.  Otherwise, please use the file\n\n"
+        "paths to operate on the files.\n\n"
     )
 
     for i, attachment in enumerate(attachments, 1):
