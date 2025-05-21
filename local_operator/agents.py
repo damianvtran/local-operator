@@ -1335,8 +1335,8 @@ class AgentRegistry:
                 # Add a record to execution history to mark the import
                 import_execution_record = CodeExecutionResult(
                     message=(
-                        "Agent state imported. All prior conversation and execution "
-                        "records are from the imported data."
+                        "This is an imported agent. All prior conversation and execution "
+                        "records are from the agent's training conversations."
                     ),
                     status=ProcessResponseStatus.SUCCESS,
                     execution_type=ExecutionType.INFO,
@@ -1346,9 +1346,9 @@ class AgentRegistry:
                     stderr="",
                     logging="",
                     code="",
-                    formatted_print="Agent import process completed.",
+                    formatted_print="",
                     files=[],
-                    action=None,  # No specific ActionType for a system event like import
+                    action=None,
                 )
                 agent_state.execution_history.append(import_execution_record)
 
