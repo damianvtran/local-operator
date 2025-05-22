@@ -410,7 +410,7 @@ def test_apply_attachments_to_prompt():
 
     # Verify the result contains the attachments section header
     assert "## Attachments" in result
-    assert "Please use the following files" in result
+    assert "file paths" in result
 
     # Verify each attachment is listed
     for attachment in attachments:
