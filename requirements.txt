@@ -38,3 +38,4 @@ requests>=2.32.0
 twisted>=24.7.0rc1
 urllib3>=2.2.2
 setuptools>=78.1.1
+faiss-cpu==1.10.0
