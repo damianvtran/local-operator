@@ -373,6 +373,7 @@ BaseSystemPrompt: str = (
 - 🔧 Use tools when you need to in order to accomplish things with less code.  Pay attention to their usage patterns in the tools list.
 - 🔄 Chain steps using previous stdout/stderr.  You will need to print to read something in subsequent steps.
 - 📝 Read, write, and edit text files using READ, WRITE, and EDIT such as markdown, html, code, and other written information formats.  Do not use Python code to perform these actions with strings.  Do not use these actions for data files or spreadsheets.
+- 🖼️ Use READ to read png, jpeg, or webp images when you need to understand the content of an image, validate image outputs, or review screenshots and other image-based debugging sources.  If this fails due to lack of multimodal support, then advise the user that you are not able to read images unless they use a model that supports multimodal input like Radient Automatic, GPT-4o, Google Gemini 2.5 Pro, Llama Maverick, or Anthropic Claude 3.7.
 - ✅ Ensure all code written to files for software development tasks is formatting-compliant.  If you are writing code, ensure that it is formatted correctly, uses best practices, is efficient, and is formatted correctly.  Ensure code files end with a newline.
 - 📊 Use CODE to read, edit, and write data objects to files like JSON, CSV, images, videos, etc.  Use Pandas to read spreadsheets and large data files.  Never read large data files or spreadsheets with READ.
 - ⛔️ Never use CODE to perform READ, WRITE, or EDIT actions with strings on text formats.  Writing to files with strings in python code is less efficient and will be error prone.
@@ -439,7 +440,7 @@ BaseSystemPrompt: str = (
 Your response flow for working tasks should look something like the following example sequence, depending on what the user is asking for:
 <example_response_flow>
   1. Research (CODE): research the information required by the plan.  Run exploratory code to gather information about the user's goal.  The purpose of this step is to gather information and data from the web and local data files into the environment context for use in the next steps.
-  2. Read (READ): read the contents of files to gather information about the user's goal.  Do not READ for large files or data files, instead use CODE to extract and summarize a portion of the file instead.  The purpose of this step is to gather information from documents on the filesystem into the environment context for use in the next steps.
+  2. Read (READ): read the contents of files to gather information about the user's goal.  You can read text and image files.  Do not READ for large files or data files, instead use CODE to extract and summarize a portion of the file instead.  The purpose of this step is to gather information from documents on the filesystem into the environment context for use in the next steps.
   3. Code/Write/Edit (CODE/WRITE/EDIT): execute on the plan by performing the actions necessary to achieve the user's goal.  Print the output of the code to the console for the system to consume.
   4. Validate (CODE): verify the results of the previous step.
   5. Repeat steps 1-4 until every required task is complete.
@@ -1388,7 +1389,7 @@ Here are the request types and how to think about classifying them.  You MUST us
 
 <request_types>
 conversation: General chat, questions, discussions that don't require complex analysis or processing, role playing, etc.
-creative_writing: Writing stories, poems, articles, marketing copy, presentations, speeches, etc.  Use this for most creative writing tasks.
+creative_writing: Writing stories, poems, articles, marketing copy, presentations, speeches, choose-your-own-adventure games/stories, etc.  Use this for most creative writing tasks.
 data_science: Data analysis, visualization, machine learning, statistics
 mathematics: Math problems, calculations, proofs
 accounting: Financial calculations, bookkeeping, budgets, pricing, cost analysis, etc.
@@ -1410,28 +1411,24 @@ other: Anything else that doesn't fit into the above categories, you will need t
 
 Planning is required for:
 <planning_required>
-- Multi-step tasks
+- Complex multi-step tasks, and not for simple tasks that can be completed in a single step, or any type of role-play or conversational tasks.
 - Tasks requiring coordination between different tools/steps
 - Complex analysis or research
-- Tasks with dependencies
 - Tasks that benefit from upfront organization
-- My requests that materially change the scope or trajectory of the task
 </planning_required>
 
 Relative effort levels:
 <relative_effort>
 low: Simple, straightforward tasks taking a single step.
 medium: Moderate complexity tasks taking 2-5 steps.
-high: Complex tasks taking >5 steps or requiring significant reasoning, planning,
-and research effort.
+high: Complex tasks taking >5 steps that require significant reasoning, planning, and research effort.
 </relative_effort>
 
 Subject change:
 <subject_change>
 true: My request is about a new topic or subject that is different from the
 current flow of conversation.  Do not use this for my first request in the conversation.
-false: My request is about the same or similar topic or subject as the previous
-request and is part of the current task or flow of conversation.  If this is the first message or there was no previous subject, then use the false value.
+false: My request is about the same or similar topic or subject as the previous request and is part of the current task or flow of conversation.  If this is the first message or there was no previous subject, then use the false value.
 </subject_change>
 
 Example XML tags response:
@@ -1561,10 +1558,8 @@ ConversationInstructions: str = """
 # Specialized instructions for creative writing tasks
 CreativeWritingInstructions: str = """
 ## Creative Writing Guidelines
-- Be creative, write to the fullest extent of your ability and don't short-cut or write
-  too short of a piece unless I have asked for a short piece.
-- If I ask for a long story, then sketch out the story in a markdown file and
-  replace the sections as you go.
+- Be creative, write to the fullest extent of your ability and don't short-cut or write too short of a piece unless I have asked for a short piece.
+- If I ask for a long story, then sketch out the story in a markdown file and replace the sections as you go.
 - Understand the target audience and adapt your style accordingly
 - Structure your writing with clear sections, paragraphs, and transitions
 - Use vivid language, metaphors, and sensory details when appropriate
@@ -1574,18 +1569,17 @@ CreativeWritingInstructions: str = """
 - Consider the medium and format requirements (blog, essay, story, etc.)
 
 Follow the general flow below for writing stories if the request was to write a story:
-1. Define the outline of the story and save it to an initial markdown file.  Plan to
-   write a detailed and useful story with a logical and creative flow.  Aim for 3000 words
-   for a short story, 10000 words for a medium story, and 40000 words for a long story.
-   Include an introduction, body and conclusion. The body should have an analysis of the
-   information, including the most important details and findings. The introduction should
-   provide background information and the conclusion should summarize the main points.
-2. Iteratively go through each section and write new content, then replace the
-   corresponding placeholder section in the markdown with the new content.  Make sure
-   that you don't lose track of sections and don't leave any sections empty.
+1. Define the outline of the story and save it to an initial markdown file.  Plan to write a detailed and useful story with a logical and creative flow.  Aim for 3000 words for a short story, 10000 words for a medium story, and 40000 words for a long story.  Include an introduction, body and conclusion.  The body should have an analysis of the information, including the most important details and findings.  The introduction should provide background information and the conclusion should summarize the main points.
+2. Iteratively go through each section and write new content, then replace the corresponding placeholder section in the markdown with the new content.  Make sure that you don't lose track of sections and don't leave any sections empty.
 3. Save the final story to disk in markdown format.
-4. Read the story over again after you are done and correct any errors or go back to
-   complete the story.
+4. Read the story over again after you are done and correct any errors or go back to complete the story.
+
+For role-play tasks and writing choose-your-own-adventure stories and similar interactive games, you will need to follow a different flow.
+1. Define a comprehensive game state which stores persistent variables that are used to track the state of the game.
+2. On each step, provide a detailed description of the current state of the game, including the current location, the player's state, the available actions.  Use multiple choice to help the player to make quick decisions.
+3. When the player chooses, don't use planning, simply update the game state and then respond with the updated state and the next part of the story with the available choices.
+4. Continue to iterate this way with CODE to update the game state and then response immediately after each update with the updated state and the next part of the story with the available choices.
+5. Focus on immersion, don't explicitly acknowledge any internal mechanics but provide the user with a seamless experience and enough information to make decisions and for the story to be engaging.
 
 Otherwise, for other creative tasks, try to use ideas that have not been used in the past and mix up ideas and concepts to create a unique and engaging piece.
 """  # noqa: E501
@@ -2304,7 +2298,10 @@ def apply_attachments_to_prompt(prompt: str, attachments: List[str] | None) -> s
         return prompt
 
     attachments_section = (
-        "\n\n## Attachments\n\nPlease use the following files to help with my request:\n\n"
+        "\n\n## Attachments\n\nThese are the file paths on the local device for\n\n"
+        "the files that I have included.  If you are able to read the files straight\n\n"
+        "from your context, then please do so.  Otherwise, please use the file\n\n"
+        "paths to operate on the files.\n\n"
     )
 
     for i, attachment in enumerate(attachments, 1):

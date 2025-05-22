@@ -19,12 +19,14 @@ import jsonlines
 import yaml
 from pydantic import BaseModel, Field
 
-from local_operator.types import Schedule  # Added Schedule
+from local_operator.types import Schedule  # Keep existing Schedule import
 from local_operator.types import (
     AgentState,
     CodeExecutionResult,
     ConversationRecord,
     ConversationRole,
+    ExecutionType,
+    ProcessResponseStatus,
 )
 
 
@@ -1328,15 +1330,37 @@ class AgentRegistry:
                 # Update conversation history and learnings to reflect import
                 # event so that the agent has continuity
                 agent_state = self.load_agent_state(agent_data.id)
-                import_message = "You were just imported to a new device.  I might be a different user, or the same user than the person you were just talking to.  I might ask you to do something that is the same or different than the conversation before this.  Make sure to use your learnings and the conversation history to replicate what you've learned and give me a consistent experience.  Don't acknowledge this message directly, it is just for your reference."  # noqa: E501
-                learnings_message = "I was just imported to a new device.  The user might be the same or different than the user that I was just talking to.  I'm expected to provide a consistent experience to the user that I was just talking to, so I will need to use learnings and conversation history to replicate the same results for a potentially different topic."  # noqa: E501
                 now = datetime.now(timezone.utc)
+
+                # Add a record to execution history to mark the import
+                import_execution_record = CodeExecutionResult(
+                    message=(
+                        "This is an imported agent. All prior conversation and execution "
+                        "records are from the agent's training conversations.  "
+                        "Send a message to continue and have the agent do something for you."
+                    ),
+                    status=ProcessResponseStatus.SUCCESS,
+                    execution_type=ExecutionType.INFO,
+                    role=ConversationRole.SYSTEM,
+                    timestamp=now,
+                    stdout="",
+                    stderr="",
+                    logging="",
+                    code="",
+                    formatted_print="",
+                    files=[],
+                    action=None,
+                )
+                agent_state.execution_history.append(import_execution_record)
+
+                # Existing import message for the agent's internal context
+                import_message_for_agent = "You were just imported to a new device. I might be a different user, or the same user than the person you were just talking to. I might ask you to do something that is the same or different than the conversation before this. Make sure to use your learnings and the conversation history to replicate what you've learned and give me a consistent experience. Don't acknowledge this message directly, it is just for your reference."  # noqa: E501
                 agent_state.conversation.append(
                     ConversationRecord(
-                        content=import_message,
+                        content=import_message_for_agent,
                         role=ConversationRole.USER,
                         timestamp=now,
-                        should_summarize=True,
+                        should_summarize=True,  # This message is for the agent's context
                         ephemeral=False,
                         summarized=False,
                         is_system_prompt=False,
@@ -1344,7 +1368,11 @@ class AgentRegistry:
                         should_cache=False,
                     )
                 )
+
+                # Existing learnings message
+                learnings_message = "I was just imported to a new device. The user might be the same or different than the user that I was just talking to. I'm expected to provide a consistent experience to the user that I was just talking to, so I will need to use learnings and conversation history to replicate the same results for a potentially different topic."  # noqa: E501
                 agent_state.learnings.append(learnings_message)
+
                 self.save_agent_state(agent_data.id, agent_state)
 
                 # Return the agent data
