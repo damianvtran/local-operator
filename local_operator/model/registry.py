@@ -304,6 +304,39 @@ the absence of specific model details.
 """
 
 anthropic_models: Dict[str, ModelInfo] = {
+    "claude-opus-4-20250514": ModelInfo(
+        id="claude-opus-4-20250514",
+        name="Claude Opus 4 (2025-05-14)",
+        max_tokens=32_000,
+        context_window=200_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=15.0,  # $15 / MTok
+        output_price=18.75,  # $18.75 / MTok
+        cache_writes_price=30.0,  # $30 / MTok
+        cache_reads_price=1.50,  # $1.50 / MTok
+        description=(
+            "Anthropic's most capable and intelligent model yet. Claude Opus 4 sets new "
+            "standards in complex reasoning and advanced coding."
+        ),
+        recommended=False,
+    ),
+    "claude-sonnet-4-20250514": ModelInfo(
+        id="claude-sonnet-4-20250514",
+        name="Claude Sonnet 4 (2025-05-14)",
+        max_tokens=64_000,
+        context_window=200_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=3.0,
+        output_price=15.0,
+        cache_writes_price=3.75,
+        cache_reads_price=0.30,
+        description=(
+            "Anthropic's high-performance model with exceptional reasoning and efficiency."
+        ),
+        recommended=True,
+    ),
     "claude-3-7-sonnet-latest": ModelInfo(
         id="claude-3-7-sonnet-latest",
         name="Claude 3.7 Sonnet (Latest)",
