@@ -55,7 +55,7 @@ def test_get_model_info() -> None:
 
     # Test OpenAI
     model_info = get_model_info("openai", "gpt-4o")
-    assert model_info.max_tokens == 16384
+    assert model_info.max_tokens == 128_000
 
     # Test OpenRouter
     model_info = get_model_info("openrouter", "any")

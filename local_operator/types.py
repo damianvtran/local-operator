@@ -63,6 +63,7 @@ class ExecutionType(str, Enum):
     - SECURITY_CHECK: Security check phase where the agent checks the safety of the code
     - CLASSIFICATION: Classification phase where the agent classifies the user's request
     - SYSTEM: An automatic static response from the system, such as an action cancellation.
+    - INFO: An informational message from the system, such as an agent import.
     """
 
     PLAN = "plan"
@@ -73,6 +74,7 @@ class ExecutionType(str, Enum):
     SECURITY_CHECK = "security_check"
     CLASSIFICATION = "classification"
     SYSTEM = "system"
+    INFO = "info"
     USER_INPUT = "user_input"
     DELEGATE = "delegate"
     NONE = "none"
