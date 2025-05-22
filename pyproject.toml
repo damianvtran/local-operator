@@ -37,6 +37,7 @@ dependencies = [
     "browser-use",
     "apscheduler",
     # Constraints
+    "faiss-cpu==1.10.0",
     "certifi>=2024.7.4",
     "configobj>=5.0.9",
     "cryptography>=43.0.1",
