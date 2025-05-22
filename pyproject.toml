@@ -5,16 +5,16 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "local-operator"
 version = "0.14.1"
-description = "A Python-based agent for local command execution"
+description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
-authors = [{ name = "Damian Tran", email = "damian@local-operator.com" }]
+authors = [{ name = "Damian Tran", email = "damian@radienthq.com" }]
 license = { file = "LICENSE" }
 classifiers = [
     "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3.12",
 ]
-keywords = ["local", "agent", "execution", "operator"]
+keywords = ["local", "agent", "execution", "operator", "agent-to-agent", "agentic", "local-first", "ai", "proactive"]
 dependencies = [
     "langchain-openai",
     "langchain-ollama", 
