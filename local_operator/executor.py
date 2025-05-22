@@ -2269,6 +2269,7 @@ class LocalCodeExecutor:
             raise FileNotFoundError(f"File not found: {file_path}")
 
         image_extensions = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp"}
+        ocr_extensions = {".pdf"}
         file_ext = expanded_file_path.suffix.lower()
 
         if file_ext in image_extensions:
@@ -2290,6 +2291,34 @@ class LocalCodeExecutor:
                 stderr="",
                 logging="",
                 formatted_print=f"Successfully attached image file: {file_path}",
+                code="",
+                message="",
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.SUCCESS,
+                files=[str(expanded_file_path)],
+                execution_type=ExecutionType.ACTION,
+                action=ActionType.READ,
+            )
+        elif file_ext in ocr_extensions:
+            # For OCR files, do not read content, just attach the file path
+            self.append_to_history(
+                ConversationRecord(
+                    role=ConversationRole.USER,
+                    content=(
+                        f"The file {file_path} is a file that can be interpreted "
+                        "through OCR and has been attached to the conversation "
+                        "context for your review."
+                    ),
+                    should_summarize=True,
+                    should_cache=True,
+                    files=[str(expanded_file_path)],
+                )
+            )
+            return CodeExecutionResult(
+                stdout=f"Successfully attached OCR-interpretable file: {file_path}",
+                stderr="",
+                logging="",
+                formatted_print=f"Successfully attached OCR-interpretable file: {file_path}",
                 code="",
                 message="",
                 role=ConversationRole.ASSISTANT,
