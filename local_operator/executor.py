@@ -2246,33 +2246,71 @@ class LocalCodeExecutor:
         )
 
     async def read_file(
-        self, file_path: str, max_file_size_bytes: int = MAX_FILE_READ_SIZE_BYTES
+        self, file_path: str, max_text_file_size_bytes: int = MAX_FILE_READ_SIZE_BYTES
     ) -> CodeExecutionResult:
-        """Read the contents of a file and include line numbers and lengths.
+        """
+        Read the contents of a file and include line numbers and lengths, or attach image files.
 
         Args:
-            file_path (str): The path to the file to read
-            max_file_size_bytes (int): The maximum file size to read in bytes
+            file_path (str): The path to the file to read.
+            max_file_size_bytes (int): The maximum file size to read in bytes.
 
         Returns:
-            str: A message indicating the file has been read
+            CodeExecutionResult: The result of the file read operation.
 
         Raises:
-            FileNotFoundError: If the file does not exist
-            ValueError: If the file is too large to read
-            OSError: If there is an error reading the file
+            FileNotFoundError: If the file does not exist.
+            ValueError: If the file is too large to read.
+            OSError: If there is an error reading the file.
         """
         expanded_file_path = Path(file_path).expanduser().resolve()
 
-        if os.path.getsize(expanded_file_path) > max_file_size_bytes:
+        if not expanded_file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        image_extensions = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp"}
+        file_ext = expanded_file_path.suffix.lower()
+
+        if file_ext in image_extensions:
+            # For image files, do not read content, just attach the file path
+            self.append_to_history(
+                ConversationRecord(
+                    role=ConversationRole.USER,
+                    content=(
+                        f"The file {file_path} is an image and has been "
+                        "attached to the conversation context for your review."
+                    ),
+                    should_summarize=True,
+                    should_cache=True,
+                    files=[str(expanded_file_path)],
+                )
+            )
+            return CodeExecutionResult(
+                stdout=f"Successfully attached image file: {file_path}",
+                stderr="",
+                logging="",
+                formatted_print=f"Successfully attached image file: {file_path}",
+                code="",
+                message="",
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.SUCCESS,
+                files=[str(expanded_file_path)],
+                execution_type=ExecutionType.ACTION,
+                action=ActionType.READ,
+            )
+
+        if os.path.getsize(expanded_file_path) > max_text_file_size_bytes:
             raise ValueError(
                 f"File is too large to use read action on: {file_path}\n"
                 f"Please use code action to summarize and extract key features from "
                 f"the file instead."
             )
 
-        with open(expanded_file_path, "r", encoding="utf-8") as f:
-            file_content = f.read()
+        try:
+            with open(expanded_file_path, "r", encoding="utf-8") as f:
+                file_content = f.read()
+        except Exception as e:
+            raise OSError(f"Error reading file {file_path}: {e}")
 
         annotated_content = annotate_code(file_content)
 
