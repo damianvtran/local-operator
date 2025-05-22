@@ -307,8 +307,8 @@ anthropic_models: Dict[str, ModelInfo] = {
     "claude-opus-4-20250514": ModelInfo(
         id="claude-opus-4-20250514",
         name="Claude Opus 4 (2025-05-14)",
-        max_tokens=4096,
-        context_window=4096,
+        max_tokens=32_000,
+        context_window=200_000,
         supports_images=True,
         supports_prompt_cache=True,
         input_price=15.0,  # $15 / MTok
@@ -324,7 +324,7 @@ anthropic_models: Dict[str, ModelInfo] = {
     "claude-sonnet-4-20250514": ModelInfo(
         id="claude-sonnet-4-20250514",
         name="Claude Sonnet 4 (2025-05-14)",
-        max_tokens=8192,
+        max_tokens=64_000,
         context_window=200_000,
         supports_images=True,
         supports_prompt_cache=True,
