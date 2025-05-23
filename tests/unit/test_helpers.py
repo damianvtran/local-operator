@@ -228,7 +228,7 @@ def test_is_marker_inside_json(text, marker, expected):
             {
                 "action": "WRITE",
                 "learnings": "",
-                "response": "",
+                "response": "Some text before and text after.",  # Updated
                 "code": "",
                 "content": "File content",
                 "file_path": "test.txt",
@@ -237,7 +237,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "message": "",
                 "mentioned_files": [],
             },
-            id="write_action_with_surrounding_text_and_action_response_tag",
+            id="write_action_with_surrounding_text_and_action_response_tag",  # noqa: E501
         ),
         pytest.param(
             "```xml\n<action>EDIT</action><file_path>doc.md</file_path><replacements>\n- old line\n- another old line\n+ new line 1\n+ new line 2\n</replacements>\n```",  # noqa: E501
@@ -475,6 +475,150 @@ def test_is_marker_inside_json(text, marker, expected):
                 "mentioned_files": [],
             },
             id="edit_replacing_xml_entities",
+        ),
+        pytest.param(
+            "Just some text",
+            {
+                "action": "",
+                "learnings": "",
+                "response": "Just some text",
+                "code": "",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="only_text_no_xml",
+        ),
+        pytest.param(
+            "Prefix <action>tool</action>",
+            {
+                "action": "tool",
+                "learnings": "",
+                "response": "Prefix",
+                "code": "",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="text_before_xml",
+        ),
+        pytest.param(
+            "<action>tool</action> Suffix",
+            {
+                "action": "tool",
+                "learnings": "",
+                "response": "Suffix",
+                "code": "",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="text_after_xml",
+        ),
+        pytest.param(
+            "Prefix <action>tool</action> Suffix",
+            {
+                "action": "tool",
+                "learnings": "",
+                "response": "Prefix Suffix",
+                "code": "",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="text_before_and_after_xml",
+        ),
+        pytest.param(
+            "Outer <response>Inner</response>",
+            {
+                "action": "",
+                "learnings": "",
+                "response": "Inner",  # Explicit response tag takes precedence
+                "code": "",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="outer_text_with_explicit_response_tag",
+        ),
+        pytest.param(
+            "Outer <message>InnerMsg</message>",
+            {
+                "action": "",
+                "learnings": "",
+                "response": "Outer",  # Outer text goes to response
+                "code": "",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "InnerMsg",  # Explicit message tag
+                "mentioned_files": [],
+            },
+            id="outer_text_with_explicit_message_tag",
+        ),
+        pytest.param(
+            "Outer <response>InnerResp</response> <message>InnerMsg</message>",  # noqa: E501
+            {
+                "action": "",
+                "learnings": "",
+                "response": "InnerResp",  # Explicit response tag
+                "code": "",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "InnerMsg",  # Explicit message tag
+                "mentioned_files": [],
+            },
+            id="outer_text_with_explicit_response_and_message_tags",
+        ),
+        pytest.param(
+            "<message>Msg only</message>",
+            {
+                "action": "",
+                "learnings": "",
+                "response": "",  # No outer text, no response tag
+                "code": "",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "Msg only",  # Explicit message tag
+                "mentioned_files": [],
+            },
+            id="only_message_tag_no_outer_text",
+        ),
+        pytest.param(
+            "<response>Resp only</response>",
+            {
+                "action": "",
+                "learnings": "",
+                "response": "Resp only",  # Explicit response tag
+                "code": "",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",  # No message tag
+                "mentioned_files": [],
+            },
+            id="only_response_tag_no_outer_text",
         ),
     ],
 )
