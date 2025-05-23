@@ -691,7 +691,7 @@ Fields:
   - Important steps and procedures, how-to instructions
   - Things that the user positively or negatively reacted to
   - Details that the user has provided that are important to remember
-- response: Short description of the current action.  If the user has asked for you to write something or summarize something, include that in this field.
+- response: Short description of the current action.  If the user has asked for you to write something or summarize something, include that in this field.  Make sure you describe what you are doing as this is the message that will be presented to the user.  If you leave it blank, they will not know what you are doing.
 - code: Required for CODE: valid Python code to achieve goal. Omit for WRITE/EDIT.
 - content: Required for WRITE: content to write to file. Omit for READ/EDIT.  Do not use for any actions that are not WRITE.
 - file_path: Required for READ/WRITE/EDIT: path to file.  Do not use for any actions that are not READ/WRITE/EDIT.
@@ -704,6 +704,8 @@ Fields:
 #### Examples for CODE:
 
 ##### Example 1:
+Running the analysis of x
+
 <action_response>
 <action>CODE</action>
 
@@ -809,6 +811,8 @@ CODE usage guidelines:
 
 #### Example for WRITE:
 
+Writing content to a file.
+
 <action_response>
 <action>WRITE</action>
 
@@ -834,6 +838,8 @@ WRITE usage guidelines:
 - If you would like to add content to a file, instead of writing to it, then use the EDIT action instead and find/replace the content that you want to add.  READ the file first to get the existing content and then replace the content that you want to add, either within the file or by replacing the string at the end of the file with that string plus your new content.
 
 #### Example for EDIT:
+
+Editing a file to update or add content.
 
 <action_response>
 <action>EDIT</action>
@@ -866,6 +872,8 @@ EDIT usage guidelines:
 
 #### Example for DELEGATE:
 
+Delegating the task to Agent Name.
+
 <action_response>
 <action>DELEGATE</action>
 
@@ -892,6 +900,8 @@ DELEGATE usage guidelines:
 
 #### Example for DONE:
 
+Marking the task as complete.
+
 <action_response>
 <action>DONE</action>
 
@@ -915,6 +925,8 @@ DONE usage guidelines:
 - NEVER hallucinate that you have completed a task when you have not.  Carefully review the real outputs of actions that you have taken and only mark the task as complete when you can verify that the work has been done.  Ensure that all the actions that you requested were actually acknowledged and performed by the system.  Never make up outputs, actions, or results that you have not actually performed.
 
 #### Example for ASK:
+
+Can you tell me more about your preferences for budget, dates, and activities?
 
 <action_response>
 <action>ASK</action>
