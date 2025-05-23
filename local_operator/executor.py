@@ -2281,7 +2281,7 @@ class LocalCodeExecutor:
                         f"The file {file_path} is an image and has been "
                         "attached to the conversation context for your review."
                     ),
-                    should_summarize=True,
+                    should_summarize=False,
                     should_cache=True,
                     files=[str(expanded_file_path)],
                 )
@@ -2309,7 +2309,7 @@ class LocalCodeExecutor:
                         "through OCR and has been attached to the conversation "
                         "context for your review."
                     ),
-                    should_summarize=True,
+                    should_summarize=False,
                     should_cache=True,
                     files=[str(expanded_file_path)],
                 )
@@ -2521,20 +2521,29 @@ class LocalCodeExecutor:
 
     async def _summarize_conversation_step(self, msg: ConversationRecord) -> str:
         """
-        Summarize the conversation step by invoking the model to generate a concise summary.
+        Summarize the conversation step by invoking the model to generate a concise summary,
+        but only if the message content exceeds 500 tokens.
 
         Args:
             msg (ConversationRecord): The conversation record to summarize.
 
         Returns:
-            str: A concise summary of the critical information from the conversation step.
-                 The summary includes key actions, important changes, significant results,
-                 errors or issues, key identifiers, transformations, and data structures.
+            str: A concise summary of the critical information from the conversation step,
+                 or the original content if it is already concise.
 
         Raises:
             ValueError: If the conversation record is not of the expected type.
         """
-        step_info = "Please summarize the following conversation step:\n" + "\n".join(
+        # Calculate token count for the message content
+        tokenizer = encoding_for_model("gpt-4o")
+
+        token_count = len(tokenizer.encode(msg.content or ""))
+
+        if token_count <= 500:
+            return msg.content
+
+        step_info = (
+            "Please summarize the following conversation step:\n"
             f"<role>{msg.role}</role>\n<message>{msg.content}</message>"
         )
 
