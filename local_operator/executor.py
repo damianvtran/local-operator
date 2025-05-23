@@ -1646,7 +1646,8 @@ class LocalCodeExecutor:
                 content=f"Here are the outputs of your last code execution:\n"
                 f"<stdout>\n{condensed_output}\n</stdout>\n"
                 f"<stderr>\n{condensed_error_output}\n</stderr>\n"
-                f"<logger>\n{condensed_log_output}\n</logger>\n",
+                f"<logger>\n{condensed_log_output}\n</logger>\n"
+                "Reflect on the results and determine what you need to do next.",
                 should_summarize=True,
                 should_cache=True,
             )
