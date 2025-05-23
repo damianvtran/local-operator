@@ -35,9 +35,6 @@ class ActionType(str, Enum):
     CODE = "CODE"
     WRITE = "WRITE"
     EDIT = "EDIT"
-    DONE = "DONE"
-    ASK = "ASK"
-    BYE = "BYE"
     READ = "READ"
     DELEGATE = "DELEGATE"  # Delegate task to another agent
 

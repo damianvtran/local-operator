@@ -8,7 +8,6 @@ from enum import Enum
 from pathlib import Path
 from typing import AsyncGenerator, List
 
-from langchain_core.messages import BaseMessage
 from pydantic import ValidationError
 
 from local_operator.agents import AgentData, AgentRegistry
@@ -43,7 +42,6 @@ from local_operator.prompts import (
     get_request_type_instructions,
 )
 from local_operator.types import (
-    ActionType,
     ConversationRecord,
     ConversationRole,
     ExecutionType,
@@ -810,7 +808,7 @@ class Operator:
             )
         )
 
-    async def interpret_action_response(
+    def interpret_action_response(
         self, response_content: str, max_attempts: int = 3  # max_attempts may no longer be needed
     ) -> ResponseJsonSchema:
         """Interpret the action response from the agent using a custom XML parser."""
@@ -869,10 +867,9 @@ class Operator:
 
         return parsed_response_schema
 
-    def process_early_response(
+    def process_text_response(
         self,
         response_content: str,
-        response_json: ResponseJsonSchema,
         classification: RequestClassification,
     ) -> tuple[str, ProcessResponseOutput]:
         """Process an early response from the agent."""
@@ -892,7 +889,6 @@ class Operator:
                 status=ProcessResponseStatus.SUCCESS,
                 files=[],
                 execution_type=ExecutionType.RESPONSE,
-                action=response_json.action,
                 task_classification=classification.type,
             ),
             None,
@@ -910,6 +906,113 @@ class Operator:
             status=ProcessResponseStatus.SUCCESS,
             message=final_response,
         )
+
+    def _has_action_tag(self, response_content: str) -> bool:
+        """Check if the response content contains an action tag."""
+        return re.search(r"<action>([^<]+)</action>", response_content) is not None
+
+    async def invoke_and_process_response(
+        self,
+        messages: list[ConversationRecord],
+        classification: RequestClassification,
+    ) -> tuple[ResponseJsonSchema | None, str, ProcessResponseOutput]:
+        """Invoke the model and process the response."""
+        async with spinner_context(
+            "Formulating a response",
+            verbosity_level=self.verbosity_level,
+        ):
+            response = await self.executor.invoke_model(messages)
+
+        response_content = (
+            response.content if isinstance(response.content, str) else str(response.content)
+        )
+
+        # Check if there is an action request from the agent, and if not,
+        # return the response content as is.
+        if not self._has_action_tag(response_content):
+            return (
+                None,
+                response_content,
+                ProcessResponseOutput(
+                    status=ProcessResponseStatus.SUCCESS,
+                    message=response_content,
+                ),
+            )
+
+        # Retry loop for parsing the agent's action response
+        attempts = 0
+        max_attempts = 3  # Define max_attempts for this loop
+        current_response_content = response_content
+        response_json = None
+
+        while attempts < max_attempts:
+            attempts += 1
+            try:
+                self.executor.append_to_history(  # Append attempt to history
+                    ConversationRecord(
+                        role=ConversationRole.ASSISTANT,
+                        content=current_response_content,  # This is the agent's XML attempt
+                        should_summarize=True,
+                    )
+                )
+                response_json = self.interpret_action_response(current_response_content)
+                break  # Successfully parsed
+            except ValueError as e:
+                logging.error(
+                    "Failed to interpret action response "
+                    f"(attempt {attempts}/{max_attempts}): {e}"
+                )
+                if attempts >= max_attempts:
+                    # Persist the last failing response before raising
+                    self.executor.append_to_history(
+                        ConversationRecord(
+                            role=ConversationRole.ASSISTANT,
+                            content=current_response_content,
+                            should_summarize=True,
+                        )
+                    )
+                    raise ValueError(
+                        f"Failed to interpret action response after {max_attempts} attempts. "
+                        f"Last error: {e}"
+                    ) from e
+
+                # Prepare to re-prompt the agent
+                error_message_for_agent = (
+                    f"Your previous action response was not parsable or failed validation. "
+                    f"Error: {str(e)}\n\nPlease try again, ensuring your response is valid XML "
+                    "matching the required action schema. "
+                    f"Review the schema in the system prompt if needed. "
+                    "The problematic response started with: "
+                    f"{current_response_content[:200]}..."
+                )
+                self.executor.append_to_history(
+                    ConversationRecord(
+                        role=ConversationRole.USER,
+                        content=error_message_for_agent,
+                        should_summarize=False,
+                    )
+                )
+
+                # Get a new response from the agent
+                async with spinner_context(
+                    f"Re-formulating response (attempt {attempts + 1})",
+                    verbosity_level=self.verbosity_level,
+                ):
+                    new_agent_response = await self.executor.invoke_model(
+                        self.executor.agent_state.conversation
+                    )
+                current_response_content = (
+                    new_agent_response.content
+                    if isinstance(new_agent_response.content, str)
+                    else str(new_agent_response.content)
+                )
+
+        if response_json is None:
+            raise ValueError("Response JSON is None after retry loop.")
+
+        result = await self.executor.process_response(response_json, classification)
+
+        return response_json, current_response_content, result
 
     async def handle_user_input(
         self,
@@ -971,7 +1074,6 @@ class Operator:
         )
 
         response_json: ResponseJsonSchema | None = None
-        response: BaseMessage | None = None
         final_response: str = ""
 
         self.executor.reset_step_counter()
@@ -1037,6 +1139,7 @@ class Operator:
 
         while (
             not self._agent_is_done(response_json)
+            and not final_response
             and not self._agent_requires_user_input(response_json)
             and not self.executor.interrupted
         ):
@@ -1061,155 +1164,24 @@ class Operator:
             if self.verbosity_level >= VerbosityLevel.VERBOSE:
                 print("\n")
 
-            async with spinner_context(
-                "Formulating a response",
-                verbosity_level=self.verbosity_level,
-            ):
-                response = await self.executor.invoke_model(self.executor.agent_state.conversation)
-
-            response_content = (
-                response.content if isinstance(response.content, str) else str(response.content)
+            # Process and handle any actions from the agent
+            response_json, response_content, result = await self.invoke_and_process_response(
+                self.executor.agent_state.conversation,
+                classification,
             )
 
-            # Retry loop for parsing the agent's action response
-            attempts = 0
-            max_attempts = 3  # Define max_attempts for this loop
-            current_response_content = response_content
-            response_json = None
-
-            while attempts < max_attempts:
-                attempts += 1
-                try:
-                    self.executor.append_to_history(  # Append attempt to history
-                        ConversationRecord(
-                            role=ConversationRole.ASSISTANT,
-                            content=current_response_content,  # This is the agent's XML attempt
-                            should_summarize=True,
-                        )
-                    )
-                    response_json = await self.interpret_action_response(current_response_content)
-                    break  # Successfully parsed
-                except ValueError as e:
-                    logging.error(
-                        "Failed to interpret action response "
-                        f"(attempt {attempts}/{max_attempts}): {e}"
-                    )
-                    if attempts >= max_attempts:
-                        # Persist the last failing response before raising
-                        self.executor.append_to_history(
-                            ConversationRecord(
-                                role=ConversationRole.ASSISTANT,
-                                content=current_response_content,
-                                should_summarize=True,
-                            )
-                        )
-                        raise ValueError(
-                            f"Failed to interpret action response after {max_attempts} attempts. "
-                            f"Last error: {e}"
-                        ) from e
-
-                    # Prepare to re-prompt the agent
-                    error_message_for_agent = (
-                        f"Your previous action response was not parsable or failed validation. "
-                        f"Error: {str(e)}\n\nPlease try again, ensuring your response is valid XML "
-                        "matching the required action schema. "
-                        f"Review the schema in the system prompt if needed. "
-                        "The problematic response started with: "
-                        f"{current_response_content[:200]}..."
-                    )
-                    self.executor.append_to_history(
-                        ConversationRecord(
-                            role=ConversationRole.USER,
-                            content=error_message_for_agent,
-                            should_summarize=False,
-                        )
-                    )
-
-                    # Get a new response from the agent
-                    async with spinner_context(
-                        f"Re-formulating response (attempt {attempts + 1})",
-                        verbosity_level=self.verbosity_level,
-                    ):
-                        new_agent_response = await self.executor.invoke_model(
-                            self.executor.agent_state.conversation
-                        )
-                    current_response_content = (
-                        new_agent_response.content
-                        if isinstance(new_agent_response.content, str)
-                        else str(new_agent_response.content)
-                    )
-
-            if response_json is None:  # Should be caught by the loop's raise, but as a safeguard
-                raise ValueError("Response JSON is None after retry loop, this should not happen.")
-
-            is_terminal_response = (
-                response_json.action == ActionType.DONE
-                or response_json.action == ActionType.ASK
-                or response_json.action == ActionType.BYE
-            )
-
-            # Check if the response contains an action tag
-            has_action_tag = re.search(r"<action>([^<]+)</action>", response_content) is not None
-
-            if self.executor.step_counter == 1 and is_terminal_response and not has_action_tag:
-                # This is a single response from the agent, such as from a conversation
-                # or other response that doesn't require an action
-                final_response, result = self.process_early_response(
-                    response_content, response_json, classification
+            if response_json is None:
+                # If there is no action request, process the response as a text response
+                final_response, result = self.process_text_response(
+                    response_content, classification
                 )
 
                 print_agent_response(
                     self.executor.step_counter, final_response, self.verbosity_level
                 )
             else:
-                result = await self.executor.process_response(response_json, classification)
-
                 # Update the "Agent Heads Up Display"
-                if not is_terminal_response:
-                    self.executor.update_ephemeral_messages()
-
-                    reflection = ""
-
-                    # Only generate reflection if the last action was CODE
-                    if response_json.action == ActionType.CODE:
-                        if self.verbosity_level >= VerbosityLevel.VERBOSE:
-                            print(
-                                "\n\033[1;36m╭─ Agent Reflection "
-                                "──────────────────────────────\033[0m"
-                            )
-
-                        # Reflect on the results of the last operation
-                        async for chunk in self.generate_reflection(classification):
-                            reflection += chunk
-                            if self.verbosity_level >= VerbosityLevel.VERBOSE:
-                                print(chunk, end="", flush=True)
-
-                        if self.verbosity_level >= VerbosityLevel.VERBOSE:
-                            print(
-                                "\n\033[1;36m╰────────────────────────────────"
-                                "──────────────────\033[0m\n"
-                            )
-
-                else:
-                    final_response = ""
-
-                    if self.verbosity_level >= VerbosityLevel.VERBOSE:
-                        print(
-                            f"\n\033[1;36m╭─ Agent Response (Step {self.executor.step_counter}) "
-                            "──────────────────────────\033[0m"
-                        )
-
-                    async for chunk in self.generate_response(response_json, classification):
-                        final_response += chunk
-
-                        if self.verbosity_level >= VerbosityLevel.VERBOSE:
-                            print(chunk, end="", flush=True)
-
-                    if self.verbosity_level >= VerbosityLevel.VERBOSE:
-                        print(
-                            "\n\033[1;"
-                            "36m╰══════════════════════════════════════════════════╯\033[0m"
-                        )
+                self.executor.update_ephemeral_messages()
 
             # Auto-save on each step if enabled
             if self.auto_save_conversation:

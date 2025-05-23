@@ -285,8 +285,6 @@ def initialize_operator(
         f"AutoSave: {operator.auto_save_conversation}"
     )
 
-    print(f"Creating tool registry with status queue: {status_queue}")
-
     # --- Tool Registry Initialization ---
     # The scheduler_service instance is passed directly from the caller
     tool_registry = build_tool_registry(
