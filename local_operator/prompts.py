@@ -696,6 +696,7 @@ Fields:
 - content: Required for WRITE: content to write to file. Omit for READ/EDIT.  Do not use for any actions that are not WRITE.
 - file_path: Required for READ/WRITE/EDIT: path to file.  Do not use for any actions that are not READ/WRITE/EDIT.
 - replacements: List of replacements to make in the file.
+- mentioned_files: The files that are being referenced in CODE that the user should be able to see.  Include the paths to the files as mentioned in the code.  Make sure that all the files are included in the list, otherwise the user will not be able to see them.  If there are file names that are programatically assigned,  infer the values accurately based on the code and include them in the list as well.  If the files are generated in code, you will need to review the way that the filenames are created from the variables and include them in the list as well so that the user can see them.  Make sure that all files here are valid addresses to a file on the user's computer or a resource on the internet.  Do not include incorrect file paths or invalid names, or names that are not files.  An empty list if there are no files referenced in the code or if the action is not CODE.
 - action: Required for all actions: CODE | READ | WRITE | EDIT | DONE | ASK | BYE
 
 ### Examples
@@ -728,6 +729,12 @@ df = pd.read_csv('data.csv')
 # Print the first few rows of the data
 print(df.head())
 </code>
+
+<mentioned_files>
+data_1.csv
+data_2.csv
+data_3.csv
+</mentioned_files>
 
 </action_response>
 
