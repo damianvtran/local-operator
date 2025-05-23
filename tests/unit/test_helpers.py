@@ -620,6 +620,87 @@ def test_is_marker_inside_json(text, marker, expected):
             },
             id="only_response_tag_no_outer_text",
         ),
+        # New test cases for mentioned_files
+        pytest.param(
+            "<action>CODE</action><code>print('hi')</code><mentioned_files></mentioned_files>",  # noqa: E501
+            {
+                "action": "CODE",
+                "learnings": "",
+                "response": "",
+                "code": "print('hi')",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],  # Empty tag
+            },
+            id="mentioned_files_empty_tag",
+        ),
+        pytest.param(
+            "<action>CODE</action><code>print('hi')</code><mentioned_files>file1.txt</mentioned_files>",  # noqa: E501
+            {
+                "action": "CODE",
+                "learnings": "",
+                "response": "",
+                "code": "print('hi')",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": ["file1.txt"],
+            },
+            id="mentioned_files_single_file",
+        ),
+        pytest.param(
+            "<action>CODE</action><code>print('hi')</code><mentioned_files>\nfile1.txt\nfile2.py\n</mentioned_files>",  # noqa: E501
+            {
+                "action": "CODE",
+                "learnings": "",
+                "response": "",
+                "code": "print('hi')",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": ["file1.txt", "file2.py"],
+            },
+            id="mentioned_files_multiple_files_newline_separated",
+        ),
+        pytest.param(
+            "<action>CODE</action><code>print('hi')</code><mentioned_files>\n  file1.txt  \n\n file2.py \n</mentioned_files>",  # noqa: E501
+            {
+                "action": "CODE",
+                "learnings": "",
+                "response": "",
+                "code": "print('hi')",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": ["file1.txt", "file2.py"],  # Stripping and filtering empty lines
+            },
+            id="mentioned_files_with_whitespace_and_empty_lines",
+        ),
+        pytest.param(
+            "<action>CODE</action><code>print('hi')</code>",  # No mentioned_files tag
+            {
+                "action": "CODE",
+                "learnings": "",
+                "response": "",
+                "code": "print('hi')",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],  # Defaults to empty list
+            },
+            id="no_mentioned_files_tag",
+        ),
     ],
 )
 def test_parse_agent_action_xml(xml_string, expected_dict):

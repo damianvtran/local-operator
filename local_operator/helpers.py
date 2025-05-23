@@ -515,6 +515,16 @@ def parse_agent_action_xml(xml_string: str) -> Dict[str, Any]:
     else:
         parsed_data["replacements"] = []
 
+    # Special handling for mentioned_files, extracted from the XML part
+    mentioned_files_content, _ = _extract_tag_content(processed_xml_part, "mentioned_files")
+    if mentioned_files_content:
+        # Split by newline and filter out empty or whitespace-only lines
+        parsed_data["mentioned_files"] = [
+            line.strip() for line in mentioned_files_content.split("\n") if line.strip()
+        ]
+    else:
+        parsed_data["mentioned_files"] = []
+
     return parsed_data
 
 
