@@ -14,6 +14,7 @@ import platform
 import re
 import subprocess
 import sys
+from typing import Any, Dict, List, Tuple
 
 from local_operator.types import ResponseJsonSchema
 
@@ -339,6 +340,144 @@ def is_marker_inside_json(text: str, marker: str) -> bool:
     # If we have more opening braces than closing ones before the marker,
     # the marker is likely inside a JSON structure
     return open_braces > close_braces
+
+
+def _extract_tag_content(xml_string: str, tag_name: str) -> Tuple[str, int]:
+    """Extracts content from the first occurrence of a simple XML tag."""
+    start_tag = f"<{tag_name}>"
+    end_tag = f"</{tag_name}>"
+    content = ""
+    next_search_start_index = 0
+
+    start_index = xml_string.find(start_tag)
+    if start_index != -1:
+        end_index = xml_string.find(end_tag, start_index + len(start_tag))
+        if end_index != -1:
+            content = xml_string[start_index + len(start_tag) : end_index].strip()
+            next_search_start_index = end_index + len(end_tag)
+        else:
+            # Tag started but didn't end, search from after start_tag
+            next_search_start_index = start_index + len(start_tag)
+    else:
+        # Tag not found, search from beginning
+        next_search_start_index = 0
+
+    return content, next_search_start_index
+
+
+def _parse_replacements(replacements_str: str) -> List[Dict[str, str]]:
+    """Parses the content of a <replacements> tag."""
+    parsed_replacements = []
+    if not replacements_str:
+        return parsed_replacements
+
+    # Split by the start of a new replacement block, which is assumed to be '- '
+    # This is a simplification based on the example format.
+    # A more robust parser would handle variations.
+    # The example format is:
+    # - Old content
+    # - to
+    # - replace
+    # + New content
+    # We need to group these.
+    lines = replacements_str.strip().split("\n")
+    current_find = []
+    current_replace = []
+    is_replacing = False
+
+    for line in lines:
+        stripped_line = line.strip()
+        if stripped_line.startswith("- "):
+            if is_replacing and current_find:  # End of a previous replace block
+                parsed_replacements.append(
+                    {
+                        "find": "\n".join(current_find).strip(),
+                        "replace": "\n".join(current_replace).strip(),
+                    }
+                )
+                current_find = []
+                current_replace = []
+            is_replacing = False
+            current_find.append(stripped_line[2:])
+        elif stripped_line.startswith("+ "):
+            is_replacing = True
+            current_replace.append(stripped_line[2:])
+        elif not is_replacing and current_find:
+            current_find.append(stripped_line)
+        elif is_replacing and current_replace:
+            current_replace.append(stripped_line)
+
+    # Add the last replacement block
+    if current_find:
+        parsed_replacements.append(
+            {"find": "\n".join(current_find).strip(), "replace": "\n".join(current_replace).strip()}
+        )
+
+    return parsed_replacements
+
+
+def parse_agent_action_xml(xml_string: str) -> Dict[str, Any]:
+    """
+    Parses an XML-like string containing agent action details.
+
+    Args:
+        xml_string (str): The raw string response from the agent.
+
+    Returns:
+        Dict[str, Any]: A dictionary representing the parsed action.
+                        Expected keys match ResponseJsonSchema.
+    """
+    # Remove markdown code block wrappers if present
+    if xml_string.strip().startswith("```xml"):
+        xml_string = xml_string.strip()[len("```xml") :]
+    if xml_string.strip().startswith("```"):  # General markdown
+        xml_string = xml_string.strip()[len("```") :]
+    if xml_string.strip().endswith("```"):
+        xml_string = xml_string.strip()[: -len("```")]
+    xml_string = xml_string.strip()
+
+    # Initialize the dictionary with default empty values
+    # A simpler approach if tags are guaranteed to be unique and not nested in complex ways:
+    # Re-initialize for a cleaner loop based on _extract_tag_content
+    # The previous loop with current_search_index was an attempt at a more robust sequential parse,
+    # but _extract_tag_content provides a cleaner way to get first occurrences if complex nesting
+    # or repeated tags aren't the primary concern for this specific XML structure.
+    parsed_data = {
+        "action": "",
+        "learnings": "",
+        "response": "",
+        "code": "",
+        "content": "",
+        "file_path": "",
+        "replacements": [],
+        "agent": "",
+        "message": "",
+        "mentioned_files": [],
+    }
+
+    # Extract content for each tag
+    # This approach assumes tags are not nested within each other in a way that confuses simple find
+    for tag_name in [
+        "action",
+        "learnings",
+        "response",
+        "code",
+        "content",
+        "file_path",
+        "agent",
+        "message",
+    ]:
+        content, _ = _extract_tag_content(xml_string, tag_name)
+        parsed_data[tag_name] = content
+
+    # Special handling for replacements
+    replacements_content, _ = _extract_tag_content(xml_string, "replacements")
+    if replacements_content:  # Ensure it's not empty before parsing
+        parsed_data["replacements"] = _parse_replacements(replacements_content)
+    else:
+        parsed_data["replacements"] = []
+
+    return parsed_data
 
 
 # --- Environment Setup ---

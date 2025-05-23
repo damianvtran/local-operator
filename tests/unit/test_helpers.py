@@ -9,6 +9,7 @@ import pytest
 from local_operator.helpers import (
     is_marker_inside_json,  # Keep existing test helper if needed
 )
+from local_operator.helpers import parse_agent_action_xml  # Added import
 from local_operator.helpers import (
     clean_json_response,
     clean_plain_text_response,
@@ -198,6 +199,291 @@ def test_is_marker_inside_json(text, marker, expected):
     assert is_marker_inside_json(text, marker) == expected
 
 
+# --- Tests for parse_agent_action_xml ---
+@pytest.mark.parametrize(
+    "xml_string, expected_dict",
+    [
+        pytest.param(
+            "<action>CODE</action><learnings>Learned something</learnings><response>Running code</response><code>print('Hello')</code>",  # noqa: E501
+            {
+                "action": "CODE",
+                "learnings": "Learned something",
+                "response": "Running code",
+                "code": "print('Hello')",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="basic_code_action",
+        ),
+        pytest.param(
+            (
+                "Some text before <action_response><action>WRITE</action>"
+                "<content>File content</content><file_path>test.txt</file_path>"
+                "</action_response> and text after."
+            ),
+            {
+                "action": "WRITE",
+                "learnings": "",
+                "response": "",
+                "code": "",
+                "content": "File content",
+                "file_path": "test.txt",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="write_action_with_surrounding_text_and_action_response_tag",
+        ),
+        pytest.param(
+            "```xml\n<action>EDIT</action><file_path>doc.md</file_path><replacements>\n- old line\n- another old line\n+ new line 1\n+ new line 2\n</replacements>\n```",  # noqa: E501
+            {
+                "action": "EDIT",
+                "learnings": "",
+                "response": "",
+                "code": "",
+                "content": "",
+                "file_path": "doc.md",
+                "replacements": [
+                    {"find": "old line\nanother old line", "replace": "new line 1\nnew line 2"}
+                ],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="edit_action_with_markdown_wrapper_and_replacements",
+        ),
+        pytest.param(
+            "```\n<action>DONE</action><response>Task complete</response>\n```",
+            {
+                "action": "DONE",
+                "learnings": "",
+                "response": "Task complete",
+                "code": "",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="done_action_with_generic_markdown_wrapper",
+        ),
+        pytest.param(
+            "<action>ASK</action><response>Need more info</response>",
+            {
+                "action": "ASK",
+                "learnings": "",
+                "response": "Need more info",
+                "code": "",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="ask_action",
+        ),
+        pytest.param(
+            "<action>BYE</action>",
+            {
+                "action": "BYE",
+                "learnings": "",
+                "response": "",
+                "code": "",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="bye_action_empty_tags",
+        ),
+        pytest.param(
+            "<action>DELEGATE</action><agent>OtherAgent</agent><message>Please help</message>",
+            {
+                "action": "DELEGATE",
+                "learnings": "",
+                "response": "",
+                "code": "",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "OtherAgent",
+                "message": "Please help",
+                "mentioned_files": [],
+            },
+            id="delegate_action",
+        ),
+        pytest.param(
+            "<action>CODE</action><learnings></learnings><response></response><code></code>",
+            {
+                "action": "CODE",
+                "learnings": "",
+                "response": "",
+                "code": "",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="empty_tags_for_code",
+        ),
+        pytest.param(
+            (
+                "<action>EDIT</action><file_path>file.txt</file_path><replacements>\n"
+                "- find1\n+ replace1\n- find2\n+ replace2\n</replacements>"
+            ),
+            {
+                "action": "EDIT",
+                "learnings": "",
+                "response": "",
+                "code": "",
+                "content": "",
+                "file_path": "file.txt",
+                "replacements": [
+                    {"find": "find1", "replace": "replace1"},
+                    {"find": "find2", "replace": "replace2"},
+                ],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="multiple_replacements",
+        ),
+        pytest.param(
+            "<action>READ</action><file_path>data.csv</file_path><response>Reading file</response>",
+            {
+                "action": "READ",
+                "learnings": "",
+                "response": "Reading file",
+                "code": "",
+                "content": "",
+                "file_path": "data.csv",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="read_action",
+        ),
+        pytest.param(
+            "<outer><action>CODE</action><code>print(1)</code></outer>",  # Simple nesting
+            {
+                "action": "CODE",  # Expects to find the first valid action tag
+                "learnings": "",
+                "response": "",
+                "code": "print(1)",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="simple_nested_xml",
+        ),
+        pytest.param(
+            "<action>EDIT</action><file_path>test.txt</file_path><replacements></replacements>",
+            {
+                "action": "EDIT",
+                "learnings": "",
+                "response": "",
+                "code": "",
+                "content": "",
+                "file_path": "test.txt",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="edit_action_empty_replacements_tag",
+        ),
+        pytest.param(
+            "<action>CODE</action><code>print('<tag>value</tag>')</code>",
+            {
+                "action": "CODE",
+                "learnings": "",
+                "response": "",
+                "code": "print('<tag>value</tag>')",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="code_with_xml_entities",
+        ),
+        pytest.param(
+            "<action>WRITE</action><content><doc><title>My Doc</title></doc></content><file_path>my.xml</file_path>",  # noqa: E501
+            {
+                "action": "WRITE",
+                "learnings": "",
+                "response": "",
+                "code": "",
+                "content": "<doc><title>My Doc</title></doc>",
+                "file_path": "my.xml",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="write_xml_content_as_entities",
+        ),
+        pytest.param(
+            "<action>WRITE</action><content><![CDATA[<doc><title>My Doc</title></doc>]]></content><file_path>my.xml</file_path>",  # noqa: E501
+            {
+                "action": "WRITE",
+                "learnings": "",
+                "response": "",
+                "code": "",
+                "content": "<![CDATA[<doc><title>My Doc</title></doc>]]>",
+                "file_path": "my.xml",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="write_xml_content_with_cdata",
+        ),
+        pytest.param(
+            "<action>EDIT</action><file_path>config.xml</file_path><replacements>\n- <old_setting>true</old_setting>\n+ <new_setting>false</new_setting>\n</replacements>",  # noqa: E501
+            {
+                "action": "EDIT",
+                "learnings": "",
+                "response": "",
+                "code": "",
+                "content": "",
+                "file_path": "config.xml",
+                "replacements": [
+                    {
+                        "find": "<old_setting>true</old_setting>",
+                        "replace": "<new_setting>false</new_setting>",
+                    }
+                ],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="edit_replacing_xml_entities",
+        ),
+    ],
+)
+def test_parse_agent_action_xml(xml_string, expected_dict):
+    """Test the parse_agent_action_xml function."""
+    assert parse_agent_action_xml(xml_string) == expected_dict
+
+
+# --- Environment Setup Tests (Keep Existing) ---
 @patch("local_operator.helpers.platform.system", return_value="Windows")
 @patch("winreg.OpenKey")  # type: ignore
 @patch("winreg.QueryValueEx")  # type: ignore
