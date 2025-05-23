@@ -814,22 +814,6 @@ class Operator:
         self, response_content: str, max_attempts: int = 3  # max_attempts may no longer be needed
     ) -> ResponseJsonSchema:
         """Interpret the action response from the agent using a custom XML parser."""
-
-        await self.executor.update_job_execution_state(
-            CodeExecutionResult(
-                stdout="",
-                stderr="",
-                logging="",
-                formatted_print="",
-                code="",
-                message="Parsing action response",  # Updated message
-                role=ConversationRole.ASSISTANT,
-                status=ProcessResponseStatus.IN_PROGRESS,
-                files=[],
-                execution_type=ExecutionType.PRE_ACTION,  # Or a new type like PARSING
-            )
-        )
-
         response_json_dict = None
         parsed_response_schema = None
 
