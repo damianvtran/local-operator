@@ -1360,7 +1360,7 @@ class AgentRegistry:
                         content=import_message_for_agent,
                         role=ConversationRole.USER,
                         timestamp=now,
-                        should_summarize=True,  # This message is for the agent's context
+                        should_summarize=False,
                         ephemeral=False,
                         summarized=False,
                         is_system_prompt=False,
