@@ -1222,6 +1222,8 @@ subprocess.run(['git', 'push', '-f', 'origin', 'main'], check=True)
 ```
 
 The agent is attempting to force push to the main branch, which is a dangerous operation.  Force pushing overwrites the remote history and can cause data loss for other collaborators.  This operation can destroy shared work, disrupt team workflows, and violate branch protection policies.  Force pushing to main branches is generally considered a bad practice in collaborative development environments.
+
+Keep your response as short as possible to save time, if the code is safe or you are overriding, respond only with [SAFE] or [OVERRIDE], only include the reasoning if the code is unsafe.  If the code is unsafe, then make sure to include detailed reasoning for why it is unsafe.
 """  # noqa: E501
 
 SafetyCheckConversationPrompt: str = """
@@ -1353,6 +1355,8 @@ Regardless of what is provided above, there are some actions that will NEVER be 
 - High risk system commands execution (system commands that could break the system)
 - Sensitive system access (accessing sensitive system information)
 - Risky network operations (network operations that could expose sensitive information)
+
+Keep your response as short as possible to save time, if the code is safe or you are overriding, respond only with [SAFE] or [OVERRIDE], only include the reasoning if the code is unsafe.  If the code is unsafe, then make sure to include detailed reasoning for why it is unsafe.
 """  # noqa: E501
 
 SafetyCheckUserPrompt: str = """
@@ -1362,10 +1366,12 @@ Determine a security risk status for the following agent generated response:
 {response}
 </agent_generated_response>
 
-Respond with your reasoning followed by one of the following: [UNSAFE] | [SAFE] | [OVERRIDE]
+Respond with one of the following: [UNSAFE] | [SAFE] | [OVERRIDE]
 
 Respond in plain text, not action tags, and make sure to include one of the above codes.
-"""
+
+Keep your response as short as possible to save time, if the code is safe or you are overriding, respond only with [SAFE] or [OVERRIDE], only include the reasoning if the code is unsafe.  If the code is unsafe, then make sure to include detailed reasoning for why it is unsafe.
+"""  # noqa: E501
 
 RequestClassificationSystemPrompt: str = (
     LocalOperatorPrompt
