@@ -21,17 +21,16 @@ from local_operator.console import (
 )
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
-from local_operator.executor import (
-    CodeExecutionResult,
-    LocalCodeExecutor,
-    process_json_response,
+from local_operator.executor import CodeExecutionResult, LocalCodeExecutor
+from local_operator.helpers import (
+    clean_plain_text_response,
+    parse_agent_action_xml,
+    remove_think_tags,
 )
-from local_operator.helpers import clean_plain_text_response, remove_think_tags
 from local_operator.model.configure import ModelConfiguration
 from local_operator.notebook import save_code_history_to_notebook
 from local_operator.prompts import (
     FinalResponseInstructions,
-    JsonResponseFormatSchema,
     PlanSystemPrompt,
     PlanUserPrompt,
     ReflectionUserPrompt,
@@ -40,7 +39,6 @@ from local_operator.prompts import (
     RequestType,
     TaskInstructionsPrompt,
     apply_attachments_to_prompt,
-    create_action_interpreter_prompt,
     create_system_prompt,
     get_request_type_instructions,
 )
@@ -813,23 +811,9 @@ class Operator:
         )
 
     async def interpret_action_response(
-        self, response_content: str, max_attempts: int = 3
+        self, response_content: str, max_attempts: int = 3  # max_attempts may no longer be needed
     ) -> ResponseJsonSchema:
-        """Interpret the action response from the agent."""
-
-        messages = [
-            ConversationRecord(
-                role=ConversationRole.SYSTEM,
-                content=create_action_interpreter_prompt(tool_registry=self.executor.tool_registry),
-                is_system_prompt=True,
-                should_cache=True,
-            ),
-            ConversationRecord(
-                role=ConversationRole.USER,
-                content=response_content,
-                should_summarize=True,
-            ),
-        ]
+        """Interpret the action response from the agent using a custom XML parser."""
 
         await self.executor.update_job_execution_state(
             CodeExecutionResult(
@@ -838,83 +822,68 @@ class Operator:
                 logging="",
                 formatted_print="",
                 code="",
-                message="Cleaning up the action response",
+                message="Parsing action response",  # Updated message
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.IN_PROGRESS,
                 files=[],
-                execution_type=ExecutionType.PRE_ACTION,
+                execution_type=ExecutionType.PRE_ACTION,  # Or a new type like PARSING
             )
         )
 
-        response_json = None
-        json_response_content = None
-        attempts = 0
+        response_json_dict = None
+        parsed_response_schema = None
 
-        while attempts < max_attempts and response_json is None:
-            attempts += 1
-            json_response = await self.executor.invoke_model(messages)
+        try:
+            # Step 1: Parse the XML-like string into a dictionary
+            response_json_dict = parse_agent_action_xml(response_content)
 
-            json_response_content = (
-                json_response.content
-                if isinstance(json_response.content, str)
-                else str(json_response.content)
-            )
-
-            try:
-                if not json_response_content:
-                    raise ValueError("JSON response content is empty")
-
-                response_json = process_json_response(json_response_content)
-            except Exception as e:
-                logging.error(f"JSON validation error (attempt {attempts}/{max_attempts}): {e}")
-
-                if attempts >= max_attempts:
-                    break
-
-                if isinstance(e, ValidationError):
-                    error_details = "\n".join(
-                        f"Error {i+1}:\n"
-                        f"  Location: {' -> '.join(str(loc) for loc in err['loc'])}\n"
-                        f"  Type: {err['type']}\n"
-                        f"  Message: {err['msg']}"
-                        for i, err in enumerate(e.errors())
-                    )
-                else:
-                    error_details = str(e)
-
-                messages.extend(
-                    [
-                        ConversationRecord(
-                            role=ConversationRole.ASSISTANT,
-                            content=json_response_content,
-                            should_summarize=True,
-                        ),
-                        ConversationRecord(
-                            role=ConversationRole.USER,
-                            content=(
-                                "Your interpretation of the action response failed JSON schema "
-                                f"validation (attempt {attempts}/{max_attempts}). "
-                                "Please review the validation errors and generate a "
-                                "valid response:\n\n"
-                                f"{error_details}\n\n"
-                                "Your response must exactly match the expected JSON format: "
-                                f"{JsonResponseFormatSchema}\n\n"
-                                "Check for syntax errors, unescaped quotes or special characters, "
-                                "invalid formatting, or other formatting issues that may cause "
-                                "the error."
-                            ),
-                            should_summarize=True,
-                        ),
-                    ]
+            if not response_json_dict or not response_json_dict.get("action"):
+                # If action is missing, it's a critical parsing failure or invalid XML.
+                # The schema validation below would also catch a missing 'action',
+                # but an early check can be useful.
+                raise ValueError(
+                    "Failed to parse critical 'action' tag from response or response is empty."
                 )
 
-        if not response_json:
+            # Step 2: Validate the dictionary against the Pydantic schema
+            # This will raise ValidationError if the dict doesn't match the schema
+            parsed_response_schema = ResponseJsonSchema.model_validate(response_json_dict)
+
+        except ValidationError as ve:
+            logging.error(f"Pydantic validation error for parsed XML: {ve}")
+            # Potentially log response_json_dict here for debugging if needed
+            error_details = "\n".join(
+                f"Error {i+1}:\n"
+                f"  Location: {' -> '.join(str(loc) for loc in err['loc'])}\n"
+                f"  Type: {err['type']}\n"
+                f"  Message: {err['msg']}"
+                for i, err in enumerate(ve.errors())
+            )
             raise ValueError(
-                f"Failed to generate valid JSON response after {max_attempts} "
-                f'attempts.\n\nFailed response: "{json_response_content}"'
+                "Parsed agent response failed schema validation.\n"
+                f'Original response content: "{response_content[:500]}..."\n'  # Log snippet
+                "Parsed dictionary (first level keys): "
+                f"{list(response_json_dict.keys()) if response_json_dict else 'None'}\n"
+                f"Validation Errors:\n{error_details}"
+            ) from ve
+        except Exception as e:
+            # Catch other potential errors during parsing or validation
+            logging.error(f"Error interpreting action response: {e}")
+            raise ValueError(
+                "Failed to interpret action response due to an unexpected error.\n"
+                f'Original response content: "{response_content[:500]}..."\n'
+                f"Error: {e}"
+            ) from e
+
+        if not parsed_response_schema:
+            # This case should ideally be caught by the exceptions above,
+            # but as a fallback.
+            raise ValueError(
+                "Failed to generate a valid response schema from the agent's output.\n"
+                f'Original response content: "{response_content[:500]}..."'
             )
 
-        return response_json
+        return parsed_response_schema
 
     def process_early_response(
         self,
@@ -1118,15 +1087,76 @@ class Operator:
                 response.content if isinstance(response.content, str) else str(response.content)
             )
 
-            self.executor.append_to_history(
-                ConversationRecord(
-                    role=ConversationRole.ASSISTANT,
-                    content=response_content,
-                    should_summarize=True,
-                )
-            )
+            # Retry loop for parsing the agent's action response
+            attempts = 0
+            max_attempts = 3  # Define max_attempts for this loop
+            current_response_content = response_content
+            response_json = None
 
-            response_json = await self.interpret_action_response(response_content)
+            while attempts < max_attempts:
+                attempts += 1
+                try:
+                    self.executor.append_to_history(  # Append attempt to history
+                        ConversationRecord(
+                            role=ConversationRole.ASSISTANT,
+                            content=current_response_content,  # This is the agent's XML attempt
+                            should_summarize=True,
+                        )
+                    )
+                    response_json = await self.interpret_action_response(current_response_content)
+                    break  # Successfully parsed
+                except ValueError as e:
+                    logging.error(
+                        "Failed to interpret action response "
+                        f"(attempt {attempts}/{max_attempts}): {e}"
+                    )
+                    if attempts >= max_attempts:
+                        # Persist the last failing response before raising
+                        self.executor.append_to_history(
+                            ConversationRecord(
+                                role=ConversationRole.ASSISTANT,
+                                content=current_response_content,
+                                should_summarize=True,
+                            )
+                        )
+                        raise ValueError(
+                            f"Failed to interpret action response after {max_attempts} attempts. "
+                            f"Last error: {e}"
+                        ) from e
+
+                    # Prepare to re-prompt the agent
+                    error_message_for_agent = (
+                        f"Your previous action response was not parsable or failed validation. "
+                        f"Error: {str(e)}\n\nPlease try again, ensuring your response is valid XML "
+                        "matching the required action schema. "
+                        f"Review the schema in the system prompt if needed. "
+                        "The problematic response started with: "
+                        f"{current_response_content[:200]}..."
+                    )
+                    self.executor.append_to_history(
+                        ConversationRecord(
+                            role=ConversationRole.USER,
+                            content=error_message_for_agent,
+                            should_summarize=False,
+                        )
+                    )
+
+                    # Get a new response from the agent
+                    async with spinner_context(
+                        f"Re-formulating response (attempt {attempts + 1})",
+                        verbosity_level=self.verbosity_level,
+                    ):
+                        new_agent_response = await self.executor.invoke_model(
+                            self.executor.agent_state.conversation
+                        )
+                    current_response_content = (
+                        new_agent_response.content
+                        if isinstance(new_agent_response.content, str)
+                        else str(new_agent_response.content)
+                    )
+
+            if response_json is None:  # Should be caught by the loop's raise, but as a safeguard
+                raise ValueError("Response JSON is None after retry loop, this should not happen.")
 
             is_terminal_response = (
                 response_json.action == ActionType.DONE
