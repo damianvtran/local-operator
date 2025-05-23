@@ -2519,13 +2519,16 @@ class LocalCodeExecutor:
                 ),
             ] + self.agent_state.conversation[-chunk_size:]
 
-    async def _summarize_conversation_step(self, msg: ConversationRecord) -> str:
+    async def _summarize_conversation_step(
+        self, msg: ConversationRecord, min_tokens: int = 500
+    ) -> str:
         """
         Summarize the conversation step by invoking the model to generate a concise summary,
         but only if the message content exceeds 500 tokens.
 
         Args:
             msg (ConversationRecord): The conversation record to summarize.
+            min_tokens (int): The minimum number of tokens to consider summarizing.
 
         Returns:
             str: A concise summary of the critical information from the conversation step,
@@ -2539,7 +2542,7 @@ class LocalCodeExecutor:
 
         token_count = len(tokenizer.encode(msg.content or ""))
 
-        if token_count <= 500:
+        if token_count <= min_tokens:
             return msg.content
 
         step_info = (
