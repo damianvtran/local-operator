@@ -699,11 +699,14 @@ Fields:
 - mentioned_files: The files that are being referenced in CODE that the user should be able to see.  Include the paths to the files as mentioned in the code.  Make sure that all the files are included in the list, otherwise the user will not be able to see them.  If there are file names that are programatically assigned,  infer the values accurately based on the code and include them in the list as well.  If the files are generated in code, you will need to review the way that the filenames are created from the variables and include them in the list as well so that the user can see them.  Make sure that all files here are valid addresses to a file on the user's computer or a resource on the internet.  Do not include incorrect file paths or invalid names, or names that are not files.  An empty list if there are no files referenced in the code or if the action is not CODE.
 - action: Required for all actions: CODE | READ | WRITE | EDIT | DONE | ASK | BYE
 
+Describe what you are doing on each step and write out the associated XML format action response after the description of the action.  This helps to communicate with the user about what you are doing on each step.
+
 ### Examples
 
 #### Examples for CODE:
 
 ##### Example 1:
+<example>
 Running the analysis of x
 
 <action_response>
@@ -737,10 +740,12 @@ data_1.csv
 data_2.csv
 data_3.csv
 </mentioned_files>
-
-</action_response>
+</example>
 
 ##### Example 2:
+<example>
+Writing an email to you for your daily report.
+
 <action_response>
 <action>CODE</action>
 
@@ -749,7 +754,7 @@ The search results were comprehensive and included all the information that I ne
 </learnings>
 
 <response>
-Writing an email to the user for their daily report.
+Writing an email to you for your daily report.
 </response>
 
 <code>
@@ -777,6 +782,7 @@ print(send_status)
 </code>
 
 </action_response>
+</example>
 
 ##### Counter Example:
 
@@ -811,6 +817,7 @@ CODE usage guidelines:
 
 #### Example for WRITE:
 
+<example>
 Writing content to a file.
 
 <action_response>
@@ -832,6 +839,7 @@ This is the content to write to the file.
 new_file.txt
 </file_path>
 </action_response>
+</example>
 
 WRITE usage guidelines:
 - IMPORTANT: This action is used to write content to a file.  **It will entirely replace all the contents of the file with the new content**, so be careful with it.  Make sure that you include the entirety of the content that you want the file to contain.
@@ -839,6 +847,7 @@ WRITE usage guidelines:
 
 #### Example for EDIT:
 
+<example>
 Editing a file to update or add content.
 
 <action_response>
@@ -863,7 +872,7 @@ existing_file.txt
 + New content
 </replacements>
 </action_response>
-
+</example>
 EDIT usage guidelines:
 - After you edit the file, you will be shown the contents of the edited file with line numbers and lengths.  Please review and determine if your edit worked as expected.  If not, then try another EDIT action to amend the error.  If repeated edits fail, then rewrite the file from scratch instead with a WRITE action, making sure to stay accurate to the original file content.
 - Make sure that you include the replacements in the "replacements" field or you will run into parsing errors.
@@ -872,6 +881,7 @@ EDIT usage guidelines:
 
 #### Example for DELEGATE:
 
+<example>
 Delegating the task to Agent Name.
 
 <action_response>
@@ -889,6 +899,7 @@ Hey I'm another Local Operator agent delegating a task to you, please do this ta
 Provide a detailed response to me so that I can complete my task and get back to the user.
 </message>
 </action_response>
+</example>
 
 DELEGATE usage guidelines:
 - Determine if there is an agent that is best suited to handle the current task.  Only use DELEGATE if there is an agent with a description that identifies them as potentially having some relevant skills or knowledge to help with the task.
@@ -900,6 +911,7 @@ DELEGATE usage guidelines:
 
 #### Example for DONE:
 
+<example>
 Marking the task as complete.
 
 <action_response>
@@ -913,8 +925,8 @@ useful for the user to know this because of x reason.
 <response>
 Marking the task as complete.
 </response>
-
 </action_response>
+</example>
 
 DONE usage guidelines:
 - If the user has a simple request or asks you something that doesn't require multi-step action, provide an empty "response" field and be ready to provide a final response after the DONE action instead.
@@ -926,6 +938,7 @@ DONE usage guidelines:
 
 #### Example for ASK:
 
+<example>
 Can you tell me more about your preferences for budget, dates, and activities?
 
 <action_response>
@@ -940,7 +953,7 @@ to be able to give an accurate response.
 I need to ask for the user's preferences for budget, dates, and activities.
 </response>
 </action_response>
-
+</example>
 ASK usage guidelines:
 - Use ASK to ask the user for information that you need to complete the task.
 - You will be asked to provide your question to the user in the first person after the ASK action.
@@ -1470,7 +1483,7 @@ Hey, how are you doing today?
 <subject_change>false</subject_change>
 </example_response>
 
-Remember, respond in XML format for this next message otherwise your response will fail to be parsed.
+Remember, respond in XML format for this next message otherwise your response will fail to be parsed.  Do not include any other text in your response outside of the XML object.
 """  # noqa: E501
 )
 
@@ -1483,7 +1496,7 @@ Here is the new message that I am sending to the agent:
 {user_message}
 </user_message>
 
-Please respond now with the request classification for this message given the conversation history context in the required XML format.
+Please respond now with the request classification for this message given the conversation history context in the required XML format.  Do not include any other text in your response outside of the XML object.
 """  # noqa: E501
 
 MessageSummarySystemPrompt: str = """
