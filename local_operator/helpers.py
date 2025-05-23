@@ -439,40 +439,78 @@ def parse_agent_action_xml(xml_string: str) -> Dict[str, Any]:
     # Initialize the dictionary with default empty values
     # A simpler approach if tags are guaranteed to be unique and not nested in complex ways:
     # Re-initialize for a cleaner loop based on _extract_tag_content
-    # The previous loop with current_search_index was an attempt at a more robust sequential parse,
-    # but _extract_tag_content provides a cleaner way to get first occurrences if complex nesting
-    # or repeated tags aren't the primary concern for this specific XML structure.
     parsed_data = {
         "action": "",
         "learnings": "",
-        "response": "",
+        "response": "",  # Initialize response
         "code": "",
         "content": "",
         "file_path": "",
         "replacements": [],
         "agent": "",
-        "message": "",
+        "message": "",  # Initialize message
         "mentioned_files": [],
     }
 
-    # Extract content for each tag
-    # This approach assumes tags are not nested within each other in a way that confuses simple find
-    for tag_name in [
+    # Attempt to find the boundaries of the main XML content
+    first_tag_start = xml_string.find("<")
+    last_tag_end = xml_string.rfind(">")
+
+    outer_message_parts = []
+    # The part of the string that contains XML tags, defaults to the whole string
+    processed_xml_part = xml_string
+
+    if first_tag_start != -1 and last_tag_end != -1 and last_tag_end > first_tag_start:
+        # Text before the first tag
+        pre_text = xml_string[:first_tag_start].strip()
+        if pre_text:
+            outer_message_parts.append(pre_text)
+
+        # Text after the last tag
+        post_text = xml_string[last_tag_end + 1 :].strip()
+        if post_text:
+            outer_message_parts.append(post_text)
+
+        # The part of the string that is likely XML
+        processed_xml_part = xml_string[first_tag_start : last_tag_end + 1]
+
+    elif first_tag_start == -1 and last_tag_end == -1:
+        # No tags found, the whole string is the response
+        parsed_data["response"] = xml_string.strip()
+        # No XML part to process for other tags, so subsequent extractions will yield empty
+        processed_xml_part = ""
+
+    initial_outer_message = " ".join(outer_message_parts).strip()
+
+    # Extract content for standard tags from the identified XML part
+    # <message> is extracted here directly.
+    # <response> is handled specially below.
+    tag_names_for_extraction = [
         "action",
         "learnings",
-        "response",
         "code",
         "content",
         "file_path",
         "agent",
         "message",
-    ]:
-        content, _ = _extract_tag_content(xml_string, tag_name)
+    ]
+    for tag_name in tag_names_for_extraction:
+        content, _ = _extract_tag_content(processed_xml_part, tag_name)
         parsed_data[tag_name] = content
 
-    # Special handling for replacements
-    replacements_content, _ = _extract_tag_content(xml_string, "replacements")
-    if replacements_content:  # Ensure it's not empty before parsing
+    # Handle the <response> tag specifically:
+    # Content from <response> tag takes precedence over text outside XML.
+    response_tag_content, _ = _extract_tag_content(processed_xml_part, "response")
+
+    if response_tag_content:
+        parsed_data["response"] = response_tag_content
+    elif initial_outer_message:
+        parsed_data["response"] = initial_outer_message
+    # If neither <response> tag nor outer text is present, response remains "" (from initialization)
+
+    # Special handling for replacements, extracted from the XML part
+    replacements_content, _ = _extract_tag_content(processed_xml_part, "replacements")
+    if replacements_content:
         parsed_data["replacements"] = _parse_replacements(replacements_content)
     else:
         parsed_data["replacements"] = []
