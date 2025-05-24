@@ -304,11 +304,12 @@ class Operator:
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content=(
-                        f"... The conversation history before this message has been truncated "
+                        f"<system>The conversation history before this message has been truncated "
                         f"to the last {max_conversation_depth} messages.  Please review the "
                         "following messages in the sequence and respond with the request "
-                        "type with the required request classification XML tags."
+                        "type with the required request classification XML tags.</system>"
                     ),
+                    should_summarize=False,
                 )
             )
 
@@ -361,9 +362,9 @@ class Operator:
 
                 if attempt < max_attempts:
                     error_message = (
-                        "The response you provided didn't have the required XML tags. "
+                        "<system>The response you provided didn't have the required XML tags. "
                         f"Error: {last_error}. Please provide a valid XML response matching "
-                        "the required classification schema."
+                        "the required classification schema.</system>"
                     )
                     messages.append(
                         ConversationRecord(
@@ -494,9 +495,11 @@ class Operator:
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content=(
-                        "Please proceed according to your plan.  Choose appropriate actions "
-                        "and follow the JSON schema for your response.  Do not include any "
-                        "other text or comments aside from the JSON object."
+                        "<system>Please proceed according to your plan. "
+                        "Choose appropriate actions "
+                        "and follow the action XML schema if you need to take"
+                        "actions.  If you do not need to take any actions, do not include"
+                        "an action in your response.</system>"
                     ),
                     should_summarize=False,
                 ),
@@ -801,16 +804,14 @@ class Operator:
         self.executor.agent_state.conversation.append(
             ConversationRecord(
                 role=ConversationRole.USER,
-                content=task_instructions,
+                content=f"<system>{task_instructions}</system>",
                 is_system_prompt=False,
                 ephemeral=request_classification.type == RequestType.CONVERSATION,
                 should_cache=True,
             )
         )
 
-    def interpret_action_response(
-        self, response_content: str, max_attempts: int = 3  # max_attempts may no longer be needed
-    ) -> ResponseJsonSchema:
+    def interpret_action_response(self, response_content: str) -> ResponseJsonSchema:
         """Interpret the action response from the agent using a custom XML parser."""
         response_json_dict = None
         parsed_response_schema = None
@@ -930,6 +931,14 @@ class Operator:
         # Check if there is an action request from the agent, and if not,
         # return the response content as is.
         if not self._has_action_tag(response_content):
+            self.executor.append_to_history(  # Append attempt to history
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content=response_content,
+                    should_summarize=True,
+                )
+            )
+
             return (
                 None,
                 response_content,
@@ -978,12 +987,13 @@ class Operator:
 
                 # Prepare to re-prompt the agent
                 error_message_for_agent = (
-                    f"Your previous action response was not parsable or failed validation. "
+                    f"<system>Your previous action response was not parsable or failed validation. "
                     f"Error: {str(e)}\n\nPlease try again, ensuring your response is valid XML "
                     "matching the required action schema. "
                     f"Review the schema in the system prompt if needed. "
                     "The problematic response started with: "
                     f"{current_response_content[:200]}..."
+                    "</system>"
                 )
                 self.executor.append_to_history(
                     ConversationRecord(
@@ -1096,9 +1106,9 @@ class Operator:
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content=(
-                        "I would like to change the subject.  Please stop the current task "
+                        "<system>I would like to change the subject.  Please stop the current task "
                         "and pay attention to my new message.  Don't acknowledge "
-                        "this message directly."
+                        "this message directly.</system>"
                     ),
                     should_summarize=False,
                 )
@@ -1106,7 +1116,8 @@ class Operator:
 
         # Add the task instructions as an ephemeral message to help the agent
         # prioritize the information and the task at hand.
-        self.add_task_instructions(classification)
+        if classification.type != RequestType.CONTINUE:
+            self.add_task_instructions(classification)
 
         # Add the user's request after the task instructions
         self.executor.agent_state.conversation.append(
