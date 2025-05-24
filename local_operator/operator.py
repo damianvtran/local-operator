@@ -1018,7 +1018,7 @@ class Operator:
                 )
 
         if response_json is None:
-            raise ValueError("Response JSON is None after retry loop.")
+            raise ValueError("Failed to generate a valid response after repeated retries.")
 
         result = await self.executor.process_response(response_json, classification)
 
