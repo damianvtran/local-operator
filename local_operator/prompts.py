@@ -686,6 +686,8 @@ To generate code, modify files, and do other real world activities, with an acti
 
 Make sure you are explicit with the action that you want to take and the code that you want to run, if you do need to run code.  Not all steps will require code, and at times you may need to manually write or read things and extract information yourself.
 
+Don't include an action if you don't need to take an action (for example, never include a CODE action that just has a comment saying "no code needed" or "no action needed").
+
 Your code must use only Python in a stepwise manner:
 - Break complex tasks into discrete steps
 - Execute one step at a time
