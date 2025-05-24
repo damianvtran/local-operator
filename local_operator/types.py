@@ -250,6 +250,7 @@ class CodeExecutionResult(BaseModel):
         logging (str): Any logging output generated during the code execution.
         message (str): The message to display to the user about the code execution.
         code (str): The code that was executed.
+        content (str): The content to display to the user for WRITE actions.
         formatted_print (str): The formatted print output from the code execution.
         role (ConversationRole): The role of the message sender (user/assistant/system)
         status (ProcessResponseStatus): The status of the code execution
@@ -268,6 +269,10 @@ class CodeExecutionResult(BaseModel):
     logging: str = Field(default="")
     message: str = Field(default="")
     code: str = Field(default="")
+    content: str = Field(default="")
+    file_path: str = Field(default="")
+    replacements: str = Field(default="")
+    agent: str = Field(default="")
     formatted_print: str = Field(default="")
     role: ConversationRole = Field(default=ConversationRole.ASSISTANT)
     status: ProcessResponseStatus = Field(default=ProcessResponseStatus.NONE)
