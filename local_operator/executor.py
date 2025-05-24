@@ -609,7 +609,7 @@ class LocalCodeExecutor:
                 role=ConversationRole.SYSTEM,
                 content=system_prompt,
                 is_system_prompt=True,
-            )
+            ),
         ]
 
         if len(new_conversation_history) == 0:
@@ -1043,10 +1043,10 @@ class LocalCodeExecutor:
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content=(
-                        "Determine a status for the following agent generated JSON response:\n\n"
+                        "<system>Determine a status for the following agent generated JSON response:\n\n"  # noqa: E501
                         "<agent_generated_json_response>\n"
                         f"{response.model_dump_json()}\n"
-                        "</agent_generated_json_response>"
+                        "</agent_generated_json_response></system>"
                     ),
                 ),
             ]
@@ -1078,8 +1078,8 @@ class LocalCodeExecutor:
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content=(
-                        "Conversation truncated due to length, only showing the last few"
-                        " messages in the conversation, which follow."
+                        "<system>Conversation truncated due to length, only showing the last few"
+                        " messages in the conversation, which follow.</system>"
                     ),
                 )
             )
@@ -1114,14 +1114,14 @@ class LocalCodeExecutor:
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content=(
-                        f"Your action was denied by the AI security auditor because it "
+                        "<system>Your action was denied by the AI security auditor because it "
                         "was deemed unsafe. Here is an analysis of the code risk by"
                         " the security auditor AI agent:\n\n"
                         f"{analysis}\n\n"
                         "Please re-summarize the security risk in natural language and"
                         " not JSON format.  Don't acknowledge this message directly but"
                         " instead pretend that you are responding as the AI security"
-                        " auditor directly to the user's request."
+                        " auditor directly to the user's request.</system>"
                     ),
                 )
             )
@@ -1310,9 +1310,9 @@ class LocalCodeExecutor:
             return ConfirmSafetyResult.SAFE
 
         msg = (
-            "I've identified that this is a dangerous operation. "
+            "<system>I've identified that this is a dangerous operation. "
             "Let's stop the current task, I will provide further instructions shortly. "
-            "Please await further instructions and use action DONE."
+            "Please await further instructions and use action DONE.</system>"
         )
         self.append_to_history(
             ConversationRecord(
@@ -1643,11 +1643,13 @@ class LocalCodeExecutor:
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.USER,
-                content=f"Here are the outputs of your last code execution:\n"
-                f"<stdout>\n{condensed_output}\n</stdout>\n"
-                f"<stderr>\n{condensed_error_output}\n</stderr>\n"
-                f"<logger>\n{condensed_log_output}\n</logger>\n"
-                "Reflect on the results and determine what you need to do next.",
+                content=(
+                    f"<system>Here are the outputs of your last code execution:\n"
+                    f"<stdout>\n{condensed_output}\n</stdout>\n"
+                    f"<stderr>\n{condensed_error_output}\n</stderr>\n"
+                    f"<logger>\n{condensed_log_output}\n</logger>\n"
+                    "</system>"
+                ),
                 should_summarize=True,
                 should_cache=True,
             )
@@ -1670,10 +1672,10 @@ class LocalCodeExecutor:
             )
 
         msg = (
-            f"The initial execution failed with an error.\n"
+            "<system>The initial execution failed with an error.\n"
             f"{error_info}\n"
             "Debug the code you submitted and make all necessary corrections "
-            "to fix the error and run successfully."
+            "to fix the error and run successfully.</system>"
         )
         self.append_to_history(
             ConversationRecord(
@@ -1699,14 +1701,14 @@ class LocalCodeExecutor:
             )
 
         msg = (
-            f"The code execution failed with an error (attempt {attempt + 1}).\n"
+            f"<system>The code execution failed with an error (attempt {attempt + 1}).\n"
             f"{error_info}\n"
             "Debug the code you submitted and make all necessary corrections "
             "to fix the error and run successfully.  Pick up from where you left "
             "off and try to avoid re-running code that has already succeeded.  "
             "Use the environment details to determine which variables are available "
             "and correct, which are not.  After fixing the issue please continue with the "
-            "tasks according to the plan."
+            "tasks according to the plan.</system>"
         )
         self.append_to_history(
             ConversationRecord(
@@ -1754,8 +1756,10 @@ class LocalCodeExecutor:
             self.append_to_history(
                 ConversationRecord(
                     role=ConversationRole.USER,
-                    content="Let's stop this task for now, I will provide further "
-                    "instructions shortly.",
+                    content=(
+                        "<system>Let's stop this task for now, I will provide further "
+                        "instructions shortly.</system>"
+                    ),
                     should_summarize=False,
                 )
             )
@@ -2114,9 +2118,9 @@ class LocalCodeExecutor:
                     ConversationRecord(
                         role=ConversationRole.USER,
                         content=(
-                            f"There was an error encountered while trying to execute your action:"
+                            "<system>There was an error encountered while trying to execute your action:"  # noqa: E501
                             f"\n\n{str(e)}"
-                            "\n\nPlease adjust your response to fix the issue."
+                            "\n\nPlease adjust your response to fix the issue.</system>"
                         ),
                         should_summarize=True,
                     )
@@ -2279,8 +2283,8 @@ class LocalCodeExecutor:
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content=(
-                        f"The file {file_path} is an image and has been "
-                        "attached to the conversation context for your review."
+                        f"<system>The file {file_path} is an image and has been "
+                        "attached to the conversation context for your review.</system>"
                     ),
                     should_summarize=False,
                     should_cache=True,
@@ -2306,9 +2310,9 @@ class LocalCodeExecutor:
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content=(
-                        f"The file {file_path} is a file that can be interpreted "
+                        f"<system>The file {file_path} is a file that can be interpreted "
                         "through OCR and has been attached to the conversation "
-                        "context for your review."
+                        "context for your review.</system>"
                     ),
                     should_summarize=False,
                     should_cache=True,
@@ -2351,13 +2355,13 @@ class LocalCodeExecutor:
             ConversationRecord(
                 role=ConversationRole.USER,
                 content=(
-                    f"Here are the contents of {file_path} with line numbers and lengths:\n"
+                    f"<system>Here are the contents of {file_path} with line numbers and lengths:\n"
                     f"\n"
                     f"Line | Length | Content\n"
                     f"----------------------\n"
                     f"BEGIN\n"
                     f"{annotated_content}\n"
-                    f"END"
+                    f"END</system>"
                 ),
                 should_summarize=True,
                 should_cache=True,
@@ -2408,9 +2412,9 @@ class LocalCodeExecutor:
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.USER,
-                content=f"The content that you requested has been written to {file_path}.\n\n"
+                content=f"<system>The content that you requested has been written to {file_path}.\n\n"  # noqa: E501
                 f"Here is the updated file content:\n\n<file_content>\n{cleaned_content}\n</file_content>\n\n"  # noqa: E501
-                "Make sure to double check that the write was successful after all edits are complete.  If your write did not work as expected, please adjust your response to fix the issue and try another write.  Make sure that you did not erase any original file content if you are writing over an existing file, and that the file content is accurate to the original content.",  # noqa: E501
+                "Make sure to double check that the write was successful after all edits are complete.  If your write did not work as expected, please adjust your response to fix the issue and try another write.  Make sure that you did not erase any original file content if you are writing over an existing file, and that the file content is accurate to the original content.</system>",  # noqa: E501
                 ephemeral=True,
                 ephemeral_steps=1,
             )
@@ -2479,9 +2483,9 @@ class LocalCodeExecutor:
             ConversationRecord(
                 role=ConversationRole.USER,
                 content=(
-                    f"Your edits have been applied to the file: {file_path}\n\n"
+                    f"<system>Your edits have been applied to the file: {file_path}\n\n"
                     f"Here is the updated file content:\n\n<file_content>\n{file_content}\n</file_content>\n\n"  # noqa: E501
-                    "Make sure to double check that the edits were successful after all edits are complete.  If your edit did not work as expected, please adjust your response to fix the issue and try another edit.  If you are unable to fix the issue, please try to WRITE the file from scratch instead, making sure to stay accurate to the original file content."  # noqa: E501
+                    "Make sure to double check that the edits were successful after all edits are complete.  If your edit did not work as expected, please adjust your response to fix the issue and try another edit.  If you are unable to fix the issue, please try to WRITE the file from scratch instead, making sure to stay accurate to the original file content.</system>"  # noqa: E501
                 ),
                 ephemeral=True,
                 ephemeral_steps=1,
@@ -2515,7 +2519,7 @@ class LocalCodeExecutor:
                 self.agent_state.conversation[0],
                 ConversationRecord(
                     role=ConversationRole.USER,
-                    content="[Some conversation history has been truncated for brevity]",
+                    content="<system>Some conversation history has been truncated for brevity.</system>",  # noqa: E501
                     should_summarize=False,
                 ),
             ] + self.agent_state.conversation[-chunk_size:]
@@ -2865,6 +2869,13 @@ Agent Created At: {self.agent.created_date}
             ):
                 msg.ephemeral_steps = msg.ephemeral_steps - 1
 
+        self.add_ephemeral_hud_message()
+
+    def create_hud_message(self) -> str:
+        """Create the agent heads up display message.
+
+        This method adds the agent heads up display to the conversation history.
+        """
         # Add environment details to the latest message
         environment_details = self.get_environment_details()
 
@@ -2919,11 +2930,17 @@ Agent Created At: {self.agent.created_date}
             agent_info=agent_info,
         )
 
+        return hud_message
+
+    def add_ephemeral_hud_message(self) -> None:
+        """Add the ephemeral HUD message to the conversation history.
+
+        This method adds the ephemeral HUD message to the conversation history.
+        """
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.USER,
-                content=hud_message,
-                should_summarize=False,
+                content=f"<system>{self.create_hud_message()}</system>",
                 ephemeral=True,
                 ephemeral_steps=0,
             )
