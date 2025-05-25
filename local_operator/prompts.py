@@ -518,7 +518,7 @@ At various points in the conversation, you will be provided prompt guides with <
 
 ## Interacting with the User
 
-If you need to ask the user a question or prompt the user for an interaction, then you should plan to split up your action responses and question into different parts.
+If you need to ask the user a question or prompt the user for an interaction, then you should plan to split up your action responses and question into different parts.  Do this for the purposes of ending the loop, but do not do this if you are still working on finishing a task. Finish the task to the fullest extent before stopping to ask the user a question.
 
 <example_flow>
 <step>
@@ -1651,6 +1651,7 @@ Guidelines:
 - Evaluate models using relevant metrics and cross-validation
 - Interpret results and provide actionable insights
 - Visualize data as you go and save the plots to the disk instead of displaying them with show() or display().  Make sure that you include the plots in the "mentioned_files" field so that I can see them in the chat ui.  Don't include the plots in the response field, just the files.
+- Do NOT use plot.show() or plot.display() in your code, this will cause errors due to the async nature of native code execution.  Instead, use the plt.savefig() function to save the plot to the disk, and then provide the link to those files in the "mentioned_files" field so that I can see them in the chat ui.
 - Document your approach, assumptions, and limitations
 """  # noqa: E501
 
