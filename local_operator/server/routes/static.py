@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from typing import List
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 
 router = APIRouter(tags=["Static"])
@@ -169,27 +169,25 @@ async def get_video(
     "/v1/static/html",
     summary="Serve HTML file",
     description="Serves an HTML file from disk by path. Only HTML file types are allowed.",
-    response_class=FileResponse,
+    response_class=Response,
 )
 async def get_html(
     path: str = Query(..., description="Path to the HTML file on disk"),
-):
+) -> Response:
     """
-    Serve an HTML file from disk.
+    Serve an HTML file from disk as text/html content.
 
     Args:
         path: Path to the HTML file on disk
 
     Returns:
-        The HTML file as a response
+        Response: The HTML file content as a text/html response
 
     Raises:
         HTTPException: If the file doesn't exist, is not accessible, or is not an HTML file
     """
     try:
-        # Validate the path exists
         file_path = Path(path)
-
         expanded_path = file_path.expanduser().resolve()
 
         if not expanded_path.exists():
@@ -198,11 +196,9 @@ async def get_html(
         if not expanded_path.is_file():
             raise HTTPException(status_code=400, detail=f"Not a file: {path}")
 
-        # Check if the file is readable
         if not os.access(expanded_path, os.R_OK):
             raise HTTPException(status_code=403, detail=f"File not accessible: {path}")
 
-        # Determine the file's MIME type
         mime_type, _ = mimetypes.guess_type(expanded_path)
         if not mime_type or mime_type not in ALLOWED_HTML_TYPES:
             raise HTTPException(
@@ -210,11 +206,24 @@ async def get_html(
                 detail=f"File is not an allowed HTML type: {mime_type or 'unknown'}",
             )
 
-        # Return the file
-        return FileResponse(path=expanded_path, media_type=mime_type, filename=expanded_path.name)
+        try:
+            content = expanded_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            logger.exception(f"HTML file is not valid UTF-8: {expanded_path}")
+            raise HTTPException(
+                status_code=400,
+                detail="HTML file is not valid UTF-8 text.",
+            )
+        except Exception as e:
+            logger.exception(f"Error reading HTML file: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Internal Server Error: {str(e)}",
+            )
+
+        return Response(content=content, media_type="text/html")
 
     except HTTPException:
-        # Re-raise HTTP exceptions to preserve their status code and detail
         raise
     except Exception as e:
         logger.exception(f"Error serving HTML file: {e}")
