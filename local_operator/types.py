@@ -261,6 +261,7 @@ class CodeExecutionResult(BaseModel):
         task_classification (str): The classification of the task that was performed
         is_complete (bool): Whether the execution is complete
         is_streamable (bool): Whether the result can be streamed
+        learnings (str): Learnings extracted from the execution
     """
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -273,6 +274,7 @@ class CodeExecutionResult(BaseModel):
     file_path: str = Field(default="")
     replacements: str = Field(default="")
     agent: str = Field(default="")
+    learnings: str = Field(default="")
     formatted_print: str = Field(default="")
     role: ConversationRole = Field(default=ConversationRole.ASSISTANT)
     status: ProcessResponseStatus = Field(default=ProcessResponseStatus.NONE)

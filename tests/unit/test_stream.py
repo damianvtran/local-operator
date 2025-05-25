@@ -1,31 +1,17 @@
 import pytest
 
 from local_operator.stream import stream_action_buffer
-from local_operator.types import ActionType, CodeExecutionResult
+from local_operator.types import ActionType
 
 
 def run_stream(input_text):
     """
-    Helper to stream input_text char-by-char through stream_action_buffer.
+    Helper to simulate streaming input_text through stream_action_buffer.
     Returns the final CodeExecutionResult and other state.
     """
-    buffer = []
-    result = CodeExecutionResult()
-    in_action_response = False
-    current_tag = None
-    tag_buffer = []
-    finished = False
-    finished_once = False
-
-    for idx, token in enumerate(input_text):
-        if finished_once:
-            continue
-        finished, result, in_action_response, current_tag, tag_buffer = stream_action_buffer(
-            token, buffer, result, in_action_response, current_tag, tag_buffer
-        )
-        if finished:
-            finished_once = True
-    return result, finished_once, in_action_response, current_tag, tag_buffer
+    # Simulate streaming by calling stream_action_buffer with the full text
+    finished, result = stream_action_buffer(input_text)
+    return result, finished, False, None, []
 
 
 @pytest.mark.parametrize(
@@ -44,6 +30,30 @@ def run_stream(input_text):
             id="plain_text",
         ),
         pytest.param(
+            "Hello, this is a plain text message. <action_re",
+            "Hello, this is ",
+            None,
+            "",
+            "",
+            "",
+            [],
+            False,
+            False,
+            id="plain_text_with_partial_action_tag",
+        ),
+        pytest.param(
+            "Hello, this is a plain text message. <action_response>",
+            "Hello, this is a plain text message. ",
+            None,
+            "",
+            "",
+            "",
+            [],
+            False,
+            False,
+            id="plain_text_with_full_action_tag",
+        ),
+        pytest.param(
             "<action_response><action>CODE</action></action_response>",
             "",
             ActionType.CODE,
@@ -54,6 +64,18 @@ def run_stream(input_text):
             False,
             True,
             id="xml_only_action",
+        ),
+        pytest.param(
+            "<action_response><action>CODE</action><code>print(1)",
+            "",
+            ActionType.CODE,
+            "",
+            "print(1)",
+            "",
+            [],
+            False,
+            False,
+            id="partial_code",
         ),
         pytest.param(
             "Hello <action_response><action>WRITE</action></action_response> world",
@@ -180,6 +202,64 @@ def run_stream(input_text):
             True,
             True,
             id="invalid_action_type",
+        ),
+        pytest.param(
+            """
+To gather the latest news on Donald Trump, I will perform a web search using multiple queries to get a broad range of information. I'll start with a general search and then follow up with more specific queries if needed.
+
+Let's begin with the initial search.
+
+<action_response>
+<action>CODE</action>
+
+<learnings>
+</learnings>
+
+<code>
+search_queries = [
+    "Donald Trump latest news",
+    "Donald Trump recent updates",
+    "Donald Trump current events"
+]
+
+search_results = []
+for query in search_queries:
+    result = tools.search_web(query, max_results=10)
+    search_results.append(result)
+
+print(search_results)
+</code>
+
+<mentioned_files>
+</mentioned_files>
+</action_response>""",  # noqa: E501
+            """
+To gather the latest news on Donald Trump, I will perform a web search using multiple queries to get a broad range of information. I'll start with a general search and then follow up with more specific queries if needed.
+
+Let's begin with the initial search.
+
+""",  # noqa: E501
+            ActionType.CODE,
+            "",
+            """
+search_queries = [
+    "Donald Trump latest news",
+    "Donald Trump recent updates",
+    "Donald Trump current events"
+]
+
+search_results = []
+for query in search_queries:
+    result = tools.search_web(query, max_results=10)
+    search_results.append(result)
+
+print(search_results)
+""",
+            "",
+            [],
+            False,
+            True,
+            id="code_with_learnings",
         ),
     ],
 )

@@ -29,12 +29,10 @@ from local_operator.console import (
     ExecutionSection,
     VerbosityLevel,
     condense_logging,
-    format_agent_output,
     format_error_output,
     format_success_output,
     log_action_error,
     log_retry_error,
-    print_agent_response,
     print_execution_section,
     print_task_interrupted,
     spinner_context,
@@ -1648,6 +1646,7 @@ class LocalCodeExecutor:
                     f"<stdout>\n{condensed_output}\n</stdout>\n"
                     f"<stderr>\n{condensed_error_output}\n</stderr>\n"
                     f"<logger>\n{condensed_log_output}\n</logger>\n"
+                    "Review and continue."
                     "</system>"
                 ),
                 should_summarize=True,
@@ -1743,7 +1742,7 @@ class LocalCodeExecutor:
 
     async def process_response(
         self, response: ResponseJsonSchema, classification: RequestClassification
-    ) -> ProcessResponseOutput:
+    ) -> tuple[ProcessResponseOutput, CodeExecutionResult | None]:
         """Process model response, extracting and executing any code blocks.
 
         Args:
@@ -1763,27 +1762,19 @@ class LocalCodeExecutor:
                     should_summarize=False,
                 )
             )
-            return ProcessResponseOutput(
-                status=ProcessResponseStatus.INTERRUPTED,
-                message="Task interrupted by user",
+            return (
+                ProcessResponseOutput(
+                    status=ProcessResponseStatus.INTERRUPTED,
+                    message="Task interrupted by user",
+                ),
+                None,
             )
 
-        plain_text_response = response.response
         new_learnings = response.learnings
 
         self.add_to_learnings(new_learnings)
 
-        # Phase 2: Display agent response
-        formatted_response = format_agent_output(plain_text_response)
-
-        if (
-            response.action != ActionType.DONE
-            and response.action != ActionType.ASK
-            and response.action != ActionType.BYE
-        ):
-            print_agent_response(self.step_counter, formatted_response, self.verbosity_level)
-
-        result = await self.perform_action(response, classification)
+        result, execution_result = await self.perform_action(response, classification)
 
         current_working_directory = os.getcwd()
 
@@ -1795,11 +1786,11 @@ class LocalCodeExecutor:
                 context=self.context,
             )
 
-        return result
+        return result, execution_result
 
     async def perform_action(
         self, response: ResponseJsonSchema, classification: RequestClassification
-    ) -> ProcessResponseOutput:
+    ) -> tuple[ProcessResponseOutput, CodeExecutionResult | None]:
         """
         Perform an action based on the provided ResponseJsonSchema.
 
@@ -1822,35 +1813,13 @@ class LocalCodeExecutor:
             ActionType.BYE,
             ActionType.ASK,
         ]:
-            self.add_to_code_history(
-                CodeExecutionResult(
-                    stdout="",
-                    stderr="",
-                    logging="",
-                    formatted_print=response.response,
-                    code="",
-                    message=response.response,
-                    role=ConversationRole.ASSISTANT,
+            return (
+                ProcessResponseOutput(
                     status=ProcessResponseStatus.SUCCESS,
-                    files=[],
-                    execution_type=ExecutionType.ACTION,
-                    action=response.action,
+                    message="Action completed",
                 ),
-                response,
-                classification,
+                None,
             )
-
-            return ProcessResponseOutput(
-                status=ProcessResponseStatus.SUCCESS,
-                message="Action completed",
-            )
-
-        print_execution_section(
-            ExecutionSection.HEADER,
-            step=self.step_counter,
-            action=response.action,
-            verbosity_level=self.verbosity_level,
-        )
 
         execution_result = None
 
@@ -1872,25 +1841,10 @@ class LocalCodeExecutor:
 
                     execution_result = await self.delegate_to_agent(agent, message)
 
-                    print_execution_section(
-                        ExecutionSection.RESULT,
-                        content=execution_result.message,
-                        action=response.action,
-                        verbosity_level=self.verbosity_level,
-                    )
-
                 if response.action == ActionType.WRITE:
                     file_path = response.file_path
                     content = response.content if response.content else response.code
                     if file_path:
-                        print_execution_section(
-                            ExecutionSection.WRITE,
-                            file_path=file_path,
-                            content=content,
-                            action=response.action,
-                            verbosity_level=self.verbosity_level,
-                        )
-
                         # First check code safety
 
                         await self.update_job_execution_state(
@@ -1929,13 +1883,6 @@ class LocalCodeExecutor:
                             )
 
                             execution_result = await self.write_file(file_path, content)
-
-                        print_execution_section(
-                            ExecutionSection.RESULT,
-                            content=execution_result.formatted_print,
-                            action=response.action,
-                            verbosity_level=self.verbosity_level,
-                        )
                     else:
                         raise ValueError("File path is required for WRITE action")
 
@@ -1988,26 +1935,12 @@ class LocalCodeExecutor:
                             )
 
                             execution_result = await self.edit_file(file_path, replacements)
-
-                        print_execution_section(
-                            ExecutionSection.RESULT,
-                            content=execution_result.formatted_print,
-                            action=response.action,
-                            verbosity_level=self.verbosity_level,
-                        )
                     else:
                         raise ValueError("File path and replacements are required for EDIT action")
 
                 elif response.action == ActionType.READ:
                     file_path = response.file_path
                     if file_path:
-                        print_execution_section(
-                            ExecutionSection.READ,
-                            file_path=file_path,
-                            action=response.action,
-                            verbosity_level=self.verbosity_level,
-                        )
-
                         # First check code safety
                         await self.update_job_execution_state(
                             CodeExecutionResult(
@@ -2051,13 +1984,6 @@ class LocalCodeExecutor:
                 elif response.action == ActionType.CODE:
                     code_block = response.code
                     if code_block:
-                        print_execution_section(
-                            ExecutionSection.CODE,
-                            content=code_block,
-                            action=response.action,
-                            verbosity_level=self.verbosity_level,
-                        )
-
                         # First check code safety
                         await self.update_job_execution_state(
                             CodeExecutionResult(
@@ -2097,9 +2023,12 @@ class LocalCodeExecutor:
                             execution_result = await self.execute_code(response)
 
                         if "code execution cancelled by user" in execution_result.message:
-                            return ProcessResponseOutput(
-                                status=ProcessResponseStatus.CANCELLED,
-                                message="Code execution cancelled by user",
+                            return (
+                                ProcessResponseOutput(
+                                    status=ProcessResponseStatus.CANCELLED,
+                                    message="Code execution cancelled by user",
+                                ),
+                                execution_result,
                             )
 
                         print_execution_section(
@@ -2125,9 +2054,6 @@ class LocalCodeExecutor:
                         should_summarize=True,
                     )
                 )
-
-        if execution_result:
-            self.add_to_code_history(execution_result, response, classification)
 
         token_metrics = self.get_token_metrics()
 
@@ -2180,7 +2106,7 @@ class LocalCodeExecutor:
             message=execution_result.message if execution_result else "Action completed",
         )
 
-        return output
+        return output, execution_result
 
     async def delegate_to_agent(self, agent_name: str, message: str) -> CodeExecutionResult:
         """Delegate the task to another agent.
