@@ -12,27 +12,16 @@ from pydantic import ValidationError
 
 from local_operator.agents import AgentData, AgentRegistry
 from local_operator.config import ConfigManager
-from local_operator.console import (
-    VerbosityLevel,
-    print_agent_response,
-    print_cli_banner,
-    spinner_context,
-)
+from local_operator.console import VerbosityLevel, print_cli_banner, spinner_context
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.executor import CodeExecutionResult, LocalCodeExecutor
-from local_operator.helpers import (
-    clean_plain_text_response,
-    parse_agent_action_xml,
-    remove_think_tags,
-)
+from local_operator.helpers import parse_agent_action_xml, remove_think_tags
 from local_operator.model.configure import ModelConfiguration
 from local_operator.notebook import save_code_history_to_notebook
 from local_operator.prompts import (
-    FinalResponseInstructions,
     PlanSystemPrompt,
     PlanUserPrompt,
-    ReflectionUserPrompt,
     RequestClassificationSystemPrompt,
     RequestClassificationUserPrompt,
     RequestType,
@@ -41,6 +30,7 @@ from local_operator.prompts import (
     create_system_prompt,
     get_request_type_instructions,
 )
+from local_operator.stream import stream_action_buffer
 from local_operator.types import (
     ConversationRecord,
     ConversationRole,
@@ -546,243 +536,6 @@ class Operator:
                 agent_state=self.executor.agent_state,
             )
 
-    async def generate_reflection(
-        self, current_task_classification: RequestClassification
-    ) -> AsyncGenerator[str, None]:
-        """Generate a reflection for the agent.
-
-        This method constructs a conversation with the agent to generate a reflection.
-        It starts by creating a system prompt based on the available tools and the
-        predefined reflection system prompt. The method then appends the current
-        """
-        system_prompt = create_system_prompt(
-            tool_registry=self.executor.tool_registry,
-            response_format="",
-            agent_system_prompt=self.executor.agent_state.agent_system_prompt,
-        )
-
-        messages = [
-            ConversationRecord(
-                role=ConversationRole.SYSTEM,
-                content=system_prompt,
-                is_system_prompt=True,
-                should_cache=True,
-            ),
-        ]
-
-        messages.extend(self.executor.agent_state.conversation[1:])
-
-        messages.append(
-            ConversationRecord(
-                role=ConversationRole.USER,
-                content=ReflectionUserPrompt,
-            )
-        )
-
-        await self.executor.update_job_execution_state(
-            CodeExecutionResult(
-                stdout="",
-                stderr="",
-                logging="",
-                formatted_print="",
-                code="",
-                message="",
-                role=ConversationRole.ASSISTANT,
-                status=ProcessResponseStatus.IN_PROGRESS,
-                files=[],
-                execution_type=ExecutionType.REFLECTION,
-            )
-        )
-
-        response_content = ""
-
-        async for chunk in self.executor.stream_model(messages):
-            chunk_content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
-            response_content += chunk_content
-            yield chunk_content
-
-        # Remove think tags for reasoning models
-        response_content = remove_think_tags(response_content)
-
-        # Clean the response content
-        response_content = clean_plain_text_response(response_content)
-
-        self.executor.agent_state.conversation.extend(
-            [
-                ConversationRecord(
-                    role=ConversationRole.ASSISTANT,
-                    content=response_content,
-                    should_summarize=True,
-                ),
-            ]
-        )
-
-        self.executor.add_to_code_history(
-            CodeExecutionResult(
-                stdout="",
-                stderr="",
-                logging="",
-                formatted_print="",
-                code="",
-                message=response_content,
-                role=ConversationRole.ASSISTANT,
-                status=ProcessResponseStatus.SUCCESS,
-                files=[],
-                execution_type=ExecutionType.REFLECTION,
-            ),
-            None,
-            current_task_classification,
-        )
-
-        # Save the conversation history and code execution history to the agent registry
-        # if the persist_conversation flag is set.
-        if self.persist_agent_conversation and self.agent_registry and self.current_agent:
-            self.agent_registry.update_agent_state(
-                agent_id=self.current_agent.id,
-                agent_state=self.executor.agent_state,
-            )
-
-    async def generate_response(
-        self, result: ResponseJsonSchema, current_task_classification: RequestClassification
-    ) -> AsyncGenerator[str, None]:
-        """Generate a final response for the user based on the conversation history.
-
-        This method constructs a conversation with the agent to generate a well-structured
-        final response. It adds an ephemeral message with guidelines on how to summarize
-        and format the response appropriately for the user.
-
-        Args:
-            current_task_classification: Classification of the current request/task
-
-        Returns:
-            AsyncGenerator[str, str]: The generated response content
-
-        Raises:
-            Exception: If there's an error during model invocation
-        """
-        # Create a copy of the conversation history
-        messages = list(self.executor.agent_state.conversation)
-
-        messages.append(
-            ConversationRecord(
-                role=ConversationRole.USER,
-                content=FinalResponseInstructions,
-                ephemeral=True,
-            )
-        )
-
-        new_message = self.executor.add_to_code_history(
-            CodeExecutionResult(
-                stdout="",
-                stderr="",
-                logging="",
-                formatted_print="",
-                code="",
-                message="",
-                role=ConversationRole.ASSISTANT,
-                status=ProcessResponseStatus.SUCCESS,
-                files=[],
-                execution_type=ExecutionType.RESPONSE,
-                is_streamable=True,
-                is_complete=False,
-            ),
-            None,
-            current_task_classification,
-        )
-
-        await self.executor.update_job_execution_state(
-            CodeExecutionResult(
-                id=new_message.id,
-                stdout="",
-                stderr="",
-                logging="",
-                formatted_print="",
-                code="",
-                message="",
-                role=ConversationRole.ASSISTANT,
-                status=ProcessResponseStatus.IN_PROGRESS,
-                files=[],
-                execution_type=ExecutionType.RESPONSE,
-                is_streamable=True,
-                is_complete=False,
-            )
-        )
-
-        if self.persist_agent_conversation and self.agent_registry and self.current_agent:
-            self.agent_registry.update_agent_state(
-                agent_id=self.current_agent.id,
-                agent_state=self.executor.agent_state,
-            )
-
-        # Invoke the model to generate the response
-        async for chunk in self.executor.stream_model(messages):
-            chunk_content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
-            new_message.message += chunk_content
-
-            await self.executor.broadcast_message_update(
-                new_message.id,
-                new_message,
-            )
-
-            yield chunk_content
-
-        # Add content to the response if it is empty to prevent invoke errors
-        # from the source.
-        if not new_message.message:
-            new_message.message = "No response from the agent"
-
-        # Clean up the response
-        new_message.message = remove_think_tags(new_message.message)
-
-        # Add the response to conversation history
-        self.executor.agent_state.conversation.extend(
-            [
-                ConversationRecord(
-                    role=ConversationRole.ASSISTANT,
-                    content=new_message.message,
-                    should_summarize=True,
-                ),
-            ]
-        )
-
-        # Update the code history
-        new_message.is_complete = True
-
-        await self.executor.update_code_history(
-            new_message.id,
-            new_message,
-        )
-
-        await self.executor.broadcast_message_update(
-            new_message.id,
-            new_message,
-        )
-
-        await self.executor.update_job_execution_state(
-            CodeExecutionResult(
-                id=new_message.id,
-                stdout="",
-                stderr="",
-                logging="",
-                formatted_print="",
-                code="",
-                message="",
-                role=ConversationRole.ASSISTANT,
-                status=ProcessResponseStatus.IN_PROGRESS,
-                files=[],
-                execution_type=ExecutionType.RESPONSE,
-                is_streamable=True,
-                is_complete=True,
-            )
-        )
-
-        # Persist conversation if enabled
-        if self.persist_agent_conversation and self.agent_registry and self.current_agent:
-            self.agent_registry.update_agent_state(
-                agent_id=self.current_agent.id,
-                agent_state=self.executor.agent_state,
-            )
-
     def add_task_instructions(self, request_classification: RequestClassification) -> None:
         """
         Add the task instructions as an ephemeral message to help the agent
@@ -871,30 +624,10 @@ class Operator:
     def process_text_response(
         self,
         response_content: str,
-        classification: RequestClassification,
     ) -> tuple[str, ProcessResponseOutput]:
         """Process an early response from the agent."""
 
         final_response = response_content
-
-        # Add final response to code history
-        self.executor.add_to_code_history(
-            CodeExecutionResult(
-                stdout="",
-                stderr="",
-                logging="",
-                formatted_print="",
-                code="",
-                message=final_response,
-                role=ConversationRole.ASSISTANT,
-                status=ProcessResponseStatus.SUCCESS,
-                files=[],
-                execution_type=ExecutionType.RESPONSE,
-                task_classification=classification.type,
-            ),
-            None,
-            classification,
-        )
 
         # Persist conversation if enabled
         if self.persist_agent_conversation and self.agent_registry and self.current_agent:
@@ -917,55 +650,204 @@ class Operator:
         messages: list[ConversationRecord],
         classification: RequestClassification,
     ) -> tuple[ResponseJsonSchema | None, str, ProcessResponseOutput]:
-        """Invoke the model and process the response."""
-        async with spinner_context(
-            "Formulating a response",
-            verbosity_level=self.verbosity_level,
-        ):
-            response = await self.executor.invoke_model(messages)
+        """Invoke the model and process the response with streaming support."""
 
-        response_content = (
-            response.content if isinstance(response.content, str) else str(response.content)
+        # Initialize streaming state
+        accumulated_text = ""
+        finished = False
+
+        # Create a new message in code history for streaming
+        new_message = self.executor.add_to_code_history(
+            CodeExecutionResult(
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message="",
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.IN_PROGRESS,
+                files=[],
+                execution_type=ExecutionType.ACTION,
+                is_streamable=True,
+                is_complete=False,
+            ),
+            None,
+            classification,
         )
 
-        # Check if there is an action request from the agent, and if not,
-        # return the response content as is.
-        if not self._has_action_tag(response_content):
-            self.executor.append_to_history(  # Append attempt to history
-                ConversationRecord(
-                    role=ConversationRole.ASSISTANT,
-                    content=response_content,
-                    should_summarize=True,
-                )
+        await self.executor.update_job_execution_state(
+            CodeExecutionResult(
+                id=new_message.id,
+                stdout="",
+                stderr="",
+                logging="",
+                formatted_print="",
+                code="",
+                message="Thinking about my next action",
+                role=ConversationRole.ASSISTANT,
+                status=ProcessResponseStatus.IN_PROGRESS,
+                files=[],
+                execution_type=ExecutionType.ACTION,
             )
+        )
 
-            return (
-                None,
-                response_content,
-                ProcessResponseOutput(
-                    status=ProcessResponseStatus.SUCCESS,
-                    message=response_content,
-                ),
+        # Persist conversation if enabled
+        if self.persist_agent_conversation and self.agent_registry and self.current_agent:
+            self.agent_registry.update_agent_state(
+                agent_id=self.current_agent.id,
+                agent_state=self.executor.agent_state,
             )
 
         # Retry loop for parsing the agent's action response
         attempts = 0
-        max_attempts = 3  # Define max_attempts for this loop
-        current_response_content = response_content
+        max_attempts = 3
         response_json = None
+        final_response_content = ""
 
         while attempts < max_attempts:
             attempts += 1
+
+            # Reset streaming state for retries
+            if attempts > 1:
+                accumulated_text = ""
+                await self.executor.update_code_history(
+                    new_message.id,
+                    CodeExecutionResult(
+                        id=new_message.id,
+                        stdout="",
+                        stderr="",
+                        logging="",
+                        formatted_print="",
+                        code="",
+                        message="",
+                        role=ConversationRole.ASSISTANT,
+                        status=ProcessResponseStatus.IN_PROGRESS,
+                        files=[],
+                        execution_type=ExecutionType.ACTION,
+                        is_streamable=True,
+                        is_complete=False,
+                    ),
+                )
+                finished = False
+
+                # Persist conversation if enabled
+                if self.persist_agent_conversation and self.agent_registry and self.current_agent:
+                    self.agent_registry.update_agent_state(
+                        agent_id=self.current_agent.id,
+                        agent_state=self.executor.agent_state,
+                    )
+
             try:
-                self.executor.append_to_history(  # Append attempt to history
+                # Stream the model response
+                if self.verbosity_level >= VerbosityLevel.VERBOSE:
+                    print(
+                        "\n\033[1;36m╭─ Agent Response ──────────────────────────────────────\033[0m"  # noqa: E501
+                    )
+
+                action_response_started = False
+
+                async for chunk in self.executor.stream_model(messages):
+                    chunk_content = (
+                        chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+                    )
+
+                    # Accumulate the text
+                    accumulated_text += chunk_content
+
+                    # Process the accumulated text through the stream buffer
+                    finished, result = stream_action_buffer(accumulated_text)
+
+                    if self.verbosity_level >= VerbosityLevel.VERBOSE:
+                        # Check if we're in an action response by looking for action_response tags
+                        in_action_response = (
+                            "<action_response>" in accumulated_text
+                            and "</action_response>" not in accumulated_text
+                        )
+
+                        if not action_response_started and in_action_response:
+                            action_response_started = True
+                            print(
+                                "\n\033[1;36m╭─ Agent Action ──────────────────────────────\033[0m"
+                            )
+
+                        print(chunk_content, end="", flush=True)
+
+                    # Update the message in code history
+                    new_message.message = result.message
+                    new_message.content = result.content or ""
+                    new_message.code = result.code or ""
+                    new_message.replacements = result.replacements or ""
+                    new_message.files = result.files or []
+                    new_message.learnings = result.learnings or ""
+                    new_message.agent = result.agent or ""
+                    new_message.action = result.action
+
+                    # Broadcast the update
+                    await self.executor.broadcast_message_update(
+                        new_message.id,
+                        new_message,
+                    )
+
+                    # If we've finished processing the action_response, break
+                    if finished:
+                        break
+
+                if self.verbosity_level >= VerbosityLevel.VERBOSE:
+                    print(
+                        "\n\033[1;36m╰──────────────────────────────────────────────────\033[0m\n"
+                    )
+
+                # Get the final response content
+                final_response_content = accumulated_text
+
+                # Check if there is an action request from the agent
+                if not self._has_action_tag(final_response_content) and not result.action:
+                    self.executor.append_to_history(
+                        ConversationRecord(
+                            role=ConversationRole.ASSISTANT,
+                            content=final_response_content,
+                            should_summarize=True,
+                        )
+                    )
+
+                    # Update final state
+                    new_message.is_complete = True
+                    new_message.status = ProcessResponseStatus.SUCCESS
+
+                    await self.executor.update_code_history(
+                        new_message.id,
+                        new_message,
+                    )
+
+                    await self.executor.broadcast_message_update(
+                        new_message.id,
+                        new_message,
+                    )
+
+                    return (
+                        None,
+                        final_response_content,
+                        ProcessResponseOutput(
+                            status=ProcessResponseStatus.SUCCESS,
+                            message=final_response_content,
+                        ),
+                    )
+
+                # Try to interpret the action response
+                self.executor.append_to_history(
                     ConversationRecord(
                         role=ConversationRole.ASSISTANT,
-                        content=current_response_content,  # This is the agent's XML attempt
+                        content=final_response_content,
                         should_summarize=True,
                     )
                 )
-                response_json = self.interpret_action_response(current_response_content)
+
+                # Create ResponseJsonSchema from streamed result
+                response_json = self.interpret_action_response(final_response_content)
+
                 break  # Successfully parsed
+
             except ValueError as e:
                 logging.error(
                     "Failed to interpret action response "
@@ -976,10 +858,25 @@ class Operator:
                     self.executor.append_to_history(
                         ConversationRecord(
                             role=ConversationRole.ASSISTANT,
-                            content=current_response_content,
+                            content=final_response_content,
                             should_summarize=True,
                         )
                     )
+
+                    # Update final state as error
+                    new_message.is_complete = True
+                    new_message.status = ProcessResponseStatus.ERROR
+
+                    await self.executor.update_code_history(
+                        new_message.id,
+                        new_message,
+                    )
+
+                    await self.executor.broadcast_message_update(
+                        new_message.id,
+                        new_message,
+                    )
+
                     raise ValueError(
                         f"Failed to interpret action response after {max_attempts} attempts. "
                         f"Last error: {e}"
@@ -992,7 +889,7 @@ class Operator:
                     "matching the required action schema. "
                     f"Review the schema in the system prompt if needed. "
                     "The problematic response started with: "
-                    f"{current_response_content[:200]}..."
+                    f"{final_response_content[:200]}..."
                     "</system>"
                 )
                 self.executor.append_to_history(
@@ -1003,26 +900,43 @@ class Operator:
                     )
                 )
 
-                # Get a new response from the agent
-                async with spinner_context(
-                    f"Re-formulating response (attempt {attempts + 1})",
-                    verbosity_level=self.verbosity_level,
-                ):
-                    new_agent_response = await self.executor.invoke_model(
-                        self.executor.agent_state.conversation
-                    )
-                current_response_content = (
-                    new_agent_response.content
-                    if isinstance(new_agent_response.content, str)
-                    else str(new_agent_response.content)
-                )
+                # Update messages for retry
+                messages = self.executor.agent_state.conversation
 
         if response_json is None:
             raise ValueError("Failed to generate a valid response after repeated retries.")
 
-        result = await self.executor.process_response(response_json, classification)
+        # Process the response
+        result_output, execution_result = await self.executor.process_response(
+            response_json, classification
+        )
 
-        return response_json, current_response_content, result
+        if execution_result:
+            # Apply the execution result to the new message
+            execution_result.id = new_message.id
+            execution_result.is_complete = True
+            execution_result.timestamp = new_message.timestamp
+
+            new_message = execution_result
+
+        await self.executor.update_code_history(
+            new_message.id,
+            new_message,
+        )
+
+        await self.executor.broadcast_message_update(
+            new_message.id,
+            new_message,
+        )
+
+        # Persist conversation if enabled
+        if self.persist_agent_conversation and self.agent_registry and self.current_agent:
+            self.agent_registry.update_agent_state(
+                agent_id=self.current_agent.id,
+                agent_state=self.executor.agent_state,
+            )
+
+        return response_json, final_response_content, result_output
 
     async def handle_user_input(
         self,
@@ -1183,13 +1097,7 @@ class Operator:
 
             if response_json is None:
                 # If there is no action request, process the response as a text response
-                final_response, result = self.process_text_response(
-                    response_content, classification
-                )
-
-                print_agent_response(
-                    self.executor.step_counter, final_response, self.verbosity_level
-                )
+                final_response, result = self.process_text_response(response_content)
             else:
                 # Update the "Agent Heads Up Display"
                 self.executor.update_ephemeral_messages()

@@ -1,165 +1,152 @@
-from typing import List, Optional, Tuple
+from typing import Tuple
 
 from local_operator.types import ActionType, CodeExecutionResult
 
+DEFAULT_LOOKAHEAD_LENGTH = 32
+
 
 def stream_action_buffer(
-    token: str,
-    buffer: List[str],
-    result: CodeExecutionResult,
-    in_action_response: bool,
-    current_tag: Optional[str],
-    tag_buffer: List[str],
-) -> Tuple[bool, CodeExecutionResult, bool, Optional[str], List[str]]:
+    accumulated_text: str,
+    lookahead_length: int = DEFAULT_LOOKAHEAD_LENGTH,
+) -> Tuple[bool, CodeExecutionResult]:
     """
-    Streams tokens into a buffer and updates the CodeExecutionResult object in-place
-    according to the XML tags encountered in the stream.
+    Processes accumulated text and formats it into an action response based on lookahead.
 
     Args:
-        token (str): The new token to process.
-        buffer (List[str]): The rolling buffer of tokens (will be updated in-place).
-        result (CodeExecutionResult): The result object to update in-place.
-        in_action_response (bool): Whether currently inside <action_response>.
-        current_tag (Optional[str]): The current tag being processed.
-        tag_buffer (List[str]): Buffer for accumulating tag content.
+        accumulated_text (str): The complete accumulated text up to this point.
+        lookahead_length (int): The number of characters to reserve as lookahead buffer.
 
     Returns:
-        Tuple[bool, CodeExecutionResult, bool, Optional[str], List[str]]:
-            (finished, result, in_action_response, current_tag, tag_buffer)
-            where finished is True if the </action_response> tag has been fully processed,
-            otherwise False.
+        Tuple[bool, CodeExecutionResult]:
+            (finished, result) where finished is True if </action_response> tag has been
+            fully processed, otherwise False.
 
     Raises:
         ValueError: If an invalid ActionType is encountered in <action> tag.
     """
-    # Update buffer
-    buffer.append(token)
-    if len(buffer) > 4096:
-        buffer.pop(0)
+    result = CodeExecutionResult()
 
-    finished = False
+    # Check if we have action_response tags
+    action_start_idx = accumulated_text.find("<action_response>")
+    action_end_idx = accumulated_text.find("</action_response>")
 
-    def buffer_str():
-        return "".join(buffer)
-
-    buf = buffer_str()
-
-    if not in_action_response:
-        while True:
-            idx = buf.find("<action_response>")
-            if idx == -1:
-                # No <action_response> yet, append token to message (plain text mode)
-                partial_tag = "<action_response>"
-                should_append = True
-                for i in range(1, len(partial_tag)):
-                    if buf.endswith(partial_tag[:i]):
-                        should_append = False
-                        break
-                if "<action_response>" not in buf and should_append:
-                    result.message += token
-                return False, result, in_action_response, current_tag, tag_buffer
+    if action_start_idx == -1:
+        # No action_response found
+        if len(accumulated_text) <= lookahead_length:
+            # Check if the lookahead contains potential action tag beginnings
+            lookahead_text = accumulated_text
+            if "<" not in lookahead_text:
+                # No potential tags, return all text
+                result.message = accumulated_text
+                return False, result
             else:
-                # Found start of <action_response>
-                in_action_response = True
-                # Only flush everything up to <action_response> to message (not the tag itself)
-                pre = buf[:idx]
-                if pre and pre not in result.message:
-                    result.message += pre
-                # Remove everything up to and including <action_response> from buffer
-                del buffer[: idx + len("<action_response>")]
-                # After removing the tag, do not append the current token to the message
-                buf = buffer_str()
-                # If another <action_response> is at the start, keep removing
-                if buf.startswith("<action_response>"):
-                    continue
+                # Potential tag beginning found, don't return anything yet
+                return False, result
+
+        # Process text minus lookahead, but check if lookahead contains potential tags
+        processing_boundary = len(accumulated_text) - lookahead_length
+        lookahead_text = accumulated_text[processing_boundary:]
+
+        # If lookahead doesn't contain potential action tag beginnings, include more text
+        if "<" not in lookahead_text:
+            result.message = accumulated_text
+        else:
+            result.message = accumulated_text[:processing_boundary]
+        return False, result
+
+    if action_end_idx == -1:
+        # action_response started but not finished
+        # Set message to everything before action_response
+        result.message = accumulated_text[:action_start_idx]
+
+        # Parse partial action content if we have enough
+        action_content = accumulated_text[action_start_idx + len("<action_response>") :]
+        if action_content:
+            _parse_action_content(action_content, result, partial=True)
+
+        return False, result
+
+    # Complete action_response found
+    pre_action = accumulated_text[:action_start_idx]
+    action_content = accumulated_text[action_start_idx + len("<action_response>") : action_end_idx]
+
+    # Set the message to everything before action_response
+    result.message = pre_action
+
+    # Parse the action_response content
+    _parse_action_content(action_content, result, partial=False)
+
+    return True, result
+
+
+def _parse_action_content(content: str, result: CodeExecutionResult, partial: bool = False) -> None:
+    """
+    Parses the content within action_response tags and populates the result object.
+
+    Args:
+        content (str): The content between <action_response> and </action_response> tags.
+        result (CodeExecutionResult): The result object to populate.
+        partial (bool): Whether this is a partial parse (incomplete action_response).
+
+    Raises:
+        ValueError: If an invalid ActionType is encountered.
+    """
+    tags = ["action", "content", "code", "replacements", "mentioned_files", "learnings"]
+
+    for tag in tags:
+        open_tag = f"<{tag}>"
+        close_tag = f"</{tag}>"
+
+        start_idx = 0
+        while True:
+            open_idx = content.find(open_tag, start_idx)
+            if open_idx == -1:
                 break
-        current_tag = None
-        tag_buffer = []
-        buf = buffer_str()
 
-    # If in action_response, look for tags
-    if in_action_response:
-        # Check for end of action_response
-        while "</action_response>" in buf:
-            idx = buf.find("</action_response>")
-            before = buf[:idx]
-            if current_tag:
-                tag_buffer.append(before)
-                tag_content = "".join(tag_buffer)
-                _assign_tag_content(current_tag, tag_content, result)
-                current_tag = None
-                tag_buffer = []
-            else:
-                result.message += before
-            finished = True
-            del buffer[: idx + len("</action_response>")]
-            # Reset state for post-XML streaming
-            in_action_response = False
-            current_tag = None
-            tag_buffer = []
-            buffer.clear()
-            # Do not process any more tokens after finishing
-            buf = buffer_str()
-            return True, result, in_action_response, current_tag, tag_buffer
-
-        tags = ["action", "content", "code", "replacements", "mentioned_files"]
-        while True:
-            if not current_tag:
-                found_tag = False
-                for tag in tags:
-                    open_tag = f"<{tag}>"
-                    if open_tag in buf:
-                        idx = buf.find(open_tag)
-                        if idx > 0:
-                            result.message += buf[:idx]
-                        # Remove up to and including <tag>
-                        del buffer[: idx + len(open_tag)]
-                        current_tag = tag
-                        tag_buffer = []
-                        buf = buffer_str()
-                        found_tag = True
-                        break
-                if not found_tag:
-                    break  # No more tags found, exit loop
-
-            if current_tag:
-                tag = current_tag
-                close_tag = f"</{tag}>"
-                if close_tag in buf:
-                    idx = buf.find(close_tag)
-                    tag_content = buf[:idx]
-                    _assign_tag_content(tag, tag_content, result)
-                    # Remove up to and including </tag>
-                    del buffer[: idx + len(close_tag)]
-                    current_tag = None
-                    tag_buffer = []
-                    buf = buffer_str()
-                    continue  # There may be more tags in the buffer, so loop again
-                else:
-                    # For mentioned_files, handle line-by-line
+            close_idx = content.find(close_tag, open_idx)
+            if close_idx == -1:
+                # If we're doing partial parsing and there's no closing tag,
+                # extract the content after the opening tag
+                if partial:
+                    partial_content = content[open_idx + len(open_tag) :]
                     if tag == "mentioned_files":
-                        if "\n" in buf:
-                            idx = buf.find("\n")
-                            file_candidate = buf[:idx].strip()
-                            if file_candidate:
-                                if not hasattr(result, "files") or result.files is None:
-                                    result.files = []
-                                result.files.append(file_candidate)
-                            del buffer[: idx + 1]
-                            buf = buffer_str()
-                            tag_buffer = []
-                            continue
-                        else:
-                            tag_buffer.append(token)
+                        _handle_partial_mentioned_files(partial_content, result)
                     else:
-                        tag_buffer.append(token)
-                    break  # Wait for more tokens
-            else:
-                break  # No current tag, exit loop
-    return finished, result, in_action_response, current_tag, tag_buffer
+                        # For other tags, assign the partial content directly
+                        _assign_tag_content(tag, partial_content, result, partial=True)
+                break
+
+            tag_content = content[open_idx + len(open_tag) : close_idx]
+            _assign_tag_content(tag, tag_content, result, partial=False)
+
+            start_idx = close_idx + len(close_tag)
 
 
-def _assign_tag_content(tag: str, content: str, result: CodeExecutionResult):
+def _handle_partial_mentioned_files(content: str, result: CodeExecutionResult) -> None:
+    """
+    Handle partial mentioned_files content that may not have a closing tag yet.
+
+    Args:
+        content (str): The partial content after <mentioned_files>
+        result (CodeExecutionResult): The result object to update.
+    """
+    # Split by newlines and process complete lines
+    lines = content.split("\n")
+
+    # Process all complete lines (all but the last one if it doesn't end with newline)
+    complete_lines = lines[:-1] if not content.endswith("\n") else lines
+
+    for line in complete_lines:
+        file_candidate = line.strip()
+        if file_candidate:
+            if not hasattr(result, "files") or result.files is None:
+                result.files = []
+            result.files.append(file_candidate)
+
+
+def _assign_tag_content(
+    tag: str, content: str, result: CodeExecutionResult, partial: bool = False
+) -> None:
     """
     Assigns the content to the appropriate field in the result object based on tag.
 
@@ -167,6 +154,7 @@ def _assign_tag_content(tag: str, content: str, result: CodeExecutionResult):
         tag (str): The tag name.
         content (str): The content to assign.
         result (CodeExecutionResult): The result object to update.
+        partial (bool): Whether this is partial content (for graceful error handling).
 
     Raises:
         ValueError: If an invalid ActionType is encountered.
@@ -174,7 +162,12 @@ def _assign_tag_content(tag: str, content: str, result: CodeExecutionResult):
     try:
         if tag == "action":
             action_value = content.strip()
-            result.action = ActionType(action_value)
+            try:
+                result.action = ActionType(action_value)
+            except ValueError:
+                # For partial content, if action is invalid, don't set it
+                if not partial:
+                    raise
         elif tag == "content":
             result.content += content
         elif tag == "code":
@@ -182,10 +175,15 @@ def _assign_tag_content(tag: str, content: str, result: CodeExecutionResult):
         elif tag == "replacements":
             result.replacements += content
         elif tag == "mentioned_files":
-            file_candidate = content.strip()
-            if file_candidate:
-                if not hasattr(result, "files") or result.files is None:
-                    result.files = []
-                result.files.append(file_candidate)
+            # Handle mentioned_files line by line
+            lines = content.strip().split("\n")
+            for line in lines:
+                file_candidate = line.strip()
+                if file_candidate:
+                    if not hasattr(result, "files") or result.files is None:
+                        result.files = []
+                    result.files.append(file_candidate)
+        elif tag == "learnings":
+            result.learnings += content
     except Exception as exc:
         raise ValueError(f"Failed to assign tag content for <{tag}>: {exc}") from exc
