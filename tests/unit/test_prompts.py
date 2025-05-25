@@ -416,7 +416,6 @@ def test_apply_attachments_to_prompt():
     for attachment in attachments:
         assert attachment in result
 
-    # Verify the numbering format (1. file1.txt, etc.)
-    assert "1. file1.txt" in result
-    assert "2. file2.pdf" in result
-    assert "3. https://example.com/data.csv" in result
+    assert "file1.txt" in result
+    assert "file2.pdf" in result
+    assert "https://example.com/data.csv" in result

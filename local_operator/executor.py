@@ -494,7 +494,7 @@ class LocalCodeExecutor:
         self.agent_state.conversation.append(new_record)
         self._limit_conversation_history()
 
-    async def _summarize_old_steps(self) -> None:
+    async def _summarize_old_steps(self, min_token_threshold: int = 500) -> None:
         """
         Summarize old conversation steps beyond the detail conversation length.
 
@@ -523,7 +523,7 @@ class LocalCodeExecutor:
             if not msg.should_summarize or msg.summarized:
                 continue
 
-            summary = await self._summarize_conversation_step(msg)
+            summary = await self._summarize_conversation_step(msg, min_token_threshold)
             msg.content = summary
             msg.summarized = True
 
@@ -2453,7 +2453,7 @@ class LocalCodeExecutor:
             ] + self.agent_state.conversation[-chunk_size:]
 
     async def _summarize_conversation_step(
-        self, msg: ConversationRecord, min_tokens: int = 500
+        self, msg: ConversationRecord, min_token_threshold: int = 500
     ) -> str:
         """
         Summarize the conversation step by invoking the model to generate a concise summary,
@@ -2461,7 +2461,7 @@ class LocalCodeExecutor:
 
         Args:
             msg (ConversationRecord): The conversation record to summarize.
-            min_tokens (int): The minimum number of tokens to consider summarizing.
+            min_token_threshold (int): The minimum number of tokens to consider summarizing.
 
         Returns:
             str: A concise summary of the critical information from the conversation step,
@@ -2475,7 +2475,7 @@ class LocalCodeExecutor:
 
         token_count = len(tokenizer.encode(msg.content or ""))
 
-        if token_count <= min_tokens:
+        if token_count <= min_token_threshold:
             return msg.content
 
         step_info = (

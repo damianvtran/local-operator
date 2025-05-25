@@ -221,7 +221,7 @@ async def get_html(
                 detail=f"Internal Server Error: {str(e)}",
             )
 
-        return Response(content=content, media_type="text/html")
+        return Response(content=content, media_type=mime_type)
 
     except HTTPException:
         raise
