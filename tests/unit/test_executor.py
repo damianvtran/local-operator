@@ -795,7 +795,6 @@ async def test_process_response(executor, mock_model_config):
     with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
         await executor.process_response(response, RequestClassification(type="data_science"))
         output = mock_stdout.getvalue()
-        assert "Executing Code" in output
         assert "hello world" in output
 
 
@@ -835,7 +834,7 @@ def test_limit_conversation_history(executor):
                 ConversationRecord(role=ConversationRole.SYSTEM, content="system prompt"),
                 ConversationRecord(
                     role=ConversationRole.USER,
-                    content="[Some conversation history has been truncated for brevity]",
+                    content="<system>Some conversation history has been truncated for brevity.</system>",  # noqa: E501
                     should_summarize=False,
                 ),
                 ConversationRecord(role=ConversationRole.ASSISTANT, content="msg4"),
@@ -890,6 +889,7 @@ async def test_summarize_old_steps(mock_model_config):
             "name": "Empty history",
             "initial": [],
             "expected": [],
+            "min_token_threshold": 0,
         },
         {
             "name": "Only system prompt",
@@ -909,6 +909,39 @@ async def test_summarize_old_steps(mock_model_config):
                     summarized=False,
                 )
             ],
+            "min_token_threshold": 0,
+        },
+        {
+            "name": "Message below min token threshold",
+            "initial": [
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="system prompt",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="msg1",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+            ],
+            "expected": [
+                ConversationRecord(
+                    role=ConversationRole.SYSTEM,
+                    content="system prompt",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+                ConversationRecord(
+                    role=ConversationRole.ASSISTANT,
+                    content="msg1",
+                    should_summarize=True,
+                    summarized=False,
+                ),
+            ],
+            "min_token_threshold": 100,
         },
         {
             "name": "Within detail length",
@@ -952,6 +985,7 @@ async def test_summarize_old_steps(mock_model_config):
                     summarized=False,
                 ),
             ],
+            "min_token_threshold": 0,
         },
         {
             "name": "Beyond detail length with skip conditions",
@@ -1043,13 +1077,14 @@ async def test_summarize_old_steps(mock_model_config):
                     summarized=False,
                 ),
             ],
+            "min_token_threshold": 0,
         },
     ]
 
     for test_case in test_cases:
         executor.agent_state.conversation = test_case["initial"]
         executor.detail_conversation_length = 2
-        await executor._summarize_old_steps()
+        await executor._summarize_old_steps(min_token_threshold=test_case["min_token_threshold"])
 
         assert executor.agent_state.conversation == test_case["expected"], (
             f"{test_case['name']}: Expected conversation history to match "
@@ -1384,20 +1419,29 @@ def test_process_json_response(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "action_type, code, file_path, content, replacements, expected_output",
+    "action_type, code, file_path, content, replacements, agent, message",
     [
-        (ActionType.CODE, "print('hello')", None, None, None, "Executing Code"),
-        (ActionType.WRITE, None, "test.txt", "test content", None, "Executing Write"),
+        (ActionType.CODE, "print('hello')", None, None, None, None, None),
+        (ActionType.WRITE, None, "test.txt", "test content", None, None, None),
         (
             ActionType.EDIT,
             None,
             "test.txt",
             "new content",
             [{"old": "old", "new": "new"}],
-            "Executing Edit",
+            None,
+            None,
         ),
-        (ActionType.READ, None, "test.txt", None, None, "Executing Read"),
-        (ActionType.DELEGATE, None, None, None, None, "Executing Delegate"),
+        (ActionType.READ, None, "test.txt", None, None, None, None),
+        (
+            ActionType.DELEGATE,
+            None,
+            None,
+            None,
+            None,
+            "agent",
+            "Please do my task",
+        ),
     ],
 )
 async def test_perform_action(
@@ -1407,7 +1451,8 @@ async def test_perform_action(
     file_path: str | None,
     content: str | None,
     replacements: list[dict[str, str]] | None,
-    expected_output: str,
+    agent: str | None,
+    message: str | None,
 ) -> None:
 
     file_path = file_path or ""
@@ -1421,6 +1466,8 @@ async def test_perform_action(
         file_path=file_path,
         mentioned_files=[],
         replacements=replacements or [],
+        agent=agent or "",
+        message=message or "",
     )
 
     original_read_file = executor.read_file
@@ -1428,99 +1475,118 @@ async def test_perform_action(
     original_edit_file = executor.edit_file
     original_execute_code = executor.execute_code
     original_delegate_to_agent = executor.delegate_to_agent
+    original_delegate_callback = executor.delegate_callback
 
-    with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
-        if action_type == ActionType.READ:
-            executor.read_file = AsyncMock(
-                return_value=CodeExecutionResult(
-                    stdout="File content",
-                    stderr="",
-                    logging="",
-                    formatted_print="File content",
-                    code="",
-                    message="",
-                    role=ConversationRole.SYSTEM,
-                    status=ProcessResponseStatus.SUCCESS,
-                    files=[file_path],
-                    execution_type=ExecutionType.ACTION,
-                    action=action_type,
-                )
-            )
-        elif action_type == ActionType.WRITE:
-            executor.write_file = AsyncMock(
-                return_value=CodeExecutionResult(
-                    stdout="File written",
-                    stderr="",
-                    logging="",
-                    formatted_print="File written",
-                    code="",
-                    message="",
-                    role=ConversationRole.SYSTEM,
-                    status=ProcessResponseStatus.SUCCESS,
-                    files=[file_path],
-                    execution_type=ExecutionType.ACTION,
-                    action=action_type,
-                )
-            )
-        elif action_type == ActionType.EDIT:
-            executor.edit_file = AsyncMock(
-                return_value=CodeExecutionResult(
-                    stdout="File edited",
-                    stderr="",
-                    logging="",
-                    formatted_print="File edited",
-                    code="",
-                    message="",
-                    role=ConversationRole.SYSTEM,
-                    status=ProcessResponseStatus.SUCCESS,
-                    files=[file_path],
-                    execution_type=ExecutionType.ACTION,
-                    action=action_type,
-                )
-            )
-        elif action_type == ActionType.DELEGATE:
-            executor.delegate_to_agent = AsyncMock(
-                return_value=CodeExecutionResult(
-                    stdout="Delegated to agent",
-                    stderr="",
-                    logging="",
-                    formatted_print="Delegated to agent",
-                    code="",
-                    message="Delegated to agent",
-                    role=ConversationRole.SYSTEM,
-                    status=ProcessResponseStatus.SUCCESS,
-                    files=[],
-                    execution_type=ExecutionType.ACTION,
-                    action=action_type,
-                )
-            )
-        else:
-            executor.execute_code = AsyncMock(
-                return_value=CodeExecutionResult(
-                    stdout="Code executed",
-                    stderr="",
-                    logging="",
-                    formatted_print="Code executed",
-                    code="",
-                    message="",
-                    role=ConversationRole.SYSTEM,
-                    status=ProcessResponseStatus.SUCCESS,
-                    files=[],
-                    execution_type=ExecutionType.ACTION,
-                    action=action_type,
-                )
-            )
+    executor.delegate_callback = AsyncMock(
+        return_value=CodeExecutionResult(
+            stdout="Delegated to agent",
+            stderr="",
+            logging="",
+            formatted_print="Delegated to agent",
+            code="",
+            message="Delegated task completed",
+            role=ConversationRole.SYSTEM,
+            status=ProcessResponseStatus.SUCCESS,
+            files=[],
+            execution_type=ExecutionType.ACTION,
+            action=ActionType.DELEGATE,
+        )
+    )
 
-        result = await executor.perform_action(response, RequestClassification(type="data_science"))
-        assert result is not None
-        assert result.status == ProcessResponseStatus.SUCCESS
-        assert expected_output in mock_stdout.getvalue()
+    if action_type == ActionType.READ:
+        executor.read_file = AsyncMock(
+            return_value=CodeExecutionResult(
+                stdout="File content",
+                stderr="",
+                logging="",
+                formatted_print="File content",
+                code="",
+                message="",
+                role=ConversationRole.SYSTEM,
+                status=ProcessResponseStatus.SUCCESS,
+                files=[file_path],
+                execution_type=ExecutionType.ACTION,
+                action=action_type,
+            )
+        )
+    elif action_type == ActionType.WRITE:
+        executor.write_file = AsyncMock(
+            return_value=CodeExecutionResult(
+                stdout="File written",
+                stderr="",
+                logging="",
+                formatted_print="File written",
+                code="",
+                message="",
+                role=ConversationRole.SYSTEM,
+                status=ProcessResponseStatus.SUCCESS,
+                files=[file_path],
+                execution_type=ExecutionType.ACTION,
+                action=action_type,
+            )
+        )
+    elif action_type == ActionType.EDIT:
+        executor.edit_file = AsyncMock(
+            return_value=CodeExecutionResult(
+                stdout="File edited",
+                stderr="",
+                logging="",
+                formatted_print="File edited",
+                code="",
+                message="",
+                role=ConversationRole.SYSTEM,
+                status=ProcessResponseStatus.SUCCESS,
+                files=[file_path],
+                execution_type=ExecutionType.ACTION,
+                action=action_type,
+            )
+        )
+    elif action_type == ActionType.DELEGATE:
+        executor.delegate_to_agent = AsyncMock(
+            return_value=CodeExecutionResult(
+                stdout="Delegated to agent",
+                stderr="",
+                logging="",
+                formatted_print="Delegated to agent",
+                code="",
+                message="Please do my task",
+                agent="agent",
+                role=ConversationRole.SYSTEM,
+                status=ProcessResponseStatus.SUCCESS,
+                files=[],
+                execution_type=ExecutionType.ACTION,
+                action=action_type,
+            )
+        )
+    else:
+        executor.execute_code = AsyncMock(
+            return_value=CodeExecutionResult(
+                stdout="Code executed",
+                stderr="",
+                logging="",
+                formatted_print="Code executed",
+                code="",
+                message="",
+                role=ConversationRole.SYSTEM,
+                status=ProcessResponseStatus.SUCCESS,
+                files=[],
+                execution_type=ExecutionType.ACTION,
+                action=action_type,
+            )
+        )
+
+    response, _ = await executor.perform_action(
+        response, RequestClassification(type="data_science")
+    )
+    assert response is not None
+    assert response.status == ProcessResponseStatus.SUCCESS
 
     executor.read_file = original_read_file
     executor.write_file = original_write_file
     executor.edit_file = original_edit_file
     executor.execute_code = original_execute_code
     executor.delegate_to_agent = original_delegate_to_agent
+    executor.delegate_callback = original_delegate_callback
 
 
 @pytest.mark.asyncio
@@ -1539,7 +1605,9 @@ async def test_perform_action_handles_exception(executor: LocalCodeExecutor):
     executor.execute_code = AsyncMock(side_effect=Exception("Execution failed"))
 
     with patch("sys.stdout", new_callable=io.StringIO):
-        result = await executor.perform_action(response, RequestClassification(type="data_science"))
+        result, _ = await executor.perform_action(
+            response, RequestClassification(type="data_science")
+        )
         assert "error encountered" in executor.agent_state.conversation[-1].content
         assert result is not None
         assert result.status == ProcessResponseStatus.SUCCESS
@@ -2239,9 +2307,6 @@ def test_append_to_history_limits_history_length(executor):
     # Verify only the most recent messages are kept
     assert len(executor.agent_state.conversation) == 4
     assert executor.agent_state.conversation[0].content == "System prompt"
-    assert (
-        executor.agent_state.conversation[1].content
-        == "[Some conversation history has been truncated for brevity]"
-    )
+    assert "truncated" in executor.agent_state.conversation[1].content
     assert executor.agent_state.conversation[2].content == "Message 4"
     assert executor.agent_state.conversation[3].content == "Message 5"

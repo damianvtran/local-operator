@@ -113,8 +113,7 @@ class TestSaveBase64Attachment:
         with patch("uuid.uuid4", return_value=fixed_uuid):
             file_uri = attachment_utils.save_base64_attachment(data_url)
 
-        assert file_uri.startswith("file://")
-        file_path_str = file_uri[len("file://") :]
+        file_path_str = file_uri
         file_path = Path(file_path_str)
 
         assert file_path.name == f"{fixed_uuid}{expected_extension_part}"
@@ -131,7 +130,7 @@ class TestSaveBase64Attachment:
         with patch("uuid.uuid4", return_value=fixed_uuid):
             file_uri = attachment_utils.save_base64_attachment(data_url)
 
-        file_path = Path(file_uri[len("file://") :])
+        file_path = Path(file_uri)
         assert file_path.name == f"{fixed_uuid}.bin"
         assert file_path.exists()
         with open(file_path, "rb") as f:
@@ -163,7 +162,7 @@ class TestProcessAttachments:
 
         # Check the processed data URL
         expected_file_path = temp_uploads_dir / f"{fixed_uuid}.png"
-        assert processed_urls[0] == expected_file_path.as_uri()
+        assert processed_urls[0] == str(expected_file_path)
         assert expected_file_path.exists()
         with open(expected_file_path, "rb") as f:
             assert f.read() == MINIMAL_PNG_CONTENT
@@ -184,11 +183,11 @@ class TestProcessAttachments:
         assert len(processed_urls) == 2
 
         expected_png_path = temp_uploads_dir / f"{uuids[0]}.png"
-        assert processed_urls[0] == expected_png_path.as_uri()
+        assert processed_urls[0] == str(expected_png_path)
         assert expected_png_path.exists()
 
         expected_pdf_path = temp_uploads_dir / f"{uuids[1]}.pdf"
-        assert processed_urls[1] == expected_pdf_path.as_uri()
+        assert processed_urls[1] == str(expected_pdf_path)
         assert expected_pdf_path.exists()
 
     async def test_process_attachments_only_regular_urls(self, temp_uploads_dir: Path):
