@@ -411,8 +411,8 @@ class Operator:
                 content=(
                     "<system>Please proceed according to your plan. "
                     "Choose appropriate actions "
-                    "and follow the action XML schema if you need to take"
-                    "actions.  If you do not need to take any actions, do not include"
+                    "and follow the action XML schema if you need to take "
+                    "actions.  If you do not need to take any actions, do not include "
                     "an action in your response.</system>"
                 ),
                 should_summarize=False,
