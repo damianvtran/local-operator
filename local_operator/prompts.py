@@ -978,6 +978,8 @@ EDIT usage guidelines:
 - Do not duplicate headers in the replacements.  If you are replacing placeholders, make sure that you pay attention to the other text around the placeholder and don't repeat content that is already present in the file.  For example, if there is a header and then placeholder, don't include the header again in the replacements as it is already above the placeholder.
 - If you have enough information to make multiple edits in a file at a time, you should do so instead of editing one at a time to be less expensive and more efficient.
 - Ensure that you use standard diff notation for the replacements.  For example, if you are replacing the word "old" with the word "new", then you should use "-old" and "+new" in the replacements.  Include newlines and ensure each replacement line is properly formatted.
+- Make sure that all lines have "- " or "+ " at the beginning of the line to indicate that they are being added or removed.  Do not include any other text in the replacements.
+- Be careful and precise with edits.  You can edit multiple times in one action, but if you are running into errors then you may need to break it up into separate edit actions, one section at a time.  If you keep running into errors, then you may need to rewrite the file from scratch instead with a WRITE action.
 
 #### Example for DELEGATE:
 
