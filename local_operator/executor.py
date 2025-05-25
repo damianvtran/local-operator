@@ -1587,10 +1587,18 @@ class LocalCodeExecutor:
                     # Run synchronous exec in a separate thread to avoid blocking the event loop
                     compiled_code = compile(code, "<agent_generated_code>", "exec")
 
-                    def _execute_sync_in_thread():
-                        exec(compiled_code, self.context)
+                    sync_required_libs = ["matplotlib", "tkinter", "PIL"]
 
-                    await asyncio.to_thread(_execute_sync_in_thread)
+                    # Some libraries do not support async execution, so we
+                    # need to run them in the main thread
+                    if any(lib in code for lib in sync_required_libs):
+                        exec(compiled_code, self.context)
+                    else:
+
+                        def _execute_sync_in_thread():
+                            exec(compiled_code, self.context)
+
+                        await asyncio.to_thread(_execute_sync_in_thread)
         except Exception as e:
             code_execution_error = CodeExecutionError(message=str(e), code=code).with_traceback(
                 e.__traceback__
