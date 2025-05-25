@@ -875,16 +875,21 @@ existing_file.txt
 <replacements>
 - Old content
 - to
+-
 - replace
 + New content
++
++ that you are replacing the old content with
 </replacements>
 </action_response>
 </example>
+
 EDIT usage guidelines:
 - After you edit the file, you will be shown the contents of the edited file with line numbers and lengths.  Please review and determine if your edit worked as expected.  If not, then try another EDIT action to amend the error.  If repeated edits fail, then rewrite the file from scratch instead with a WRITE action, making sure to stay accurate to the original file content.
 - Make sure that you include the replacements in the "replacements" field or you will run into parsing errors.
 - Do not duplicate headers in the replacements.  If you are replacing placeholders, make sure that you pay attention to the other text around the placeholder and don't repeat content that is already present in the file.  For example, if there is a header and then placeholder, don't include the header again in the replacements as it is already above the placeholder.
 - If you have enough information to make multiple edits in a file at a time, you should do so instead of editing one at a time to be less expensive and more efficient.
+- Ensure that you use standard diff notation for the replacements.  For example, if you are replacing the word "old" with the word "new", then you should use "-old" and "+new" in the replacements.  Include newlines and ensure each replacement line is properly formatted.
 
 #### Example for DELEGATE:
 

@@ -258,6 +258,27 @@ def test_is_marker_inside_json(text, marker, expected):
             id="edit_action_with_markdown_wrapper_and_replacements",
         ),
         pytest.param(
+            "```xml\n<action>EDIT</action><file_path>doc.md</file_path><replacements>\n- old line\n- \n- another old line\n+ new line 1\n+ \n+ \n+ new line 2\n</replacements>\n```",  # noqa: E501
+            {
+                "action": "EDIT",
+                "learnings": "",
+                "response": "",
+                "code": "",
+                "content": "",
+                "file_path": "doc.md",
+                "replacements": [
+                    {
+                        "find": "old line\n\nanother old line",
+                        "replace": "new line 1\n\n\nnew line 2",
+                    }
+                ],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="edit_action_with_newlines_in_replacements",
+        ),
+        pytest.param(
             "```\n<action>DONE</action><response>Task complete</response>\n```",
             {
                 "action": "DONE",

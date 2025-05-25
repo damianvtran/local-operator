@@ -387,7 +387,7 @@ def _parse_replacements(replacements_str: str) -> List[Dict[str, str]]:
 
     for line in lines:
         stripped_line = line.strip()
-        if stripped_line.startswith("- "):
+        if stripped_line.startswith("- ") or stripped_line == "-":
             if is_replacing and current_find:  # End of a previous replace block
                 parsed_replacements.append(
                     {
@@ -398,10 +398,20 @@ def _parse_replacements(replacements_str: str) -> List[Dict[str, str]]:
                 current_find = []
                 current_replace = []
             is_replacing = False
-            current_find.append(stripped_line[2:])
-        elif stripped_line.startswith("+ "):
+            # Handle empty lines: if the line is just "- " or "-" then it represents an empty line
+            if stripped_line == "-":
+                current_find.append("")
+            else:
+                content_after_marker = stripped_line[2:]
+                current_find.append(content_after_marker)
+        elif stripped_line.startswith("+ ") or stripped_line == "+":
             is_replacing = True
-            current_replace.append(stripped_line[2:])
+            # Handle empty lines: if the line is just "+ " or "+" then it represents an empty line
+            if stripped_line == "+":
+                current_replace.append("")
+            else:
+                content_after_marker = stripped_line[2:]
+                current_replace.append(content_after_marker)
         elif not is_replacing and current_find:
             current_find.append(stripped_line)
         elif is_replacing and current_replace:
