@@ -46,6 +46,12 @@ ALLOWED_VIDEO_TYPES: List[str] = [
     "video/x-flv",
 ]
 
+# List of allowed HTML MIME types
+ALLOWED_HTML_TYPES: List[str] = [
+    "text/html",
+    "application/xhtml+xml",
+]
+
 
 @router.get(
     "/v1/static/images",
@@ -156,4 +162,60 @@ async def get_video(
         raise
     except Exception as e:
         logger.exception(f"Error serving video file: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
+
+@router.get(
+    "/v1/static/html",
+    summary="Serve HTML file",
+    description="Serves an HTML file from disk by path. Only HTML file types are allowed.",
+    response_class=FileResponse,
+)
+async def get_html(
+    path: str = Query(..., description="Path to the HTML file on disk"),
+):
+    """
+    Serve an HTML file from disk.
+
+    Args:
+        path: Path to the HTML file on disk
+
+    Returns:
+        The HTML file as a response
+
+    Raises:
+        HTTPException: If the file doesn't exist, is not accessible, or is not an HTML file
+    """
+    try:
+        # Validate the path exists
+        file_path = Path(path)
+
+        expanded_path = file_path.expanduser().resolve()
+
+        if not expanded_path.exists():
+            raise HTTPException(status_code=404, detail=f"File not found: {path}")
+
+        if not expanded_path.is_file():
+            raise HTTPException(status_code=400, detail=f"Not a file: {path}")
+
+        # Check if the file is readable
+        if not os.access(expanded_path, os.R_OK):
+            raise HTTPException(status_code=403, detail=f"File not accessible: {path}")
+
+        # Determine the file's MIME type
+        mime_type, _ = mimetypes.guess_type(expanded_path)
+        if not mime_type or mime_type not in ALLOWED_HTML_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File is not an allowed HTML type: {mime_type or 'unknown'}",
+            )
+
+        # Return the file
+        return FileResponse(path=expanded_path, media_type=mime_type, filename=expanded_path.name)
+
+    except HTTPException:
+        # Re-raise HTTP exceptions to preserve their status code and detail
+        raise
+    except Exception as e:
+        logger.exception(f"Error serving HTML file: {e}")
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
