@@ -961,13 +961,21 @@ existing_file.txt
 </file_path>
 
 <replacements>
-- Old content
-- to
--
-- replace
-+ New content
-+
-+ that you are replacing the old content with
+<<<<<<< SEARCH
+original text 1
+
+original text 2
+=======
+text to replace 1
+
+text to replace 2
+>>>>>>> REPLACE
+
+<<<<<<< SEARCH
+original text 3
+=======
+text to replace 3
+>>>>>>> REPLACE
 </replacements>
 </action_response>
 </example>

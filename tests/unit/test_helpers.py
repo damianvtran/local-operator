@@ -240,7 +240,7 @@ def test_is_marker_inside_json(text, marker, expected):
             id="write_action_with_surrounding_text_and_action_response_tag",  # noqa: E501
         ),
         pytest.param(
-            "```xml\n<action>EDIT</action><file_path>doc.md</file_path><replacements>\n- old line\n- another old line\n+ new line 1\n+ new line 2\n</replacements>\n```",  # noqa: E501
+            "```xml\n<action>EDIT</action><file_path>doc.md</file_path><replacements>\n<<<<<<< SEARCH\nold line\nanother old line\n=======\nnew line 1\nnew line 2\n>>>>>>> REPLACE\n</replacements>\n```",  # noqa: E501
             {
                 "action": "EDIT",
                 "learnings": "",
@@ -258,7 +258,7 @@ def test_is_marker_inside_json(text, marker, expected):
             id="edit_action_with_markdown_wrapper_and_replacements",
         ),
         pytest.param(
-            "```xml\n<action>EDIT</action><file_path>doc.md</file_path><replacements>\n- old line\n- \n- another old line\n+ new line 1\n+ \n+ \n+ new line 2\n</replacements>\n```",  # noqa: E501
+            "```xml\n<action>EDIT</action><file_path>doc.md</file_path><replacements>\n<<<<<<< SEARCH\nold line\n\nanother old line\n=======\nnew line 1\n\n\nnew line 2\n>>>>>>> REPLACE\n</replacements>\n```",  # noqa: E501
             {
                 "action": "EDIT",
                 "learnings": "",
@@ -277,6 +277,27 @@ def test_is_marker_inside_json(text, marker, expected):
                 "mentioned_files": [],
             },
             id="edit_action_with_newlines_in_replacements",
+        ),
+        pytest.param(
+            "```xml\n<action>EDIT</action><file_path>doc.md</file_path><replacements>\n<<<<<<< SEARCH\nold line\n\n<<<<<<< SEARCH\nrepl======\n>>>>>> REPLACE\nanother old line\n=======\nnew line 1\n\n\nnew line 2\n>>>>>>> REPLACE\n</replacements>\n```",  # noqa: E501
+            {
+                "action": "EDIT",
+                "learnings": "",
+                "response": "",
+                "code": "",
+                "content": "",
+                "file_path": "doc.md",
+                "replacements": [
+                    {
+                        "find": "old line\n\n<<<<<<< SEARCH\nrepl======\n>>>>>> REPLACE\nanother old line",  # noqa: E501
+                        "replace": "new line 1\n\n\nnew line 2",
+                    }
+                ],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="edit_action_with_recursive_replacements",
         ),
         pytest.param(
             "```\n<action>DONE</action><response>Task complete</response>\n```",
@@ -361,7 +382,7 @@ def test_is_marker_inside_json(text, marker, expected):
         pytest.param(
             (
                 "<action>EDIT</action><file_path>file.txt</file_path><replacements>\n"
-                "- find1\n+ replace1\n- find2\n+ replace2\n</replacements>"
+                "<<<<<<< SEARCH\nfind1\n=======\nreplace1\n>>>>>>> REPLACE\n<<<<<<< SEARCH\nfind2\n=======\nreplace2\n>>>>>>> REPLACE\n</replacements>"  # noqa: E501
             ),
             {
                 "action": "EDIT",
@@ -477,7 +498,7 @@ def test_is_marker_inside_json(text, marker, expected):
             id="write_xml_content_with_cdata",
         ),
         pytest.param(
-            "<action>EDIT</action><file_path>config.xml</file_path><replacements>\n- <old_setting>true</old_setting>\n+ <new_setting>false</new_setting>\n</replacements>",  # noqa: E501
+            "<action>EDIT</action><file_path>config.xml</file_path><replacements>\n<<<<<<< SEARCH\n<old_setting>true</old_setting>\n=======\n<new_setting>false</new_setting>\n>>>>>>> REPLACE\n</replacements>",  # noqa: E501
             {
                 "action": "EDIT",
                 "learnings": "",
