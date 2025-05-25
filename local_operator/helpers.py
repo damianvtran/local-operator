@@ -366,62 +366,63 @@ def _extract_tag_content(xml_string: str, tag_name: str) -> Tuple[str, int]:
 
 
 def _parse_replacements(replacements_str: str) -> List[Dict[str, str]]:
-    """Parses the content of a <replacements> tag."""
-    parsed_replacements = []
-    if not replacements_str:
-        return parsed_replacements
+    """
+    Parses the content of a <replacements> tag in diff notation, supporting nested SEARCH blocks.
 
-    # Split by the start of a new replacement block, which is assumed to be '- '
-    # This is a simplification based on the example format.
-    # A more robust parser would handle variations.
-    # The example format is:
-    # - Old content
-    # - to
-    # - replace
-    # + New content
-    # We need to group these.
-    lines = replacements_str.strip().split("\n")
-    current_find = []
-    current_replace = []
-    is_replacing = False
+    Args:
+        replacements_str (str): The string content inside the <replacements> tag.
 
-    for line in lines:
-        stripped_line = line.strip()
-        if stripped_line.startswith("- ") or stripped_line == "-":
-            if is_replacing and current_find:  # End of a previous replace block
-                parsed_replacements.append(
-                    {
-                        "find": "\n".join(current_find).strip(),
-                        "replace": "\n".join(current_replace).strip(),
-                    }
-                )
-                current_find = []
-                current_replace = []
-            is_replacing = False
-            # Handle empty lines: if the line is just "- " or "-" then it represents an empty line
-            if stripped_line == "-":
-                current_find.append("")
+    Returns:
+        List[Dict[str, str]]: A list of dictionaries, each with 'find' and 'replace' keys.
+
+    Raises:
+        ValueError: If replacements_str is not a string.
+    """
+    if not replacements_str.strip():
+        return []
+
+    lines = replacements_str.strip().splitlines()
+    parsed_replacements: List[Dict[str, str]] = []
+    i = 0
+    n = len(lines)
+
+    while i < n:
+        current_line = lines[i].strip()
+        # Detect start of a replacement block marker, e.g. <<<<<<< SEARCH
+        if current_line.startswith("<") and current_line.endswith("SEARCH"):
+            block_start = i
+            nesting = 1
+            search_sep = None
+            replace_end = None
+            j = i + 1
+            while j < n:
+                ln = lines[j].strip()
+                # Nested SEARCH block
+                if ln.startswith("<") and ln.endswith("SEARCH"):
+                    nesting += 1
+                # Replacement block end marker
+                elif ln.startswith(">") and ln.endswith("REPLACE"):
+                    nesting -= 1
+                    if nesting == 0:
+                        replace_end = j
+                        break
+                # Separator between find and replace in top-level block
+                elif nesting == 1 and search_sep is None and ln and ln.replace("=", "") == "":
+                    search_sep = j
+                j += 1
+            # Only add well-formed blocks
+            if search_sep is not None and replace_end is not None:
+                find_lines = lines[block_start + 1 : search_sep]
+                replace_lines = lines[search_sep + 1 : replace_end]
+                find_content = "\n".join(find_lines).strip()
+                replace_content = "\n".join(replace_lines).strip()
+                parsed_replacements.append({"find": find_content, "replace": replace_content})
+                i = replace_end + 1
             else:
-                content_after_marker = stripped_line[2:]
-                current_find.append(content_after_marker)
-        elif stripped_line.startswith("+ ") or stripped_line == "+":
-            is_replacing = True
-            # Handle empty lines: if the line is just "+ " or "+" then it represents an empty line
-            if stripped_line == "+":
-                current_replace.append("")
-            else:
-                content_after_marker = stripped_line[2:]
-                current_replace.append(content_after_marker)
-        elif not is_replacing and current_find:
-            current_find.append(stripped_line)
-        elif is_replacing and current_replace:
-            current_replace.append(stripped_line)
-
-    # Add the last replacement block
-    if current_find:
-        parsed_replacements.append(
-            {"find": "\n".join(current_find).strip(), "replace": "\n".join(current_replace).strip()}
-        )
+                # Malformed block; skip start marker
+                i += 1
+        else:
+            i += 1
 
     return parsed_replacements
 
