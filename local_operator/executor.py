@@ -3,7 +3,6 @@ import base64
 import builtins
 import inspect
 import io
-import json
 import logging
 import os
 import subprocess
@@ -2119,12 +2118,14 @@ class LocalCodeExecutor:
             CodeExecutionResult(
                 status=ProcessResponseStatus.IN_PROGRESS,
                 message=f"Delegating the task to {agent_name}",
+                content=message,
                 role=ConversationRole.ASSISTANT,
                 execution_type=ExecutionType.ACTION,
                 stdout="",
                 stderr="",
                 logging="",
                 formatted_print="",
+                agent=agent_name,
                 code="",
                 files=[],
                 action=ActionType.DELEGATE,
@@ -2346,16 +2347,13 @@ class LocalCodeExecutor:
             )
         )
 
-        equivalent_code = FILE_WRITE_EQUIVALENT_TEMPLATE.format(
-            file_path=file_path, content=cleaned_content
-        )
-
         return CodeExecutionResult(
             stdout=f"Successfully wrote to file: {file_path}",
             stderr="",
             logging="",
             formatted_print=f"Successfully wrote to file: {file_path}",
-            code=equivalent_code,
+            content=cleaned_content,
+            file_path=file_path,
             message="",
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
@@ -2401,10 +2399,6 @@ class LocalCodeExecutor:
         with open(expanded_file_path, "w") as f:
             f.write(file_content)
 
-        equivalent_code = FILE_EDIT_EQUIVALENT_TEMPLATE.format(
-            file_path=file_path, replacements=json.dumps(replacements)
-        )
-
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.USER,
@@ -2423,7 +2417,7 @@ class LocalCodeExecutor:
             stderr="",
             logging="",
             formatted_print=f"Successfully edited file: {file_path}",
-            code=equivalent_code,
+            file_path=file_path,
             message="",
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,

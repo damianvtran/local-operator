@@ -6,7 +6,7 @@ import signal
 import uuid
 from enum import Enum
 from pathlib import Path
-from typing import AsyncGenerator, List
+from typing import List
 
 from pydantic import ValidationError
 
@@ -16,18 +16,16 @@ from local_operator.console import VerbosityLevel, print_cli_banner, spinner_con
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.executor import CodeExecutionResult, LocalCodeExecutor
-from local_operator.helpers import parse_agent_action_xml, remove_think_tags
+from local_operator.helpers import parse_agent_action_xml
 from local_operator.model.configure import ModelConfiguration
 from local_operator.notebook import save_code_history_to_notebook
 from local_operator.prompts import (
-    PlanSystemPrompt,
     PlanUserPrompt,
     RequestClassificationSystemPrompt,
     RequestClassificationUserPrompt,
     RequestType,
     TaskInstructionsPrompt,
     apply_attachments_to_prompt,
-    create_system_prompt,
     get_request_type_instructions,
 )
 from local_operator.stream import stream_action_buffer
@@ -371,9 +369,7 @@ class Operator:
             f"Last error: {last_error}"
         )
 
-    async def generate_plan(
-        self, current_task_classification: RequestClassification
-    ) -> AsyncGenerator[str, None]:
+    async def generate_plan(self, current_task_classification: RequestClassification) -> str:
         """Generate a plan for the agent to follow.
 
         This method constructs a conversation with the agent to generate a plan. It
@@ -394,139 +390,34 @@ class Operator:
         if current_task_classification.type != RequestType.CONTINUE:
             self.executor.set_current_plan("")
 
-        system_prompt = create_system_prompt(
-            tool_registry=self.executor.tool_registry,
-            response_format=PlanSystemPrompt,
-            agent_system_prompt=self.executor.agent_state.agent_system_prompt,
-        )
-
-        messages = [
-            ConversationRecord(
-                role=ConversationRole.SYSTEM,
-                content=system_prompt,
-                is_system_prompt=True,
-                should_cache=True,
-            ),
-        ]
-
-        messages.extend(self.executor.agent_state.conversation[1:])
-
-        messages.append(
+        self.executor.agent_state.conversation.append(
             ConversationRecord(
                 role=ConversationRole.USER,
-                content=PlanUserPrompt,
+                content=f"<system>{PlanUserPrompt}</system>",
+                should_summarize=False,
             )
         )
 
-        new_message = self.executor.add_to_code_history(
-            CodeExecutionResult(
-                stdout="",
-                stderr="",
-                logging="",
-                formatted_print="",
-                code="",
-                message="",
-                role=ConversationRole.ASSISTANT,
-                status=ProcessResponseStatus.SUCCESS,
-                files=[],
-                execution_type=ExecutionType.PLAN,
-                is_streamable=True,
-                is_complete=False,
-            ),
-            None,
+        _, response_content, _ = await self.invoke_and_process_response(
+            self.executor.agent_state.conversation,
             current_task_classification,
         )
 
-        await self.executor.update_job_execution_state(
-            CodeExecutionResult(
-                id=new_message.id,
-                stdout="",
-                stderr="",
-                logging="",
-                formatted_print="",
-                code="",
-                message="",
-                role=ConversationRole.ASSISTANT,
-                status=ProcessResponseStatus.IN_PROGRESS,
-                files=[],
-                execution_type=ExecutionType.PLAN,
-                is_streamable=True,
-                is_complete=False,
-            )
-        )
+        self.executor.set_current_plan(response_content)
 
-        if self.persist_agent_conversation and self.agent_registry and self.current_agent:
-            self.agent_registry.update_agent_state(
-                agent_id=self.current_agent.id,
-                agent_state=self.executor.agent_state,
-            )
-
-        async for chunk in self.executor.stream_model(messages):
-            chunk_content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
-            new_message.message += chunk_content
-
-            await self.executor.broadcast_message_update(
-                new_message.id,
-                new_message,
-            )
-
-            yield chunk_content
-
-        # Remove think tags for reasoning models
-        new_message.message = remove_think_tags(new_message.message)
-
-        self.executor.agent_state.conversation.extend(
-            [
-                ConversationRecord(
-                    role=ConversationRole.ASSISTANT,
-                    content=new_message.message,
-                    should_summarize=False,
+        self.executor.agent_state.conversation.append(
+            ConversationRecord(
+                role=ConversationRole.USER,
+                content=(
+                    "<system>Please proceed according to your plan. "
+                    "Choose appropriate actions "
+                    "and follow the action XML schema if you need to take"
+                    "actions.  If you do not need to take any actions, do not include"
+                    "an action in your response.</system>"
                 ),
-                ConversationRecord(
-                    role=ConversationRole.USER,
-                    content=(
-                        "<system>Please proceed according to your plan. "
-                        "Choose appropriate actions "
-                        "and follow the action XML schema if you need to take"
-                        "actions.  If you do not need to take any actions, do not include"
-                        "an action in your response.</system>"
-                    ),
-                    should_summarize=False,
-                ),
-            ]
+                should_summarize=False,
+            ),
         )
-
-        new_message.is_complete = True
-
-        await self.executor.update_code_history(
-            new_message.id,
-            new_message,
-        )
-
-        await self.executor.broadcast_message_update(
-            new_message.id,
-            new_message,
-        )
-
-        await self.executor.update_job_execution_state(
-            CodeExecutionResult(
-                id=new_message.id,
-                stdout="",
-                stderr="",
-                logging="",
-                formatted_print="",
-                code="",
-                message="",
-                role=ConversationRole.ASSISTANT,
-                status=ProcessResponseStatus.IN_PROGRESS,
-                files=[],
-                execution_type=ExecutionType.PLAN,
-                is_streamable=True,
-                is_complete=True,
-            )
-        )
-
-        self.executor.set_current_plan(new_message.message)
 
         # Save the conversation history and code execution history to the agent registry
         # if the persist_conversation flag is set.
@@ -535,6 +426,8 @@ class Operator:
                 agent_id=self.current_agent.id,
                 agent_state=self.executor.agent_state,
             )
+
+        return response_content
 
     def add_task_instructions(self, request_classification: RequestClassification) -> None:
         """
@@ -848,7 +741,7 @@ class Operator:
 
                 break  # Successfully parsed
 
-            except ValueError as e:
+            except Exception as e:
                 logging.error(
                     "Failed to interpret action response "
                     f"(attempt {attempts}/{max_attempts}): {e}"
@@ -877,7 +770,17 @@ class Operator:
                         new_message,
                     )
 
-                    raise ValueError(
+                    if (
+                        self.persist_agent_conversation
+                        and self.agent_registry
+                        and self.current_agent
+                    ):
+                        self.agent_registry.update_agent_state(
+                            agent_id=self.current_agent.id,
+                            agent_state=self.executor.agent_state,
+                        )
+
+                    raise Exception(
                         f"Failed to interpret action response after {max_attempts} attempts. "
                         f"Last error: {e}"
                     ) from e
@@ -916,6 +819,10 @@ class Operator:
             execution_result.id = new_message.id
             execution_result.is_complete = True
             execution_result.timestamp = new_message.timestamp
+            execution_result.replacements = new_message.replacements
+
+            if not execution_result.message:
+                execution_result.message = new_message.message
 
             new_message = execution_result
 
@@ -1045,20 +952,7 @@ class Operator:
 
         # Perform planning for more complex tasks
         if classification.planning_required:
-            plan = ""
-
-            if self.verbosity_level >= VerbosityLevel.VERBOSE:
-                print("\n\033[1;36m╭─ Agent Plan ──────────────────────────────────────\033[0m")
-
-            async for chunk in self.generate_plan(classification):
-                plan += chunk
-
-                if self.verbosity_level >= VerbosityLevel.VERBOSE:
-                    print(chunk, end="", flush=True)
-
-            if self.verbosity_level >= VerbosityLevel.VERBOSE:
-                print("\n\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
-
+            await self.generate_plan(classification)
         elif classification.type != RequestType.CONTINUE:
             self.executor.set_current_plan("")
 
