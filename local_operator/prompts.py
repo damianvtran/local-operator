@@ -916,6 +916,7 @@ CODE usage guidelines:
 - You write text yourself in CODE actions, don't use code to synthesize summaries from search results/links/text inputs.  Rewrite/summarize the data in your own words.
 - Don't assume that the user will see what you are writing in the CODE action, make sure to include/resummarize what you are putting in the code tag to the user if it is relevant in your final step in the loop to them.  This is not necessary for any summaries that you are writing in emails or other programmatically transmitted context, but if you are doing something with CODE that is meant to be communicated in the conversation to the user, you will need to include/resummarize what you are doing in the text outside of the action tag.
 - Remember that things you print() to the console are meant to be seen by you, but may not be seen by the user.  Don't assume that the user has seen what you have printed.
+- Do not provide a CODE action if you are done with your task.  Do not provide empty CODE tags that just say "# no code required", or similar.  These will cause the system to continue the loop when not necessary.
 
 #### Example for WRITE:
 
@@ -1821,6 +1822,7 @@ Guidelines:
 - Put together diagrams and charts to help illustrate the information, such as tables and Mermaid diagrams.
 - Do NOT attempt to manipulate natural language with nltk, punkt, or other natural language processing libraries.  Instead, load the data into the context window and then use your own intelligence to write the summary for the user manually in the final response.
 - Be aware of search tool costs - the search tools are generally billed per search but not based on the number of results returned, so consider using a higher number of max results but fewer individual searches to save costs.  5 searches for a first pass is a good starting point, don't do more than 5 searches at once in the first pass.  If you need another round of searches, then do so only once you've discerned that the first searches didn't provide the information you need.
+- ALWAYS strive to get specific and actionable insights.  Don't settle for generic information that doesn't answer the user's question or task.  Keep going for as many turns as you need to until you have comprehensive information in your context window.
 
 Follow the general flow below:
 1. Identify the searches on the web and/or the files on the disk that you will need to answer the question.
@@ -1828,6 +1830,8 @@ Follow the general flow below:
     - For file searches, be aware of the file system structure and use the appropriate tools to find the files you need.
     - Be aware of context window limits and token consumption, so if you have a full picture from the first search, then you don't need to read the full page content and you can complete the task with the information you have in the conversation context and agent HUD.
 2. Perform the searches and read the results in your reflections.  Determine if there are any missing pieces of information and if so, then do additional reads and searches until you have a complete picture.  Once you have gathered all the information in the conversation history, you can complete the task with a final response to me after the task is complete.
+   - If you don't have specific information from the first round of searches that directly answers the user's question/task, then continue to research and get more specific page data until you have the answers.  Keep going for as many turns as you need to until you have comprehensive information in your context window.
+   - For example, if all you have is page headers and aggregator data, then you need to provide more specific queries and/or get information from specific pages to find data that is more actionabel and useful.
 3. In the final response, summarize the information and provide it to me in your final response in markdown format.  Embed citations in the text to the original sources on the web or in the files. If there are multiple viewpoints, then provide a balanced perspective.
 4. If it is helpful and necessary, then include diagrams and charts to help illustrate the information, such as tables and Mermaid diagrams.
 """  # noqa: E501
