@@ -2399,15 +2399,25 @@ def apply_attachments_to_prompt(prompt: str, attachments: List[str] | None) -> s
     if not attachments:
         return prompt
 
-    attachments_section = (
-        "\n\n## Attachments\n\nThese are the file paths on the local device for\n\n"
-        "the files that I have included.  If you are able to read the files straight\n\n"
-        "from your context, then please do so.  Otherwise, please use the file\n\n"
-        "paths to operate on the files.\n\n"
+    attachments_section = f"""
+<system>
+## Attachments
+
+These are the file paths on the local device for the files that I have included.
+
+If you are able to read the files straight from your context, then please do so without a READ action.  Otherwise, please use the file paths to operate on the files.
+
+<attachments>
+{attachments}
+</attachments>
+</system>
+"""  # noqa: E501
+
+    attachments_list = "\n".join(
+        f"{i}. {attachment}" for i, attachment in enumerate(attachments, 1)
     )
 
-    for i, attachment in enumerate(attachments, 1):
-        attachments_section += f"{i}. {attachment}\n"
+    attachments_section = attachments_section.format(attachments=attachments_list)
 
     return prompt + attachments_section
 

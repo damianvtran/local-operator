@@ -23,7 +23,6 @@ def _ensure_uploads_dir_exists():
         UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         logger.error(f"Could not create uploads directory {UPLOADS_DIR}: {e}")
-        # This is a critical failure, server might not function correctly for uploads
         raise RuntimeError(f"Failed to create uploads directory: {UPLOADS_DIR}") from e
 
 
@@ -52,18 +51,15 @@ def parse_base64_data_url(data_url: str) -> Tuple[str, bytes]:
     base64_data = match.group("data")
 
     try:
-        # The base64 data might have padding issues if not correctly encoded by the client.
-        # Add padding if necessary.
         missing_padding = len(base64_data) % 4
         if missing_padding:
             base64_data += "=" * (4 - missing_padding)
-        # Use validate=True to ensure that non-base64 characters cause an error
         decoded_data = base64.b64decode(base64_data, validate=True)
         return mime_type, decoded_data
     except binascii.Error as e:
         logger.error(f"Failed to decode base64 data from URL (mime: {mime_type}): {e}")
         raise HTTPException(status_code=400, detail=f"Invalid base64 data in attachment: {e}")
-    except Exception as e:  # Catch any other unexpected errors during decoding
+    except Exception as e:
         logger.error(f"Unexpected error decoding base64 data (mime: {mime_type}): {e}")
         raise HTTPException(status_code=500, detail="Error processing base64 attachment data.")
 
@@ -76,12 +72,11 @@ def save_base64_attachment(data_url: str) -> str:
         data_url: The base64 data URL string.
 
     Returns:
-        The file URI (e.g., "file:///path/to/file") of the saved attachment.
+        The absolute normalized path (as a string) of the saved attachment.
 
     Raises:
         HTTPException: If parsing, decoding, or saving fails.
     """
-    # parse_base64_data_url will raise HTTPException on failure.
     mime_type, binary_data = parse_base64_data_url(data_url)
 
     extension = mimetypes.guess_extension(mime_type)
@@ -91,12 +86,10 @@ def save_base64_attachment(data_url: str) -> str:
         )
         extension = ".bin"
 
-    # Sanitize common extensions
     if extension == ".jpe":
         extension = ".jpg"
     elif extension == ".htm":
         extension = ".html"
-    # Add more sanitizations if needed, e.g. for office docs if mimetypes gives short versions
 
     filename = f"{uuid.uuid4()}{extension}"
     file_path = UPLOADS_DIR / filename
@@ -105,11 +98,11 @@ def save_base64_attachment(data_url: str) -> str:
         with open(file_path, "wb") as f:
             f.write(binary_data)
         logger.info(f"Saved attachment to {file_path}")
-        return file_path.as_uri()
+        return str(file_path.resolve())
     except IOError as e:
         logger.error(f"Failed to save attachment to {file_path}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to save attachment file: {e}")
-    except Exception as e:  # Catch any other unexpected errors during file write
+    except Exception as e:
         logger.error(f"Unexpected error saving attachment to {file_path}: {e}")
         raise HTTPException(status_code=500, detail="Error saving attachment file.")
 
@@ -118,13 +111,13 @@ async def process_attachments(attachment_urls: Optional[List[str]]) -> List[str]
     """
     Processes a list of attachment URLs. If a URL is a base64 data URL,
     it decodes the data, saves it to a local file, and replaces the URL
-    with the local file URI.
+    with the absolute normalized path to the file.
 
     Args:
         attachment_urls: An optional list of attachment URLs.
 
     Returns:
-        A list of processed attachment URLs. Returns an empty list if input is None or empty.
+        A list of processed attachment paths. Returns an empty list if input is None or empty.
 
     Raises:
         HTTPException: If processing any base64 attachment fails (propagated from helper functions).
@@ -134,12 +127,9 @@ async def process_attachments(attachment_urls: Optional[List[str]]) -> List[str]
 
     processed_urls = []
     for url in attachment_urls:
-        # Check if it looks like a data URL before attempting to process
-        # This avoids trying to process regular http/https URLs with save_base64_attachment
         if url.startswith("data:") and ";base64," in url:
-            # save_base64_attachment will raise HTTPException on failure
-            file_uri = save_base64_attachment(url)
-            processed_urls.append(file_uri)
+            file_path = save_base64_attachment(url)
+            processed_urls.append(file_path)
         else:
             processed_urls.append(url)
     return processed_urls
