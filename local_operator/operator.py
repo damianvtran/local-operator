@@ -661,11 +661,21 @@ class Operator:
 
                         if not action_response_started and in_action_response:
                             action_response_started = True
-                            print(
-                                "\n\033[1;36m╭─ Agent Action ──────────────────────────────\033[0m"
-                            )
 
-                        print(chunk_content, end="", flush=True)
+                            split_text = accumulated_text.split("<action_response>")
+                            pre_action_response_text = split_text[0].rstrip()
+                            accumulated_text = split_text[1].lstrip()
+
+                            print(pre_action_response_text)
+                            print(
+                                "\033[1;36m╰──────────────────────────────────────────────────\033[0m\n"  # noqa: E501
+                            )
+                            print(
+                                "\n\n\033[1;36m╭─ Agent Action ──────────────────────────────\033[0m"  # noqa: E501
+                            )
+                            print(accumulated_text)
+                        else:
+                            print(chunk_content, end="", flush=True)
 
                     # Update the message in code history
                     new_message.message = result.message
