@@ -675,6 +675,7 @@ class Operator:
                     new_message.learnings = result.learnings or ""
                     new_message.agent = result.agent or ""
                     new_message.action = result.action
+                    new_message.file_path = result.file_path
 
                     # Broadcast the update
                     await self.executor.broadcast_message_update(
