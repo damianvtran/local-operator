@@ -1354,13 +1354,13 @@ class AgentRegistry:
                 agent_state.execution_history.append(import_execution_record)
 
                 # Existing import message for the agent's internal context
-                import_message_for_agent = "You were just imported to a new device. I might be a different user, or the same user than the person you were just talking to. I might ask you to do something that is the same or different than the conversation before this. Make sure to use your learnings and the conversation history to replicate what you've learned and give me a consistent experience. Don't acknowledge this message directly, it is just for your reference."  # noqa: E501
+                import_message_for_agent = "<system>You were just imported to a new device. I might be a different user, or the same user than the person you were just talking to. I might ask you to do something that is the same or different than the conversation before this. Make sure to use your learnings and the conversation history to replicate what you've learned and give me a consistent experience. Don't acknowledge this message directly, it is just for your reference.</system>"  # noqa: E501
                 agent_state.conversation.append(
                     ConversationRecord(
                         content=import_message_for_agent,
                         role=ConversationRole.USER,
                         timestamp=now,
-                        should_summarize=True,  # This message is for the agent's context
+                        should_summarize=False,
                         ephemeral=False,
                         summarized=False,
                         is_system_prompt=False,

@@ -14,6 +14,7 @@ import platform
 import re
 import subprocess
 import sys
+from typing import Any, Dict, List, Tuple
 
 from local_operator.types import ResponseJsonSchema
 
@@ -339,6 +340,249 @@ def is_marker_inside_json(text: str, marker: str) -> bool:
     # If we have more opening braces than closing ones before the marker,
     # the marker is likely inside a JSON structure
     return open_braces > close_braces
+
+
+def _extract_tag_content(xml_string: str, tag_name: str) -> Tuple[str, int]:
+    """Extracts content from the first occurrence of a simple XML tag."""
+    start_tag = f"<{tag_name}>"
+    end_tag = f"</{tag_name}>"
+    content = ""
+    next_search_start_index = 0
+
+    start_index = xml_string.find(start_tag)
+    if start_index != -1:
+        end_index = xml_string.find(end_tag, start_index + len(start_tag))
+        if end_index != -1:
+            content = xml_string[start_index + len(start_tag) : end_index].strip()
+            next_search_start_index = end_index + len(end_tag)
+        else:
+            # Tag started but didn't end, search from after start_tag
+            next_search_start_index = start_index + len(start_tag)
+    else:
+        # Tag not found, search from beginning
+        next_search_start_index = 0
+
+    return content, next_search_start_index
+
+
+def _parse_replacements(replacements_str: str) -> List[Dict[str, str]]:
+    """
+    Parses the content of a <replacements> tag in diff notation, supporting nested SEARCH blocks.
+
+    Args:
+        replacements_str (str): The string content inside the <replacements> tag.
+
+    Returns:
+        List[Dict[str, str]]: A list of dictionaries, each with 'find' and 'replace' keys.
+
+    Raises:
+        ValueError: If replacements_str is not a string.
+    """
+    if not replacements_str.strip():
+        return []
+
+    lines = replacements_str.strip().splitlines()
+    parsed_replacements: List[Dict[str, str]] = []
+    i = 0
+    n = len(lines)
+
+    while i < n:
+        current_line = lines[i].strip()
+        # Detect start of a replacement block marker, e.g. <<<<<<< SEARCH
+        if current_line.startswith("<") and current_line.endswith("SEARCH"):
+            block_start = i
+            nesting = 1
+            search_sep = None
+            replace_end = None
+            j = i + 1
+            while j < n:
+                ln = lines[j].strip()
+                # Nested SEARCH block
+                if ln.startswith("<") and ln.endswith("SEARCH"):
+                    nesting += 1
+                # Replacement block end marker
+                elif ln.startswith(">") and ln.endswith("REPLACE"):
+                    nesting -= 1
+                    if nesting == 0:
+                        replace_end = j
+                        break
+                # Separator between find and replace in top-level block
+                elif nesting == 1 and search_sep is None and ln and ln.replace("=", "") == "":
+                    search_sep = j
+                j += 1
+            # Only add well-formed blocks
+            if search_sep is not None and replace_end is not None:
+                find_lines = lines[block_start + 1 : search_sep]
+                replace_lines = lines[search_sep + 1 : replace_end]
+                find_content = "\n".join(find_lines).strip()
+                replace_content = "\n".join(replace_lines).strip()
+                parsed_replacements.append({"find": find_content, "replace": replace_content})
+                i = replace_end + 1
+            else:
+                # Malformed block; skip start marker
+                i += 1
+        else:
+            i += 1
+
+    return parsed_replacements
+
+
+def parse_agent_action_xml(xml_string: str) -> Dict[str, Any]:
+    """
+    Parses an XML-like string containing agent action details.
+
+    Args:
+        xml_string (str): The raw string response from the agent.
+
+    Returns:
+        Dict[str, Any]: A dictionary representing the parsed action.
+                        Expected keys match ResponseJsonSchema.
+    """
+    parsed_data = {
+        "action": "",
+        "learnings": "",
+        "response": "",
+        "code": "",
+        "content": "",
+        "file_path": "",
+        "replacements": [],
+        "agent": "",
+        "message": "",
+        "mentioned_files": [],
+    }
+
+    raw_input_string = xml_string  # Preserve original for outer text extraction
+    xml_content_to_parse = raw_input_string.strip()  # Default to full stripped string
+
+    text_before_outer_fence = ""
+    text_after_outer_fence = ""
+    is_explicitly_xml_fenced = False
+
+    # Define potential fences
+    xml_specific_fence_start = "```xml\n"
+    generic_fence_start_options = ["```\n", "```"]  # ``` at very start of string
+    # End fences usually are preceded by a newline, or are at the very end
+    fence_end_options = ["\n```", "```"]
+
+    # Initialize variables to avoid "possibly unbound" errors
+    idx_generic_fence_start = -1
+
+    # 1. Check for ```xml\n fence
+    idx_xml_fence_start = raw_input_string.find(xml_specific_fence_start)
+    if idx_xml_fence_start != -1:
+        is_explicitly_xml_fenced = True
+        text_before_outer_fence = raw_input_string[:idx_xml_fence_start].strip()
+
+        search_from = idx_xml_fence_start + len(xml_specific_fence_start)
+        # Find the corresponding \n```
+        idx_xml_fence_end = raw_input_string.find(fence_end_options[0], search_from)  # prefer \n```
+        if idx_xml_fence_end != -1:
+            xml_content_to_parse = raw_input_string[search_from:idx_xml_fence_end].strip()
+            text_after_outer_fence = raw_input_string[
+                idx_xml_fence_end + len(fence_end_options[0]) :
+            ].strip()
+        else:  # No \n```, check for ``` at the very end of the string
+            if raw_input_string.endswith(fence_end_options[1]):
+                temp_content = raw_input_string[search_from:]
+                xml_content_to_parse = temp_content[: -len(fence_end_options[1])].strip()
+                # text_after_outer_fence remains ""
+            else:  # Start fence but no clear end fence, assume rest is content
+                xml_content_to_parse = raw_input_string[search_from:].strip()
+    else:
+        # 2. Check for generic ``` fence if no ```xml fence
+        # Try matching generic_fence_start_options
+        idx_generic_fence_start = -1
+        used_generic_start_marker = ""
+
+        for marker in generic_fence_start_options:
+            if raw_input_string.strip().startswith(marker):  # Check strip() for "```" at start
+                # find original index without strip
+                idx_generic_fence_start = raw_input_string.find(marker)
+                used_generic_start_marker = marker
+                break
+
+        if idx_generic_fence_start != -1:
+            text_before_outer_fence = raw_input_string[
+                :idx_generic_fence_start
+            ].strip()  # Should be empty if startswith
+            search_from = idx_generic_fence_start + len(used_generic_start_marker)
+
+            idx_generic_fence_end = -1
+            used_generic_end_marker = ""
+
+            # Find corresponding end fence (prefer \n```)
+            if raw_input_string.find(fence_end_options[0], search_from) != -1:
+                idx_generic_fence_end = raw_input_string.find(fence_end_options[0], search_from)
+                used_generic_end_marker = fence_end_options[0]
+            elif raw_input_string.endswith(fence_end_options[1]):  # Check ``` at very end
+                # Ensure this "```" is after the start fence
+                temp_idx = raw_input_string.rfind(fence_end_options[1])
+                if temp_idx >= search_from:  # Check if this rfind is actually the end
+                    idx_generic_fence_end = temp_idx
+                    used_generic_end_marker = fence_end_options[1]
+
+            if idx_generic_fence_end != -1:
+                xml_content_to_parse = raw_input_string[search_from:idx_generic_fence_end].strip()
+                text_after_outer_fence = raw_input_string[
+                    idx_generic_fence_end + len(used_generic_end_marker) :
+                ].strip()
+            else:  # Start fence but no clear end fence
+                xml_content_to_parse = raw_input_string[search_from:].strip()
+
+    # --- Extract all tags from xml_content_to_parse ---
+    parsed_data["action"], _ = _extract_tag_content(xml_content_to_parse, "action")
+    parsed_data["learnings"], _ = _extract_tag_content(xml_content_to_parse, "learnings")
+    internal_response_content, _ = _extract_tag_content(xml_content_to_parse, "response")
+    parsed_data["code"], _ = _extract_tag_content(xml_content_to_parse, "code")
+    parsed_data["content"], _ = _extract_tag_content(xml_content_to_parse, "content")
+    parsed_data["file_path"], _ = _extract_tag_content(xml_content_to_parse, "file_path")
+    parsed_data["agent"], _ = _extract_tag_content(xml_content_to_parse, "agent")
+    parsed_data["message"], _ = _extract_tag_content(xml_content_to_parse, "message")
+
+    replacements_str, _ = _extract_tag_content(xml_content_to_parse, "replacements")
+    if replacements_str:
+        parsed_data["replacements"] = _parse_replacements(replacements_str)
+
+    mentioned_files_str, _ = _extract_tag_content(xml_content_to_parse, "mentioned_files")
+    if mentioned_files_str:
+        parsed_data["mentioned_files"] = [
+            line.strip() for line in mentioned_files_str.split("\n") if line.strip()
+        ]
+
+    if is_explicitly_xml_fenced:
+        final_response_parts = []
+        if text_before_outer_fence:
+            final_response_parts.append(text_before_outer_fence)
+        if text_after_outer_fence:
+            final_response_parts.append(text_after_outer_fence)
+        parsed_data["response"] = " ".join(final_response_parts).strip()
+    else:
+        if internal_response_content:
+            parsed_data["response"] = internal_response_content
+        else:
+
+            outer_parts = []
+            if idx_generic_fence_start != -1:  # Was generic fenced
+                if text_before_outer_fence:
+                    outer_parts.append(text_before_outer_fence)
+                if text_after_outer_fence:
+                    outer_parts.append(text_after_outer_fence)
+            else:
+                first_tag_s = xml_content_to_parse.find("<")
+                last_tag_e = xml_content_to_parse.rfind(">")
+                if first_tag_s != -1 and last_tag_e != -1 and last_tag_e > first_tag_s:
+                    pre = xml_content_to_parse[:first_tag_s].strip()
+                    post = xml_content_to_parse[last_tag_e + 1 :].strip()
+                    if pre:
+                        outer_parts.append(pre)
+                    if post:
+                        outer_parts.append(post)
+                elif first_tag_s == -1:  # No tags at all in xml_content_to_parse
+                    outer_parts.append(xml_content_to_parse)
+
+            parsed_data["response"] = " ".join(outer_parts).strip()
+
+    return parsed_data
 
 
 # --- Environment Setup ---
