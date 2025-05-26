@@ -73,52 +73,6 @@ This is used to prevent reading large files into context, which can cause
 context overflow errors for LLM APIs.
 """
 
-FILE_WRITE_EQUIVALENT_TEMPLATE = """
-write_file_content = \"\"\"{content}
-\"\"\"
-
-with open("{file_path}", "w") as f:
-    f.write(write_file_content)
-
-    print(f"Successfully wrote to file: {file_path}")
-"""
-"""
-This template provides an equivalent code representation for a file write operation.
-
-It's used to generate a code snippet that mirrors the action of writing content to a file,
-so that it can be run in a notebook in the notebook export functionality.
-"""
-
-FILE_EDIT_EQUIVALENT_TEMPLATE = """
-# Read the original content of the file
-with open("{file_path}", "r") as f:
-    original_content = f.read()
-
-replacements = {replacements}
-
-# Perform the replacements
-for replacement in replacements:
-    find = replacement["find"]
-    replace = replacement["replace"]
-
-    if find not in original_content:
-        raise ValueError(f"Find string '{{find}}' not found in file {{file_path}}")
-
-    original_content = original_content.replace(find, replace, 1)
-
-# Write the modified content back to the file
-with open("{file_path}", "w") as f:
-    f.write(original_content)
-
-print(f"Successfully edited file: {file_path}")
-"""
-"""
-This template provides an equivalent code representation for a file edit operation.
-
-It's used to generate a code snippet that mirrors the action of editing a file,
-so that it can be run in a notebook in the notebook export functionality.
-"""
-
 
 class ExecutorInitError(Exception):
     """Raised when the executor fails to initialize properly."""
@@ -2328,28 +2282,91 @@ class LocalCodeExecutor:
         )
 
     async def write_file(self, file_path: str, content: str) -> CodeExecutionResult:
-        """Write content to a file.
+        """
+        Write content to a file, removing code block markers only for file-type fences.
 
         Args:
-            file_path (str): The path to the file to write
-            content (str): The content to write to the file
+            file_path (str): The path to the file to write.
+            content (str): The content to write to the file.
 
         Returns:
-            str: A message indicating the file has been written
+            CodeExecutionResult: Result of the write operation.
 
         Raises:
-            OSError: If there is an error writing to the file
+            OSError: If there is an error writing to the file.
         """
-        # Remove code block markers if present
-        content_lines = content.split("\n")
-        if len(content_lines) > 0 and content_lines[0].startswith("```"):
-            content_lines = content_lines[1:]
-        if len(content_lines) > 0 and content_lines[-1].startswith("```"):
-            content_lines = content_lines[:-1]
+        try:
+            content_lines = content.split("\n")
+            # Only remove code block markers if they are file-type (e.g., ```python, ```json, etc.)
+            file_type_fences = {
+                "python",
+                "json",
+                "yaml",
+                "toml",
+                "xml",
+                "html",
+                "js",
+                "javascript",
+                "ts",
+                "typescript",
+                "csv",
+                "txt",
+                "md",
+                "markdown",
+                "sh",
+                "bash",
+                "ini",
+                "cfg",
+                "conf",
+                "go",
+                "java",
+                "c",
+                "cpp",
+                "cs",
+                "rb",
+                "rs",
+                "swift",
+                "php",
+                "pl",
+                "r",
+                "scala",
+                "kt",
+                "kotlin",
+                "sql",
+                "dockerfile",
+                "makefile",
+                "bat",
+                "ps1",
+                "powershell",
+                "dart",
+                "lua",
+                "groovy",
+                "asm",
+                "s",
+                "scss",
+                "css",
+            }
 
-        cleaned_content = "\n".join(content_lines)
+            def is_file_type_fence(line: str) -> bool:
+                if not line.startswith("```"):
+                    return False
+                fence = line.strip()[3:].strip().lower()
+                return fence in file_type_fences or fence == ""
 
-        expanded_file_path = Path(file_path).expanduser().resolve()
+            file_type_fence = is_file_type_fence(content_lines[0])
+
+            # Remove leading file-type code fence
+            if content_lines and file_type_fence:
+                content_lines = content_lines[1:]
+
+            # Remove trailing code fence if present and leading was file-type
+            if content_lines and file_type_fence and content_lines[-1].strip() == "```":
+                content_lines = content_lines[:-1]
+
+            cleaned_content = "\n".join(content_lines)
+            expanded_file_path = Path(file_path).expanduser().resolve()
+        except Exception as exc:
+            raise OSError(f"Error preparing file content for writing to {file_path}: {exc}")
 
         with open(expanded_file_path, "w") as f:
             f.write(cleaned_content)
