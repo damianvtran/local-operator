@@ -597,6 +597,7 @@ class Operator:
         max_attempts = 3
         response_json = None
         final_response_content = ""
+        result = new_message.model_copy()
 
         while attempts < max_attempts:
             attempts += 1
