@@ -17,11 +17,14 @@ USER_MOCK_RESPONSES = {
         "mentioned_files": [],
         "replacements": [],
     },
-    "please proceed according to your plan": """
-    <action>CODE</action>
-    <code>print("Hello World")</code>
-    <response>I will execute a simple Python script to print "Hello World".</response>
-    <learnings>I learned about the Python print function.</learnings>
+    "please proceed according to your plan": """Ok, I will now print hello world.
+
+<action_response>
+<action>CODE</action>
+<code>print("Hello World")</code>
+<response>I will execute a simple Python script to print "Hello World".</response>
+<learnings>I learned about the Python print function.</learnings>
+</action_response>
     """,
     '<code>print("Hello World")</code>': {
         "response": 'I will execute a simple Python script to print "Hello World".',
@@ -34,10 +37,10 @@ USER_MOCK_RESPONSES = {
         "replacements": [],
     },
     "print hello world": """
-    <type>conversation</type>
-    <planning_required>true</planning_required>
-    <relative_effort>low</relative_effort>
-    <subject_change>false</subject_change>
+<type>conversation</type>
+<planning_required>true</planning_required>
+<relative_effort>low</relative_effort>
+<subject_change>false</subject_change>
     """,
     "<type>conversation</type>\n<planning_required>true</planning_required>\n<relative_effort>low</relative_effort>\n<subject_change>false</subject_change>": {  # noqa: E501
         "type": "conversation",
@@ -49,18 +52,8 @@ USER_MOCK_RESPONSES = {
         "I will need to print 'Hello World' to the console."
     ),
     "think aloud about what you did and the outcome": ("I printed 'Hello World' to the console."),
-    "hello world": {
-        "response": "I have printed 'Hello World' to the console.",
-        "code": "",
-        "action": "DONE",
-        "learnings": "",
-        "content": "",
-        "file_path": "",
-        "mentioned_files": [],
-        "replacements": [],
-    },
+    "hello world": "I have printed 'Hello World' to the console.",
     "please summarize": "[SUMMARY] this is a summary",
-    "Final Response Guidelines": "I have printed 'Hello World' to the console.",
 }
 
 
