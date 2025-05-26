@@ -464,6 +464,9 @@ def parse_agent_action_xml(xml_string: str) -> Dict[str, Any]:
     # End fences usually are preceded by a newline, or are at the very end
     fence_end_options = ["\n```", "```"]
 
+    # Initialize variables to avoid "possibly unbound" errors
+    idx_generic_fence_start = -1
+
     # 1. Check for ```xml\n fence
     idx_xml_fence_start = raw_input_string.find(xml_specific_fence_start)
     if idx_xml_fence_start != -1:
