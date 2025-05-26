@@ -1884,6 +1884,7 @@ class LocalCodeExecutor:
                                     role=ConversationRole.ASSISTANT,
                                     status=ProcessResponseStatus.IN_PROGRESS,
                                     files=[],
+                                    file_path=file_path,
                                     execution_type=ExecutionType.ACTION,
                                     action=response.action,
                                 )
@@ -1916,6 +1917,8 @@ class LocalCodeExecutor:
                                 stderr="",
                                 logging="",
                                 formatted_print="",
+                                file_path=file_path,
+                                action=response.action,
                                 code="",
                                 files=[],
                             )
@@ -1936,6 +1939,7 @@ class LocalCodeExecutor:
                                     role=ConversationRole.ASSISTANT,
                                     status=ProcessResponseStatus.IN_PROGRESS,
                                     files=[],
+                                    file_path=file_path,
                                     execution_type=ExecutionType.ACTION,
                                     action=response.action,
                                 )
@@ -1959,6 +1963,8 @@ class LocalCodeExecutor:
                                 stderr="",
                                 logging="",
                                 formatted_print="",
+                                file_path=file_path,
+                                action=response.action,
                                 code="",
                                 files=[],
                             )
@@ -1980,6 +1986,7 @@ class LocalCodeExecutor:
                                     status=ProcessResponseStatus.IN_PROGRESS,
                                     files=[],
                                     execution_type=ExecutionType.ACTION,
+                                    file_path=file_path,
                                     action=response.action,
                                 )
                             )
