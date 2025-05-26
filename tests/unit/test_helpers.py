@@ -220,6 +220,22 @@ def test_is_marker_inside_json(text, marker, expected):
             id="basic_code_action",
         ),
         pytest.param(
+            "This is a message before ```xml\n<action>CODE</action><learnings>Learned something</learnings><code>print('Hello')</code>\n```",  # noqa: E501
+            {
+                "action": "CODE",
+                "learnings": "Learned something",
+                "response": "This is a message before",
+                "code": "print('Hello')",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="basic_code_action_with_code_block_marker",
+        ),
+        pytest.param(
             (
                 "Some text before <action_response><action>WRITE</action>"
                 "<content>File content</content><file_path>test.txt</file_path>"

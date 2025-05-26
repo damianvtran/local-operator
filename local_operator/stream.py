@@ -25,58 +25,65 @@ def stream_action_buffer(
         ValueError: If an invalid ActionType is encountered in <action> tag.
     """
     result = CodeExecutionResult()
+    XML_FENCE = "```xml\n"
 
     # Check if we have action_response tags
     action_start_idx = accumulated_text.find("<action_response>")
     action_end_idx = accumulated_text.find("</action_response>")
+    is_fenced_action = False
 
-    if action_start_idx == -1:
+    if action_start_idx != -1:
+        # Check if the action_response is preceded by ```xml\n
+        fence_idx = accumulated_text.rfind(XML_FENCE, 0, action_start_idx)
+        if fence_idx != -1 and fence_idx + len(XML_FENCE) == action_start_idx:
+            is_fenced_action = True
+            # Message is text before the fence
+            result.message = accumulated_text[:fence_idx]
+        else:
+            # Message is text before <action_response>
+            result.message = accumulated_text[:action_start_idx]
+    else:
         # No action_response found
+        # Check for potential action tag beginnings or ```
+        potential_tag_chars = ["<", "`"]
         if len(accumulated_text) <= lookahead_length:
-            # Check if the lookahead contains potential action tag beginnings
             lookahead_text = accumulated_text
-            if "<" not in lookahead_text:
-                # No potential tags, return all text
+            if not any(char in lookahead_text for char in potential_tag_chars):
                 result.message = accumulated_text
                 return False, result
             else:
-                # Potential tag beginning found, don't return anything yet
                 return False, result
 
-        # Process text minus lookahead, but check if lookahead contains potential tags
         processing_boundary = len(accumulated_text) - lookahead_length
         lookahead_text = accumulated_text[processing_boundary:]
 
-        # If lookahead doesn't contain potential action tag beginnings, include more text
-        if "<" not in lookahead_text:
+        if not any(char in lookahead_text for char in potential_tag_chars):
             result.message = accumulated_text
         else:
             result.message = accumulated_text[:processing_boundary]
         return False, result
 
-    if action_end_idx == -1:
-        # action_response started but not finished
-        # Set message to everything before action_response
-        result.message = accumulated_text[:action_start_idx]
+    # Determine the content to parse
+    if action_start_idx != -1:
+        if action_end_idx != -1:
+            # Complete action_response found
+            action_block_content = accumulated_text[
+                action_start_idx + len("<action_response>") : action_end_idx
+            ]
+            _parse_action_content(action_block_content, result, partial=False)
+            return True, result
+        else:
+            # action_response started but not finished
+            action_block_content = accumulated_text[action_start_idx + len("<action_response>") :]
+            _parse_action_content(action_block_content, result, partial=True)
+            # If it's a fenced action and we have an action type, consider it finished
+            # This handles cases like "```xml\n<action_response><action>CODE"
+            if is_fenced_action and result.action is not None:
+                return True, result
+            return False, result
 
-        # Parse partial action content if we have enough
-        action_content = accumulated_text[action_start_idx + len("<action_response>") :]
-        if action_content:
-            _parse_action_content(action_content, result, partial=True)
-
-        return False, result
-
-    # Complete action_response found
-    pre_action = accumulated_text[:action_start_idx]
-    action_content = accumulated_text[action_start_idx + len("<action_response>") : action_end_idx]
-
-    # Set the message to everything before action_response
-    result.message = pre_action
-
-    # Parse the action_response content
-    _parse_action_content(action_content, result, partial=False)
-
-    return True, result
+    # This part should ideally not be reached if action_start_idx was -1 due to earlier return
+    return False, result
 
 
 def _parse_action_content(content: str, result: CodeExecutionResult, partial: bool = False) -> None:
