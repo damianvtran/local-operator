@@ -236,6 +236,22 @@ def test_is_marker_inside_json(text, marker, expected):
             id="basic_code_action_with_code_block_marker",
         ),
         pytest.param(
+            "This is a message before <action_response><action>WRITE</action><file_path>test.txt</file_path><content>```mermaid\ngraph TD\nA --> B\n```</content></action_response>",  # noqa: E501
+            {
+                "action": "WRITE",
+                "learnings": "",
+                "response": "This is a message before",
+                "code": "",
+                "content": "```mermaid\ngraph TD\nA --> B\n```",
+                "file_path": "test.txt",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+            },
+            id="basic_code_action_with_nested_code_block_marker",
+        ),
+        pytest.param(
             (
                 "Some text before <action_response><action>WRITE</action>"
                 "<content>File content</content><file_path>test.txt</file_path>"

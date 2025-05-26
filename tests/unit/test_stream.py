@@ -102,6 +102,18 @@ def run_stream(input_text):
             id="xml_only_action_with_xml_fence",
         ),
         pytest.param(
+            "Generating code <action_response><action>WRITE</action><content>```mermaid\ngraph TD\nA --> B\n```</content></action_response>",  # noqa: E501
+            "Generating code ",
+            ActionType.WRITE,
+            "```mermaid\ngraph TD\nA --> B\n```",
+            "",
+            "",
+            [],
+            False,
+            True,
+            id="write_action_with_mermaid_fence",
+        ),
+        pytest.param(
             "Hello <action_response><action>WRITE</action></action_response> world",
             "Hello ",
             ActionType.WRITE,

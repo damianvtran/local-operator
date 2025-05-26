@@ -1668,6 +1668,7 @@ async def test_read_file_action(executor: LocalCodeExecutor, tmp_path: Path, fil
     [
         ("New file content", "New file content"),
         ("```\nMarkdown content\n```", "Markdown content"),
+        ("```mermaid\ngraph content\n```", "```mermaid\ngraph content\n```"),
         ("```python\nCode content\n```", "Code content"),
         ("```\nLine 1\nLine 2\n```", "Line 1\nLine 2"),
         ("No markdown here", "No markdown here"),
@@ -1677,6 +1678,7 @@ async def test_read_file_action(executor: LocalCodeExecutor, tmp_path: Path, fil
     ids=[
         "no_markdown",
         "basic_markdown",
+        "mermaid_markdown",
         "python_markdown",
         "multiline_markdown",
         "no_markdown_present",
