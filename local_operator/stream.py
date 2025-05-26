@@ -91,7 +91,16 @@ def _parse_action_content(content: str, result: CodeExecutionResult, partial: bo
     Raises:
         ValueError: If an invalid ActionType is encountered.
     """
-    tags = ["action", "content", "code", "replacements", "mentioned_files", "learnings"]
+    tags = [
+        "action",
+        "content",
+        "code",
+        "replacements",
+        "mentioned_files",
+        "learnings",
+        "file_path",
+        "agent",
+    ]
 
     for tag in tags:
         open_tag = f"<{tag}>"
@@ -174,6 +183,10 @@ def _assign_tag_content(
             result.code += content
         elif tag == "replacements":
             result.replacements += content
+        elif tag == "file_path":
+            result.file_path += content
+        elif tag == "agent":
+            result.agent += content
         elif tag == "mentioned_files":
             # Handle mentioned_files line by line
             lines = content.strip().split("\n")

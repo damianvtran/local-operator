@@ -771,6 +771,7 @@ class Operator:
                     # Update final state as error
                     new_message.is_complete = True
                     new_message.status = ProcessResponseStatus.ERROR
+                    new_message.stderr = str(e)
 
                     await self.executor.update_code_history(
                         new_message.id,
