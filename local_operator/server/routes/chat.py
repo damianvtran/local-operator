@@ -36,6 +36,7 @@ from local_operator.server.models.schemas import (
     CRUDResponse,
     JobResultSchema,
 )
+from local_operator.server.utils.attachment_utils import process_attachments
 
 # Import job processor utilities when needed
 from local_operator.server.utils.job_processor_queue import (
@@ -134,8 +135,9 @@ async def chat_endpoint(
                 model_instance.temperature = temperature
             model_instance.top_p = request.options.top_p or model_instance.top_p
 
+        processed_attachments = await process_attachments(request.attachments)
         response_json, final_response = await operator.handle_user_input(
-            request.prompt, attachments=request.attachments or []
+            request.prompt, attachments=processed_attachments
         )
 
         if response_json is not None:
@@ -250,8 +252,9 @@ async def chat_with_agent(
                 model_instance.temperature = temperature
             model_instance.top_p = request.options.top_p or model_instance.top_p
 
+        processed_attachments = await process_attachments(request.attachments)
         response_json, final_response = await operator.handle_user_input(
-            request.prompt, attachments=request.attachments or []
+            request.prompt, attachments=processed_attachments
         )
         response_content = response_json.response if response_json is not None else ""
 
@@ -354,6 +357,7 @@ async def chat_async_endpoint(
         HTTPException: If there's an error setting up the job
     """
     try:
+        processed_attachments = await process_attachments(request.attachments)
 
         # Create a job in the job manager
         job = await job_manager.create_job(
@@ -370,7 +374,7 @@ async def chat_async_endpoint(
             args=(
                 job.id,
                 request.prompt,
-                request.attachments or [],
+                processed_attachments,
                 request.model,
                 request.hosting,
                 credential_manager,
@@ -489,6 +493,7 @@ async def chat_with_agent_async(
             logger.exception("Error retrieving agent")
             raise HTTPException(status_code=404, detail=f"Agent not found: {e}")
 
+        processed_attachments = await process_attachments(request.attachments)
         # Create a job in the job manager
         job = await job_manager.create_job(
             prompt=request.prompt,
@@ -504,7 +509,7 @@ async def chat_with_agent_async(
             args=(
                 job.id,
                 request.prompt,
-                request.attachments or [],
+                processed_attachments,
                 request.model,
                 request.hosting,
                 agent_id,

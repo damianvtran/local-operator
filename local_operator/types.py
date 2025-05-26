@@ -35,11 +35,13 @@ class ActionType(str, Enum):
     CODE = "CODE"
     WRITE = "WRITE"
     EDIT = "EDIT"
+    READ = "READ"
+    DELEGATE = "DELEGATE"  # Delegate task to another agent
+
+    # Kept in for backwards compatibility, but not used anymore
     DONE = "DONE"
     ASK = "ASK"
     BYE = "BYE"
-    READ = "READ"
-    DELEGATE = "DELEGATE"  # Delegate task to another agent
 
     def __str__(self) -> str:
         """Return the string representation of the ActionType enum.
@@ -248,6 +250,7 @@ class CodeExecutionResult(BaseModel):
         logging (str): Any logging output generated during the code execution.
         message (str): The message to display to the user about the code execution.
         code (str): The code that was executed.
+        content (str): The content to display to the user for WRITE actions.
         formatted_print (str): The formatted print output from the code execution.
         role (ConversationRole): The role of the message sender (user/assistant/system)
         status (ProcessResponseStatus): The status of the code execution
@@ -258,6 +261,7 @@ class CodeExecutionResult(BaseModel):
         task_classification (str): The classification of the task that was performed
         is_complete (bool): Whether the execution is complete
         is_streamable (bool): Whether the result can be streamed
+        learnings (str): Learnings extracted from the execution
     """
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -266,6 +270,11 @@ class CodeExecutionResult(BaseModel):
     logging: str = Field(default="")
     message: str = Field(default="")
     code: str = Field(default="")
+    content: str = Field(default="")
+    file_path: str = Field(default="")
+    replacements: str = Field(default="")
+    agent: str = Field(default="")
+    learnings: str = Field(default="")
     formatted_print: str = Field(default="")
     role: ConversationRole = Field(default=ConversationRole.ASSISTANT)
     status: ProcessResponseStatus = Field(default=ProcessResponseStatus.NONE)

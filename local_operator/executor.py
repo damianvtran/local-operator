@@ -3,7 +3,6 @@ import base64
 import builtins
 import inspect
 import io
-import json
 import logging
 import os
 import subprocess
@@ -29,12 +28,10 @@ from local_operator.console import (
     ExecutionSection,
     VerbosityLevel,
     condense_logging,
-    format_agent_output,
     format_error_output,
     format_success_output,
     log_action_error,
     log_retry_error,
-    print_agent_response,
     print_execution_section,
     print_task_interrupted,
     spinner_context,
@@ -74,52 +71,6 @@ MAX_FILE_READ_SIZE_BYTES = CHARS_PER_TOKEN * MAX_FILE_READ_TOKENS
 
 This is used to prevent reading large files into context, which can cause
 context overflow errors for LLM APIs.
-"""
-
-FILE_WRITE_EQUIVALENT_TEMPLATE = """
-write_file_content = \"\"\"{content}
-\"\"\"
-
-with open("{file_path}", "w") as f:
-    f.write(write_file_content)
-
-    print(f"Successfully wrote to file: {file_path}")
-"""
-"""
-This template provides an equivalent code representation for a file write operation.
-
-It's used to generate a code snippet that mirrors the action of writing content to a file,
-so that it can be run in a notebook in the notebook export functionality.
-"""
-
-FILE_EDIT_EQUIVALENT_TEMPLATE = """
-# Read the original content of the file
-with open("{file_path}", "r") as f:
-    original_content = f.read()
-
-replacements = {replacements}
-
-# Perform the replacements
-for replacement in replacements:
-    find = replacement["find"]
-    replace = replacement["replace"]
-
-    if find not in original_content:
-        raise ValueError(f"Find string '{{find}}' not found in file {{file_path}}")
-
-    original_content = original_content.replace(find, replace, 1)
-
-# Write the modified content back to the file
-with open("{file_path}", "w") as f:
-    f.write(original_content)
-
-print(f"Successfully edited file: {file_path}")
-"""
-"""
-This template provides an equivalent code representation for a file edit operation.
-
-It's used to generate a code snippet that mirrors the action of editing a file,
-so that it can be run in a notebook in the notebook export functionality.
 """
 
 
@@ -497,7 +448,7 @@ class LocalCodeExecutor:
         self.agent_state.conversation.append(new_record)
         self._limit_conversation_history()
 
-    async def _summarize_old_steps(self) -> None:
+    async def _summarize_old_steps(self, min_token_threshold: int = 500) -> None:
         """
         Summarize old conversation steps beyond the detail conversation length.
 
@@ -526,7 +477,7 @@ class LocalCodeExecutor:
             if not msg.should_summarize or msg.summarized:
                 continue
 
-            summary = await self._summarize_conversation_step(msg)
+            summary = await self._summarize_conversation_step(msg, min_token_threshold)
             msg.content = summary
             msg.summarized = True
 
@@ -609,7 +560,7 @@ class LocalCodeExecutor:
                 role=ConversationRole.SYSTEM,
                 content=system_prompt,
                 is_system_prompt=True,
-            )
+            ),
         ]
 
         if len(new_conversation_history) == 0:
@@ -1043,10 +994,10 @@ class LocalCodeExecutor:
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content=(
-                        "Determine a status for the following agent generated JSON response:\n\n"
+                        "<system>Determine a status for the following agent generated JSON response:\n\n"  # noqa: E501
                         "<agent_generated_json_response>\n"
                         f"{response.model_dump_json()}\n"
-                        "</agent_generated_json_response>"
+                        "</agent_generated_json_response></system>"
                     ),
                 ),
             ]
@@ -1078,8 +1029,8 @@ class LocalCodeExecutor:
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content=(
-                        "Conversation truncated due to length, only showing the last few"
-                        " messages in the conversation, which follow."
+                        "<system>Conversation truncated due to length, only showing the last few"
+                        " messages in the conversation, which follow.</system>"
                     ),
                 )
             )
@@ -1114,14 +1065,14 @@ class LocalCodeExecutor:
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content=(
-                        f"Your action was denied by the AI security auditor because it "
+                        "<system>Your action was denied by the AI security auditor because it "
                         "was deemed unsafe. Here is an analysis of the code risk by"
                         " the security auditor AI agent:\n\n"
                         f"{analysis}\n\n"
                         "Please re-summarize the security risk in natural language and"
                         " not JSON format.  Don't acknowledge this message directly but"
                         " instead pretend that you are responding as the AI security"
-                        " auditor directly to the user's request."
+                        " auditor directly to the user's request.</system>"
                     ),
                 )
             )
@@ -1310,9 +1261,9 @@ class LocalCodeExecutor:
             return ConfirmSafetyResult.SAFE
 
         msg = (
-            "I've identified that this is a dangerous operation. "
+            "<system>I've identified that this is a dangerous operation. "
             "Let's stop the current task, I will provide further instructions shortly. "
-            "Please await further instructions and use action DONE."
+            "Please await further instructions and use action DONE.</system>"
         )
         self.append_to_history(
             ConversationRecord(
@@ -1590,10 +1541,18 @@ class LocalCodeExecutor:
                     # Run synchronous exec in a separate thread to avoid blocking the event loop
                     compiled_code = compile(code, "<agent_generated_code>", "exec")
 
-                    def _execute_sync_in_thread():
-                        exec(compiled_code, self.context)
+                    sync_required_libs = ["matplotlib", "tkinter", "PIL"]
 
-                    await asyncio.to_thread(_execute_sync_in_thread)
+                    # Some libraries do not support async execution, so we
+                    # need to run them in the main thread
+                    if any(lib in code for lib in sync_required_libs):
+                        exec(compiled_code, self.context)
+                    else:
+
+                        def _execute_sync_in_thread():
+                            exec(compiled_code, self.context)
+
+                        await asyncio.to_thread(_execute_sync_in_thread)
         except Exception as e:
             code_execution_error = CodeExecutionError(message=str(e), code=code).with_traceback(
                 e.__traceback__
@@ -1643,10 +1602,14 @@ class LocalCodeExecutor:
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.USER,
-                content=f"Here are the outputs of your last code execution:\n"
-                f"<stdout>\n{condensed_output}\n</stdout>\n"
-                f"<stderr>\n{condensed_error_output}\n</stderr>\n"
-                f"<logger>\n{condensed_log_output}\n</logger>\n",
+                content=(
+                    f"<system>Here are the outputs of your last code execution:\n"
+                    f"<stdout>\n{condensed_output}\n</stdout>\n"
+                    f"<stderr>\n{condensed_error_output}\n</stderr>\n"
+                    f"<logger>\n{condensed_log_output}\n</logger>\n"
+                    "Review and continue."
+                    "</system>"
+                ),
                 should_summarize=True,
                 should_cache=True,
             )
@@ -1669,10 +1632,10 @@ class LocalCodeExecutor:
             )
 
         msg = (
-            f"The initial execution failed with an error.\n"
+            "<system>The initial execution failed with an error.\n"
             f"{error_info}\n"
             "Debug the code you submitted and make all necessary corrections "
-            "to fix the error and run successfully."
+            "to fix the error and run successfully.</system>"
         )
         self.append_to_history(
             ConversationRecord(
@@ -1698,14 +1661,14 @@ class LocalCodeExecutor:
             )
 
         msg = (
-            f"The code execution failed with an error (attempt {attempt + 1}).\n"
+            f"<system>The code execution failed with an error (attempt {attempt + 1}).\n"
             f"{error_info}\n"
             "Debug the code you submitted and make all necessary corrections "
             "to fix the error and run successfully.  Pick up from where you left "
             "off and try to avoid re-running code that has already succeeded.  "
             "Use the environment details to determine which variables are available "
             "and correct, which are not.  After fixing the issue please continue with the "
-            "tasks according to the plan."
+            "tasks according to the plan.</system>"
         )
         self.append_to_history(
             ConversationRecord(
@@ -1740,7 +1703,7 @@ class LocalCodeExecutor:
 
     async def process_response(
         self, response: ResponseJsonSchema, classification: RequestClassification
-    ) -> ProcessResponseOutput:
+    ) -> tuple[ProcessResponseOutput, CodeExecutionResult | None]:
         """Process model response, extracting and executing any code blocks.
 
         Args:
@@ -1753,32 +1716,26 @@ class LocalCodeExecutor:
             self.append_to_history(
                 ConversationRecord(
                     role=ConversationRole.USER,
-                    content="Let's stop this task for now, I will provide further "
-                    "instructions shortly.",
+                    content=(
+                        "<system>Let's stop this task for now, I will provide further "
+                        "instructions shortly.</system>"
+                    ),
                     should_summarize=False,
                 )
             )
-            return ProcessResponseOutput(
-                status=ProcessResponseStatus.INTERRUPTED,
-                message="Task interrupted by user",
+            return (
+                ProcessResponseOutput(
+                    status=ProcessResponseStatus.INTERRUPTED,
+                    message="Task interrupted by user",
+                ),
+                None,
             )
 
-        plain_text_response = response.response
         new_learnings = response.learnings
 
         self.add_to_learnings(new_learnings)
 
-        # Phase 2: Display agent response
-        formatted_response = format_agent_output(plain_text_response)
-
-        if (
-            response.action != ActionType.DONE
-            and response.action != ActionType.ASK
-            and response.action != ActionType.BYE
-        ):
-            print_agent_response(self.step_counter, formatted_response, self.verbosity_level)
-
-        result = await self.perform_action(response, classification)
+        result, execution_result = await self.perform_action(response, classification)
 
         current_working_directory = os.getcwd()
 
@@ -1790,11 +1747,11 @@ class LocalCodeExecutor:
                 context=self.context,
             )
 
-        return result
+        return result, execution_result
 
     async def perform_action(
         self, response: ResponseJsonSchema, classification: RequestClassification
-    ) -> ProcessResponseOutput:
+    ) -> tuple[ProcessResponseOutput, CodeExecutionResult | None]:
         """
         Perform an action based on the provided ResponseJsonSchema.
 
@@ -1817,35 +1774,13 @@ class LocalCodeExecutor:
             ActionType.BYE,
             ActionType.ASK,
         ]:
-            self.add_to_code_history(
-                CodeExecutionResult(
-                    stdout="",
-                    stderr="",
-                    logging="",
-                    formatted_print=response.response,
-                    code="",
-                    message=response.response,
-                    role=ConversationRole.ASSISTANT,
+            return (
+                ProcessResponseOutput(
                     status=ProcessResponseStatus.SUCCESS,
-                    files=[],
-                    execution_type=ExecutionType.ACTION,
-                    action=response.action,
+                    message="Action completed",
                 ),
-                response,
-                classification,
+                None,
             )
-
-            return ProcessResponseOutput(
-                status=ProcessResponseStatus.SUCCESS,
-                message="Action completed",
-            )
-
-        print_execution_section(
-            ExecutionSection.HEADER,
-            step=self.step_counter,
-            action=response.action,
-            verbosity_level=self.verbosity_level,
-        )
 
         execution_result = None
 
@@ -1867,25 +1802,10 @@ class LocalCodeExecutor:
 
                     execution_result = await self.delegate_to_agent(agent, message)
 
-                    print_execution_section(
-                        ExecutionSection.RESULT,
-                        content=execution_result.message,
-                        action=response.action,
-                        verbosity_level=self.verbosity_level,
-                    )
-
                 if response.action == ActionType.WRITE:
                     file_path = response.file_path
                     content = response.content if response.content else response.code
                     if file_path:
-                        print_execution_section(
-                            ExecutionSection.WRITE,
-                            file_path=file_path,
-                            content=content,
-                            action=response.action,
-                            verbosity_level=self.verbosity_level,
-                        )
-
                         # First check code safety
 
                         await self.update_job_execution_state(
@@ -1918,19 +1838,13 @@ class LocalCodeExecutor:
                                     role=ConversationRole.ASSISTANT,
                                     status=ProcessResponseStatus.IN_PROGRESS,
                                     files=[],
+                                    file_path=file_path,
                                     execution_type=ExecutionType.ACTION,
                                     action=response.action,
                                 )
                             )
 
                             execution_result = await self.write_file(file_path, content)
-
-                        print_execution_section(
-                            ExecutionSection.RESULT,
-                            content=execution_result.formatted_print,
-                            action=response.action,
-                            verbosity_level=self.verbosity_level,
-                        )
                     else:
                         raise ValueError("File path is required for WRITE action")
 
@@ -1957,6 +1871,8 @@ class LocalCodeExecutor:
                                 stderr="",
                                 logging="",
                                 formatted_print="",
+                                file_path=file_path,
+                                action=response.action,
                                 code="",
                                 files=[],
                             )
@@ -1977,32 +1893,19 @@ class LocalCodeExecutor:
                                     role=ConversationRole.ASSISTANT,
                                     status=ProcessResponseStatus.IN_PROGRESS,
                                     files=[],
+                                    file_path=file_path,
                                     execution_type=ExecutionType.ACTION,
                                     action=response.action,
                                 )
                             )
 
                             execution_result = await self.edit_file(file_path, replacements)
-
-                        print_execution_section(
-                            ExecutionSection.RESULT,
-                            content=execution_result.formatted_print,
-                            action=response.action,
-                            verbosity_level=self.verbosity_level,
-                        )
                     else:
                         raise ValueError("File path and replacements are required for EDIT action")
 
                 elif response.action == ActionType.READ:
                     file_path = response.file_path
                     if file_path:
-                        print_execution_section(
-                            ExecutionSection.READ,
-                            file_path=file_path,
-                            action=response.action,
-                            verbosity_level=self.verbosity_level,
-                        )
-
                         # First check code safety
                         await self.update_job_execution_state(
                             CodeExecutionResult(
@@ -2014,6 +1917,8 @@ class LocalCodeExecutor:
                                 stderr="",
                                 logging="",
                                 formatted_print="",
+                                file_path=file_path,
+                                action=response.action,
                                 code="",
                                 files=[],
                             )
@@ -2035,6 +1940,7 @@ class LocalCodeExecutor:
                                     status=ProcessResponseStatus.IN_PROGRESS,
                                     files=[],
                                     execution_type=ExecutionType.ACTION,
+                                    file_path=file_path,
                                     action=response.action,
                                 )
                             )
@@ -2046,13 +1952,6 @@ class LocalCodeExecutor:
                 elif response.action == ActionType.CODE:
                     code_block = response.code
                     if code_block:
-                        print_execution_section(
-                            ExecutionSection.CODE,
-                            content=code_block,
-                            action=response.action,
-                            verbosity_level=self.verbosity_level,
-                        )
-
                         # First check code safety
                         await self.update_job_execution_state(
                             CodeExecutionResult(
@@ -2092,9 +1991,12 @@ class LocalCodeExecutor:
                             execution_result = await self.execute_code(response)
 
                         if "code execution cancelled by user" in execution_result.message:
-                            return ProcessResponseOutput(
-                                status=ProcessResponseStatus.CANCELLED,
-                                message="Code execution cancelled by user",
+                            return (
+                                ProcessResponseOutput(
+                                    status=ProcessResponseStatus.CANCELLED,
+                                    message="Code execution cancelled by user",
+                                ),
+                                execution_result,
                             )
 
                         print_execution_section(
@@ -2113,16 +2015,13 @@ class LocalCodeExecutor:
                     ConversationRecord(
                         role=ConversationRole.USER,
                         content=(
-                            f"There was an error encountered while trying to execute your action:"
+                            "<system>There was an error encountered while trying to execute your action:"  # noqa: E501
                             f"\n\n{str(e)}"
-                            "\n\nPlease adjust your response to fix the issue."
+                            "\n\nPlease adjust your response to fix the issue.</system>"
                         ),
                         should_summarize=True,
                     )
                 )
-
-        if execution_result:
-            self.add_to_code_history(execution_result, response, classification)
 
         token_metrics = self.get_token_metrics()
 
@@ -2175,7 +2074,7 @@ class LocalCodeExecutor:
             message=execution_result.message if execution_result else "Action completed",
         )
 
-        return output
+        return output, execution_result
 
     async def delegate_to_agent(self, agent_name: str, message: str) -> CodeExecutionResult:
         """Delegate the task to another agent.
@@ -2188,12 +2087,14 @@ class LocalCodeExecutor:
             CodeExecutionResult(
                 status=ProcessResponseStatus.IN_PROGRESS,
                 message=f"Delegating the task to {agent_name}",
+                content=message,
                 role=ConversationRole.ASSISTANT,
                 execution_type=ExecutionType.ACTION,
                 stdout="",
                 stderr="",
                 logging="",
                 formatted_print="",
+                agent=agent_name,
                 code="",
                 files=[],
                 action=ActionType.DELEGATE,
@@ -2278,10 +2179,10 @@ class LocalCodeExecutor:
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content=(
-                        f"The file {file_path} is an image and has been "
-                        "attached to the conversation context for your review."
+                        f"<system>The file {file_path} is an image and has been "
+                        "attached to the conversation context for your review.</system>"
                     ),
-                    should_summarize=True,
+                    should_summarize=False,
                     should_cache=True,
                     files=[str(expanded_file_path)],
                 )
@@ -2293,6 +2194,7 @@ class LocalCodeExecutor:
                 formatted_print=f"Successfully attached image file: {file_path}",
                 code="",
                 message="",
+                file_path=file_path,
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.SUCCESS,
                 files=[str(expanded_file_path)],
@@ -2305,11 +2207,11 @@ class LocalCodeExecutor:
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content=(
-                        f"The file {file_path} is a file that can be interpreted "
+                        f"<system>The file {file_path} is a file that can be interpreted "
                         "through OCR and has been attached to the conversation "
-                        "context for your review."
+                        "context for your review.</system>"
                     ),
-                    should_summarize=True,
+                    should_summarize=False,
                     should_cache=True,
                     files=[str(expanded_file_path)],
                 )
@@ -2321,6 +2223,7 @@ class LocalCodeExecutor:
                 formatted_print=f"Successfully attached OCR-interpretable file: {file_path}",
                 code="",
                 message="",
+                file_path=file_path,
                 role=ConversationRole.ASSISTANT,
                 status=ProcessResponseStatus.SUCCESS,
                 files=[str(expanded_file_path)],
@@ -2350,13 +2253,13 @@ class LocalCodeExecutor:
             ConversationRecord(
                 role=ConversationRole.USER,
                 content=(
-                    f"Here are the contents of {file_path} with line numbers and lengths:\n"
+                    f"<system>Here are the contents of {file_path} with line numbers and lengths:\n"
                     f"\n"
                     f"Line | Length | Content\n"
                     f"----------------------\n"
                     f"BEGIN\n"
                     f"{annotated_content}\n"
-                    f"END"
+                    f"END</system>"
                 ),
                 should_summarize=True,
                 should_cache=True,
@@ -2370,6 +2273,7 @@ class LocalCodeExecutor:
             formatted_print=f"Successfully read file: {file_path}",
             code="",
             message="",
+            file_path=file_path,
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
             files=[str(expanded_file_path)],
@@ -2378,28 +2282,91 @@ class LocalCodeExecutor:
         )
 
     async def write_file(self, file_path: str, content: str) -> CodeExecutionResult:
-        """Write content to a file.
+        """
+        Write content to a file, removing code block markers only for file-type fences.
 
         Args:
-            file_path (str): The path to the file to write
-            content (str): The content to write to the file
+            file_path (str): The path to the file to write.
+            content (str): The content to write to the file.
 
         Returns:
-            str: A message indicating the file has been written
+            CodeExecutionResult: Result of the write operation.
 
         Raises:
-            OSError: If there is an error writing to the file
+            OSError: If there is an error writing to the file.
         """
-        # Remove code block markers if present
-        content_lines = content.split("\n")
-        if len(content_lines) > 0 and content_lines[0].startswith("```"):
-            content_lines = content_lines[1:]
-        if len(content_lines) > 0 and content_lines[-1].startswith("```"):
-            content_lines = content_lines[:-1]
+        try:
+            content_lines = content.split("\n")
+            # Only remove code block markers if they are file-type (e.g., ```python, ```json, etc.)
+            file_type_fences = {
+                "python",
+                "json",
+                "yaml",
+                "toml",
+                "xml",
+                "html",
+                "js",
+                "javascript",
+                "ts",
+                "typescript",
+                "csv",
+                "txt",
+                "md",
+                "markdown",
+                "sh",
+                "bash",
+                "ini",
+                "cfg",
+                "conf",
+                "go",
+                "java",
+                "c",
+                "cpp",
+                "cs",
+                "rb",
+                "rs",
+                "swift",
+                "php",
+                "pl",
+                "r",
+                "scala",
+                "kt",
+                "kotlin",
+                "sql",
+                "dockerfile",
+                "makefile",
+                "bat",
+                "ps1",
+                "powershell",
+                "dart",
+                "lua",
+                "groovy",
+                "asm",
+                "s",
+                "scss",
+                "css",
+            }
 
-        cleaned_content = "\n".join(content_lines)
+            def is_file_type_fence(line: str) -> bool:
+                if not line.startswith("```"):
+                    return False
+                fence = line.strip()[3:].strip().lower()
+                return fence in file_type_fences or fence == ""
 
-        expanded_file_path = Path(file_path).expanduser().resolve()
+            file_type_fence = is_file_type_fence(content_lines[0])
+
+            # Remove leading file-type code fence
+            if content_lines and file_type_fence:
+                content_lines = content_lines[1:]
+
+            # Remove trailing code fence if present and leading was file-type
+            if content_lines and file_type_fence and content_lines[-1].strip() == "```":
+                content_lines = content_lines[:-1]
+
+            cleaned_content = "\n".join(content_lines)
+            expanded_file_path = Path(file_path).expanduser().resolve()
+        except Exception as exc:
+            raise OSError(f"Error preparing file content for writing to {file_path}: {exc}")
 
         with open(expanded_file_path, "w") as f:
             f.write(cleaned_content)
@@ -2407,16 +2374,12 @@ class LocalCodeExecutor:
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.USER,
-                content=f"The content that you requested has been written to {file_path}.\n\n"
+                content=f"<system>The content that you requested has been written to {file_path}.\n\n"  # noqa: E501
                 f"Here is the updated file content:\n\n<file_content>\n{cleaned_content}\n</file_content>\n\n"  # noqa: E501
-                "Make sure to double check that the write was successful after all edits are complete.  If your write did not work as expected, please adjust your response to fix the issue and try another write.  Make sure that you did not erase any original file content if you are writing over an existing file, and that the file content is accurate to the original content.",  # noqa: E501
+                "Make sure to double check that the write was successful after all edits are complete.  If your write did not work as expected, please adjust your response to fix the issue and try another write.  Make sure that you did not erase any original file content if you are writing over an existing file, and that the file content is accurate to the original content.</system>",  # noqa: E501
                 ephemeral=True,
                 ephemeral_steps=1,
             )
-        )
-
-        equivalent_code = FILE_WRITE_EQUIVALENT_TEMPLATE.format(
-            file_path=file_path, content=cleaned_content
         )
 
         return CodeExecutionResult(
@@ -2424,7 +2387,8 @@ class LocalCodeExecutor:
             stderr="",
             logging="",
             formatted_print=f"Successfully wrote to file: {file_path}",
-            code=equivalent_code,
+            content=cleaned_content,
+            file_path=file_path,
             message="",
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
@@ -2470,17 +2434,13 @@ class LocalCodeExecutor:
         with open(expanded_file_path, "w") as f:
             f.write(file_content)
 
-        equivalent_code = FILE_EDIT_EQUIVALENT_TEMPLATE.format(
-            file_path=file_path, replacements=json.dumps(replacements)
-        )
-
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.USER,
                 content=(
-                    f"Your edits have been applied to the file: {file_path}\n\n"
+                    f"<system>Your edits have been applied to the file: {file_path}\n\n"
                     f"Here is the updated file content:\n\n<file_content>\n{file_content}\n</file_content>\n\n"  # noqa: E501
-                    "Make sure to double check that the edits were successful after all edits are complete.  If your edit did not work as expected, please adjust your response to fix the issue and try another edit.  If you are unable to fix the issue, please try to WRITE the file from scratch instead, making sure to stay accurate to the original file content."  # noqa: E501
+                    "Make sure to double check that the edits were successful after all edits are complete.  If your edit did not work as expected, please adjust your response to fix the issue and try another edit.  If you are unable to fix the issue, please try to WRITE the file from scratch instead, making sure to stay accurate to the original file content.</system>"  # noqa: E501
                 ),
                 ephemeral=True,
                 ephemeral_steps=1,
@@ -2492,7 +2452,7 @@ class LocalCodeExecutor:
             stderr="",
             logging="",
             formatted_print=f"Successfully edited file: {file_path}",
-            code=equivalent_code,
+            file_path=file_path,
             message="",
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.SUCCESS,
@@ -2514,27 +2474,39 @@ class LocalCodeExecutor:
                 self.agent_state.conversation[0],
                 ConversationRecord(
                     role=ConversationRole.USER,
-                    content="[Some conversation history has been truncated for brevity]",
+                    content="<system>Some conversation history has been truncated for brevity.</system>",  # noqa: E501
                     should_summarize=False,
                 ),
             ] + self.agent_state.conversation[-chunk_size:]
 
-    async def _summarize_conversation_step(self, msg: ConversationRecord) -> str:
+    async def _summarize_conversation_step(
+        self, msg: ConversationRecord, min_token_threshold: int = 500
+    ) -> str:
         """
-        Summarize the conversation step by invoking the model to generate a concise summary.
+        Summarize the conversation step by invoking the model to generate a concise summary,
+        but only if the message content exceeds 500 tokens.
 
         Args:
             msg (ConversationRecord): The conversation record to summarize.
+            min_token_threshold (int): The minimum number of tokens to consider summarizing.
 
         Returns:
-            str: A concise summary of the critical information from the conversation step.
-                 The summary includes key actions, important changes, significant results,
-                 errors or issues, key identifiers, transformations, and data structures.
+            str: A concise summary of the critical information from the conversation step,
+                 or the original content if it is already concise.
 
         Raises:
             ValueError: If the conversation record is not of the expected type.
         """
-        step_info = "Please summarize the following conversation step:\n" + "\n".join(
+        # Calculate token count for the message content
+        tokenizer = encoding_for_model("gpt-4o")
+
+        token_count = len(tokenizer.encode(msg.content or ""))
+
+        if token_count <= min_token_threshold:
+            return msg.content
+
+        step_info = (
+            "Please summarize the following conversation step:\n"
             f"<role>{msg.role}</role>\n<message>{msg.content}</message>"
         )
 
@@ -2852,6 +2824,13 @@ Agent Created At: {self.agent.created_date}
             ):
                 msg.ephemeral_steps = msg.ephemeral_steps - 1
 
+        self.add_ephemeral_hud_message()
+
+    def create_hud_message(self) -> str:
+        """Create the agent heads up display message.
+
+        This method adds the agent heads up display to the conversation history.
+        """
         # Add environment details to the latest message
         environment_details = self.get_environment_details()
 
@@ -2906,11 +2885,17 @@ Agent Created At: {self.agent.created_date}
             agent_info=agent_info,
         )
 
+        return hud_message
+
+    def add_ephemeral_hud_message(self) -> None:
+        """Add the ephemeral HUD message to the conversation history.
+
+        This method adds the ephemeral HUD message to the conversation history.
+        """
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.USER,
-                content=hud_message,
-                should_summarize=False,
+                content=f"<system>{self.create_hud_message()}</system>",
                 ephemeral=True,
                 ephemeral_steps=0,
             )

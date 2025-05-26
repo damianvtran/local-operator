@@ -121,12 +121,6 @@ async def test_cli_operator_chat(cli_operator, mock_model_config):
             relative_effort=RelativeEffortLevel.MEDIUM,
         ),
     ).start()
-    mock_generate_plan = patch.object(
-        cli_operator, "generate_plan", return_value=MagicMock()
-    ).start()
-    mock_interpret_action_response = patch.object(
-        cli_operator, "interpret_action_response", return_value=mock_response
-    ).start()
     patch.object(cli_operator, "_agent_should_exit", return_value=True).start()
     patch("builtins.input", return_value="exit").start()
 
@@ -142,8 +136,6 @@ async def test_cli_operator_chat(cli_operator, mock_model_config):
 
     # Assertions
     assert mock_classify_request.call_count == 1
-    assert mock_generate_plan.call_count == 1
-    assert mock_interpret_action_response.call_count == 1
     assert "I'm done" in cli_operator.executor.agent_state.conversation[-1].content
 
     # Clean up patches
