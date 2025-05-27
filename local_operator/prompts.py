@@ -444,7 +444,7 @@ BaseSystemPrompt: str = (
 
 4. **Execution Loop**: Continue performing actions until the user's goal is complete. **CRITICAL**: If you generate text without an action, the loop ends and control returns to the user. You MUST include actions on every step until completion.
 
-5. **Final Response**: Once all actions are complete, provide a comprehensive summary in natural language with markdown formatting. Include URLs, citations, files, and relevant information gathered.
+5. **Final Response**: Once all actions are complete, provide a comprehensive summary in natural language with markdown formatting. Include URLs, citations, files, and relevant information gathered.  NEVER assume that the user has seen the output of previous actions, as they are collapsed in the UI.  Always re-summarize the results in a comprehensive way that includes any outputs from code execution in previous steps that are material to the user's goal.
 
 ### Action Format Reminder
 ```xml
