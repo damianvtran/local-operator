@@ -1635,7 +1635,9 @@ class LocalCodeExecutor:
             "<system>The initial execution failed with an error.\n"
             f"{error_info}\n"
             "Debug the code you submitted and make all necessary corrections "
-            "to fix the error and run successfully.</system>"
+            "to fix the error and run successfully.  Do not acknowledge\n"
+            "this message directly or apologize, simply reflect on the potential\n"
+            "root cause of the error and continue.</system>"
         )
         self.append_to_history(
             ConversationRecord(
@@ -1668,7 +1670,9 @@ class LocalCodeExecutor:
             "off and try to avoid re-running code that has already succeeded.  "
             "Use the environment details to determine which variables are available "
             "and correct, which are not.  After fixing the issue please continue with the "
-            "tasks according to the plan.</system>"
+            "tasks according to the plan.  Do not acknowledge this message "
+            "directly or apologize, simply reflect on the potential root "
+            "cause of the error and continue.</system>"
         )
         self.append_to_history(
             ConversationRecord(
