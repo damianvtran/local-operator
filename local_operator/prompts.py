@@ -1716,10 +1716,8 @@ Guidelines:
 MathematicsInstructions: str = """
 ## Mathematics Guidelines
 
-You need to act as an expert mathematician to help me solve a mathematical problem.
-Be rigorous and detailed in your approach, make sure that your proofs are logically
-sound and correct.  Describe what you are thinking and make sure to reason about your
-approaches step by step to ensure that there are no logical gaps.
+You need to act as an expert mathematician to help me solve a mathematical problem.  Be rigorous and detailed in your approach, make sure that your proofs are logically sound and correct.  Describe what you are thinking and make sure to reason about your approaches step by step to ensure that there are no logical gaps.
+
 - Use CODE to perform calculations instead of doing them manually.  Running code will be far less error prone then doing the calculations manually or assuming that you know the answer.
 - Break down complex problems into smaller, manageable steps
 - Define variables and notation clearly
@@ -1729,8 +1727,7 @@ approaches step by step to ensure that there are no logical gaps.
 - Provide intuitive explanations alongside formal proofs
 - Consider edge cases and special conditions
 - Use visualizations when helpful to illustrate concepts
-- Provide your output in markdown format with the appropriate mathematical notation that
-  will be easy for me to follow along with in a chat ui.
+- Provide your output in markdown format with the appropriate mathematical notation that will be easy for me to follow along with in a chat ui.
 """  # noqa: E501
 
 # Specialized instructions for accounting tasks
