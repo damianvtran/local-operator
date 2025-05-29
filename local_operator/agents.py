@@ -386,7 +386,7 @@ class AgentRegistry:
         final_cwd = current_metadata_obj.current_working_directory
         if (
             new_cwd_explicitly_set is not None
-            and Path(final_cwd).resolve() != Path(original_cwd).resolve()
+            and Path(final_cwd).expanduser().resolve() != Path(original_cwd).expanduser().resolve()
         ):
             try:
                 agent_state = self.load_agent_state(agent_id)
@@ -417,7 +417,7 @@ class AgentRegistry:
 
                 # Add info message to execution history
                 cwd_execution_message = CodeExecutionResult(
-                    message=f"The user changed the working directory "
+                    message=f"The working directory was changed "
                     f"from '{original_cwd}' to '{final_cwd}'.",
                     status=ProcessResponseStatus.SUCCESS,
                     execution_type=ExecutionType.INFO,
