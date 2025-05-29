@@ -625,8 +625,8 @@ openai_models: Dict[str, ModelInfo] = {
 
 
 google_models: Dict[str, ModelInfo] = {
-    "google/gemini-2.5-flash-preview-05-20": ModelInfo(
-        id="google/gemini-2.5-flash-preview-05-20",
+    "gemini-2.5-flash-preview-05-20": ModelInfo(
+        id="gemini-2.5-flash-preview-05-20",
         name="Gemini 2.5 Flash Preview",
         max_tokens=65535,
         context_window=1048576,
@@ -638,10 +638,10 @@ google_models: Dict[str, ModelInfo] = {
             "Google's latest general purpose model, which is fast and more cost effective "
             "for complex reasoning, coding, and scientific tasks"
         ),
-        recommended=False,
+        recommended=True,
     ),
-    "gemini-2.5-pro-preview": ModelInfo(
-        id="gemini-2.5-pro-preview",
+    "gemini-2.5-pro-preview-05-06": ModelInfo(
+        id="gemini-2.5-pro-preview-05-06",
         name="Gemini 2.5 Pro Preview",
         max_tokens=65535,
         context_window=1048576,
