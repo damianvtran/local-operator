@@ -36,11 +36,7 @@ from local_operator.console import (
     print_task_interrupted,
     spinner_context,
 )
-from local_operator.helpers import (
-    clean_plain_text_response,
-    process_json_response,
-    remove_think_tags,
-)
+from local_operator.helpers import clean_plain_text_response, process_json_response
 from local_operator.model.configure import ModelConfiguration, calculate_cost
 from local_operator.prompts import (
     AgentHeadsUpDisplayPrompt,
@@ -448,7 +444,7 @@ class LocalCodeExecutor:
         self.agent_state.conversation.append(new_record)
         self._limit_conversation_history()
 
-    async def _summarize_old_steps(self, min_token_threshold: int = 500) -> None:
+    async def _summarize_old_steps(self, min_token_threshold: int = 1000) -> None:
         """
         Summarize old conversation steps beyond the detail conversation length.
 
@@ -1126,7 +1122,6 @@ class LocalCodeExecutor:
                     else str(safety_summary.content)
                 )
 
-                safety_summary_content = remove_think_tags(safety_summary_content)
                 safety_summary_content = clean_plain_text_response(safety_summary_content)
 
                 self.append_to_history(
@@ -1445,7 +1440,9 @@ class LocalCodeExecutor:
             await stream_update_callback()
 
             condensed_output, condensed_error_output, condensed_log_output = (
-                self._capture_and_record_output(stdout_buffer, stderr_buffer, log_buffer.getvalue())
+                self._capture_and_record_output(
+                    response.code, stdout_buffer, stderr_buffer, log_buffer.getvalue()
+                )
             )
             formatted_print = format_success_output(
                 (condensed_output, condensed_error_output, condensed_log_output)
@@ -1473,7 +1470,9 @@ class LocalCodeExecutor:
             # Final update on error
             await stream_update_callback()
             condensed_output, condensed_error_output, condensed_log_output = (
-                self._capture_and_record_output(stdout_buffer, stderr_buffer, log_buffer.getvalue())
+                self._capture_and_record_output(
+                    response.code, stdout_buffer, stderr_buffer, log_buffer.getvalue()
+                )
             )
             raise e
         finally:
@@ -1561,8 +1560,24 @@ class LocalCodeExecutor:
         finally:
             sys.stdin = old_stdin
 
+    def _get_mentioned_variables(self, code: str) -> dict[str, Any]:
+        """Get the variables mentioned in the code.
+
+        Args:
+            code (str): The code to get the variables from
+
+        Returns:
+            dict[str, Any]: A dictionary of variables mentioned in the code
+        """
+        return {key: var for key, var in self.context.items() if key in code}
+
     def _capture_and_record_output(
-        self, stdout: io.StringIO, stderr: io.StringIO, log_output: str, format_for_ui: bool = False
+        self,
+        code: str,
+        stdout: io.StringIO,
+        stderr: io.StringIO,
+        log_output: str,
+        format_for_ui: bool = False,
     ) -> tuple[str, str, str]:
         """Capture stdout/stderr output and record it in conversation history.
 
@@ -1599,6 +1614,9 @@ class LocalCodeExecutor:
         condensed_error_output = condense_logging(error_output)
         condensed_log_output = condense_logging(log_output)
 
+        mentioned_variables = self._get_mentioned_variables(code)
+        mentioned_variables_str = get_context_vars_str(mentioned_variables)
+
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.USER,
@@ -1607,6 +1625,7 @@ class LocalCodeExecutor:
                     f"<stdout>\n{condensed_output}\n</stdout>\n"
                     f"<stderr>\n{condensed_error_output}\n</stderr>\n"
                     f"<logger>\n{condensed_log_output}\n</logger>\n"
+                    f"<variables>\n{mentioned_variables_str}\n</variables>\n"
                     "Review and continue."
                     "</system>"
                 ),
@@ -1635,7 +1654,9 @@ class LocalCodeExecutor:
             "<system>The initial execution failed with an error.\n"
             f"{error_info}\n"
             "Debug the code you submitted and make all necessary corrections "
-            "to fix the error and run successfully.</system>"
+            "to fix the error and run successfully.  Do not acknowledge\n"
+            "this message directly or apologize, simply reflect on the potential\n"
+            "root cause of the error and continue.</system>"
         )
         self.append_to_history(
             ConversationRecord(
@@ -1668,7 +1689,9 @@ class LocalCodeExecutor:
             "off and try to avoid re-running code that has already succeeded.  "
             "Use the environment details to determine which variables are available "
             "and correct, which are not.  After fixing the issue please continue with the "
-            "tasks according to the plan.</system>"
+            "tasks according to the plan.  Do not acknowledge this message "
+            "directly or apologize, simply reflect on the potential root "
+            "cause of the error and continue.</system>"
         )
         self.append_to_history(
             ConversationRecord(
@@ -2657,7 +2680,6 @@ class LocalCodeExecutor:
         current_time_zone = datetime.now().astimezone().tzname()
         git_status = self._get_git_status()
         directory_tree = self.format_directory_tree(list_working_directory())
-        context_vars = get_context_vars_str(self.context)
 
         return f"""
 Current working directory: {cwd}
@@ -2669,9 +2691,6 @@ Current time zone: {current_time_zone}
 <directory_tree>
 {directory_tree}
 </directory_tree>
-<execution_context_variables>
-{context_vars}
-</execution_context_variables>
         """
 
     def _get_git_status(self) -> str:

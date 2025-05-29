@@ -408,7 +408,16 @@ def serve_command(host: str, port: int, reload: bool) -> int:
     Start the FastAPI server using uvicorn.
     """
     print(f"Starting server at http://{host}:{port}")
-    uvicorn.run("local_operator.server.app:app", host=host, port=port, reload=reload)
+    if reload:
+        uvicorn.run(
+            "local_operator.server.app:app",
+            host=host,
+            port=port,
+            reload=reload,
+            reload_excludes=[".venv"],
+        )
+    else:
+        uvicorn.run("local_operator.server.app:app", host=host, port=port, reload=reload)
     return 0
 
 

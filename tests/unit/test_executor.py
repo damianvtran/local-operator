@@ -2033,9 +2033,6 @@ def test_get_environment_details(executor, monkeypatch, tmp_path):
     mock_datetime.now.return_value = fixed_datetime
     monkeypatch.setattr("local_operator.executor.datetime", mock_datetime)
 
-    # Mock context variables
-    executor.context = {"test_var": "test_value"}
-
     # Get environment details
     env_details = executor.get_environment_details()
 
@@ -2044,7 +2041,6 @@ def test_get_environment_details(executor, monkeypatch, tmp_path):
     assert "2024-01-01 12:00:00" in env_details
     assert "On branch main" in env_details
     assert "nothing to commit, working tree clean" in env_details
-    assert "test_var: test_value" in env_details
 
     # Verify directory tree formatting
     assert "📁 ./" in env_details

@@ -41,15 +41,19 @@ def remove_think_tags(response_content: str) -> str:
     Returns:
         str: The response content with <think> and </think> tags and their content removed.
     """
-    if "<think>" in response_content:
-        start_think_index = response_content.find("<think>")
-        end_think_index = response_content.rfind("</think>")
-        if start_think_index != -1 and end_think_index != -1:
-            response_content = (
-                response_content[:start_think_index]
-                + response_content[end_think_index + len("</think>") :].strip()
-            )
-    return response_content
+    # This function is designed to remove *all* think tags, not just initial ones.
+    # For initial think tag extraction, a more specific function like
+    # _extract_initial_think_tags should be used if only the first one is desired.
+    # This version will remove all occurrences.
+
+    # Regex to find <think>...</think> or <thinking>...</thinking>
+    # It's non-greedy (.*?) to handle multiple tags correctly.
+    # re.DOTALL allows '.' to match newlines, in case think tags span multiple lines.
+    response_content = re.sub(r"<think>.*?</think>", "", response_content, flags=re.DOTALL)
+    response_content = re.sub(r"<thinking>.*?</thinking>", "", response_content, flags=re.DOTALL)
+    # Consolidate multiple spaces into one and strip leading/trailing whitespace
+    response_content = re.sub(r" +", " ", response_content)
+    return response_content.strip()
 
 
 def clean_plain_text_response(response_content: str) -> str:
@@ -121,7 +125,9 @@ def clean_json_response(response_content: str) -> str:
     Returns:
         str: The extracted JSON content as a string.
     """
-    response_content = remove_think_tags(response_content)
+    # Remove initial think tags before processing for JSON
+    _, response_content_after_thinking = _extract_initial_think_tags(response_content)
+    response_content = response_content_after_thinking.lstrip()
 
     # Special case for the format: ```json\n{...}\n```
     start = response_content.strip().startswith("```json")
@@ -449,10 +455,16 @@ def parse_agent_action_xml(xml_string: str) -> Dict[str, Any]:
         "agent": "",
         "message": "",
         "mentioned_files": [],
+        "thinking": "",  # Added thinking field
     }
 
-    raw_input_string = xml_string  # Preserve original for outer text extraction
-    xml_content_to_parse = raw_input_string.strip()  # Default to full stripped string
+    # Extract initial thinking tags first
+    thinking_content, text_after_thinking = _extract_initial_think_tags(xml_string)
+    if thinking_content:
+        parsed_data["thinking"] = thinking_content
+
+    raw_input_string = text_after_thinking.lstrip()  # Process the rest of the string
+    xml_content_to_parse = raw_input_string.strip()
 
     text_before_outer_fence = ""
     text_after_outer_fence = ""
@@ -583,6 +595,55 @@ def parse_agent_action_xml(xml_string: str) -> Dict[str, Any]:
             parsed_data["response"] = " ".join(outer_parts).strip()
 
     return parsed_data
+
+
+def _extract_initial_think_tags(text: str) -> Tuple[str, str]:
+    """
+    Extracts content from the first <think> or <thinking> tag at the beginning of the text.
+
+    Args:
+        text (str): The input text.
+
+    Returns:
+        Tuple[str, str]: (thinking_content, remaining_text)
+                         thinking_content is the extracted content from the think tag.
+                         remaining_text is the text after the think tag.
+                         If no think tag is found at the beginning, thinking_content is ""
+                         and remaining_text is the original text.
+    """
+    think_tags_map = {
+        "<think>": "</think>",
+        "<thinking>": "</thinking>",
+    }
+
+    stripped_text = text.lstrip()  # Handle leading whitespace
+
+    for open_tag, close_tag in think_tags_map.items():
+        if stripped_text.startswith(open_tag):
+            # Find the corresponding closing tag, searching after the open tag
+            # This ensures that if open_tag and close_tag are identical
+            # (e.g. for empty tags like <think></think>)
+            # we correctly identify the closing tag.
+            end_tag_idx_in_stripped = stripped_text.find(close_tag, len(open_tag))
+
+            if end_tag_idx_in_stripped != -1:  # Closing tag found
+                # Content is between open_tag and end_tag_idx_in_stripped
+                thinking_content = stripped_text[len(open_tag) : end_tag_idx_in_stripped].strip()
+
+                # Calculate where the remaining text starts in the *original* text
+                # Find the start of the open_tag in the original text
+                original_open_tag_start_idx = text.find(open_tag)
+                if original_open_tag_start_idx != -1:
+                    # Find the end of the close_tag in the original text,
+                    # searching after the open_tag
+                    original_close_tag_end_idx = text.find(
+                        close_tag, original_open_tag_start_idx + len(open_tag)
+                    )
+                    if original_close_tag_end_idx != -1:
+                        remaining_text_start_pos = original_close_tag_end_idx + len(close_tag)
+                        return thinking_content, text[remaining_text_start_pos:]
+
+    return "", text  # No initial think tag found or tag was malformed
 
 
 # --- Environment Setup ---

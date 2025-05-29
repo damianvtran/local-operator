@@ -506,7 +506,7 @@ async def get_page_text_content(url: str) -> str:
             text_elements = await page.evaluate(
                 """
                 () => {
-                    const selectors = 'h1, h2, h3, h4, h5, h6, p, li, td, th, figcaption';
+                    const selectors = 'h1, h2, h3, h4, h5, h6, p, li, td, th, figcaption, pre, blockquote, code, a';
                     const elements = document.querySelectorAll(selectors);
                     return Array.from(elements)
                         .map(el => el.textContent)
@@ -514,7 +514,7 @@ async def get_page_text_content(url: str) -> str:
                         .map(text => text.trim())
                         .map(text => text.replace(/\\s+/g, ' '));
                 }
-            """
+            """  # noqa: E501
             )
 
             await browser.close()
