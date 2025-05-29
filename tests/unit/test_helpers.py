@@ -279,6 +279,40 @@ def test_is_marker_inside_json(text, marker, expected):
             id="write_action_with_thinking_tag_and_spaces",
         ),
         pytest.param(
+            "I am writing a think tag example <action>WRITE</action><content>This is the file content <think>This is a thought</think></content>",  # noqa E501
+            {
+                "action": "WRITE",
+                "learnings": "",
+                "response": "I am writing a think tag example",
+                "code": "",
+                "content": "This is the file content <think>This is a thought</think>",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+                "thinking": "",
+            },
+            id="writing_action_writing_think_tag",
+        ),
+        pytest.param(
+            "<think>I am thinking about writing thinking</think> I am writing a think tag example <action>WRITE</action><content>This is the file content <think>This is a thought</think></content>",  # noqa E501
+            {
+                "action": "WRITE",
+                "learnings": "",
+                "response": "I am writing a think tag example",
+                "code": "",
+                "content": "This is the file content <think>This is a thought</think>",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+                "thinking": "I am thinking about writing thinking",
+            },
+            id="writing_action_writing_think_tag_with_thinking",
+        ),
+        pytest.param(
             "<think>Thought 1</think>Message part 1 <action>CODE</action> Message part 2",
             {
                 "action": "CODE",
