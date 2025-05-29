@@ -395,10 +395,10 @@ class AgentRegistry:
                 # Add system message to conversation history
                 cwd_conversation_message = ConversationRecord(
                     content=(
-                        "System Notification: Your working directory "
-                        f"has been changed to: {final_cwd}"
+                        "<system>Your working directory "
+                        f"has been changed to: {final_cwd}</system>"
                     ),
-                    role=ConversationRole.SYSTEM,
+                    role=ConversationRole.USER,
                     timestamp=now,
                     should_summarize=False,
                     ephemeral=False,

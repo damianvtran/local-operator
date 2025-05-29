@@ -18,6 +18,7 @@ from local_operator.types import (
     CodeExecutionResult,
     ConversationRecord,
     ConversationRole,
+    ExecutionType,
     ProcessResponseStatus,
 )
 
@@ -1267,17 +1268,21 @@ def test_update_agent_state_with_context(temp_agents_dir: Path):
 
     # Verify conversation was saved
     saved_conversation = registry.get_agent_conversation_history(agent.id)
-    assert len(saved_conversation) == 2
+    assert len(saved_conversation) == 3
     assert saved_conversation[0].role == ConversationRole.USER
     assert saved_conversation[0].content == "Hello"
     assert saved_conversation[1].role == ConversationRole.ASSISTANT
     assert saved_conversation[1].content == "Hi there!"
+    assert saved_conversation[2].role == ConversationRole.USER
+    assert "test/path" in saved_conversation[2].content
 
     # Verify code history was saved
     saved_code_history = registry.get_agent_execution_history(agent.id)
-    assert len(saved_code_history) == 1
+    assert len(saved_code_history) == 2
     assert saved_code_history[0].message == "Test execution"
     assert saved_code_history[0].code == "print('test')"
+    assert "test/path" in saved_code_history[1].message
+    assert saved_code_history[1].execution_type is ExecutionType.INFO
 
     # Verify context was saved
     loaded_context = registry.load_agent_context(agent.id)
