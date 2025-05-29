@@ -36,11 +36,7 @@ from local_operator.console import (
     print_task_interrupted,
     spinner_context,
 )
-from local_operator.helpers import (
-    clean_plain_text_response,
-    process_json_response,
-    remove_think_tags,
-)
+from local_operator.helpers import clean_plain_text_response, process_json_response
 from local_operator.model.configure import ModelConfiguration, calculate_cost
 from local_operator.prompts import (
     AgentHeadsUpDisplayPrompt,
@@ -1126,7 +1122,6 @@ class LocalCodeExecutor:
                     else str(safety_summary.content)
                 )
 
-                safety_summary_content = remove_think_tags(safety_summary_content)
                 safety_summary_content = clean_plain_text_response(safety_summary_content)
 
                 self.append_to_history(
