@@ -138,15 +138,16 @@ The supported providers are:
 """
 
 RecommendedOpenRouterModelIds = [
+    "anthropic/claude-sonnet-4",
     "anthropic/claude-3.7-sonnet",
     "openai/gpt-4.1",
-    "openai/gpt-4.1-mini",
     "mistralai/mistral-large-2411",
     "mistralai/mistral-large-2407",
     "mistralai/mistral-large",
     "x-ai/grok-3-beta",
-    "google/gemini-2.5-pro-preview-03-25",
+    "google/gemini-2.5-pro-preview",
     "deepseek/deepseek-chat-v3-0324",
+    "deepseek/deepseek-r1-0528",
 ]
 """List of recommended model IDs from OpenRouter.
 
