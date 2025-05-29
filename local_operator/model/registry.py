@@ -138,15 +138,16 @@ The supported providers are:
 """
 
 RecommendedOpenRouterModelIds = [
+    "anthropic/claude-sonnet-4",
     "anthropic/claude-3.7-sonnet",
     "openai/gpt-4.1",
-    "openai/gpt-4.1-mini",
     "mistralai/mistral-large-2411",
     "mistralai/mistral-large-2407",
     "mistralai/mistral-large",
     "x-ai/grok-3-beta",
-    "google/gemini-2.5-pro-preview-03-25",
+    "google/gemini-2.5-pro-preview",
     "deepseek/deepseek-chat-v3-0324",
+    "deepseek/deepseek-r1-0528",
 ]
 """List of recommended model IDs from OpenRouter.
 
@@ -624,8 +625,8 @@ openai_models: Dict[str, ModelInfo] = {
 
 
 google_models: Dict[str, ModelInfo] = {
-    "google/gemini-2.5-flash-preview-05-20": ModelInfo(
-        id="google/gemini-2.5-flash-preview-05-20",
+    "gemini-2.5-flash-preview-05-20": ModelInfo(
+        id="gemini-2.5-flash-preview-05-20",
         name="Gemini 2.5 Flash Preview",
         max_tokens=65535,
         context_window=1048576,
@@ -637,10 +638,10 @@ google_models: Dict[str, ModelInfo] = {
             "Google's latest general purpose model, which is fast and more cost effective "
             "for complex reasoning, coding, and scientific tasks"
         ),
-        recommended=False,
+        recommended=True,
     ),
-    "gemini-2.5-pro-preview": ModelInfo(
-        id="gemini-2.5-pro-preview",
+    "gemini-2.5-pro-preview-05-06": ModelInfo(
+        id="gemini-2.5-pro-preview-05-06",
         name="Gemini 2.5 Pro Preview",
         max_tokens=65535,
         context_window=1048576,

@@ -352,18 +352,20 @@ class AgentRegistry:
         if agent_id not in self._agents:
             raise KeyError(f"Agent with id {agent_id} not found")
 
-        current_metadata = self._agents[agent_id]
+        current_metadata_obj = self._agents[agent_id]
+        original_cwd = current_metadata_obj.current_working_directory
 
-        # Update all non-None fields from updated_metadata
-        for field, value in updated_metadata.model_dump(exclude_unset=True).items():
-            if value is not None:
-                setattr(current_metadata, field, value)
+        # Determine if current_working_directory is being explicitly changed
+        prospective_changes = updated_metadata.model_dump(exclude_unset=True)
+        new_cwd_explicitly_set = prospective_changes.get("current_working_directory")
+
+        # Apply updates to current_metadata_obj
+        for field, value in prospective_changes.items():
+            if value is not None:  # Ensure we only process fields that were actually provided
+                setattr(current_metadata_obj, field, value)
 
         if updated_metadata.last_message is not None:
-            current_metadata.last_message_datetime = datetime.now(timezone.utc)
-
-        # Update the in-memory agent data
-        self._agents[agent_id] = current_metadata
+            current_metadata_obj.last_message_datetime = datetime.now(timezone.utc)
 
         # Save agent metadata to agent.yml
         agent_dir = self.agents_dir / agent_id
@@ -372,13 +374,80 @@ class AgentRegistry:
 
         try:
             with (agent_dir / "agent.yml").open("w", encoding="utf-8") as f:
-                yaml.dump(current_metadata.model_dump(), f, default_flow_style=False)
+                yaml.dump(current_metadata_obj.model_dump(), f, default_flow_style=False)
         except Exception as e:
-            # Restore original metadata if save fails
-            self._agents[agent_id] = AgentData.model_validate(agent_id)
+            logging.error(
+                f"Failed to save agent.yml for {agent_id}. In-memory state "
+                "might be inconsistent until next refresh."
+            )
             raise Exception(f"Failed to save updated agent metadata: {str(e)}")
 
-        return current_metadata
+        # After successful save of agent.yml, check if CWD was explicitly changed
+        final_cwd = current_metadata_obj.current_working_directory
+        if (
+            new_cwd_explicitly_set is not None
+            and Path(final_cwd).resolve() != Path(original_cwd).resolve()
+        ):
+            try:
+                agent_state = self.load_agent_state(agent_id)
+                now = datetime.now(timezone.utc)  # Use a single timestamp for both messages
+
+                # Add system message to conversation history
+                cwd_conversation_message = ConversationRecord(
+                    content=(
+                        "<system>Your working directory "
+                        f"has been changed to: {final_cwd}</system>"
+                    ),
+                    role=ConversationRole.USER,
+                    timestamp=now,
+                    should_summarize=False,
+                    ephemeral=False,
+                    summarized=False,
+                    is_system_prompt=False,
+                    files=None,
+                    should_cache=False,
+                )
+                if not isinstance(agent_state.conversation, list):
+                    logging.warning(
+                        f"agent_state.conversation for agent {agent_id} is "
+                        "not a list. Initializing."
+                    )
+                    agent_state.conversation = []
+                agent_state.conversation.append(cwd_conversation_message)
+
+                # Add info message to execution history
+                cwd_execution_message = CodeExecutionResult(
+                    message=f"The user changed the working directory "
+                    f"from '{original_cwd}' to '{final_cwd}'.",
+                    status=ProcessResponseStatus.SUCCESS,
+                    execution_type=ExecutionType.INFO,
+                    role=ConversationRole.SYSTEM,
+                    timestamp=now,
+                    stdout="",
+                    stderr="",
+                    logging="",
+                    code="",
+                    formatted_print="",
+                    files=[],
+                    action=None,
+                )
+                if not isinstance(agent_state.execution_history, list):
+                    logging.warning(
+                        f"agent_state.execution_history for agent {agent_id} is "
+                        "not a list. Initializing."
+                    )
+                    agent_state.execution_history = []
+                agent_state.execution_history.append(cwd_execution_message)
+
+                self.save_agent_state(agent_id, agent_state)
+            except Exception as e:
+                logging.error(
+                    "Failed to update state (conversation/execution history) for CWD change "
+                    f"in agent {agent_id} (update_agent): {str(e)}"
+                )
+                # Log and continue, as the primary metadata update was successful.
+
+        return current_metadata_obj
 
     def delete_agent(self, agent_id: str) -> None:
         """
