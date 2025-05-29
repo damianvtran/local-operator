@@ -444,7 +444,7 @@ class LocalCodeExecutor:
         self.agent_state.conversation.append(new_record)
         self._limit_conversation_history()
 
-    async def _summarize_old_steps(self, min_token_threshold: int = 500) -> None:
+    async def _summarize_old_steps(self, min_token_threshold: int = 1000) -> None:
         """
         Summarize old conversation steps beyond the detail conversation length.
 
