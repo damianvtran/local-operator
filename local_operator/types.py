@@ -213,6 +213,7 @@ class ResponseJsonSchema(BaseModel):
     learnings: str = Field(default="")
     agent: str = Field(default="")
     message: str = Field(default="")
+    thinking: str = Field(default="")
 
 
 class ProcessResponseStatus(str, Enum):
@@ -285,6 +286,7 @@ class CodeExecutionResult(BaseModel):
     task_classification: str = Field(default="")
     is_complete: bool = Field(default=False)
     is_streamable: bool = Field(default=False)
+    thinking: str = Field(default="")
 
     def model_dump(self, *args, **kwargs) -> Dict[str, Any]:
         """Convert the conversation record to a dictionary for serialization.

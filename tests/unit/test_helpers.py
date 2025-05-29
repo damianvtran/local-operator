@@ -6,15 +6,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from local_operator.helpers import (
-    is_marker_inside_json,  # Keep existing test helper if needed
-)
-from local_operator.helpers import parse_agent_action_xml  # Added import
+from local_operator.helpers import _extract_initial_think_tags  # Added import
 from local_operator.helpers import (
     clean_json_response,
     clean_plain_text_response,
     get_posix_shell_path,
     get_windows_registry_path,
+    is_marker_inside_json,
+    parse_agent_action_xml,
     remove_think_tags,
     setup_cross_platform_environment,
 )
@@ -63,10 +62,25 @@ else:
 @pytest.mark.parametrize(
     "response_content, expected_output",
     [
-        ("This is a test <think>with think tags</think>.", "This is a test ."),
+        (
+            "This is a test <think>with think tags</think>.",
+            "This is a test .",
+        ),  # Keep trailing period
         ("No think tags here.", "No think tags here."),
         ("<think>Only think tags</think>", ""),
-        ("<think>Think tags leading content</think> content", "content"),
+        (
+            "<think>Think tags leading content</think> content",
+            "content",
+        ),  # Single space after removal
+        (
+            "Text with <thinking>some thoughts</thinking> and more text.",
+            "Text with and more text.",
+        ),  # Single space
+        ("<thinking>Just thoughts</thinking>", ""),
+        (
+            "Leading <think>thought 1</think> middle <thinking>thought 2</thinking> trailing",
+            "Leading middle trailing",  # Single space between words
+        ),
         ("", ""),
     ],
 )
@@ -140,6 +154,16 @@ def test_clean_plain_text_response(response_content, expected_output):
             '<think>Thinking...</think>{"action": "EXECUTE_CODE"}',
             '{"action": "EXECUTE_CODE"}',
             id="json_with_think_tags",
+        ),
+        pytest.param(
+            '<thinking>Thinking about JSON...</thinking>{"action": "CODE"}',
+            '{"action": "CODE"}',
+            id="json_with_thinking_tags_variant",
+        ),
+        pytest.param(
+            '  <think>Leading space then think</think> {"key": "value"}',
+            '{"key": "value"}',
+            id="json_with_leading_space_and_think_tag",
         ),
         pytest.param(
             '```json\n{"nested": {"key": "value"}}\n```',
@@ -216,8 +240,60 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="basic_code_action",
+        ),
+        pytest.param(
+            "<think>This is a thought.</think><action>CODE</action><code>print('Hello')</code>",
+            {
+                "action": "CODE",
+                "learnings": "",
+                "response": "",
+                "code": "print('Hello')",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+                "thinking": "This is a thought.",
+            },
+            id="code_action_with_think_tag",
+        ),
+        pytest.param(
+            "  <thinking>Another thought here.</thinking>  <action>WRITE</action><content>File content</content>",  # noqa E501
+            {
+                "action": "WRITE",
+                "learnings": "",
+                "response": "",
+                "code": "",
+                "content": "File content",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+                "thinking": "Another thought here.",
+            },
+            id="write_action_with_thinking_tag_and_spaces",
+        ),
+        pytest.param(
+            "<think>Thought 1</think>Message part 1 <action>CODE</action> Message part 2",
+            {
+                "action": "CODE",
+                "learnings": "",
+                "response": "Message part 1 Message part 2",
+                "code": "",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+                "thinking": "Thought 1",
+            },
+            id="think_tag_with_message_around_action",
         ),
         pytest.param(
             "This is a message before ```xml\n<action>CODE</action><learnings>Learned something</learnings><code>print('Hello')</code>\n```",  # noqa: E501
@@ -232,8 +308,26 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="basic_code_action_with_code_block_marker",
+        ),
+        pytest.param(
+            "<think>A plan.</think>This is a message before ```xml\n<action>CODE</action><code>print('H')</code>\n```",  # noqa: E501
+            {
+                "action": "CODE",
+                "learnings": "",
+                "response": "This is a message before",
+                "code": "print('H')",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+                "thinking": "A plan.",
+            },
+            id="think_tag_before_fenced_action",
         ),
         pytest.param(
             "This is a message before <action_response><action>WRITE</action><file_path>test.txt</file_path><content>```mermaid\ngraph TD\nA --> B\n```</content></action_response>",  # noqa: E501
@@ -248,6 +342,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="basic_code_action_with_nested_code_block_marker",
         ),
@@ -260,7 +355,7 @@ def test_is_marker_inside_json(text, marker, expected):
             {
                 "action": "WRITE",
                 "learnings": "",
-                "response": "Some text before and text after.",  # Updated
+                "response": "Some text before and text after.",
                 "code": "",
                 "content": "File content",
                 "file_path": "test.txt",
@@ -268,8 +363,9 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
-            id="write_action_with_surrounding_text_and_action_response_tag",  # noqa: E501
+            id="write_action_with_surrounding_text_and_action_response_tag",
         ),
         pytest.param(
             "```xml\n<action>EDIT</action><file_path>doc.md</file_path><replacements>\n<<<<<<< SEARCH\nold line\nanother old line\n=======\nnew line 1\nnew line 2\n>>>>>>> REPLACE\n</replacements>\n```",  # noqa: E501
@@ -286,6 +382,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="edit_action_with_markdown_wrapper_and_replacements",
         ),
@@ -307,6 +404,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="edit_action_with_newlines_in_replacements",
         ),
@@ -328,6 +426,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="edit_action_with_recursive_replacements",
         ),
@@ -344,6 +443,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="done_action_with_generic_markdown_wrapper",
         ),
@@ -360,6 +460,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="ask_action",
         ),
@@ -376,6 +477,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="bye_action_empty_tags",
         ),
@@ -392,6 +494,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "OtherAgent",
                 "message": "Please help",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="delegate_action",
         ),
@@ -408,6 +511,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="empty_tags_for_code",
         ),
@@ -430,6 +534,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="multiple_replacements",
         ),
@@ -446,13 +551,14 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="read_action",
         ),
         pytest.param(
             "<outer><action>CODE</action><code>print(1)</code></outer>",  # Simple nesting
             {
-                "action": "CODE",  # Expects to find the first valid action tag
+                "action": "CODE",
                 "learnings": "",
                 "response": "",
                 "code": "print(1)",
@@ -462,6 +568,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="simple_nested_xml",
         ),
@@ -478,6 +585,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="edit_action_empty_replacements_tag",
         ),
@@ -494,6 +602,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="code_with_xml_entities",
         ),
@@ -510,6 +619,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="write_xml_content_as_entities",
         ),
@@ -526,6 +636,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="write_xml_content_with_cdata",
         ),
@@ -547,6 +658,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="edit_replacing_xml_entities",
         ),
@@ -563,6 +675,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="only_text_no_xml",
         ),
@@ -579,6 +692,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="text_before_xml",
         ),
@@ -595,6 +709,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="text_after_xml",
         ),
@@ -611,6 +726,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="text_before_and_after_xml",
         ),
@@ -619,7 +735,7 @@ def test_is_marker_inside_json(text, marker, expected):
             {
                 "action": "",
                 "learnings": "",
-                "response": "Inner",  # Explicit response tag takes precedence
+                "response": "Inner",
                 "code": "",
                 "content": "",
                 "file_path": "",
@@ -627,6 +743,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="outer_text_with_explicit_response_tag",
         ),
@@ -635,14 +752,15 @@ def test_is_marker_inside_json(text, marker, expected):
             {
                 "action": "",
                 "learnings": "",
-                "response": "Outer",  # Outer text goes to response
+                "response": "Outer",
                 "code": "",
                 "content": "",
                 "file_path": "",
                 "replacements": [],
                 "agent": "",
-                "message": "InnerMsg",  # Explicit message tag
+                "message": "InnerMsg",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="outer_text_with_explicit_message_tag",
         ),
@@ -651,14 +769,15 @@ def test_is_marker_inside_json(text, marker, expected):
             {
                 "action": "",
                 "learnings": "",
-                "response": "InnerResp",  # Explicit response tag
+                "response": "InnerResp",
                 "code": "",
                 "content": "",
                 "file_path": "",
                 "replacements": [],
                 "agent": "",
-                "message": "InnerMsg",  # Explicit message tag
+                "message": "InnerMsg",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="outer_text_with_explicit_response_and_message_tags",
         ),
@@ -667,14 +786,15 @@ def test_is_marker_inside_json(text, marker, expected):
             {
                 "action": "",
                 "learnings": "",
-                "response": "",  # No outer text, no response tag
+                "response": "",
                 "code": "",
                 "content": "",
                 "file_path": "",
                 "replacements": [],
                 "agent": "",
-                "message": "Msg only",  # Explicit message tag
+                "message": "Msg only",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="only_message_tag_no_outer_text",
         ),
@@ -683,18 +803,18 @@ def test_is_marker_inside_json(text, marker, expected):
             {
                 "action": "",
                 "learnings": "",
-                "response": "Resp only",  # Explicit response tag
+                "response": "Resp only",
                 "code": "",
                 "content": "",
                 "file_path": "",
                 "replacements": [],
                 "agent": "",
-                "message": "",  # No message tag
+                "message": "",
                 "mentioned_files": [],
+                "thinking": "",
             },
             id="only_response_tag_no_outer_text",
         ),
-        # New test cases for mentioned_files
         pytest.param(
             "<action>CODE</action><code>print('hi')</code><mentioned_files></mentioned_files>",  # noqa: E501
             {
@@ -707,7 +827,8 @@ def test_is_marker_inside_json(text, marker, expected):
                 "replacements": [],
                 "agent": "",
                 "message": "",
-                "mentioned_files": [],  # Empty tag
+                "mentioned_files": [],
+                "thinking": "",
             },
             id="mentioned_files_empty_tag",
         ),
@@ -724,6 +845,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": ["file1.txt"],
+                "thinking": "",
             },
             id="mentioned_files_single_file",
         ),
@@ -740,6 +862,7 @@ def test_is_marker_inside_json(text, marker, expected):
                 "agent": "",
                 "message": "",
                 "mentioned_files": ["file1.txt", "file2.py"],
+                "thinking": "",
             },
             id="mentioned_files_multiple_files_newline_separated",
         ),
@@ -755,12 +878,13 @@ def test_is_marker_inside_json(text, marker, expected):
                 "replacements": [],
                 "agent": "",
                 "message": "",
-                "mentioned_files": ["file1.txt", "file2.py"],  # Stripping and filtering empty lines
+                "mentioned_files": ["file1.txt", "file2.py"],
+                "thinking": "",
             },
             id="mentioned_files_with_whitespace_and_empty_lines",
         ),
         pytest.param(
-            "<action>CODE</action><code>print('hi')</code>",  # No mentioned_files tag
+            "<action>CODE</action><code>print('hi')</code>",
             {
                 "action": "CODE",
                 "learnings": "",
@@ -771,7 +895,8 @@ def test_is_marker_inside_json(text, marker, expected):
                 "replacements": [],
                 "agent": "",
                 "message": "",
-                "mentioned_files": [],  # Defaults to empty list
+                "mentioned_files": [],
+                "thinking": "",
             },
             id="no_mentioned_files_tag",
         ),
@@ -779,6 +904,9 @@ def test_is_marker_inside_json(text, marker, expected):
 )
 def test_parse_agent_action_xml(xml_string, expected_dict):
     """Test the parse_agent_action_xml function."""
+    # Ensure the 'thinking' key exists in expected_dict for all tests after this change
+    if "thinking" not in expected_dict:
+        expected_dict["thinking"] = ""
     assert parse_agent_action_xml(xml_string) == expected_dict
 
 
@@ -994,3 +1122,48 @@ def test_setup_env_unsupported_os(mock_get_posix, mock_get_win, mock_system):
     assert os.environ["PATH"] == initial_path
     mock_get_win.assert_not_called()
     mock_get_posix.assert_not_called()
+
+
+# --- Tests for _extract_initial_think_tags ---
+@pytest.mark.parametrize(
+    "text, expected_thinking, expected_remaining",
+    [
+        ("<think>My thoughts</think>Rest of message", "My thoughts", "Rest of message"),
+        (
+            "  <think>  Thoughts with spaces  </think>  Message  ",
+            "Thoughts with spaces",
+            "  Message  ",
+        ),
+        (
+            "<thinking>My thinking process</thinking>Action here",
+            "My thinking process",
+            "Action here",
+        ),
+        (
+            "  <thinking>  Thinking with spaces  </thinking>  Action  ",
+            "Thinking with spaces",
+            "  Action  ",
+        ),
+        ("No think tag here", "", "No think tag here"),
+        ("<think>Unclosed thought", "", "<think>Unclosed thought"),  # Malformed
+        (
+            "Text before <think>thought</think>",
+            "",
+            "Text before <think>thought</think>",
+        ),  # Not initial
+        (
+            "<think>Thought 1</think><think>Thought 2</think>",
+            "Thought 1",
+            "<think>Thought 2</think>",
+        ),  # Only first
+        ("<think></think>Empty", "", "Empty"),
+        ("<thinking></thinking>Empty", "", "Empty"),
+        ("<think>  </think>Spaces inside", "", "Spaces inside"),  # Content is just spaces
+        ("  <think>Content</think>", "Content", ""),  # Think tag at end after spaces
+        ("<think>Content</think>", "Content", ""),  # Think tag at end
+    ],
+)
+def test_extract_initial_think_tags(text, expected_thinking, expected_remaining):
+    thinking, remaining = _extract_initial_think_tags(text)
+    assert thinking == expected_thinking
+    assert remaining == expected_remaining
