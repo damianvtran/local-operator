@@ -1440,7 +1440,9 @@ class LocalCodeExecutor:
             await stream_update_callback()
 
             condensed_output, condensed_error_output, condensed_log_output = (
-                self._capture_and_record_output(stdout_buffer, stderr_buffer, log_buffer.getvalue())
+                self._capture_and_record_output(
+                    response.code, stdout_buffer, stderr_buffer, log_buffer.getvalue()
+                )
             )
             formatted_print = format_success_output(
                 (condensed_output, condensed_error_output, condensed_log_output)
@@ -1468,7 +1470,9 @@ class LocalCodeExecutor:
             # Final update on error
             await stream_update_callback()
             condensed_output, condensed_error_output, condensed_log_output = (
-                self._capture_and_record_output(stdout_buffer, stderr_buffer, log_buffer.getvalue())
+                self._capture_and_record_output(
+                    response.code, stdout_buffer, stderr_buffer, log_buffer.getvalue()
+                )
             )
             raise e
         finally:
@@ -1556,8 +1560,24 @@ class LocalCodeExecutor:
         finally:
             sys.stdin = old_stdin
 
+    def _get_mentioned_variables(self, code: str) -> dict[str, Any]:
+        """Get the variables mentioned in the code.
+
+        Args:
+            code (str): The code to get the variables from
+
+        Returns:
+            dict[str, Any]: A dictionary of variables mentioned in the code
+        """
+        return {key: var for key, var in self.context.items() if key in code}
+
     def _capture_and_record_output(
-        self, stdout: io.StringIO, stderr: io.StringIO, log_output: str, format_for_ui: bool = False
+        self,
+        code: str,
+        stdout: io.StringIO,
+        stderr: io.StringIO,
+        log_output: str,
+        format_for_ui: bool = False,
     ) -> tuple[str, str, str]:
         """Capture stdout/stderr output and record it in conversation history.
 
@@ -1594,6 +1614,9 @@ class LocalCodeExecutor:
         condensed_error_output = condense_logging(error_output)
         condensed_log_output = condense_logging(log_output)
 
+        mentioned_variables = self._get_mentioned_variables(code)
+        mentioned_variables_str = get_context_vars_str(mentioned_variables)
+
         self.append_to_history(
             ConversationRecord(
                 role=ConversationRole.USER,
@@ -1602,6 +1625,7 @@ class LocalCodeExecutor:
                     f"<stdout>\n{condensed_output}\n</stdout>\n"
                     f"<stderr>\n{condensed_error_output}\n</stderr>\n"
                     f"<logger>\n{condensed_log_output}\n</logger>\n"
+                    f"<variables>\n{mentioned_variables_str}\n</variables>\n"
                     "Review and continue."
                     "</system>"
                 ),
@@ -2656,7 +2680,6 @@ class LocalCodeExecutor:
         current_time_zone = datetime.now().astimezone().tzname()
         git_status = self._get_git_status()
         directory_tree = self.format_directory_tree(list_working_directory())
-        context_vars = get_context_vars_str(self.context)
 
         return f"""
 Current working directory: {cwd}
@@ -2668,9 +2691,6 @@ Current time zone: {current_time_zone}
 <directory_tree>
 {directory_tree}
 </directory_tree>
-<execution_context_variables>
-{context_vars}
-</execution_context_variables>
         """
 
     def _get_git_status(self) -> str:

@@ -384,7 +384,10 @@ class AgentRegistry:
 
         # After successful save of agent.yml, check if CWD was explicitly changed
         final_cwd = current_metadata_obj.current_working_directory
-        if new_cwd_explicitly_set is not None and final_cwd != original_cwd:
+        if (
+            new_cwd_explicitly_set is not None
+            and Path(final_cwd).resolve() != Path(original_cwd).resolve()
+        ):
             try:
                 agent_state = self.load_agent_state(agent_id)
                 now = datetime.now(timezone.utc)  # Use a single timestamp for both messages
