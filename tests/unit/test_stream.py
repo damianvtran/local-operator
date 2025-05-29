@@ -83,6 +83,32 @@ def run_stream(input_text):
             id="think_tag_before_action_no_message",
         ),
         pytest.param(
+            "Writing thinking to a file <action_response><action>WRITE</action><content>Here is the file <think>This is a thought</think></content></action_response>",  # noqa: E501
+            "",  # expected_thinking
+            "Writing thinking to a file ",  # expected_message
+            ActionType.WRITE,  # expected_action
+            "Here is the file <think>This is a thought</think>",  # expected_content
+            "",  # expected_code
+            "",  # expected_replacements
+            [],  # expected_files
+            False,  # expect_error
+            True,  # expected_finish
+            id="writing_action_writing_think_tag",
+        ),
+        pytest.param(
+            "Writing thinking to a file <action_response><action>WRITE</action><content>Here is the file <think>This is",  # noqa: E501
+            "",  # expected_thinking
+            "Writing thinking to a file ",  # expected_message
+            ActionType.WRITE,  # expected_action
+            "Here is the file <think>This is",  # expected_content
+            "",  # expected_code
+            "",  # expected_replacements
+            [],  # expected_files
+            False,  # expect_error
+            False,  # expected_finish
+            id="writing_action_writing_think_tag_partial_content",
+        ),
+        pytest.param(
             "Hello, this is a plain text message. <action_re",
             "",  # expected_thinking
             "Hello, this is ",  # expected_message
