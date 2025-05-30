@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import builtins
+import difflib
 import inspect
 import io
 import logging
@@ -2476,10 +2477,82 @@ class LocalCodeExecutor:
             find = replacement["find"]
             replace = replacement["replace"]
 
-            if find not in file_content:
-                raise ValueError(f"Find string '{find}' not found in file {file_path}")
+            # Attempt exact string match
+            match_index = file_content.find(find)
 
-            file_content = file_content.replace(find, replace, 1)
+            if match_index != -1:
+                # Exact match found, perform replacement
+                file_content = (
+                    file_content[:match_index] + replace + file_content[match_index + len(find) :]
+                )
+            else:
+                # Exact match failed, provide detailed error feedback
+                s1_lines_for_diff = find.splitlines(keepends=True)
+                s2_lines_for_diff = file_content.splitlines(keepends=True)
+
+                matcher = difflib.SequenceMatcher(
+                    None, s1_lines_for_diff, s2_lines_for_diff, autojunk=False
+                )
+                match = matcher.find_longest_match(
+                    0, len(s1_lines_for_diff), 0, len(s2_lines_for_diff)
+                )
+
+                closest_actual_snippet_text = "No close match found to generate a detailed diff."
+                diff_output_text = "No close match found to generate a detailed diff."
+                snippet_line_info = ""
+
+                if match.size > 0:
+                    # Extract the block from the file that aligns with
+                    # find_text's length, starting at the best match point
+                    file_block_for_diff_lines = s2_lines_for_diff[
+                        match.b : match.b + len(s1_lines_for_diff)
+                    ]
+                    if not file_block_for_diff_lines:  # if find_text is longer than remaining file
+                        file_block_for_diff_lines = s2_lines_for_diff[match.b :]
+                    file_block_for_diff_text = "".join(file_block_for_diff_lines)
+
+                    # Generate diff
+                    diff_gen = difflib.ndiff(
+                        s1_lines_for_diff, file_block_for_diff_text.splitlines(keepends=True)
+                    )
+                    diff_output_text = "".join(list(diff_gen))
+
+                    # For showing the "closest text found in the file", provide some context
+                    context_window_lines = 2
+                    actual_snippet_start_line_idx = max(0, match.b - context_window_lines)
+                    actual_snippet_end_line_idx = min(
+                        len(s2_lines_for_diff),
+                        match.b + len(file_block_for_diff_lines) + context_window_lines,
+                    )
+
+                    closest_snippet_lines_with_context = s2_lines_for_diff[
+                        actual_snippet_start_line_idx:actual_snippet_end_line_idx
+                    ]
+                    closest_actual_snippet_text = "".join(closest_snippet_lines_with_context)
+
+                    snippet_start_human_line = actual_snippet_start_line_idx + 1
+                    snippet_end_human_line = actual_snippet_end_line_idx
+                    snippet_line_info = (
+                        f"(lines approx. {snippet_start_human_line}-{snippet_end_human_line})"
+                    )
+
+                    error_message_parts = [
+                        f"The SEARCH block for file '{file_path}' was not found.",
+                        f"\nYour provided SEARCH block:\n---\n{find}\n---\n",
+                        f"The closest text found in the file {snippet_line_info} was:\n---\n{closest_actual_snippet_text}\n---\n",  # noqa: E501
+                        "Differences (+ your search / - actual file content / ? suggestions):\n---",
+                        diff_output_text,
+                        "---\n",
+                        "Please review these differences carefully and provide a corrected SEARCH block.",  # noqa: E501
+                    ]
+                    error_message = "\n".join(error_message_parts)
+                else:
+                    error_message = (
+                        f"The SEARCH block for file '{file_path}' was not found.\n\n"
+                        f"Your provided SEARCH block:\n---\n{find}\n---\n\n"
+                        "No close match could be identified in the file to provide a detailed diff."
+                    )
+                raise ValueError(error_message)
 
         with open(expanded_file_path, "w") as f:
             f.write(file_content)
