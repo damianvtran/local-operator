@@ -1,10 +1,20 @@
 import logging
+from datetime import datetime, timezone  # Added
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
+from local_operator.agents import (  # Added
+    AgentRegistry,
+    AgentState,
+    CodeExecutionResult,
+    ConversationRecord,
+    ConversationRole,
+    ExecutionType,
+    ProcessResponseStatus,
+)
 from local_operator.jobs import JobManager, JobStatus
-from local_operator.server.dependencies import get_job_manager
+from local_operator.server.dependencies import get_agent_registry, get_job_manager
 from local_operator.server.models.schemas import CRUDResponse
 
 router = APIRouter(tags=["Jobs"])
@@ -253,6 +263,7 @@ async def list_jobs(
 async def cancel_job(
     job_id: str = Path(..., description="The ID of the job to cancel"),
     job_manager: JobManager = Depends(get_job_manager),
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
 ):
     """
     Cancel a running or pending job.
@@ -268,20 +279,83 @@ async def cancel_job(
         HTTPException: If the job is not found or cannot be cancelled
     """
     try:
-        # The get_job check is redundant as cancel_job will raise KeyError if job not found
-        # We'll keep the try/except for KeyError instead
+        job = await job_manager.get_job(job_id)  # Get job first to access agent_id
+
         success = await job_manager.cancel_job(job_id)
         if not success:
+            # If cancel_job returns False, it means the job couldn't be cancelled
+            # (e.g., already completed, failed, or previously cancelled).
             raise HTTPException(
                 status_code=400,
-                detail=f"Job {job_id} cannot be cancelled (already completed or failed)",
+                detail=(
+                    f"Job {job_id} cannot be cancelled (already completed, failed, or "
+                    "previously cancelled)"
+                ),
             )
+
+        # If cancellation was successful and there is an agent_id, update agent history
+        agent_id = job.agent_id
+        if agent_id:
+            try:
+                agent_state: AgentState = agent_registry.load_agent_state(agent_id)
+                now = datetime.now(timezone.utc)
+
+                # Add to conversation history
+                # Consistent with CWD change message in agents.py (role USER, <system> tag)
+                conversation_record = ConversationRecord(
+                    content="<system>The user interrupted your current task.  Await further instructions and pay attention to any updates or changes that they might want to make.</system>",  # noqa: E501
+                    role=ConversationRole.USER,
+                    timestamp=now,
+                    should_summarize=False,
+                    ephemeral=False,  # Persist this event in history
+                    summarized=False,
+                    is_system_prompt=False,
+                    files=None,
+                    should_cache=False,
+                )
+                if not isinstance(agent_state.conversation, list):
+                    logger.warning(
+                        f"agent_state.conversation for agent {agent_id} is not a list. "
+                        "Initializing."
+                    )
+                    agent_state.conversation = []
+                agent_state.conversation.append(conversation_record)
+
+                # Add to execution history
+                execution_record = CodeExecutionResult(
+                    message="The task that the agent was working on was stopped by the user.",
+                    status=ProcessResponseStatus.SUCCESS,  # Using SUCCESS for an info message
+                    execution_type=ExecutionType.INFO,
+                    role=ConversationRole.USER,  # System event
+                    timestamp=now,
+                    stdout="",
+                    stderr="",
+                    logging="",
+                    code="",
+                    formatted_print="",
+                    files=[],
+                    action=None,
+                )
+                if not isinstance(agent_state.execution_history, list):
+                    logger.warning(
+                        f"agent_state.execution_history for agent {agent_id} is not a list. "
+                        "Initializing."
+                    )
+                    agent_state.execution_history = []
+                agent_state.execution_history.append(execution_record)
+
+                agent_registry.save_agent_state(agent_id, agent_state)
+                logger.info(f"Added cancellation history for job {job_id} to agent {agent_id}")
+
+            except Exception as e:
+                # Log error during history update but don't fail the cancellation itself
+                logger.error(f"Error updating history for cancelled job {job_id}: %s", e)
 
         return CRUDResponse(
             status=200,
             message=f"Job {job_id} cancelled successfully",
         )
-    except KeyError:
+    except KeyError:  # Raised by get_job or potentially cancel_job if job_id not found
         raise HTTPException(status_code=404, detail=f'Job with ID "{job_id}" not found')
     except HTTPException:
         # Re-raise HTTP exceptions to preserve their status code and detail
