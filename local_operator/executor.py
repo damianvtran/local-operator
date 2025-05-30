@@ -128,37 +128,44 @@ def get_context_vars_str(context_vars: Dict[str, Any]) -> str:
         value_str = str(value)
         formatted_value_str = value_str
 
-        if callable(value):
+        if inspect.iscoroutine(value):
+            formatted_value_str = f"<Coroutine object {value.__name__} (not awaited)>"
+        elif inspect.iscoroutinefunction(value):
+            # For async function definitions, format them like other callables
             try:
                 doc = value.__doc__ or "No description available"
-                # Get first line of docstring
                 doc = doc.split("\n")[0].strip()
-
                 sig = inspect.signature(value)
-                args = []
-                for p in sig.parameters.values():
-                    arg_type = (
-                        p.annotation.__name__
-                        if hasattr(p.annotation, "__name__")
-                        else str(p.annotation)
-                    )
-                    args.append(f"{p.name}: {arg_type}")
-
+                args = [
+                    f"{p.name}: {p.annotation.__name__ if hasattr(p.annotation, '__name__') else str(p.annotation)}"  # noqa: E501
+                    for p in sig.parameters.values()
+                ]
                 return_type = (
                     sig.return_annotation.__name__
                     if hasattr(sig.return_annotation, "__name__")
                     else str(sig.return_annotation)
                 )
-
-                # Check if function is async
-                is_async = inspect.iscoroutinefunction(value)
-                async_prefix = "async " if is_async else ""
-
-                formatted_value_str = (
-                    f"{async_prefix}{key}({', '.join(args)}) -> {return_type}: {doc}"
-                )
+                formatted_value_str = f"async def {key}({', '.join(args)}) -> {return_type}: {doc}"
             except ValueError:
-                formatted_value_str = value_str
+                formatted_value_str = f"<AsyncFunction {key}>"
+        elif callable(value):
+            try:
+                doc = value.__doc__ or "No description available"
+                doc = doc.split("\n")[0].strip()
+                sig = inspect.signature(value)
+                args = [
+                    f"{p.name}: {p.annotation.__name__ if hasattr(p.annotation, '__name__') else str(p.annotation)}"  # noqa: E501
+                    for p in sig.parameters.values()
+                ]
+                return_type = (
+                    sig.return_annotation.__name__
+                    if hasattr(sig.return_annotation, "__name__")
+                    else str(sig.return_annotation)
+                )
+                # No async_prefix here as iscoroutinefunction is handled above
+                formatted_value_str = f"def {key}({', '.join(args)}) -> {return_type}: {doc}"
+            except ValueError:
+                formatted_value_str = f"<Function {key}>"
 
         if len(formatted_value_str) > 10000:
             formatted_value_str = (
@@ -1517,24 +1524,44 @@ class LocalCodeExecutor:
                 sys.stdin = devnull
                 # Extract any async code
                 if "async def" in code or "await" in code:
-                    # Create an async function from the code
-                    async_code = "async def __temp_async_fn():\n" + "\n".join(
-                        f"    {line}" for line in code.split("\n")
+                    # Prepare the code to be wrapped in an async function
+                    # that will update a provided dictionary with its locals.
+                    wrapped_code_lines = []
+                    wrapped_code_lines.append(
+                        "async def __exec_async_code_wrapper__(__context_dict_to_update__):"
                     )
-                    # Add code to get and run the coroutine
-                    async_code += "\n__temp_coro = __temp_async_fn()"
+                    for line in code.split("\n"):
+                        wrapped_code_lines.append(f"    {line}")
+                    # After user's code, update the passed dictionary
+                    # with locals from user's code scope
+                    wrapped_code_lines.append(
+                        "    # Update context with locals from this async function's scope"
+                    )
+                    wrapped_code_lines.append("    for __k, __v in locals().items():")
+                    # Avoid copying the context dict itself, or internal loop variables.
+                    wrapped_code_lines.append(
+                        "        if __k not in ['__context_dict_to_update__', '__k', '__v']:"
+                    )
+                    wrapped_code_lines.append("            __context_dict_to_update__[__k] = __v")
+
+                    full_wrapped_code = "\n".join(wrapped_code_lines)
+
+                    # Compile and execute the wrapper definition.
+                    # The wrapper function will be defined in self.context.
+                    compiled_wrapper = compile(
+                        full_wrapped_code, "<agent_generated_code_wrapper>", "exec"
+                    )
+                    exec(
+                        compiled_wrapper, self.context
+                    )  # Defines __exec_async_code_wrapper__ in self.context
+
                     try:
-                        # Execute the async function definition
-                        compiled_code = compile(async_code, "<agent_generated_code>", "exec")
-                        exec(compiled_code, self.context)
-                        # Run the coroutine
-                        await self.context["__temp_coro"]
+                        # Call the wrapper, passing self.context to be updated.
+                        await self.context["__exec_async_code_wrapper__"](self.context)
                     finally:
-                        # Clean up even if there was an error
-                        if "__temp_async_fn" in self.context:
-                            del self.context["__temp_async_fn"]
-                        if "__temp_coro" in self.context:
-                            del self.context["__temp_coro"]
+                        # Clean up the wrapper function from self.context
+                        if "__exec_async_code_wrapper__" in self.context:
+                            del self.context["__exec_async_code_wrapper__"]
                 else:
                     # Regular synchronous code
                     # Run synchronous exec in a separate thread to avoid blocking the event loop

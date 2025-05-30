@@ -745,6 +745,7 @@ If provided, these are guidelines to help provide additional context to user ins
 - Always prefer OS native safe delete commands over using destructive commands unless the user explicitly asks for them.
 - Always use CODE to perform calculations, never write out calculations by hand.
 </critical_constraints>
+- NEVER write instructions to the user inside CODE actions.  The user will not be looking at the stdout themselves, it is only for your reference.  So you must make sure to only write code that you will be running, and then write out information that you want the user to see based on the output of the actions.
 {response_format}
 """  # noqa: E501
 )
