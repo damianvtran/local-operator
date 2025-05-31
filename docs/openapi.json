@@ -1474,6 +1474,276 @@
         }
       }
     },
+    "/v1/agents/{agent_id}/execution-variables": {
+      "get": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "List agent execution variables",
+        "description": "Retrieve all execution variables for a specific agent.",
+        "operationId": "list_agent_execution_variables_v1_agents__agent_id__execution_variables_get",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "ID of the agent",
+              "title": "Agent Id"
+            },
+            "description": "ID of the agent"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ExecutionVariablesResponse_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Create an agent execution variable",
+        "description": "Create a new execution variable for a specific agent.",
+        "operationId": "create_agent_execution_variable_v1_agents__agent_id__execution_variables_post",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "ID of the agent",
+              "title": "Agent Id"
+            },
+            "description": "ID of the agent"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecutionVariable"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ExecutionVariable_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/{agent_id}/execution-variables/{variable_key}": {
+      "get": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Get an agent execution variable",
+        "description": "Retrieve a specific execution variable for an agent by its key.",
+        "operationId": "get_agent_execution_variable_v1_agents__agent_id__execution_variables__variable_key__get",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "ID of the agent",
+              "title": "Agent Id"
+            },
+            "description": "ID of the agent"
+          },
+          {
+            "name": "variable_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Key of the execution variable",
+              "title": "Variable Key"
+            },
+            "description": "Key of the execution variable"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ExecutionVariable_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Update an agent execution variable",
+        "description": "Update an existing execution variable for a specific agent.",
+        "operationId": "update_agent_execution_variable_v1_agents__agent_id__execution_variables__variable_key__patch",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "ID of the agent",
+              "title": "Agent Id"
+            },
+            "description": "ID of the agent"
+          },
+          {
+            "name": "variable_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Key of the execution variable to update",
+              "title": "Variable Key"
+            },
+            "description": "Key of the execution variable to update"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecutionVariableUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ExecutionVariable_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Delete an agent execution variable",
+        "description": "Delete an execution variable for a specific agent by its key.",
+        "operationId": "delete_agent_execution_variable_v1_agents__agent_id__execution_variables__variable_key__delete",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "ID of the agent",
+              "title": "Agent Id"
+            },
+            "description": "ID of the agent"
+          },
+          {
+            "name": "variable_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Key of the execution variable to delete",
+              "title": "Variable Key"
+            },
+            "description": "Key of the execution variable to delete"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/jobs/{job_id}": {
       "get": {
         "tags": [
@@ -3869,6 +4139,62 @@
         ],
         "title": "CRUDResponse[CredentialListResult]"
       },
+      "CRUDResponse_ExecutionVariable_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExecutionVariable"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[ExecutionVariable]"
+      },
+      "CRUDResponse_ExecutionVariablesResponse_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExecutionVariablesResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[ExecutionVariablesResponse]"
+      },
       "CRUDResponse_HealthCheckResponse_": {
         "properties": {
           "status": {
@@ -4400,6 +4726,11 @@
             "type": "boolean",
             "title": "Is Streamable",
             "default": false
+          },
+          "thinking": {
+            "type": "string",
+            "title": "Thinking",
+            "default": ""
           }
         },
         "type": "object",
@@ -4701,6 +5032,78 @@
         ],
         "title": "ExecutionType",
         "description": "Enum representing the different types of execution in a conversation workflow.\n\nUsed to track the execution phase within the agent's thought process:\n- PLAN: Initial planning phase where the agent outlines its approach\n- PRE_ACTION: The agent is generating a response for the action interpreter to\n  review and produce a structured system message.\n- ACTION: Execution of specific actions like running code or accessing resources\n- REFLECTION: Analysis and evaluation of previous actions and their results\n- RESPONSE: Final response generation based on the execution results\n- SECURITY_CHECK: Security check phase where the agent checks the safety of the code\n- CLASSIFICATION: Classification phase where the agent classifies the user's request\n- SYSTEM: An automatic static response from the system, such as an action cancellation.\n- INFO: An informational message from the system, such as an agent import."
+      },
+      "ExecutionVariable": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key",
+            "description": "The key of the execution variable."
+          },
+          "value": {
+            "type": "string",
+            "title": "Value",
+            "description": "The value of the execution variable."
+          },
+          "type": {
+            "type": "string",
+            "title": "Type",
+            "description": "The type of the execution variable."
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "value",
+          "type"
+        ],
+        "title": "ExecutionVariable",
+        "description": "A single execution variable."
+      },
+      "ExecutionVariableUpdate": {
+        "properties": {
+          "value": {
+            "type": "string",
+            "title": "Value",
+            "description": "The new value of the execution variable."
+          },
+          "type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type",
+            "description": "The new type of the execution variable."
+          }
+        },
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "title": "ExecutionVariableUpdate",
+        "description": "Data for updating an execution variable."
+      },
+      "ExecutionVariablesResponse": {
+        "properties": {
+          "execution_variables": {
+            "items": {
+              "$ref": "#/components/schemas/ExecutionVariable"
+            },
+            "type": "array",
+            "title": "Execution Variables",
+            "description": "A list of execution variables."
+          }
+        },
+        "type": "object",
+        "required": [
+          "execution_variables"
+        ],
+        "title": "ExecutionVariablesResponse",
+        "description": "Response model for a list of execution variables."
       },
       "HTTPValidationError": {
         "properties": {

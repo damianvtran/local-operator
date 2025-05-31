@@ -1258,22 +1258,22 @@ async def test_invoke_model_timeout(executor):
         (
             {},
             "function_1",
-            "function_1: function_1(x: _empty) -> _empty: No description available\n",
+            "function_1: def function_1(x: _empty) -> _empty: No description available\n",
         ),
         (
             {},
             "function_2",
-            "function_2: function_2(x: _empty) -> _empty: This is a docstring\n",
+            "function_2: def function_2(x: _empty) -> _empty: This is a docstring\n",
         ),
         (
             {},
             "function_3",
-            "function_3: async function_3(x: _empty) -> _empty: No description available\n",
+            "function_3: async def function_3(x: _empty) -> _empty: No description available\n",
         ),
         (
             {"a": 1, "b": "hello", "c": [1, 2, 3]},
             "function_1",
-            "a: 1\nb: hello\nc: [1, 2, 3]\nfunction_1: function_1(x: _empty) -> _empty: "
+            "a: 1\nb: hello\nc: [1, 2, 3]\nfunction_1: def function_1(x: _empty) -> _empty: "
             "No description available\n",
         ),
         (
