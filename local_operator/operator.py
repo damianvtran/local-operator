@@ -682,7 +682,7 @@ class Operator:
                     new_message.content = result.content or ""
                     new_message.code = result.code or ""
                     new_message.replacements = result.replacements or ""
-                    new_message.files = result.files or []
+                    new_message.files = result.files if result.files else new_message.files
                     new_message.learnings = result.learnings or ""
                     new_message.agent = result.agent or ""
                     new_message.action = result.action
