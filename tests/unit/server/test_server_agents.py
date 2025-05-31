@@ -1798,7 +1798,7 @@ async def test_update_agent_execution_variable(test_app_client, dummy_registry: 
     dummy_registry.save_agent_context(agent.id, {"update_key": "initial_value"})
     agent_id = agent.id
 
-    payload = {"value": "updated_value"}
+    payload = {"value": "updated_value", "key": "update_key", "type": "str"}
     response = await test_app_client.patch(
         f"/v1/agents/{agent_id}/execution-variables/update_key", json=payload
     )
