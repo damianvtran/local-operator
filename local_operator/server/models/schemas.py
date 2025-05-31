@@ -872,13 +872,6 @@ class ExecutionVariable(BaseModel):
     type: str = Field(..., description="The type of the execution variable.")
 
 
-class ExecutionVariableUpdate(BaseModel):
-    """Data for updating an execution variable."""
-
-    value: str = Field(..., description="The new value of the execution variable.")
-    type: Optional[str] = Field(None, description="The new type of the execution variable.")
-
-
 class ExecutionVariablesResponse(BaseModel):
     """Response model for a list of execution variables."""
 
