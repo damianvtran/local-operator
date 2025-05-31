@@ -506,7 +506,7 @@ async def get_page_text_content(url: str) -> str:
             text_elements = await page.evaluate(
                 """
                 () => {
-                    const selectors = 'h1, h2, h3, h4, h5, h6, p, li, td, th, figcaption, pre, blockquote, code, a';
+                    const selectors = 'h1, h2, h3, h4, h5, h6, p, li, td, th, figcaption, pre, blockquote, code, a, div[class*="text-"]';
                     const elements = document.querySelectorAll(selectors);
                     return Array.from(elements)
                         .map(el => el.textContent)
