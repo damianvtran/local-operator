@@ -42,6 +42,9 @@ from local_operator.server.models.schemas import (
     AgentListResult,
     AgentUpdate,
     CRUDResponse,
+    ExecutionVariable,
+    ExecutionVariablesResponse,
+    ExecutionVariableUpdate,
 )
 from local_operator.types import AgentState
 
@@ -1350,3 +1353,193 @@ async def update_agent_system_prompt(
 
         logger.exception("Error updating agent system prompt")
         raise HTTPException(status_code=500, detail=f"Error updating agent system prompt: {str(e)}")
+
+
+# Agent Execution Variables CRUD Endpoints
+@router.get(
+    "/v1/agents/{agent_id}/execution-variables",
+    response_model=CRUDResponse[ExecutionVariablesResponse],
+    summary="List agent execution variables",
+    description="Retrieve all execution variables for a specific agent.",
+)
+async def list_agent_execution_variables(
+    agent_id: str = Path(..., description="ID of the agent"),
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
+):
+    try:
+        variables = agent_registry.load_agent_context(agent_id)
+
+        string_variables = [
+            ExecutionVariable(key=k, value=str(v), type=type(v).__name__)
+            for k, v in variables.items()
+        ]
+
+        return CRUDResponse(
+            status=200,
+            message="Execution variables retrieved successfully",
+            result=ExecutionVariablesResponse(execution_variables=string_variables),
+        )
+    except KeyError:
+        logger.warning(f"Agent not found when listing execution variables: {agent_id}")
+        raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+    except Exception as e:
+        logger.exception(f"Error listing execution variables for agent {agent_id}")
+        raise HTTPException(
+            status_code=500, detail=f"Error retrieving execution variables: {str(e)}"
+        )
+
+
+@router.post(
+    "/v1/agents/{agent_id}/execution-variables",
+    response_model=CRUDResponse[ExecutionVariable],
+    summary="Create an agent execution variable",
+    description="Create a new execution variable for a specific agent.",
+)
+async def create_agent_execution_variable(
+    variable_data: ExecutionVariable,
+    agent_id: str = Path(..., description="ID of the agent"),
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
+):
+    try:
+        agent_registry.create_context_variable(agent_id, variable_data.key, variable_data.value)
+        response_content = CRUDResponse(
+            status=201,
+            message="Execution variable created successfully",
+            result=ExecutionVariable(
+                key=variable_data.key,
+                value=str(variable_data.value),  # Ensure value is string for response
+                type=type(variable_data.value).__name__,
+            ),
+        )
+        return JSONResponse(status_code=201, content=jsonable_encoder(response_content))
+    except KeyError:
+        logger.warning(f"Agent not found when creating execution variable: {agent_id}")
+        raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+    except ValueError as e:  # Handles case where variable key already exists
+        logger.warning(
+            f"Attempt to create existing execution variable '{variable_data.key}' "
+            f"for agent {agent_id}: {str(e)}"
+        )
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        logger.exception(
+            f"Error creating execution variable '{variable_data.key}' for agent {agent_id}"
+        )
+        raise HTTPException(status_code=500, detail=f"Error creating execution variable: {str(e)}")
+
+
+@router.get(
+    "/v1/agents/{agent_id}/execution-variables/{variable_key}",
+    response_model=CRUDResponse[ExecutionVariable],
+    summary="Get an agent execution variable",
+    description="Retrieve a specific execution variable for an agent by its key.",
+)
+async def get_agent_execution_variable(
+    agent_id: str = Path(..., description="ID of the agent"),
+    variable_key: str = Path(..., description="Key of the execution variable"),
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
+):
+    try:
+        value = agent_registry.get_context_variable(agent_id, variable_key)
+        return CRUDResponse(
+            status=200,
+            message="Execution variable retrieved successfully",
+            result=ExecutionVariable(key=variable_key, value=value, type=type(value).__name__),
+        )
+    except KeyError as e:
+        logger.warning(
+            f"Agent '{agent_id}' or variable '{variable_key}' not found "
+            "when getting execution variable"
+        )
+        # Distinguish between agent not found and variable not found for clarity
+        if f"Agent with id {agent_id} not found" in str(e):
+            raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Execution variable '{variable_key}' not found for agent {agent_id}",
+            )
+    except Exception as e:
+        logger.exception(
+            f"Error retrieving execution variable '{variable_key}' for agent {agent_id}"
+        )
+        raise HTTPException(
+            status_code=500, detail=f"Error retrieving execution variable: {str(e)}"
+        )
+
+
+@router.patch(
+    "/v1/agents/{agent_id}/execution-variables/{variable_key}",
+    response_model=CRUDResponse[ExecutionVariable],
+    summary="Update an agent execution variable",
+    description="Update an existing execution variable for a specific agent.",
+)
+async def update_agent_execution_variable(
+    variable_data: ExecutionVariableUpdate,  # Use ExecutionVariableUpdate
+    agent_id: str = Path(..., description="ID of the agent"),
+    variable_key: str = Path(..., description="Key of the execution variable to update"),
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
+):
+    try:
+        updated_context = agent_registry.update_context_variable(
+            agent_id, variable_key, variable_data.value
+        )
+        updated_value = updated_context.get(variable_key)
+
+        return CRUDResponse(
+            status=200,
+            message="Execution variable updated successfully",
+            result=ExecutionVariable(
+                key=variable_key,
+                value=str(updated_value),  # Ensure value is string for the response model
+                type=type(updated_value).__name__,
+            ),
+        )
+    except KeyError as e:
+        logger.warning(
+            f"Agent '{agent_id}' or variable '{variable_key}' not found "
+            "when updating execution variable"
+        )
+        if f"Agent with id {agent_id} not found" in str(e):
+            raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Execution variable '{variable_key}' not found for agent {agent_id}",
+            )
+    except Exception as e:
+        logger.exception(f"Error updating execution variable '{variable_key}' for agent {agent_id}")
+        raise HTTPException(status_code=500, detail=f"Error updating execution variable: {str(e)}")
+
+
+@router.delete(
+    "/v1/agents/{agent_id}/execution-variables/{variable_key}",
+    summary="Delete an agent execution variable",
+    description="Delete an execution variable for a specific agent by its key.",
+)
+async def delete_agent_execution_variable(
+    agent_id: str = Path(..., description="ID of the agent"),
+    variable_key: str = Path(..., description="Key of the execution variable to delete"),
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
+):
+    try:
+        agent_registry.delete_context_variable(agent_id, variable_key)
+        return CRUDResponse(
+            status=200,
+            message="Execution variable deleted successfully",
+        )
+    except KeyError as e:
+        logger.warning(
+            f"Agent '{agent_id}' or variable '{variable_key}' not found "
+            "when deleting execution variable"
+        )
+        if f"Agent with id {agent_id} not found" in str(e):
+            raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Execution variable '{variable_key}' not found for agent {agent_id}",
+            )
+    except Exception as e:
+        logger.exception(f"Error deleting execution variable '{variable_key}' for agent {agent_id}")
+        raise HTTPException(status_code=500, detail=f"Error deleting execution variable: {str(e)}")
