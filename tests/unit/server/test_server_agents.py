@@ -1631,3 +1631,237 @@ async def test_download_agent_from_radient_error(test_app_client, dummy_registry
     assert "Error downloading agent from Radient" in data.get(
         "detail", ""
     ) or "Download failed" in data.get("detail", "")
+
+
+@pytest.mark.asyncio
+async def test_list_agent_execution_variables(test_app_client, dummy_registry: AgentRegistry):
+    """Test listing execution variables for an agent."""
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="ExecVarAgent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description="Test agent for execution variable listing",
+            last_message=None,
+            tags=None,
+            categories=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+    dummy_registry.save_agent_context(agent.id, {"key1": "value1", "key2": "value2"})
+    agent_id = agent.id
+
+    response = await test_app_client.get(f"/v1/agents/{agent_id}/execution-variables")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == 200
+    assert data["message"] == "Execution variables retrieved successfully"
+    assert data["result"] == {
+        "execution_variables": [
+            {"key": "key1", "value": "value1", "type": "str"},
+            {"key": "key2", "value": "value2", "type": "str"},
+        ]
+    }
+
+    # Test agent not found
+    response = await test_app_client.get("/v1/agents/nonexistent/execution-variables")
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_create_agent_execution_variable(test_app_client, dummy_registry: AgentRegistry):
+    """Test creating an execution variable for an agent."""
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="ExecVarCreateAgent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description="Test agent for execution variable creation",
+            last_message=None,
+            tags=None,
+            categories=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+    agent_id = agent.id
+
+    payload = {"key": "new_key", "value": "new_value", "type": "str"}
+    response = await test_app_client.post(
+        f"/v1/agents/{agent_id}/execution-variables", json=payload
+    )
+    assert response.status_code == 201
+    data = response.json()
+    assert data["status"] == 201
+    assert data["message"] == "Execution variable created successfully"
+    assert data["result"] == {"key": "new_key", "value": "new_value", "type": "str"}
+
+    # Test creating an existing key (should fail)
+    response = await test_app_client.post(
+        f"/v1/agents/{agent_id}/execution-variables", json=payload
+    )
+    assert response.status_code == 409
+
+    # Test agent not found
+    response = await test_app_client.post(
+        "/v1/agents/nonexistent/execution-variables", json=payload
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_agent_execution_variable(test_app_client, dummy_registry: AgentRegistry):
+    """Test getting a specific execution variable for an agent."""
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="ExecVarGetAgent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description="Test agent for execution variable retrieval",
+            last_message=None,
+            tags=None,
+            categories=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+    dummy_registry.save_agent_context(agent.id, {"get_key": "get_value"})
+    agent_id = agent.id
+
+    response = await test_app_client.get(f"/v1/agents/{agent_id}/execution-variables/get_key")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == 200
+    assert data["message"] == "Execution variable retrieved successfully"
+    assert data["result"] == {"key": "get_key", "value": "get_value", "type": "str"}
+
+    # Test variable not found
+    response = await test_app_client.get(
+        f"/v1/agents/{agent_id}/execution-variables/nonexistent_key"
+    )
+    assert response.status_code == 404
+
+    # Test agent not found
+    response = await test_app_client.get("/v1/agents/nonexistent/execution-variables/get_key")
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_update_agent_execution_variable(test_app_client, dummy_registry: AgentRegistry):
+    """Test updating an execution variable for an agent."""
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="ExecVarUpdateAgent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description="Test agent for execution variable update",
+            last_message=None,
+            tags=None,
+            categories=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+    dummy_registry.save_agent_context(agent.id, {"update_key": "initial_value"})
+    agent_id = agent.id
+
+    payload = {"value": "updated_value"}
+    response = await test_app_client.patch(
+        f"/v1/agents/{agent_id}/execution-variables/update_key", json=payload
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == 200
+    assert data["message"] == "Execution variable updated successfully"
+    assert data["result"] == {"key": "update_key", "value": "updated_value", "type": "str"}
+
+    # Test updating a non-existent key
+    response = await test_app_client.patch(
+        f"/v1/agents/{agent_id}/execution-variables/nonexistent_key", json=payload
+    )
+    assert response.status_code == 404
+
+    # Test agent not found
+    response = await test_app_client.patch(
+        "/v1/agents/nonexistent/execution-variables/update_key", json=payload
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_agent_execution_variable(test_app_client, dummy_registry: AgentRegistry):
+    """Test deleting an execution variable for an agent."""
+    agent = dummy_registry.create_agent(
+        AgentEditFields(
+            name="ExecVarDeleteAgent",
+            security_prompt="Test Security",
+            hosting="openai",
+            model="gpt-4",
+            description="Test agent for execution variable deletion",
+            last_message=None,
+            tags=None,
+            categories=None,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=None,
+            max_tokens=2048,
+            stop=None,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+    dummy_registry.save_agent_context(
+        agent.id, {"delete_key": "delete_value", "keep_key": "keep_value"}
+    )
+    agent_id = agent.id
+
+    response = await test_app_client.delete(f"/v1/agents/{agent_id}/execution-variables/delete_key")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == 200
+    assert data["message"] == "Execution variable deleted successfully"
+
+    # Test deleting a non-existent key
+    response = await test_app_client.delete(
+        f"/v1/agents/{agent_id}/execution-variables/nonexistent_key"
+    )
+    assert response.status_code == 404
+
+    # Test agent not found
+    response = await test_app_client.delete("/v1/agents/nonexistent/execution-variables/delete_key")
+    assert response.status_code == 404
