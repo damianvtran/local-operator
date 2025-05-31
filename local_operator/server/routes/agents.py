@@ -4,6 +4,7 @@ Agent management endpoints for the Local Operator API.
 This module contains the FastAPI route handlers for agent-related endpoints.
 """
 
+import json
 import logging
 import shutil
 import tempfile
@@ -1417,24 +1418,14 @@ async def create_agent_execution_variable(
             coerced_value = variable_data.value.lower() in ("true", "1", "yes", "on")
         elif variable_data.type == "list":
             # Try to parse as JSON list, fallback to string split
-            try:
-                import json
-
-                coerced_value = json.loads(variable_data.value)
-                if not isinstance(coerced_value, list):
-                    raise ValueError("Not a list")
-            except (json.JSONDecodeError, ValueError):
-                coerced_value = variable_data.value.split(",") if variable_data.value else []
+            coerced_value = json.loads(variable_data.value)
+            if not isinstance(coerced_value, list):
+                raise ValueError("Value is not a valid list")
         elif variable_data.type == "dict":
             # Try to parse as JSON dict
-            try:
-                import json
-
-                coerced_value = json.loads(variable_data.value)
-                if not isinstance(coerced_value, dict):
-                    raise ValueError("Not a dict")
-            except (json.JSONDecodeError, ValueError):
-                coerced_value = {}
+            coerced_value = json.loads(variable_data.value)
+            if not isinstance(coerced_value, dict):
+                raise ValueError("Value is not a valid dict")
         # For 'str' type or any other type, keep as string
 
         agent_registry.create_context_variable(agent_id, variable_data.key, coerced_value)
@@ -1531,6 +1522,14 @@ async def update_agent_execution_variable(
                     coerced_value = variable_data.value.lower() in ("true", "1", "yes", "on")
                 elif variable_data.type == "str":
                     coerced_value = str(variable_data.value)
+                elif variable_data.type == "list":
+                    coerced_value = json.loads(variable_data.value)
+                    if not isinstance(coerced_value, list):
+                        raise ValueError("Value is not a valid list")
+                elif variable_data.type == "dict":
+                    coerced_value = json.loads(variable_data.value)
+                    if not isinstance(coerced_value, dict):
+                        raise ValueError("Value is not a valid dict")
                 # Add more type coercions as needed
             except (ValueError, AttributeError) as type_error:
                 raise ValueError(
