@@ -4,6 +4,7 @@ Agent management endpoints for the Local Operator API.
 This module contains the FastAPI route handlers for agent-related endpoints.
 """
 
+import json
 import logging
 import shutil
 import tempfile
@@ -44,7 +45,6 @@ from local_operator.server.models.schemas import (
     CRUDResponse,
     ExecutionVariable,
     ExecutionVariablesResponse,
-    ExecutionVariableUpdate,
 )
 from local_operator.types import AgentState
 
@@ -1369,6 +1369,13 @@ async def list_agent_execution_variables(
     try:
         variables = agent_registry.load_agent_context(agent_id)
 
+        if variables is None:
+            return CRUDResponse(
+                status=200,
+                message="No execution variables found",
+                result=ExecutionVariablesResponse(execution_variables=[]),
+            )
+
         string_variables = [
             ExecutionVariable(key=k, value=str(v), type=type(v).__name__)
             for k, v in variables.items()
@@ -1401,24 +1408,46 @@ async def create_agent_execution_variable(
     agent_registry: AgentRegistry = Depends(get_agent_registry),
 ):
     try:
-        agent_registry.create_context_variable(agent_id, variable_data.key, variable_data.value)
+        # Coerce the value to the correct type based on the type field
+        coerced_value = variable_data.value
+        if variable_data.type == "int":
+            coerced_value = int(variable_data.value)
+        elif variable_data.type == "float":
+            coerced_value = float(variable_data.value)
+        elif variable_data.type == "bool":
+            coerced_value = variable_data.value.lower() in ("true", "1", "yes", "on")
+        elif variable_data.type == "list":
+            # Try to parse as JSON list, fallback to string split
+            coerced_value = json.loads(variable_data.value)
+            if not isinstance(coerced_value, list):
+                raise ValueError("Value is not a valid list")
+        elif variable_data.type == "dict":
+            # Try to parse as JSON dict
+            coerced_value = json.loads(variable_data.value)
+            if not isinstance(coerced_value, dict):
+                raise ValueError("Value is not a valid dict")
+        # For 'str' type or any other type, keep as string
+
+        agent_registry.create_context_variable(agent_id, variable_data.key, coerced_value)
         response_content = CRUDResponse(
             status=201,
             message="Execution variable created successfully",
             result=ExecutionVariable(
                 key=variable_data.key,
-                value=str(variable_data.value),  # Ensure value is string for response
-                type=type(variable_data.value).__name__,
+                value=str(coerced_value),  # Ensure value is string for response
+                type=type(coerced_value).__name__,
             ),
         )
         return JSONResponse(status_code=201, content=jsonable_encoder(response_content))
     except KeyError:
         logger.warning(f"Agent not found when creating execution variable: {agent_id}")
         raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
-    except ValueError as e:  # Handles case where variable key already exists
+    except (
+        ValueError
+    ) as e:  # Handles case where variable key already exists or type conversion errors
         logger.warning(
             f"Attempt to create existing execution variable '{variable_data.key}' "
-            f"for agent {agent_id}: {str(e)}"
+            f"for agent {agent_id} or type conversion error: {str(e)}"
         )
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
@@ -1475,14 +1504,41 @@ async def get_agent_execution_variable(
     description="Update an existing execution variable for a specific agent.",
 )
 async def update_agent_execution_variable(
-    variable_data: ExecutionVariableUpdate,  # Use ExecutionVariableUpdate
+    variable_data: ExecutionVariable,
     agent_id: str = Path(..., description="ID of the agent"),
     variable_key: str = Path(..., description="Key of the execution variable to update"),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
 ):
     try:
+        # Coerce the value to the correct type if type is provided
+        coerced_value = variable_data.value
+        if variable_data.type:
+            try:
+                if variable_data.type == "int":
+                    coerced_value = int(variable_data.value)
+                elif variable_data.type == "float":
+                    coerced_value = float(variable_data.value)
+                elif variable_data.type == "bool":
+                    coerced_value = variable_data.value.lower() in ("true", "1", "yes", "on")
+                elif variable_data.type == "str":
+                    coerced_value = str(variable_data.value)
+                elif variable_data.type == "list":
+                    coerced_value = json.loads(variable_data.value)
+                    if not isinstance(coerced_value, list):
+                        raise ValueError("Value is not a valid list")
+                elif variable_data.type == "dict":
+                    coerced_value = json.loads(variable_data.value)
+                    if not isinstance(coerced_value, dict):
+                        raise ValueError("Value is not a valid dict")
+                # Add more type coercions as needed
+            except (ValueError, AttributeError) as type_error:
+                raise ValueError(
+                    f"Cannot convert '{variable_data.value}' to type "
+                    f"'{variable_data.type}': {str(type_error)}"
+                )
+
         updated_context = agent_registry.update_context_variable(
-            agent_id, variable_key, variable_data.value
+            agent_id, variable_key, coerced_value
         )
         updated_value = updated_context.get(variable_key)
 
@@ -1507,6 +1563,12 @@ async def update_agent_execution_variable(
                 status_code=404,
                 detail=f"Execution variable '{variable_key}' not found for agent {agent_id}",
             )
+    except ValueError as e:
+        logger.warning(
+            f"Type conversion error when updating execution variable '{variable_key}' "
+            f"for agent {agent_id}: {str(e)}"
+        )
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.exception(f"Error updating execution variable '{variable_key}' for agent {agent_id}")
         raise HTTPException(status_code=500, detail=f"Error updating execution variable: {str(e)}")
