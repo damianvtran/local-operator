@@ -862,3 +862,26 @@ class ScheduleListResponse(BaseModel):
             ]
         }
     }
+
+
+class ExecutionVariable(BaseModel):
+    """A single execution variable."""
+
+    key: str = Field(..., description="The key of the execution variable.")
+    value: str = Field(..., description="The value of the execution variable.")
+    type: str = Field(..., description="The type of the execution variable.")
+
+
+class ExecutionVariableUpdate(BaseModel):
+    """Data for updating an execution variable."""
+
+    value: str = Field(..., description="The new value of the execution variable.")
+    type: Optional[str] = Field(None, description="The new type of the execution variable.")
+
+
+class ExecutionVariablesResponse(BaseModel):
+    """Response model for a list of execution variables."""
+
+    execution_variables: List[ExecutionVariable] = Field(
+        ..., description="A list of execution variables."
+    )

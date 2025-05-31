@@ -57,11 +57,11 @@ class AgentData(BaseModel):
         description="A description of the agent.  Defaults to ''.",
     )
     tags: List[str] = Field(
-        [],
+        default_factory=list,
         description="Tags for the agent.  Defaults to an empty list.",
     )
     categories: List[str] = Field(
-        [],
+        default_factory=list,
         description="Categories for the agent.  Defaults to an empty list.",
     )
     last_message: str = Field(
@@ -1695,3 +1695,95 @@ class AgentRegistry:
         except IOError as e:
             logging.error(f"Error writing system prompt for agent {agent_id}: {str(e)}")
             raise IOError(f"Failed to write system prompt: {str(e)}")
+
+    def get_context_variable(self, agent_id: str, variable_key: str) -> Any:
+        """
+        Get a specific execution variable for an agent.
+
+        Args:
+            agent_id (str): The unique identifier of the agent.
+            variable_key (str): The key of the variable to retrieve.
+
+        Returns:
+            Any: The value of the execution variable.
+
+        Raises:
+            KeyError: If the agent_id or variable_key does not exist.
+        """
+        context = self.load_agent_context(agent_id)
+        if context is None or variable_key not in context:
+            raise KeyError(f"Execution variable '{variable_key}' not found for agent {agent_id}")
+        return context[variable_key]
+
+    def create_context_variable(self, agent_id: str, key: str, value: Any) -> Dict[str, Any]:
+        """
+        Create a new execution variable for an agent.
+
+        Args:
+            agent_id (str): The unique identifier of the agent.
+            key (str): The key of the new variable.
+            value (Any): The value of the new variable.
+
+        Returns:
+            Dict[str, Any]: The updated dictionary of all execution variables.
+
+        Raises:
+            KeyError: If the agent_id does not exist.
+            ValueError: If the variable key already exists.
+        """
+        context = self.load_agent_context(agent_id)
+        if context is None:
+            context = {}
+        if key in context:
+            raise ValueError(
+                f"Execution variable '{key}' already exists for agent {agent_id}. "
+                "Use update operation instead."
+            )
+        context[key] = value
+        self.save_agent_context(
+            agent_id, context
+        )  # Persists the change to agent.yml and updates in-memory
+        return context
+
+    def update_context_variable(self, agent_id: str, key: str, value: Any) -> Dict[str, Any]:
+        """
+        Update an existing execution variable for an agent.
+
+        Args:
+            agent_id (str): The unique identifier of the agent.
+            key (str): The key of the variable to update.
+            value (Any): The new value for the variable.
+
+        Returns:
+            Dict[str, Any]: The updated dictionary of all execution variables.
+
+        Raises:
+            KeyError: If the agent_id or variable_key does not exist.
+        """
+        context = self.load_agent_context(agent_id)
+        if context is None or key not in context:
+            raise KeyError(f"Execution variable '{key}' not found for agent {agent_id}")
+        context[key] = value
+        self.save_agent_context(agent_id, context)
+        return context
+
+    def delete_context_variable(self, agent_id: str, key: str) -> Dict[str, Any]:
+        """
+        Delete an execution variable for an agent.
+
+        Args:
+            agent_id (str): The unique identifier of the agent.
+            key (str): The key of the variable to delete.
+
+        Returns:
+            Dict[str, Any]: The updated dictionary of all execution variables.
+
+        Raises:
+            KeyError: If the agent_id or variable_key does not exist.
+        """
+        context = self.load_agent_context(agent_id)
+        if context is None or key not in context:
+            raise KeyError(f"Execution variable '{key}' not found for agent {agent_id}")
+        del context[key]
+        self.save_agent_context(agent_id, context)
+        return context

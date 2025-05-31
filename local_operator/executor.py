@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import builtins
+import difflib
 import inspect
 import io
 import logging
@@ -128,37 +129,44 @@ def get_context_vars_str(context_vars: Dict[str, Any]) -> str:
         value_str = str(value)
         formatted_value_str = value_str
 
-        if callable(value):
+        if inspect.iscoroutine(value):
+            formatted_value_str = f"<Coroutine object {value.__name__} (not awaited)>"
+        elif inspect.iscoroutinefunction(value):
+            # For async function definitions, format them like other callables
             try:
                 doc = value.__doc__ or "No description available"
-                # Get first line of docstring
                 doc = doc.split("\n")[0].strip()
-
                 sig = inspect.signature(value)
-                args = []
-                for p in sig.parameters.values():
-                    arg_type = (
-                        p.annotation.__name__
-                        if hasattr(p.annotation, "__name__")
-                        else str(p.annotation)
-                    )
-                    args.append(f"{p.name}: {arg_type}")
-
+                args = [
+                    f"{p.name}: {p.annotation.__name__ if hasattr(p.annotation, '__name__') else str(p.annotation)}"  # noqa: E501
+                    for p in sig.parameters.values()
+                ]
                 return_type = (
                     sig.return_annotation.__name__
                     if hasattr(sig.return_annotation, "__name__")
                     else str(sig.return_annotation)
                 )
-
-                # Check if function is async
-                is_async = inspect.iscoroutinefunction(value)
-                async_prefix = "async " if is_async else ""
-
-                formatted_value_str = (
-                    f"{async_prefix}{key}({', '.join(args)}) -> {return_type}: {doc}"
-                )
+                formatted_value_str = f"async def {key}({', '.join(args)}) -> {return_type}: {doc}"
             except ValueError:
-                formatted_value_str = value_str
+                formatted_value_str = f"<AsyncFunction {key}>"
+        elif callable(value):
+            try:
+                doc = value.__doc__ or "No description available"
+                doc = doc.split("\n")[0].strip()
+                sig = inspect.signature(value)
+                args = [
+                    f"{p.name}: {p.annotation.__name__ if hasattr(p.annotation, '__name__') else str(p.annotation)}"  # noqa: E501
+                    for p in sig.parameters.values()
+                ]
+                return_type = (
+                    sig.return_annotation.__name__
+                    if hasattr(sig.return_annotation, "__name__")
+                    else str(sig.return_annotation)
+                )
+                # No async_prefix here as iscoroutinefunction is handled above
+                formatted_value_str = f"def {key}({', '.join(args)}) -> {return_type}: {doc}"
+            except ValueError:
+                formatted_value_str = f"<Function {key}>"
 
         if len(formatted_value_str) > 10000:
             formatted_value_str = (
@@ -1517,24 +1525,44 @@ class LocalCodeExecutor:
                 sys.stdin = devnull
                 # Extract any async code
                 if "async def" in code or "await" in code:
-                    # Create an async function from the code
-                    async_code = "async def __temp_async_fn():\n" + "\n".join(
-                        f"    {line}" for line in code.split("\n")
+                    # Prepare the code to be wrapped in an async function
+                    # that will update a provided dictionary with its locals.
+                    wrapped_code_lines = []
+                    wrapped_code_lines.append(
+                        "async def __exec_async_code_wrapper__(__context_dict_to_update__):"
                     )
-                    # Add code to get and run the coroutine
-                    async_code += "\n__temp_coro = __temp_async_fn()"
+                    for line in code.split("\n"):
+                        wrapped_code_lines.append(f"    {line}")
+                    # After user's code, update the passed dictionary
+                    # with locals from user's code scope
+                    wrapped_code_lines.append(
+                        "    # Update context with locals from this async function's scope"
+                    )
+                    wrapped_code_lines.append("    for __k, __v in locals().items():")
+                    # Avoid copying the context dict itself, or internal loop variables.
+                    wrapped_code_lines.append(
+                        "        if __k not in ['__context_dict_to_update__', '__k', '__v']:"
+                    )
+                    wrapped_code_lines.append("            __context_dict_to_update__[__k] = __v")
+
+                    full_wrapped_code = "\n".join(wrapped_code_lines)
+
+                    # Compile and execute the wrapper definition.
+                    # The wrapper function will be defined in self.context.
+                    compiled_wrapper = compile(
+                        full_wrapped_code, "<agent_generated_code_wrapper>", "exec"
+                    )
+                    exec(
+                        compiled_wrapper, self.context
+                    )  # Defines __exec_async_code_wrapper__ in self.context
+
                     try:
-                        # Execute the async function definition
-                        compiled_code = compile(async_code, "<agent_generated_code>", "exec")
-                        exec(compiled_code, self.context)
-                        # Run the coroutine
-                        await self.context["__temp_coro"]
+                        # Call the wrapper, passing self.context to be updated.
+                        await self.context["__exec_async_code_wrapper__"](self.context)
                     finally:
-                        # Clean up even if there was an error
-                        if "__temp_async_fn" in self.context:
-                            del self.context["__temp_async_fn"]
-                        if "__temp_coro" in self.context:
-                            del self.context["__temp_coro"]
+                        # Clean up the wrapper function from self.context
+                        if "__exec_async_code_wrapper__" in self.context:
+                            del self.context["__exec_async_code_wrapper__"]
                 else:
                     # Regular synchronous code
                     # Run synchronous exec in a separate thread to avoid blocking the event loop
@@ -2449,10 +2477,82 @@ class LocalCodeExecutor:
             find = replacement["find"]
             replace = replacement["replace"]
 
-            if find not in file_content:
-                raise ValueError(f"Find string '{find}' not found in file {file_path}")
+            # Attempt exact string match
+            match_index = file_content.find(find)
 
-            file_content = file_content.replace(find, replace, 1)
+            if match_index != -1:
+                # Exact match found, perform replacement
+                file_content = (
+                    file_content[:match_index] + replace + file_content[match_index + len(find) :]
+                )
+            else:
+                # Exact match failed, provide detailed error feedback
+                s1_lines_for_diff = find.splitlines(keepends=True)
+                s2_lines_for_diff = file_content.splitlines(keepends=True)
+
+                matcher = difflib.SequenceMatcher(
+                    None, s1_lines_for_diff, s2_lines_for_diff, autojunk=False
+                )
+                match = matcher.find_longest_match(
+                    0, len(s1_lines_for_diff), 0, len(s2_lines_for_diff)
+                )
+
+                closest_actual_snippet_text = "No close match found to generate a detailed diff."
+                diff_output_text = "No close match found to generate a detailed diff."
+                snippet_line_info = ""
+
+                if match.size > 0:
+                    # Extract the block from the file that aligns with
+                    # find_text's length, starting at the best match point
+                    file_block_for_diff_lines = s2_lines_for_diff[
+                        match.b : match.b + len(s1_lines_for_diff)
+                    ]
+                    if not file_block_for_diff_lines:  # if find_text is longer than remaining file
+                        file_block_for_diff_lines = s2_lines_for_diff[match.b :]
+                    file_block_for_diff_text = "".join(file_block_for_diff_lines)
+
+                    # Generate diff
+                    diff_gen = difflib.ndiff(
+                        s1_lines_for_diff, file_block_for_diff_text.splitlines(keepends=True)
+                    )
+                    diff_output_text = "".join(list(diff_gen))
+
+                    # For showing the "closest text found in the file", provide some context
+                    context_window_lines = 2
+                    actual_snippet_start_line_idx = max(0, match.b - context_window_lines)
+                    actual_snippet_end_line_idx = min(
+                        len(s2_lines_for_diff),
+                        match.b + len(file_block_for_diff_lines) + context_window_lines,
+                    )
+
+                    closest_snippet_lines_with_context = s2_lines_for_diff[
+                        actual_snippet_start_line_idx:actual_snippet_end_line_idx
+                    ]
+                    closest_actual_snippet_text = "".join(closest_snippet_lines_with_context)
+
+                    snippet_start_human_line = actual_snippet_start_line_idx + 1
+                    snippet_end_human_line = actual_snippet_end_line_idx
+                    snippet_line_info = (
+                        f"(lines approx. {snippet_start_human_line}-{snippet_end_human_line})"
+                    )
+
+                    error_message_parts = [
+                        f"The SEARCH block for file '{file_path}' was not found.",
+                        f"\nYour provided SEARCH block:\n---\n{find}\n---\n",
+                        f"The closest text found in the file {snippet_line_info} was:\n---\n{closest_actual_snippet_text}\n---\n",  # noqa: E501
+                        "Differences (+ your search / - actual file content / ? suggestions):\n---",
+                        diff_output_text,
+                        "---\n",
+                        "Please review these differences carefully and provide a corrected SEARCH block.",  # noqa: E501
+                    ]
+                    error_message = "\n".join(error_message_parts)
+                else:
+                    error_message = (
+                        f"The SEARCH block for file '{file_path}' was not found.\n\n"
+                        f"Your provided SEARCH block:\n---\n{find}\n---\n\n"
+                        "No close match could be identified in the file to provide a detailed diff."
+                    )
+                raise ValueError(error_message)
 
         with open(expanded_file_path, "w") as f:
             f.write(file_content)
