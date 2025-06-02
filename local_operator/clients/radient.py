@@ -1042,7 +1042,7 @@ class RadientClient:
         if not self.api_key:
             raise RuntimeError("RADIENT_API_KEY is not configured. Cannot create transcription.")
 
-        url = f"{self.base_url}/transcriptions"
+        url = f"{self.base_url}/tools/transcriptions"
         # Headers for multipart/form-data will be set by requests library,
         # but we still need Authorization.
         headers = self._get_headers(content_type=None, require_api_key=True)
