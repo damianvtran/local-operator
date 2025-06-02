@@ -25,7 +25,7 @@ router = APIRouter()
 async def create_transcription_endpoint(
     radient_client: Annotated[RadientClient, Depends(get_radient_client)],
     file: UploadFile = File(...),
-    model: Optional[str] = Form("whisper-1"),
+    model: Optional[str] = Form("gpt-4o-transcribe"),
     prompt: Optional[str] = Form(None),
     response_format: Optional[str] = Form("json"),
     temperature: Optional[float] = Form(0.0),
@@ -68,6 +68,7 @@ async def create_transcription_endpoint(
             language=language,
             provider=provider,
         )
+
         return CRUDResponse(
             status=200,
             message="Transcription created successfully",

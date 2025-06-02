@@ -51,7 +51,7 @@ async def test_create_transcription_success(test_app_client, temp_audio_file):
         with open(temp_audio_file, "rb") as f:
             files = {"file": (SAMPLE_FILE_NAME, f, "audio/mpeg")}
             data = {
-                "model": "whisper-1",
+                "model": "gpt-4o-transcribe",
                 "response_format": "json",
                 "temperature": 0.0,
                 "provider": "openai",
@@ -67,7 +67,7 @@ async def test_create_transcription_success(test_app_client, temp_audio_file):
     # Check that the temp file path was passed to create_transcription
     call_args = mock_radient_client.create_transcription.call_args[1]
     assert "file_path" in call_args
-    assert call_args["model"] == "whisper-1"
+    assert call_args["model"] == "gpt-4o-transcribe"
     assert call_args["response_format"] == "json"
     assert call_args["temperature"] == 0.0
     assert call_args["provider"] == "openai"

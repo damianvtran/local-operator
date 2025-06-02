@@ -1013,7 +1013,7 @@ class RadientClient:
     def create_transcription(
         self,
         file_path: str,
-        model: Optional[str] = "whisper-1",
+        model: Optional[str] = "gpt-4o-transcribe",
         prompt: Optional[str] = None,
         response_format: Optional[str] = "json",
         temperature: Optional[float] = 0.0,
@@ -1024,7 +1024,7 @@ class RadientClient:
 
         Args:
             file_path (str): Path to the audio file to transcribe.
-            model (Optional[str]): The transcription model to use. Defaults to "whisper-1".
+            model (Optional[str]): The transcription model to use. Defaults to "gpt-4o-transcribe".
             prompt (Optional[str]): Optional text prompt to guide the model. Max 1000 chars.
             response_format (Optional[str]): Format of the response ('json', 'text', 'srt',
                                              'verbose_json', 'vtt'). Defaults to "json".

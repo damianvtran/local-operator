@@ -1415,7 +1415,7 @@ def create_audio_transcription_tool(
 
     def create_audio_transcription(
         file_path: str,
-        model: Optional[str] = "whisper-1",
+        model: Optional[str] = "gpt-4o-transcribe",
         prompt: Optional[str] = None,
         response_format: Optional[str] = "json",
         temperature: Optional[float] = 0.0,
@@ -1426,8 +1426,8 @@ def create_audio_transcription_tool(
 
         Args:
             file_path (str): Path to the audio file on disk to transcribe.
-            model (Optional[str], optional): The transcription model to use (e.g., "whisper-1").
-                Defaults to "whisper-1".
+            model (Optional[str], optional): The transcription model to use (e.g., "gpt-4o-transcribe").
+                Defaults to "gpt-4o-transcribe".
             prompt (Optional[str], optional): An optional text prompt to guide the model.
                 Maximum 1000 characters. Defaults to None.
             response_format (Optional[str], optional): The format of the transcription response.
