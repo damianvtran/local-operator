@@ -283,6 +283,51 @@ class RadientSendEmailAPIResponse(BaseModel):
 
 
 # Token Refresh Models
+
+
+# Transcription Models
+class RadientTranscriptionResponseData(BaseModel):
+    """Data part of the response when creating a transcription.
+
+    Attributes:
+        text (str): The transcribed text from the audio.
+        provider (str): The name of the provider that performed the transcription.
+        status (str): The status of the transcription request.
+        error (Optional[str]): An error message if the transcription failed.
+        duration (Optional[float]): The duration of the transcribed audio in seconds.
+    """
+
+    text: str
+    provider: str
+    status: str
+    error: Optional[str] = None
+    duration: Optional[float] = None
+    model_config = {"extra": "allow"}
+
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        return super().model_dump(*args, **kwargs)
+
+
+class RadientTranscriptionAPIResponse(BaseModel):
+    """Overall API response structure for creating a transcription.
+
+    Attributes:
+        result (Optional[RadientTranscriptionResponseData]): The actual transcription result.
+        error (Optional[str]): Error message if any.
+        msg (Optional[str]): Additional message if any.
+    """
+
+    result: Optional[RadientTranscriptionResponseData] = None
+    error: Optional[str] = None
+    msg: Optional[str] = None
+    model_config = {"extra": "allow"}
+
+    def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Convert model to dictionary, making it JSON serializable."""
+        return super().model_dump(*args, **kwargs)
+
+
 class RadientTokenRefreshRequest(BaseModel):
     """Request model for refreshing an access token.
 
@@ -963,3 +1008,88 @@ class RadientClient:
             ) from e
         except Exception as e:
             raise RuntimeError(f"Failed to refresh token: {str(e)}") from e
+
+    # Transcription Methods
+    def create_transcription(
+        self,
+        file_path: str,
+        model: Optional[str] = "gpt-4o-transcribe",
+        prompt: Optional[str] = None,
+        response_format: Optional[str] = "json",
+        temperature: Optional[float] = 0.0,
+        language: Optional[str] = None,
+        provider: Optional[str] = "openai",
+    ) -> RadientTranscriptionResponseData:
+        """Create an audio transcription using the Radient API.
+
+        Args:
+            file_path (str): Path to the audio file to transcribe.
+            model (Optional[str]): The transcription model to use. Defaults to "gpt-4o-transcribe".
+            prompt (Optional[str]): Optional text prompt to guide the model. Max 1000 chars.
+            response_format (Optional[str]): Format of the response ('json', 'text', 'srt',
+                                             'verbose_json', 'vtt'). Defaults to "json".
+            temperature (Optional[float]): Sampling temperature (0-2). Defaults to 0.0.
+            language (Optional[str]): Language of audio in ISO-639-1 format (e.g., "en").
+            provider (Optional[str]): Transcription provider. Defaults to "openai".
+
+        Returns:
+            RadientTranscriptionResponseData: The transcription result.
+
+        Raises:
+            RuntimeError: If the API key is not set, file not found, or request fails.
+            ValueError: If input parameters are invalid.
+        """
+        if not self.api_key:
+            raise RuntimeError("RADIENT_API_KEY is not configured. Cannot create transcription.")
+
+        url = f"{self.base_url}/tools/transcriptions"
+        # Headers for multipart/form-data will be set by requests library,
+        # but we still need Authorization.
+        headers = self._get_headers(content_type=None, require_api_key=True)
+
+        form_data: Dict[str, Any] = {}
+        if model:
+            form_data["model"] = model
+        if prompt:
+            if len(prompt) > 1000:
+                raise ValueError("Prompt cannot exceed 1000 characters.")
+            form_data["prompt"] = prompt
+        if response_format:
+            form_data["response_format"] = response_format
+        if temperature is not None:
+            if not (0 <= temperature <= 2):
+                raise ValueError("Temperature must be between 0 and 2.")
+            form_data["temperature"] = str(temperature)  # Form data sends as string
+        if language:
+            form_data["language"] = language
+        if provider:
+            form_data["provider"] = provider
+
+        try:
+            with open(file_path, "rb") as audio_file:
+                files = {"file": (file_path, audio_file)}
+                response = requests.post(url, headers=headers, data=form_data, files=files)
+            response.raise_for_status()
+            api_response_data = response.json()
+            api_response = RadientTranscriptionAPIResponse.model_validate(api_response_data)
+
+            if api_response.error:
+                raise RuntimeError(
+                    f"Failed to create transcription: {api_response.error} - {api_response.msg}"
+                )
+            if not api_response.result:
+                raise RuntimeError("Failed to create transcription: No result data in response.")
+            return api_response.result
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Audio file not found: {file_path}")
+        except requests.exceptions.RequestException as e:
+            error_body = (
+                e.response.content.decode()
+                if hasattr(e, "response") and e.response
+                else "No response body"
+            )
+            raise RuntimeError(
+                f"Failed to create transcription: {str(e)}, Response Body: {error_body}"
+            ) from e
+        except Exception as e:
+            raise RuntimeError(f"Failed to create transcription: {str(e)}") from e
