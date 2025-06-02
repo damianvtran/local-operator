@@ -13,8 +13,8 @@
 
 <br />
 
-<div style="display: flex; justify-content: center; border-radius: 8px; overflow: hidden;">
-  <img src="./static/preview-example-ui.gif" alt="Local Operator UI Dashboard Example" style="width: 100%; max-width: 800px;">
+<p align="center">
+  <img src="./static/preview-example-ui.gif" alt="Local Operator UI Dashboard Example" style="width: 640px">
 </div>
 
 <p align="center"><i>Local Operator server powering the open source UI.  The frontend is optional and available <a href="https://github.com/damianvtran/local-operator-ui">here</a></i> or by downloading from the <a href="https://local-operator.com">website</a></p>
