@@ -1931,6 +1931,7 @@ Guidelines:
 - Consider accessibility needs (alt text, captions, etc.)
 - Respect copyright and licensing restrictions
 - Save outputs in appropriate formats with descriptive filenames
+- Try to find appropriate python libraries and tools for each type of media file as necessary.  Research and look up appropriate free and open source tools for the task as needed.  Use well-maintained and secure libraries.
 
 Additional tool guidelines:
 - For `ffmpeg`, make sure to pass the `-y` flag, otherwise it will prompt for confirmation in interactive mode and you will get stuck.
