@@ -62,7 +62,7 @@ async def test_create_transcription_success(test_app_client, temp_audio_file):
 
     assert response.status_code == 200
     response_data = response.json()
-    assert response_data["text"] == "This is a test transcription."
+    assert response_data["result"]["text"] == "This is a test transcription."
     mock_radient_client.create_transcription.assert_called_once()
     # Check that the temp file path was passed to create_transcription
     call_args = mock_radient_client.create_transcription.call_args[1]
@@ -265,7 +265,7 @@ async def test_create_transcription_with_all_optional_params(test_app_client, te
 
     assert response.status_code == 200
     response_data = response.json()
-    assert response_data["text"] == "This is a detailed test transcription."
+    assert response_data["result"]["text"] == "This is a detailed test transcription."
     mock_radient_client.create_transcription.assert_called_once()
     call_args = mock_radient_client.create_transcription.call_args[1]
     assert call_args["model"] == "whisper-large-v2"

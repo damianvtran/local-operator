@@ -11,13 +11,14 @@ from local_operator.clients.radient import (
     RadientTranscriptionResponseData,
 )
 from local_operator.server.dependencies import get_radient_client
+from local_operator.server.models.schemas import CRUDResponse
 
 router = APIRouter()
 
 
 @router.post(
     "/v1/transcriptions",
-    response_model=RadientTranscriptionResponseData,
+    response_model=CRUDResponse[RadientTranscriptionResponseData],
     summary="Transcribe Audio File",
     tags=["Transcription"],
 )
@@ -30,7 +31,7 @@ async def create_transcription_endpoint(
     temperature: Optional[float] = Form(0.0),
     language: Optional[str] = Form(None),
     provider: Optional[str] = Form("openai"),
-) -> RadientTranscriptionResponseData:
+) -> CRUDResponse[RadientTranscriptionResponseData]:
     """
     Transcribe an audio file using the specified model and parameters.
 
@@ -67,7 +68,11 @@ async def create_transcription_endpoint(
             language=language,
             provider=provider,
         )
-        return transcription_result
+        return CRUDResponse(
+            status=200,
+            message="Transcription created successfully",
+            result=transcription_result,
+        )
     except FileNotFoundError:
         # This case should ideally be caught by the client if temp_file_path is wrong,
         # but good to have a catch here.
