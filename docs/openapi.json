@@ -1663,7 +1663,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ExecutionVariableUpdate"
+                "$ref": "#/components/schemas/ExecutionVariable"
               }
             }
           }
@@ -3053,6 +3053,48 @@
           }
         }
       }
+    },
+    "/v1/transcriptions": {
+      "post": {
+        "tags": [
+          "Transcription"
+        ],
+        "summary": "Transcribe Audio File",
+        "description": "Transcribe an audio file using the specified model and parameters.\n\nThe audio file is sent as `multipart/form-data`.",
+        "operationId": "create_transcription_endpoint_v1_transcriptions_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_create_transcription_endpoint_v1_transcriptions_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RadientTranscriptionResponseData"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -3899,6 +3941,90 @@
         "type": "object",
         "title": "AgentUpdate",
         "description": "Data for updating an existing agent."
+      },
+      "Body_create_transcription_endpoint_v1_transcriptions_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "format": "binary",
+            "title": "File"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model",
+            "default": "whisper-1"
+          },
+          "prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt"
+          },
+          "response_format": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response Format",
+            "default": "json"
+          },
+          "temperature": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temperature",
+            "default": 0.0
+          },
+          "language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Language"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider",
+            "default": "openai"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_create_transcription_endpoint_v1_transcriptions_post"
       },
       "Body_import_agent_v1_agents_import_post": {
         "properties": {
@@ -5060,33 +5186,6 @@
         "title": "ExecutionVariable",
         "description": "A single execution variable."
       },
-      "ExecutionVariableUpdate": {
-        "properties": {
-          "value": {
-            "type": "string",
-            "title": "Value",
-            "description": "The new value of the execution variable."
-          },
-          "type": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Type",
-            "description": "The new type of the execution variable."
-          }
-        },
-        "type": "object",
-        "required": [
-          "value"
-        ],
-        "title": "ExecutionVariableUpdate",
-        "description": "Data for updating an execution variable."
-      },
       "ExecutionVariablesResponse": {
         "properties": {
           "execution_variables": {
@@ -5641,6 +5740,53 @@
           ]
         }
       },
+      "RadientTranscriptionResponseData": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "provider": {
+            "type": "string",
+            "title": "Provider"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "duration": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "text",
+          "provider",
+          "status"
+        ],
+        "title": "RadientTranscriptionResponseData",
+        "description": "Data part of the response when creating a transcription.\n\nAttributes:\n    text (str): The transcribed text from the audio.\n    provider (str): The name of the provider that performed the transcription.\n    status (str): The status of the transcription request.\n    error (Optional[str]): An error message if the transcription failed.\n    duration (Optional[float]): The duration of the transcribed audio in seconds."
+      },
       "ScheduleCreateRequest": {
         "properties": {
           "prompt": {
@@ -6111,6 +6257,10 @@
     {
       "name": "Schedules",
       "description": "Schedule management endpoints"
+    },
+    {
+      "name": "Transcription",
+      "description": "Audio transcription endpoints"
     },
     {
       "name": "Static",

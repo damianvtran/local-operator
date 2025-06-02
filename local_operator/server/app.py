@@ -32,6 +32,7 @@ from local_operator.server.routes import (
     models,
     schedules,
     static,
+    transcription,
     websockets,
 )
 from local_operator.server.utils.websocket_manager import WebSocketManager
@@ -112,6 +113,7 @@ app = FastAPI(
         {"name": "Credentials", "description": "Credential management endpoints"},
         {"name": "Models", "description": "Model management endpoints"},
         {"name": "Schedules", "description": "Schedule management endpoints"},  # Added
+        {"name": "Transcription", "description": "Audio transcription endpoints"},  # Added
         {"name": "Static", "description": "Static file hosting endpoints"},
     ],
 )
@@ -173,4 +175,9 @@ app.include_router(
 # /v1/schedules
 app.include_router(
     schedules.router,
+)
+
+# /v1/transcriptions
+app.include_router(
+    transcription.router,
 )
