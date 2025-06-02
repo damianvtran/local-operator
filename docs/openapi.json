@@ -3959,7 +3959,7 @@
               }
             ],
             "title": "Model",
-            "default": "whisper-1"
+            "default": "gpt-4o-transcribe"
           },
           "prompt": {
             "anyOf": [
