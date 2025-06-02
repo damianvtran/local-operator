@@ -5,18 +5,14 @@ Tests for the transcription endpoints of the FastAPI server.
 import os
 import shutil
 import tempfile
-from unittest.mock import MagicMock, patch  # Add patch back
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi import UploadFile
 
-from local_operator.clients.radient import (
-    RadientTranscriptionResponseData,  # Remove unused RadientClient
-)
-from local_operator.server.app import app  # Import the FastAPI app instance
-from local_operator.server.dependencies import (
-    get_radient_client,  # Import the dependency key
-)
+from local_operator.clients.radient import RadientTranscriptionResponseData
+from local_operator.server.app import app
+from local_operator.server.dependencies import get_radient_client
 
 # Define a sample audio file content (can be any bytes)
 SAMPLE_AUDIO_CONTENT = b"sample audio data"
