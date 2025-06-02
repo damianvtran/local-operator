@@ -20,6 +20,7 @@ from pydantic import SecretStr
 
 from local_operator.agents import AgentRegistry
 from local_operator.clients.fal import FalClient, FalImageGenerationResponse, ImageSize
+from local_operator.clients.radient import RadientTranscriptionResponseData  # Added
 from local_operator.clients.radient import (
     RadientClient,
     RadientImageGenerationResponse,
@@ -1400,6 +1401,76 @@ def send_email_to_user_tool(
     return send_email_to_user
 
 
+def create_audio_transcription_tool(
+    radient_client: RadientClient,
+) -> Callable[..., RadientTranscriptionResponseData]:
+    """Create a tool function to transcribe audio using the Radient API.
+
+    Args:
+        radient_client (RadientClient): The Radient API client to use.
+
+    Returns:
+        Callable: A function that transcribes an audio file.
+    """
+
+    def create_audio_transcription(
+        file_path: str,
+        model: Optional[str] = "gpt-4o-transcribe",
+        prompt: Optional[str] = None,
+        response_format: Optional[str] = "json",
+        temperature: Optional[float] = 0.0,
+        language: Optional[str] = None,
+        provider: Optional[str] = "openai",
+    ) -> RadientTranscriptionResponseData:
+        """Transcribe an audio file to text using the Radient API. This tool takes the path to an audio file and returns the transcribed text. You can optionally specify the model, a prompt to guide transcription, the desired response format, temperature for sampling, the language of the audio, and the transcription provider.
+
+        Args:
+            file_path (str): Path to the audio file on disk to transcribe.
+            model (Optional[str], optional): The transcription model to use (e.g., "gpt-4o-transcribe").
+                Defaults to "gpt-4o-transcribe".
+            prompt (Optional[str], optional): An optional text prompt to guide the model.
+                Maximum 1000 characters. Defaults to None.
+            response_format (Optional[str], optional): The format of the transcription response.
+                Allowed values: "json", "text", "srt", "verbose_json", "vtt".
+                Defaults to "json".
+            temperature (Optional[float], optional): Sampling temperature (0.0-2.0).
+                Higher values make output more random. Defaults to 0.0.
+            language (Optional[str], optional): Language of the audio in ISO-639-1 format
+                (e.g., "en" for English). Defaults to None.
+            provider (Optional[str], optional): The transcription service provider to use
+                (e.g., "openai"). Defaults to "openai".
+
+        Returns:
+            RadientTranscriptionResponseData: A response containing the transcribed text and metadata.
+
+        Raises:
+            RuntimeError: If the Radient client is not available, API key is missing,
+                          or the request fails.
+            FileNotFoundError: If the audio file does not exist.
+            ValueError: If input parameters are invalid (e.g. prompt too long, temp out of range)
+        """  # noqa: E501
+        if not radient_client.api_key:
+            raise RuntimeError("RADIENT_API_KEY is not configured. Cannot transcribe audio.")
+
+        # Basic validation for parameters that have client-side checks
+        if prompt and len(prompt) > 1000:
+            raise ValueError("Prompt cannot exceed 1000 characters.")
+        if temperature is not None and not (0 <= temperature <= 2):
+            raise ValueError("Temperature must be between 0 and 2.")
+
+        return radient_client.create_transcription(
+            file_path=file_path,
+            model=model,
+            prompt=prompt,
+            response_format=response_format,
+            temperature=temperature,
+            language=language,
+            provider=provider,
+        )
+
+    return create_audio_transcription
+
+
 class ToolRegistry:
     """Registry for tools that can be used by agents.
 
@@ -1527,6 +1598,7 @@ class ToolRegistry:
         - stop_schedule: Stop an active schedule for an agent
         - list_schedules: List active schedules for an agent
         - send_email_to_user: Send an email to the authenticated user
+        - create_audio_transcription: Transcribe an audio file to text
         """
         self.add_tool("get_page_html_content", get_page_html_content)
         self.add_tool("get_page_text_content", get_page_text_content)
@@ -1634,6 +1706,10 @@ class ToolRegistry:
         # Add send_email_to_user tool if Radient client and API key are available
         if self.radient_client and self.radient_client.api_key:
             self.add_tool("send_email_to_user", send_email_to_user_tool(self.radient_client))
+            self.add_tool(
+                "create_audio_transcription",
+                create_audio_transcription_tool(self.radient_client),
+            )
 
     def add_tool(self, name: str, tool: Callable[..., Any]):
         """Add a new tool to the registry.
