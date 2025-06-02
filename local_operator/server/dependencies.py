@@ -1,6 +1,7 @@
 from fastapi import Request, WebSocket
 
 from local_operator.agents import AgentRegistry
+from local_operator.clients.radient import RadientClient
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
@@ -43,6 +44,22 @@ def get_env_config(request: Request) -> EnvConfig:
 def get_scheduler_service(request: Request) -> SchedulerService:
     """Get the scheduler service from the application state."""
     return request.app.state.scheduler_service
+
+
+def get_radient_client(request: Request) -> RadientClient:
+    """Get the Radient API client, configured with API key and base URL."""
+    credential_manager = get_credential_manager(request)
+    env_config = get_env_config(request)
+
+    api_key = None
+    try:
+        api_key = credential_manager.get_credential("RADIENT_API_KEY")
+    except KeyError:
+        # Key not found, RadientClient will be initialized without it.
+        # Operations requiring the key will fail gracefully within the client.
+        pass
+
+    return RadientClient(api_key=api_key, base_url=env_config.radient_api_base_url)
 
 
 async def get_websocket_manager_ws(websocket: WebSocket) -> WebSocketManager:
