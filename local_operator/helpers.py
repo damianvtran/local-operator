@@ -839,30 +839,85 @@ def setup_cross_platform_environment():
     original_path = os.environ.get("PATH", "")
     logger.debug(f"Initial PATH: {original_path}")
 
-    user_effective_path = None
+    user_effective_path_str = None
 
     # Determine the OS and call the appropriate function
     os_name = platform.system()
     if os_name == "Windows":
-        user_effective_path = get_windows_registry_path()
+        user_effective_path_str = get_windows_registry_path()
     elif os_name in ["Darwin", "Linux"]:
-        user_effective_path = get_posix_shell_path()
+        user_effective_path_str = get_posix_shell_path()
     else:
         logger.warning(f"Unsupported OS: {os_name}. Cannot automatically retrieve effective PATH.")
-        # Optionally, you could just use the original_path or raise an error
-        return  # Exit the setup function if OS is not supported
+        return
 
-    # Update os.environ['PATH'] if a valid, different path was retrieved
-    if user_effective_path and user_effective_path != original_path:
-        logger.debug(f"Updating os.environ['PATH'] to: {user_effective_path}")
-        os.environ["PATH"] = user_effective_path
-    elif user_effective_path is None:
+    # Ensure user_effective_path_str is not None before proceeding
+    if user_effective_path_str is None:
+        user_effective_path_str = original_path  # Fallback to original if retrieval failed
+
+    # Convert string path to list for easier manipulation
+    user_effective_path_list = user_effective_path_str.split(os.pathsep)
+    # Remove empty strings that might result from split
+    user_effective_path_list = [p for p in user_effective_path_list if p]
+
+    # Define potential Electron AppData "Local Operator/bin" subdirectories
+    electron_app_data_bin_dirs = []
+    if os_name == "Windows":
+        electron_app_data_bin_dirs = [
+            os.path.join(os.path.expanduser("~\\AppData\\Local"), "Local Operator", "bin"),
+            os.path.join(os.path.expanduser("~\\AppData\\Roaming"), "Local Operator", "bin"),
+        ]
+    elif os_name == "Darwin":  # macOS
+        electron_app_data_bin_dirs = [
+            os.path.join(
+                os.path.expanduser("~/Library/Application Support"), "Local Operator", "bin"
+            )
+        ]
+    elif os_name == "Linux":
+        electron_app_data_bin_dirs = [
+            os.path.join(os.path.expanduser("~/.config"), "Local Operator", "bin")
+        ]
+
+    # Add Electron AppData "Local Operator/bin" directories to the
+    # path if they exist and are not already present
+    added_electron_bin_paths = False
+    for electron_bin_dir in electron_app_data_bin_dirs:
+        if os.path.isdir(electron_bin_dir):
+            # Normalize paths for comparison to avoid duplicates due to case or slashes
+            normalized_electron_bin_dir = os.path.normcase(os.path.normpath(electron_bin_dir))
+            path_exists = any(
+                os.path.normcase(os.path.normpath(p)) == normalized_electron_bin_dir
+                for p in user_effective_path_list
+            )
+            if not path_exists:
+                logger.debug(
+                    f"Prepending Electron AppData bin directory to PATH: {electron_bin_dir}"
+                )
+                user_effective_path_list.insert(0, electron_bin_dir)  # Prepend for priority
+                added_electron_bin_paths = True
+        else:
+            logger.debug(
+                f"Electron AppData bin directory not found or not a directory: {electron_bin_dir}"
+            )
+
+    # Reconstruct the path string
+    if added_electron_bin_paths:
+        user_effective_path_str = os.pathsep.join(user_effective_path_list)
+
+    # Update os.environ['PATH'] if a valid, different path was retrieved or modified
+    if user_effective_path_str and user_effective_path_str != original_path:
+        logger.debug(f"Updating os.environ['PATH'] to: {user_effective_path_str}")
+        os.environ["PATH"] = user_effective_path_str
+    elif not user_effective_path_str and original_path:  # Path became empty, revert
+        logger.warning("Effective PATH became empty, reverting to original PATH.")
+        os.environ["PATH"] = original_path
+    elif user_effective_path_str == original_path:
+        logger.debug("Effective PATH is the same as the initial PATH. No update needed.")
+    else:  # user_effective_path_str is None or empty, and original_path was also empty/None
         logger.warning(
-            "Could not retrieve user's effective PATH. "
-            "Subprocess calls will use the initial PATH."
+            "Could not retrieve or construct a valid effective PATH. "
+            "Subprocess calls will use the initial (possibly empty) PATH."
         )
-    else:  # Path retrieved is same as original
-        logger.debug("Retrieved effective PATH is the same as the initial PATH. No update needed.")
 
     # Optional: Verification step (example)
     # Try to find a common command expected to be in the user's path
