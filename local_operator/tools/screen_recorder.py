@@ -131,7 +131,7 @@ async def start_recording_tool(
         )
 
     recording_id = str(uuid.uuid4())
-    temp_dir = os.path.join(os.path.expanduser("~"), ".local_operator_recordings_temp")
+    temp_dir = os.path.join(os.path.expanduser("~"), ".local_operator/tmp/recordings")
     os.makedirs(temp_dir, exist_ok=True)
 
     # Use .mp4 for combined output
@@ -217,8 +217,3 @@ async def stop_recording_tool(recording_id: str) -> str:
 
     del _active_recordings[recording_id]
     return f"Recording saved to: {output_path}"
-
-
-# --- Tool Registration (Conceptual, would be in ToolRegistry.init_tools) ---
-# self.add_tool("start_recording", start_recording_tool)
-# self.add_tool("stop_recording", stop_recording_tool)
