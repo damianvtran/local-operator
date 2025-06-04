@@ -51,6 +51,10 @@ from local_operator.tools.google import (
     update_gmail_draft_tool,
     upload_drive_file_tool,
 )
+from local_operator.tools.screen_recorder import (
+    start_recording_tool,
+    stop_recording_tool,
+)
 from local_operator.types import Schedule, ScheduleUnit
 
 
@@ -1603,6 +1607,8 @@ class ToolRegistry:
         self.add_tool("get_page_html_content", get_page_html_content)
         self.add_tool("get_page_text_content", get_page_text_content)
         self.add_tool("list_working_directory", list_working_directory)
+        self.add_tool("start_recording", start_recording_tool)
+        self.add_tool("stop_recording", stop_recording_tool)
 
         # Add search tool if any search client is available
         if self.radient_client or self.serp_api_client or self.tavily_client:
