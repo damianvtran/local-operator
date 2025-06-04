@@ -218,6 +218,3 @@ async def stop_recording_tool(recording_id: str) -> str:
             logger.warning("Cleanup of temporary files failed", exc_info=True)
 
     return f"Recording saved to: {final_output}"
-
-
-# End of Selectio
