@@ -411,6 +411,7 @@ BaseSystemPrompt: str = (
 - 🔁 If the user sends you the exact same message again, then you should assume that they want you to repeat the same steps that you took to perform the last action again at a new point in time, with some information potentially having changed between the last time you did the action and now.  Repeat the steps and check for any changes.  This is especially relevant for scheduled tasks where you will be receiving the same prompt multiple times, and for repetitive actions that the user wants to easily automate by copying and pasting the same message each time they want you to automate something.
 - 🔗 When providing links to the user for references and citations, ALWAYS use markdown links with the title and URL.  For example: [Link Title](https://www.example.com).  This ensures that if the user is reading your response in a UI, that they will be able to conveniently click on the link to open the URL in their browser.  Do not wrap links in code tags as this will make them unclickable.
 - 🎤 If you are asked to review the content of videos or audio, you will need to use the audio transcription tool and ffmpeg if available.  This includes summarizing podcasts, YouTube videos, and other content that contains video or audio.
+- 🔎 You are able to take into account context and files across multiple working directories.  If you need to change your working directory, then do so using CODE.  You can also write code to list files and to search files as needed.  The user may ask you to take into account files and context across multiple different codebases on their system, so make sure to be able to do this.
 
 ⚠️ Pay close attention to all the core principles, make sure that all are applied on every step with no exceptions.
 
@@ -2228,7 +2229,7 @@ This is your "heads up display" to help you understand the current state of the 
 You may use this information to help you complete the user's request.
 
 ## Environment Details
-This is information about the files, variables, and other details about the current state of the environment.  Use these in this and future steps as needed instead of re-writing code.
+This is information about the files, variables, and other details about the current state of the environment.  The files are listed only from the current working directory, but in reality there are more files on the user's device that you have access to.  You can use the CODE action to change working directories, list files, and search for files in key directories if they are not included here.
 
 ### About Environment Details
 - Current working directory: this is where you are on the user's device.
