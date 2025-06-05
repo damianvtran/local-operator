@@ -1426,10 +1426,10 @@ def create_audio_transcription_tool(
         language: Optional[str] = None,
         provider: Optional[str] = "openai",
     ) -> RadientTranscriptionResponseData:
-        """Transcribe an audio file to text using the Radient API. This tool takes the path to an audio file and returns the transcribed text. You can optionally specify the model, a prompt to guide transcription, the desired response format, temperature for sampling, the language of the audio, and the transcription provider.
+        """Transcribe an audio file to text using the Radient API. This tool takes the path to an audio file and returns the transcribed text. Supported audio formats include flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, and webm. You can optionally specify the model, a prompt to guide transcription, the desired response format, temperature for sampling, the language of the audio, and the transcription provider.
 
         Args:
-            file_path (str): Path to the audio file on disk to transcribe.
+            file_path (str): Path to the audio file on disk to transcribe. Must be a valid path to an audio file on disk. Supported formats: flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, webm.
             model (Optional[str], optional): The transcription model to use (e.g., "gpt-4o-transcribe").
                 Defaults to "gpt-4o-transcribe".
             prompt (Optional[str], optional): An optional text prompt to guide the model.
