@@ -155,7 +155,14 @@ def _get_os_specific_video_input(video_source: str) -> List[str]:
     system = platform.system()
     if video_source == "screen":
         if system == "Darwin":
-            return ["-f", "avfoundation", "-i", "1"]  # Often main screen, may need specific index
+            return [
+                "-f",
+                "avfoundation",
+                "-framerate",
+                "30",
+                "-i",
+                "1",
+            ]  # Often main screen, may need specific index
         if system == "Windows":
             return ["-f", "gdigrab", "-i", "desktop"]
         if system == "Linux":
@@ -200,8 +207,6 @@ async def start_recording_tool(
     if record_video:
         cmd += _get_os_specific_video_input(video_source)
         cmd += [
-            "-r",
-            "30",
             "-c:v",
             "libx264",
             "-preset",
