@@ -237,6 +237,31 @@ async def start_recording_tool(
     audio_source: str = "system",
     video_source: str = "screen",
 ) -> str:
+    """Start recording screen and/or audio using FFmpeg.
+
+    This tool allows you to start recording the screen, audio, or both simultaneously.
+    The recording will continue until you call the stop_recording_tool. You must provide
+    an output path where the recording will be saved. The tool supports various audio
+    sources (system audio or microphone) and video sources (screen capture).
+
+    Args:
+        output_path (str): Path where the recording file will be saved (e.g., "recording.mp4").  If the user doesn't specifically tell you where to save the file, then save it in your current working directory with a well-organized naming structure.
+        record_audio (bool, optional): Whether to record audio. Defaults to True.
+        record_video (bool, optional): Whether to record video. Defaults to True.
+        audio_source (str, optional): Audio source to record from. Options are "system"
+            for system audio or "microphone" for microphone input. Defaults to "system".
+        video_source (str, optional): Video source to record from. Currently only
+            "screen" is supported. Defaults to "screen".
+
+    Returns:
+        str: Confirmation message with recording details and instructions for stopping.
+
+    Raises:
+        ToolError: If FFmpeg is not installed or not found in PATH.
+        ValueError: If neither audio nor video recording is enabled, or if invalid
+            source options are provided.
+        NotImplementedError: If unsupported video_source options are used.
+    """  # noqa: E501
     if shutil.which("ffmpeg") is None:
         raise ToolError("FFmpeg executable not found. Please install FFmpeg.")
     if not (record_audio or record_video):
@@ -393,6 +418,26 @@ async def start_recording_tool(
 
 
 async def stop_recording_tool(recording_id: str) -> str:
+    """Stop an active screen/audio recording and save the final output file.
+
+    This tool stops a recording that was previously started with start_recording_tool.
+    It gracefully terminates the FFmpeg process, waits for the recording to be finalized,
+    and moves the temporary recording file to the specified output location. The tool
+    will attempt graceful termination first, then escalate to forceful termination if
+    necessary.
+
+    Args:
+        recording_id (str): The unique identifier returned by start_recording_tool
+            when the recording was started.
+
+    Returns:
+        str: Confirmation message indicating the recording was stopped and the location
+        of the saved file.
+
+    Raises:
+        ToolError: If no active recording with the given ID is found, if the recording
+            process cannot be terminated, or if the output file cannot be saved.
+    """
     all_states = await _read_state_file()
     info = all_states.pop(recording_id, None)
 
