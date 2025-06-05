@@ -4,8 +4,10 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import signal
+import subprocess
 import uuid
 from asyncio.subprocess import DEVNULL, PIPE, Process
 from pathlib import Path
@@ -43,7 +45,7 @@ async def _read_state_file() -> Dict[str, StoredRecordingInfo]:
         try:
             with open(STATE_FILE_PATH, "r") as f:
                 content = f.read()
-                if not content:  # Handle empty file
+                if not content:
                     return {}
                 return json.loads(content)
         except (json.JSONDecodeError, FileNotFoundError):
@@ -78,7 +80,7 @@ async def _run_ffmpeg_command(command: List[str], process_name: str, stderr_hand
     try:
         process = await asyncio.create_subprocess_exec(
             *command,
-            stdin=PIPE,  # For sending 'q' if possible, though PID stop won't use it
+            stdin=PIPE,
             stdout=DEVNULL,
             stderr=stderr_handle,
         )
@@ -88,7 +90,7 @@ async def _run_ffmpeg_command(command: List[str], process_name: str, stderr_hand
             try:
                 stderr_handle.close()
             except Exception:
-                pass  # Ignore errors during cleanup of stderr handle
+                pass
         raise ToolError(f"Could not start FFmpeg process '{process_name}': {exc}") from exc
     return process
 
@@ -102,84 +104,128 @@ async def _wait_for_pid(pid: int, timeout_seconds: float = 5.0) -> bool:
     interval = 0.1
     while elapsed < timeout_seconds:
         try:
-            os.kill(pid, 0)  # Check if process exists; raises OSError if not (or permission denied)
+            os.kill(pid, 0)
             await asyncio.sleep(interval)
             elapsed += interval
         except OSError as e:
-            if e.errno == errno.ESRCH:  # ESRCH: No such process
+            if e.errno == errno.ESRCH:
                 logger.debug(f"Process {pid} confirmed terminated (ESRCH).")
                 return True
-            # If permission denied (EPERM), process might exist but we can't signal it.
-            # Treat as still running for polling, but log it.
             if e.errno == errno.EPERM:
-                logger.warning(
-                    f"Permission error checking PID {pid}, assuming it's running for now."
-                )
+                logger.warning(f"Permission error checking PID {pid}; assuming it's running.")
                 await asyncio.sleep(interval)
                 elapsed += interval
                 continue
             logger.error(f"Unexpected OSError checking PID {pid}: {e}")
-            raise  # Other OSError, re-raise
-    logger.warning(f"Process {pid} did not terminate within {timeout_seconds}s timeout.")
+            raise
+    logger.warning(f"Process {pid} did not terminate within {timeout_seconds}s.")
     return False
 
 
+# --- Device Detection for macOS avfoundation ---
+async def _find_avfoundation_device_index(device_type: str, hint: str) -> int:
+    """
+    List avfoundation devices and return index of the first device whose name contains the hint.
+    device_type: 'video' or 'audio'.
+    """
+    cmd = ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdin=DEVNULL, stdout=DEVNULL, stderr=PIPE
+        )
+        _, stderr = await proc.communicate()
+        output = stderr.decode(errors="ignore")
+    except Exception as e:
+        logger.warning("Could not list avfoundation devices: %s", e)
+        return 1 if device_type == "video" else 0
+
+    found_index = None
+    lines = output.splitlines()
+    scanning = False
+    for line in lines:
+        if device_type == "video" and "AVFoundation video devices" in line:
+            scanning = True
+            continue
+        if device_type == "audio" and "AVFoundation audio devices" in line:
+            scanning = True
+            continue
+        if scanning:
+            m = re.search(r"\[([0-9]+)\]\s*(.+)", line)
+            if m:
+                idx = int(m.group(1))
+                name = m.group(2).strip()
+                if hint.lower() in name.lower():
+                    found_index = idx
+                    break
+    return found_index if found_index is not None else (1 if device_type == "video" else 0)
+
+
 # --- OS Specific FFmpeg Arguments ---
-def _get_os_specific_audio_input(audio_source: str) -> List[str]:
-    system = platform.system()
-    if audio_source == "system":
-        if system == "Darwin":
-            return ["-f", "avfoundation", "-i", ":1"]  # May need specific device index
-        if system == "Windows":
-            return [
-                "-f",
-                "dshow",
-                "-i",
-                "audio=virtual-audio-capturer",
-            ]  # Requires VB-Audio Virtual Cable or similar
-        if system == "Linux":
-            return ["-f", "pulse", "-i", "default"]
-        raise NotImplementedError(f"System audio capture not implemented for {system}")
-    if audio_source == "microphone":
-        if system == "Darwin":
-            return ["-f", "avfoundation", "-i", ":0"]  # Often default mic, may need specific index
-        if system == "Windows":
-            return ["-f", "dshow", "-i", "audio=Microphone"]  # Generic name, might need specific
-        if system == "Linux":
-            return ["-f", "pulse", "-i", "default"]
-        raise NotImplementedError(f"Microphone capture not implemented for {system}")
-    raise ValueError(f"Unsupported audio_source: {audio_source}")
-
-
-def _get_os_specific_video_input(video_source: str) -> List[str]:
+async def _get_os_specific_video_input(video_source: str) -> List[str]:
     system = platform.system()
     if video_source == "screen":
         if system == "Darwin":
+            idx = await _find_avfoundation_device_index("video", "capture screen")
             return [
                 "-f",
                 "avfoundation",
+                "-thread_queue_size",
+                "512",
+                "-probesize",
+                "10M",
                 "-framerate",
                 "30",
                 "-i",
-                "1",
-            ]  # Often main screen, may need specific index
+                str(idx),
+            ]
         if system == "Windows":
-            return ["-f", "gdigrab", "-i", "desktop"]
+            return ["-f", "gdigrab", "-framerate", "30", "-i", "desktop"]
         if system == "Linux":
             return [
                 "-f",
                 "x11grab",
+                "-thread_queue_size",
+                "512",
+                "-probesize",
+                "10M",
                 "-draw_mouse",
                 "1",
                 "-s",
                 "1920x1080",
                 "-i",
                 ":0.0",
-            ]  # Example, adjust size/display
+            ]
         raise NotImplementedError(f"Screen capture not implemented for {system}")
     if video_source == "window":
         raise NotImplementedError("Window-specific recording is not supported yet.")
     raise ValueError(f"Unsupported video_source: {video_source}")
+
+
+async def _get_os_specific_audio_input(audio_source: str) -> List[str]:
+    system = platform.system()
+    if audio_source == "system" and system == "Darwin":
+        logger.warning(
+            "System audio capture on macOS may require a virtual driver (e.g., BlackHole). "
+            "Falling back to default microphone input."
+        )
+        audio_source = "microphone"
+    if audio_source == "system":
+        if system == "Windows":
+            return ["-f", "dshow", "-i", "audio=virtual-audio-capturer"]
+        if system == "Linux":
+            return ["-f", "pulse", "-i", "default"]
+        if system == "Darwin":
+            idx = await _find_avfoundation_device_index("audio", "microphone")
+            return ["-f", "avfoundation", "-thread_queue_size", "512", "-i", f":{idx}"]
+    if audio_source == "microphone":
+        if system == "Windows":
+            return ["-f", "dshow", "-i", "audio=Microphone"]
+        if system == "Linux":
+            return ["-f", "pulse", "-i", "default"]
+        if system == "Darwin":
+            idx = await _find_avfoundation_device_index("audio", "microphone")
+            return ["-f", "avfoundation", "-thread_queue_size", "512", "-i", f":{idx}"]
+    raise ValueError(f"Unsupported audio_source: {audio_source}")
 
 
 # --- Public Tool Functions ---
@@ -203,22 +249,52 @@ async def start_recording_tool(
     final_output = Path(output_path).expanduser().resolve()
     final_output.parent.mkdir(parents=True, exist_ok=True)
 
-    cmd: List[str] = ["ffmpeg", "-y"]  # -y overwrites output files without asking
-    if record_video:
-        cmd += _get_os_specific_video_input(video_source)
+    # Determine video codec availability
+    video_codec = "libx264"
+    try:
+        encoders = subprocess.check_output(["ffmpeg", "-encoders"], stderr=DEVNULL).decode(
+            errors="ignore"
+        )
+        if " libx264 " not in encoders:
+            video_codec = "h264"
+            logger.warning("libx264 encoder not found; falling back to h264")
+    except Exception:
+        logger.warning("Could not check ffmpeg encoders; using libx264 by default")
+
+    # Build ffmpeg command: inputs first, then codec/output options
+    cmd: List[str] = ["ffmpeg", "-y"]
+
+    # On macOS, combine audio and video in a single avfoundation input
+    if platform.system() == "Darwin" and record_video and record_audio:
+        v_idx = await _find_avfoundation_device_index("video", "capture screen")
+        a_idx = await _find_avfoundation_device_index(
+            "audio", "microphone" if audio_source == "microphone" else ""
+        )
         cmd += [
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-crf",
-            "23",
-            "-pix_fmt",
-            "yuv420p",
+            "-f",
+            "avfoundation",
+            "-thread_queue_size",
+            "512",
+            "-probesize",
+            "10M",
+            "-framerate",
+            "30",
+            "-i",
+            f"{v_idx}:{a_idx}",
         ]
+    else:
+        if record_video:
+            cmd += await _get_os_specific_video_input(video_source)
+        if record_audio:
+            cmd += await _get_os_specific_audio_input(audio_source)
+
+    # Codec and output options
+    if record_video:
+        cmd += ["-c:v", video_codec, "-preset", "ultrafast", "-crf", "23", "-pix_fmt", "yuv420p"]
     if record_audio:
-        cmd += _get_os_specific_audio_input(audio_source)
         cmd += ["-c:a", "aac", "-b:a", "192k"]
+
+    # Output file
     cmd.append(str(temp_output))
 
     proc_name = (
@@ -237,7 +313,6 @@ async def start_recording_tool(
                 stderr_file_handle.close()
             except Exception:
                 pass
-            # Attempt to delete potentially empty stderr log if ffmpeg failed to start
             if stderr_log_path.exists():
                 try:
                     stderr_log_path.unlink()
@@ -256,17 +331,9 @@ async def start_recording_tool(
         "record_audio": record_audio,
     }
 
-    # Add to state file
     all_states = await _read_state_file()
-    print(f"Adding to state file: {rec_id} = {stored_info}")
-    print(f"All states: {all_states}")
     all_states[rec_id] = stored_info
-    print(f"All states after adding: {all_states}")
     await _write_state_file(all_states)
-
-    # The stderr_file_handle is managed by the OS and FFmpeg process.
-    # It will be closed when FFmpeg exits or the handle is garbage collected if this process exits.
-    # We don't need to explicitly close it here if FFmpeg is running.
 
     logger.info(
         f"Recording started with ID {rec_id}, PID {process.pid}. "
@@ -277,17 +344,11 @@ async def start_recording_tool(
 
 async def stop_recording_tool(recording_id: str) -> str:
     all_states = await _read_state_file()
-    print(f"Stopping recording {recording_id}")
-    print(f"All states: {all_states}")
     info = all_states.pop(recording_id, None)
 
     if info is None:
-        # Check if it was already stopped and removed by a concurrent call
-        # If we write the state file before raising, a rapid second call might also find it missing.
-        # It's safer to write the state *after* successful processing or definite failure.
         raise ToolError(f"No active recording with ID '{recording_id}' found in state file.")
 
-    # Immediately update state file to reflect removal attempt
     await _write_state_file(all_states)
 
     pid = info["pid"]
@@ -297,157 +358,84 @@ async def stop_recording_tool(recording_id: str) -> str:
 
     logger.info(f"Attempting to stop recording ID {recording_id} (PID: {pid})")
 
-    # Attempt to stop FFmpeg process using signals
     terminated_gracefully = False
     try:
-        if not await _wait_for_pid(pid, timeout_seconds=0.1):  # Check if already exited
-            logger.info(f"Sending SIGINT to PID {pid} for recording {recording_id}")
+        if not await _wait_for_pid(pid, timeout_seconds=0.1):
             os.kill(pid, signal.SIGINT)
-            terminated_gracefully = await _wait_for_pid(
-                pid, timeout_seconds=7.0
-            )  # Increased timeout for graceful shutdown
-
+            terminated_gracefully = await _wait_for_pid(pid, timeout_seconds=7.0)
             if not terminated_gracefully:
-                logger.warning(
-                    f"PID {pid} (rec: {recording_id}) did not stop with SIGINT. Sending SIGTERM."
-                )
                 os.kill(pid, signal.SIGTERM)
                 terminated_gracefully = await _wait_for_pid(pid, timeout_seconds=3.0)
-
                 if not terminated_gracefully:
-                    logger.error(
-                        f"PID {pid} (rec: {recording_id}) did not stop with SIGTERM. "
-                        "Sending SIGKILL."
-                    )
                     os.kill(pid, signal.SIGKILL)
-                    terminated_gracefully = await _wait_for_pid(
-                        pid, timeout_seconds=1.0
-                    )  # SIGKILL should be fast
-                    if not terminated_gracefully:
-                        logger.error(
-                            f"PID {pid} (rec: {recording_id}) failed to stop even with SIGKILL."
-                        )
-        else:
-            logger.info(
-                f"Process PID {pid} (rec: {recording_id}) already exited before stop signals."
-            )
-            terminated_gracefully = True  # It's terminated, that's what matters
-
-    except ProcessLookupError:  # os.kill can raise this if PID doesn't exist
-        logger.info(f"Process PID {pid} (rec: {recording_id}) not found. Already terminated.")
+                    terminated_gracefully = await _wait_for_pid(pid, timeout_seconds=1.0)
+    except ProcessLookupError:
         terminated_gracefully = True
     except Exception as e:
-        logger.exception(
-            f"Error during FFmpeg process stop for PID {pid} (rec: {recording_id}): {e}"
-        )
-        # Continue to file checks, as FFmpeg might have exited/crashed
+        logger.exception(f"Error while stopping FFmpeg process {pid}: {e}")
 
     logger.info(
-        f"FFmpeg process PID {pid} (rec: {recording_id}) termination status: "
-        f"{'Graceful/Confirmed' if terminated_gracefully else 'Uncertain/Forced'}"
+        f"FFmpeg process PID {pid} termination status: "
+        f"{'Graceful/Confirmed' if terminated_gracefully else 'Forced/Uncertain'}"
     )
 
-    # Read and log FFmpeg's stderr
-    ffmpeg_stderr_content = ""
+    # Log stderr
     if stderr_log_path.exists():
         try:
-            with open(stderr_log_path, "r") as f_err:
-                ffmpeg_stderr_content = f_err.read()
-            if ffmpeg_stderr_content:
-                logger.info(
-                    f"FFmpeg stderr for {recording_id} (PID: {pid}):\n{ffmpeg_stderr_content}"
-                )
-            else:
-                logger.info(f"FFmpeg stderr log for {recording_id} (PID: {pid}) was empty.")
+            stderr_content = stderr_log_path.read_text(errors="ignore")
+            if stderr_content:
+                logger.info(f"FFmpeg stderr for {recording_id}:\n{stderr_content}")
         except Exception as e:
-            logger.warning(f"Could not read FFmpeg stderr log {stderr_log_path}: {e}")
+            logger.warning(f"Could not read stderr log {stderr_log_path}: {e}")
 
-    # Ensure temporary file exists, wait briefly if necessary
-    # This loop is crucial if FFmpeg takes a moment to flush file after termination signal
+    # Wait for temp file flush
     temp_file_found = False
-    for attempt in range(10):  # Wait up to 10 * 0.2 = 2 seconds
+    for _ in range(10):
         if temp_output_path.exists() and temp_output_path.stat().st_size > 0:
             temp_file_found = True
             break
-        logger.debug(
-            "Waiting for temp file %s (attempt %d), current size: %s",
-            temp_output_path,
-            attempt + 1,
-            temp_output_path.stat().st_size if temp_output_path.exists() else "N/A",
-        )
         await asyncio.sleep(0.2)
 
     if not temp_file_found:
-        error_msg = (
-            f"Temporary file not found or empty: {temp_output_path} for recording {recording_id}."
-        )
-        if ffmpeg_stderr_content:
-            error_msg += f"\nFFmpeg stderr indicated: {ffmpeg_stderr_content.strip()[:500]}..."
+        error_msg = f"Temporary file missing or empty: {temp_output_path}"
+        if stderr_log_path.exists():
+            stderr_excerpt = stderr_log_path.read_text(errors="ignore")[:500]
+            error_msg += f"\nFFmpeg stderr excerpt:\n{stderr_excerpt}"
         logger.error(error_msg)
-        # Cleanup stderr log even on failure
         if stderr_log_path.exists():
             try:
                 stderr_log_path.unlink()
             except Exception:
-                logger.warning(f"Could not delete stderr log {stderr_log_path} on error path.")
+                logger.warning(f"Could not delete stderr log {stderr_log_path}")
         raise ToolError(error_msg)
 
-    # Move to final location
+    # Move to final output
     try:
+        final_output_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            # Ensure parent directory of final_output_path exists
-            final_output_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(temp_output_path), str(final_output_path))
-        except OSError as exc:  # shutil.move can raise this, not temp_output_path.replace
-            if exc.errno == errno.EXDEV:  # Cross-device link
-                logger.warning(
-                    f"Cross-device move for {recording_id}. Using shutil.move as fallback."
-                )
+        except OSError as exc:
+            if exc.errno == errno.EXDEV:
                 shutil.move(str(temp_output_path), str(final_output_path))
             else:
                 raise
         logger.info(f"Recording {recording_id} saved to {final_output_path}")
     except Exception as exc:
-        logger.exception(
-            f"Failed to finalize recording {recording_id} from "
-            f"{temp_output_path} to {final_output_path}"
-        )
-        # Attempt to clean up temp file if move failed
+        logger.exception(f"Failed to move recording {recording_id} to final destination: {exc}")
         if temp_output_path.exists():
             try:
                 temp_output_path.unlink()
             except Exception:
-                logger.warning(
-                    f"Could not delete temp file {temp_output_path} after failed finalization."
-                )
-        # Cleanup stderr log
+                logger.warning(f"Could not delete temp file {temp_output_path}")
         if stderr_log_path.exists():
             try:
                 stderr_log_path.unlink()
             except Exception:
-                logger.warning(f"Could not delete stderr log {stderr_log_path} on error path.")
-        raise ToolError(f"Failed to finalize recording {recording_id}: {exc}") from exc
+                logger.warning(f"Could not delete stderr log {stderr_log_path}")
+        raise ToolError(f"Failed to finalize recording {recording_id}: {exc}")
 
-    # Cleanup temporary files (stderr log; temp_output should be gone if move succeeded)
-    try:
-        if temp_output_path.exists():  # Should not exist if move was successful
-            logger.warning(
-                f"Temp file {temp_output_path} still exists after successful move. Deleting."
-            )
-            temp_output_path.unlink()
-        if stderr_log_path.exists():
-            stderr_log_path.unlink()
-
-        # Attempt to remove the base temp directory if it's empty
-        # This is a bit aggressive; be careful if other tools use TEMP_DIR_BASE directly
-        # For now, only remove the specific recording's parent if it was rec_id based.
-        # The current TEMP_DIR_BASE is shared, so don't remove it.
-        # If temp_output_path.parent was unique per recording, we could rmdir it.
-        # Example: if temp_output_path was TEMP_DIR_BASE / rec_id / "temp.mp4"
-        # then temp_output_path.parent.rmdir() if empty.
-        # For now, individual file cleanup is sufficient.
-
-    except Exception:
-        logger.warning(f"Cleanup of temp files for {recording_id} failed.", exc_info=True)
+    # Cleanup stderr log
+    if stderr_log_path.exists():
+        stderr_log_path.unlink()
 
     return f"Recording saved to: {final_output_path}"
