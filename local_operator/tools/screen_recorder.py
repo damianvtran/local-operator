@@ -8,6 +8,7 @@ import re
 import shutil
 import signal
 import subprocess
+import time
 import uuid
 from asyncio.subprocess import DEVNULL, PIPE, Process
 from pathlib import Path
@@ -304,42 +305,91 @@ async def start_recording_tool(
     )
 
     stderr_file_handle = None
+    process = None
     try:
         stderr_file_handle = open(stderr_log_path, "wb")
         process = await _run_ffmpeg_command(cmd, proc_name, stderr_handle=stderr_file_handle)
+
+        # Wait for ffmpeg to confirm recording start
+        startup_timeout = 5.0
+        success_pattern = re.compile(r"Press \[q\] to stop|frame=\s*\d+")
+        start_time = time.monotonic()
+        error_output = ""
+        started = False
+
+        while True:
+            # Read available stderr content
+            if stderr_log_path.exists():
+                try:
+                    error_output = stderr_log_path.read_text(errors="ignore")
+                except Exception:
+                    error_output = ""
+                if success_pattern.search(error_output):
+                    started = True
+                    break
+                # Detect obvious errors
+                if re.search(
+                    r"[Ee]rror|not authorized|permission denied", error_output, re.IGNORECASE
+                ):
+                    break
+
+            # Check if process exited prematurely
+            if process.returncode is not None:
+                break
+
+            # Timeout
+            if time.monotonic() - start_time > startup_timeout:
+                break
+
+            await asyncio.sleep(0.1)
+
+        if not started:
+            # Cleanup ffmpeg process
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+
+            stderr_excerpt = error_output.strip()
+            raise ToolError(
+                f"Failed to start recording (timeout or error). "
+                f"FFmpeg stderr:\n{stderr_excerpt}"
+            )
+
+        # On successful start, record state
+        stored_info: StoredRecordingInfo = {
+            "pid": process.pid,
+            "output_path": str(final_output),
+            "temp_output_path": str(temp_output),
+            "stderr_log_path": str(stderr_log_path),
+            "record_video": record_video,
+            "record_audio": record_audio,
+        }
+
+        all_states = await _read_state_file()
+        all_states[rec_id] = stored_info
+        await _write_state_file(all_states)
+
+        logger.info(
+            f"Recording started with ID {rec_id}, PID {process.pid}. "
+            f"Temp: {temp_output}, Output: {final_output}"
+        )
+        return rec_id
+
     except Exception:
+        # Cleanup on failure
         if stderr_file_handle:
             try:
                 stderr_file_handle.close()
             except Exception:
                 pass
-            if stderr_log_path.exists():
-                try:
-                    stderr_log_path.unlink()
-                except Exception:
-                    logger.warning(
-                        f"Could not delete stderr log {stderr_log_path} after ffmpeg start failure."
-                    )
+        if stderr_log_path.exists():
+            try:
+                stderr_log_path.unlink()
+            except Exception:
+                logger.warning(f"Could not delete stderr log {stderr_log_path}")
         raise
-
-    stored_info: StoredRecordingInfo = {
-        "pid": process.pid,
-        "output_path": str(final_output),
-        "temp_output_path": str(temp_output),
-        "stderr_log_path": str(stderr_log_path),
-        "record_video": record_video,
-        "record_audio": record_audio,
-    }
-
-    all_states = await _read_state_file()
-    all_states[rec_id] = stored_info
-    await _write_state_file(all_states)
-
-    logger.info(
-        f"Recording started with ID {rec_id}, PID {process.pid}. "
-        f"Temp: {temp_output}, Output: {final_output}"
-    )
-    return rec_id
 
 
 async def stop_recording_tool(recording_id: str) -> str:
