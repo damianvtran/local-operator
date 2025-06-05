@@ -1428,6 +1428,8 @@ def create_audio_transcription_tool(
     ) -> RadientTranscriptionResponseData:
         """Transcribe an audio file to text using the Radient API. This tool takes the path to an audio file and returns the transcribed text. Supported audio formats include flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, and webm. You can optionally specify the model, a prompt to guide transcription, the desired response format, temperature for sampling, the language of the audio, and the transcription provider.
 
+        If the file that you need to transcribe is not one of the supported formats, you'll need to separate the audio from the video using a tool like ffmpeg first and then provide the audio file to this tool.
+
         Args:
             file_path (str): Path to the audio file on disk to transcribe. Must be a valid path to an audio file on disk. Supported formats: flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, webm.
             model (Optional[str], optional): The transcription model to use (e.g., "gpt-4o-transcribe").
