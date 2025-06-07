@@ -228,6 +228,40 @@ def test_is_marker_inside_json(text, marker, expected):
     "xml_string, expected_dict",
     [
         pytest.param(
+            "Plain text response",
+            {
+                "action": "",
+                "learnings": "",
+                "response": "Plain text response",
+                "code": "",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+                "thinking": "",
+            },
+            id="plain_text_response",
+        ),
+        pytest.param(
+            "Plain text response with a url and backticks: `https://www.google.com`",
+            {
+                "action": "",
+                "learnings": "",
+                "response": "Plain text response with a url and backticks: `https://www.google.com`",  # noqa: E501
+                "code": "",
+                "content": "",
+                "file_path": "",
+                "replacements": [],
+                "agent": "",
+                "message": "",
+                "mentioned_files": [],
+                "thinking": "",
+            },
+            id="plain_text_response_with_url_and_backticks",
+        ),
+        pytest.param(
             "<action>CODE</action><learnings>Learned something</learnings><response>Running code</response><code>print('Hello')</code>",  # noqa: E501
             {
                 "action": "CODE",
