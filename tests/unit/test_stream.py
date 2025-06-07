@@ -31,6 +31,19 @@ def run_stream(input_text):
             id="plain_text",
         ),
         pytest.param(
+            "Hello, this is a plain text message with a url and backticks: `https://www.google.com`",  # noqa: E501
+            "",  # expected_thinking
+            "Hello, this is a plain text message with a url and backticks: `https://www.google.com`",  # noqa: E501
+            None,  # expected_action
+            "",  # expected_content
+            "",  # expected_code
+            "",  # expected_replacements
+            [],  # expected_files
+            False,  # expect_error
+            False,  # expected_finish
+            id="plain_text_with_url_and_backticks",
+        ),
+        pytest.param(
             "<think>My thoughts here.</think>Just a message.",
             "My thoughts here.",  # expected_thinking
             "Just a message.",  # expected_message
