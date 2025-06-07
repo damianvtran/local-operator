@@ -374,15 +374,23 @@ async def start_recording_tool(
         stderr_file_handle = open(stderr_log_path, "wb")
         process = await _run_ffmpeg_command(cmd, proc_name, stderr_handle=stderr_file_handle)
 
-        # Wait for ffmpeg to confirm recording start
+        # Wait for ffmpeg to confirm recording start or initial file output
         startup_timeout = 5.0
-        success_pattern = re.compile(r"Press \[q\] to stop|frame=\s*\d+")
+        success_pattern = re.compile(r"Press \[q\] to stop|frame=\s*\d+|size=\s*\d+")
         start_time = time.monotonic()
         error_output = ""
         started = False
 
         while True:
-            # Read available stderr content
+            # Check if the temp file has started receiving data
+            try:
+                if temp_output.exists() and temp_output.stat().st_size > 0:
+                    started = True
+                    break
+            except Exception:
+                pass
+
+            # Read available stderr content for progress or errors
             if stderr_log_path.exists():
                 try:
                     error_output = stderr_log_path.read_text(errors="ignore")
@@ -417,8 +425,8 @@ async def start_recording_tool(
 
             stderr_excerpt = error_output.strip()
             raise ToolError(
-                f"Failed to start recording (timeout or error). "
-                f"FFmpeg stderr:\n{stderr_excerpt}"
+                f"Failed to start recording (timeout or no data detected). "
+                f"FFmpeg stderr (excerpt):\n{stderr_excerpt}"
             )
 
         # On successful start, record state
@@ -522,9 +530,10 @@ async def stop_recording_tool(recording_id: str) -> str:
         except Exception as e:
             logger.warning(f"Could not read stderr log {stderr_log_path}: {e}")
 
-    # Wait for temp file flush
+    # Wait for temp file flush (increased attempts for robustness)
     temp_file_found = False
-    for _ in range(10):
+    max_attempts = 15
+    for _ in range(max_attempts):
         if temp_output_path.exists() and temp_output_path.stat().st_size > 0:
             temp_file_found = True
             break
