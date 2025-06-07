@@ -124,7 +124,7 @@ async def _wait_for_pid(pid: int, timeout_seconds: float = 5.0) -> bool:
 
 
 # --- Device Detection for macOS avfoundation ---
-async def _find_avfoundation_device_index(device_type: str, hint: str) -> int:
+async def _find_avfoundation_device_index(device_type: str, hint: str) -> int | None:
     """
     List avfoundation devices and return index of the first device whose name contains the hint.
     device_type: 'video' or 'audio'.
@@ -138,7 +138,7 @@ async def _find_avfoundation_device_index(device_type: str, hint: str) -> int:
         output = stderr.decode(errors="ignore")
     except Exception as e:
         logger.warning("Could not list avfoundation devices: %s", e)
-        return 1 if device_type == "video" else 0
+        return None
 
     found_index = None
     lines = output.splitlines()
@@ -158,7 +158,7 @@ async def _find_avfoundation_device_index(device_type: str, hint: str) -> int:
                 if hint.lower() in name.lower():
                     found_index = idx
                     break
-    return found_index if found_index is not None else (1 if device_type == "video" else 0)
+    return found_index
 
 
 # --- OS Specific FFmpeg Arguments ---
@@ -167,6 +167,9 @@ async def _get_os_specific_video_input(video_source: str) -> List[str]:
     if video_source == "screen":
         if system == "Darwin":
             idx = await _find_avfoundation_device_index("video", "capture screen")
+            if idx is None:
+                logger.warning("Could not find screen capture device, using default index 1.")
+                idx = 1
             return [
                 "-f",
                 "avfoundation",
@@ -204,29 +207,42 @@ async def _get_os_specific_video_input(video_source: str) -> List[str]:
 
 async def _get_os_specific_audio_input(audio_source: str) -> List[str]:
     system = platform.system()
-    if audio_source == "system" and system == "Darwin":
-        logger.warning(
-            "System audio capture on macOS may require a virtual driver (e.g., BlackHole). "
-            "Falling back to default microphone input."
-        )
-        audio_source = "microphone"
-    if audio_source == "system":
-        if system == "Windows":
+
+    if system == "Darwin":
+        if audio_source == "system":
+            # On macOS, system audio capture usually requires a virtual audio device.
+            # We'll try to find one, otherwise fall back to the microphone.
+            idx = await _find_avfoundation_device_index("audio", "blackhole")
+            if idx is not None:
+                logger.info("Found system audio device (BlackHole).")
+                return ["-f", "avfoundation", "-thread_queue_size", "512", "-i", f":{idx}"]
+
+            logger.warning(
+                "Could not find a 'BlackHole' system audio device. "
+                "Falling back to default microphone input. "
+                "Please install BlackHole for system audio recording on macOS."
+            )
+            # Fall through to microphone
+            audio_source = "microphone"
+
+        if audio_source == "microphone":
+            idx = await _find_avfoundation_device_index("audio", "microphone")
+            if idx is None:
+                logger.warning("Could not find microphone, using default index 0.")
+                idx = 0
+            return ["-f", "avfoundation", "-thread_queue_size", "512", "-i", f":{idx}"]
+
+    elif system == "Windows":
+        if audio_source == "system":
             return ["-f", "dshow", "-i", "audio=virtual-audio-capturer"]
-        if system == "Linux":
-            return ["-f", "pulse", "-i", "default"]
-        if system == "Darwin":
-            idx = await _find_avfoundation_device_index("audio", "microphone")
-            return ["-f", "avfoundation", "-thread_queue_size", "512", "-i", f":{idx}"]
-    if audio_source == "microphone":
-        if system == "Windows":
+        if audio_source == "microphone":
             return ["-f", "dshow", "-i", "audio=Microphone"]
-        if system == "Linux":
+
+    elif system == "Linux":
+        if audio_source in ["system", "microphone"]:
             return ["-f", "pulse", "-i", "default"]
-        if system == "Darwin":
-            idx = await _find_avfoundation_device_index("audio", "microphone")
-            return ["-f", "avfoundation", "-thread_queue_size", "512", "-i", f":{idx}"]
-    raise ValueError(f"Unsupported audio_source: {audio_source}")
+
+    raise ValueError(f"Unsupported audio_source '{audio_source}' for system '{system}'")
 
 
 # --- Public Tool Functions ---
@@ -241,20 +257,24 @@ async def start_recording_tool(
 
     This tool allows you to start recording the screen, audio, or both simultaneously.
     The recording will continue until you call the stop_recording_tool. You must provide
-    an output path where the recording will be saved. The tool supports various audio
-    sources (system audio or microphone) and video sources (screen capture).
+    an output path where the recording will be saved.
+
+    By default, this tool will attempt to capture system audio. If you need to record
+    from a microphone, set the `audio_source` parameter to `'microphone'`. On macOS,
+    system audio capture may require a virtual audio driver like BlackHole to be installed.
 
     Args:
-        output_path (str): Path where the recording file will be saved (e.g., "recording.mp4").  If the user doesn't specifically tell you where to save the file, then save it in your current working directory with a well-organized naming structure.
+        output_path (str): Path where the recording file will be saved (e.g., "recording.mp4").  Pick a well organized path and file name at your discretion unless the user specifically tells you where to save the file.  Don't ask them for this information if they don't specify it.
         record_audio (bool, optional): Whether to record audio. Defaults to True.
         record_video (bool, optional): Whether to record video. Defaults to True.
         audio_source (str, optional): Audio source to record from. Options are "system"
             for system audio or "microphone" for microphone input. Defaults to "system".
+            Unless otherwise specified, you should use the default "system" audio source.
         video_source (str, optional): Video source to record from. Currently only
             "screen" is supported. Defaults to "screen".
 
     Returns:
-        str: Confirmation message with recording details and instructions for stopping.
+        str: The unique ID for the recording session.
 
     Raises:
         ToolError: If FFmpeg is not installed or not found in PATH.
@@ -293,9 +313,28 @@ async def start_recording_tool(
     # On macOS, combine audio and video in a single avfoundation input
     if platform.system() == "Darwin" and record_video and record_audio:
         v_idx = await _find_avfoundation_device_index("video", "capture screen")
-        a_idx = await _find_avfoundation_device_index(
-            "audio", "microphone" if audio_source == "microphone" else ""
-        )
+        if v_idx is None:
+            logger.warning("Could not find screen capture device, using default index 1.")
+            v_idx = 1
+
+        a_idx = None
+        if audio_source == "system":
+            a_idx = await _find_avfoundation_device_index("audio", "blackhole")
+            if a_idx is not None:
+                logger.info("Found system audio device (BlackHole) for combined recording.")
+            else:
+                logger.warning(
+                    "Could not find a 'BlackHole' system audio device for combined recording. "
+                    "Falling back to microphone."
+                )
+                # Fall through to try microphone
+
+        if a_idx is None:  # Either microphone source, or system source that fell through
+            a_idx = await _find_avfoundation_device_index("audio", "microphone")
+            if a_idx is None:
+                logger.warning("Could not find any audio device, using default index 0.")
+                a_idx = 0
+
         cmd += [
             "-f",
             "avfoundation",
