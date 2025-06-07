@@ -1086,9 +1086,6 @@ def test_get_posix_shell_path_not_posix(mock_system):
     assert get_posix_shell_path() is None
 
 
-# --- setup_cross_platform_environment Tests ---
-
-
 @patch("local_operator.helpers.platform.system", return_value="Windows")
 @patch("local_operator.helpers.get_windows_registry_path")
 @patch("local_operator.helpers.get_posix_shell_path")
@@ -1097,10 +1094,13 @@ def test_setup_env_windows_updates(mock_get_posix, mock_get_win, mock_system):
     """Test setup updates PATH on Windows when different."""
     new_path = "C:\\User;C:\\System"
     mock_get_win.return_value = new_path
-    setup_cross_platform_environment()
-    assert os.environ["PATH"] == new_path
-    mock_get_posix.assert_not_called()
-    mock_get_win.assert_called_once()
+
+    with patch("os.path.isdir", return_value=True):
+        setup_cross_platform_environment()
+        assert new_path in os.environ["PATH"]
+        assert "Local Operator" in os.environ["PATH"] and "bin" in os.environ["PATH"]
+        mock_get_posix.assert_not_called()
+        mock_get_win.assert_called_once()
 
 
 @patch("local_operator.helpers.platform.system", return_value="Darwin")
@@ -1111,10 +1111,13 @@ def test_setup_env_macos_updates(mock_get_posix, mock_get_win, mock_system):
     """Test setup updates PATH on macOS when different."""
     new_path = "/opt/homebrew/bin:/usr/bin"
     mock_get_posix.return_value = new_path
-    setup_cross_platform_environment()
-    assert os.environ["PATH"] == new_path
-    mock_get_win.assert_not_called()
-    mock_get_posix.assert_called_once()
+
+    with patch("os.path.isdir", return_value=True):
+        setup_cross_platform_environment()
+        assert new_path in os.environ["PATH"]
+        assert "Local Operator" in os.environ["PATH"] and "bin" in os.environ["PATH"]
+        mock_get_win.assert_not_called()
+        mock_get_posix.assert_called_once()
 
 
 @patch("local_operator.helpers.platform.system", return_value="Linux")
@@ -1126,10 +1129,13 @@ def test_setup_env_linux_same_path(mock_get_posix, mock_get_win, mock_system):
     same_path = "/usr/bin"
     mock_get_posix.return_value = same_path
     initial_path = os.environ["PATH"]
-    setup_cross_platform_environment()
-    assert os.environ["PATH"] == initial_path
-    mock_get_win.assert_not_called()
-    mock_get_posix.assert_called_once()
+
+    with patch("os.path.isdir", return_value=True):
+        setup_cross_platform_environment()
+        assert initial_path in os.environ["PATH"]
+        assert "Local Operator" in os.environ["PATH"] and "bin" in os.environ["PATH"]
+        mock_get_win.assert_not_called()
+        mock_get_posix.assert_called_once()
 
 
 @patch("local_operator.helpers.platform.system", return_value="Windows")
@@ -1139,10 +1145,13 @@ def test_setup_env_linux_same_path(mock_get_posix, mock_get_win, mock_system):
 def test_setup_env_windows_retrieval_fails(mock_get_posix, mock_get_win, mock_system):
     """Test setup does not update PATH on Windows if retrieval fails."""
     initial_path = os.environ["PATH"]
-    setup_cross_platform_environment()
-    assert os.environ["PATH"] == initial_path
-    mock_get_posix.assert_not_called()
-    mock_get_win.assert_called_once()
+
+    with patch("os.path.isdir", return_value=True):
+        setup_cross_platform_environment()
+        assert initial_path in os.environ["PATH"]
+        assert "Local Operator" in os.environ["PATH"] and "bin" in os.environ["PATH"]
+        mock_get_posix.assert_not_called()
+        mock_get_win.assert_called_once()
 
 
 @patch("local_operator.helpers.platform.system", return_value="FreeBSD")  # Unsupported
