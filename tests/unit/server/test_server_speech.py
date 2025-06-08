@@ -18,6 +18,7 @@ def speech_request_data():
     """Fixture for speech request data."""
     return {
         "input": "Hello, world!",
+        "instructions": "Please speak in a friendly and engaging tone.",
         "model": "tts-1",
         "voice": "alloy",
         "response_format": "mp3",
@@ -39,6 +40,7 @@ async def test_create_speech_success(speech_request_data, mock_radient_client):
     assert response.media_type == "audio/mp3"
     mock_radient_client.create_speech.assert_called_once_with(
         input_text="Hello, world!",
+        instructions="Please speak in a friendly and engaging tone.",
         model="tts-1",
         voice="alloy",
         response_format="mp3",

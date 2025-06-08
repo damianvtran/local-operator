@@ -885,6 +885,7 @@ class SpeechRequest(BaseModel):
 
     Attributes:
         input: The text to generate speech from.
+        instructions: Additional prompt with instructions for the speech generation.
         model: The model to use for generation.
         voice: The voice to use for generation.
         response_format: The format of the audio response. Default: "mp3".
@@ -893,6 +894,9 @@ class SpeechRequest(BaseModel):
     """
 
     input: str = Field(..., description="The text to generate speech from.")
+    instructions: Optional[str] = Field(
+        None, description="Additional prompt with instructions for the speech generation."
+    )
     model: str = Field(..., description="The model to use for generation.")
     voice: str = Field(..., description="The voice to use for generation.")
     response_format: str = Field(
