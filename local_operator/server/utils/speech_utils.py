@@ -52,7 +52,7 @@ def parse_gender_from_xml(xml_string: str) -> str:
 
 async def determine_voice_and_instructions(
     agent: AgentData, executor: LocalCodeExecutor
-) -> Tuple[str, str, str]:
+) -> Tuple[str, str]:
     """
     Determines the voice and instructions for speech generation based on the agent's gender.
 
@@ -71,7 +71,6 @@ async def determine_voice_and_instructions(
     gender = parse_gender_from_xml(str(response.content))
 
     voice = "nova" if gender == "female" else "ash"
-    instructions = f"You are {agent.name}, {agent.description}."
-    input_text = agent.last_message
+    instructions = f"You are {agent.name}, {agent.description}.  Pay attention to potentially multilingual inputs and make sure to use native accents for all different parts of the text, especially those that are not english."  # noqa: E501
 
-    return voice, instructions, input_text
+    return voice, instructions
