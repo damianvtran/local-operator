@@ -53,7 +53,7 @@ def stream_action_buffer(
     else:
         # No action_response found in the remaining text
         # Check for potential action tag beginnings or ```
-        potential_tag_chars = ["<", "`"]
+        potential_tag_chars = ["<"]
         if len(current_text_to_process) <= lookahead_length:
             lookahead_text_segment = current_text_to_process
             if not any(char in lookahead_text_segment for char in potential_tag_chars):
