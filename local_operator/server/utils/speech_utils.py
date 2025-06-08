@@ -70,7 +70,7 @@ async def determine_voice_and_instructions(
     response: BaseMessage = await executor.invoke_model(messages)
     gender = parse_gender_from_xml(str(response.content))
 
-    voice = "nova" if gender == "female" else "alloy"
+    voice = "nova" if gender == "female" else "ash"
     instructions = f"You are {agent.name}, {agent.description}."
     input_text = agent.last_message
 
