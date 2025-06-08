@@ -1,4 +1,6 @@
 import os
+import subprocess
+import sys
 from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
@@ -8,6 +10,25 @@ from local_operator.tools.general import (
     get_page_text_content,
     list_working_directory,
 )
+
+
+@pytest.fixture(scope="session")
+def playwright_browsers():
+    """Ensure Playwright browsers are installed."""
+    try:
+        # Check if browsers are installed by trying to launch a browser
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "--with-deps"],
+            check=True,
+            capture_output=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        # If the check fails, install the browsers
+        print("Playwright browsers not found, installing...")
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "--with-deps"],
+            check=True,
+        )
 
 
 @pytest.fixture
@@ -187,7 +208,7 @@ def test_list_working_directory_max_depth():
 
 
 @pytest.mark.asyncio
-async def test_get_page_text_content(tmp_path):
+async def test_get_page_text_content(tmp_path, playwright_browsers):
     """Test extracting text content from a local HTML file using Playwright.
 
     This test creates a temporary HTML file with predetermined semantic elements,

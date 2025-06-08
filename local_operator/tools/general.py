@@ -51,6 +51,10 @@ from local_operator.tools.google import (
     update_gmail_draft_tool,
     upload_drive_file_tool,
 )
+from local_operator.tools.screen_recorder import (
+    start_recording_tool,
+    stop_recording_tool,
+)
 from local_operator.types import Schedule, ScheduleUnit
 
 
@@ -1140,7 +1144,7 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
         elif existing_wss_url:
             print(f"Attempting to connect to existing browser session via WSS: {existing_wss_url}")
             browser_config = BrowserConfig(
-                wss_url=existing_wss_url,
+                wss_url=existing_wss_url,  # type: ignore - browser-use might not type this
                 headless=headless_setting,
                 keep_alive=keep_alive_setting,  # type: ignore - browser-use type issue
             )
@@ -1154,12 +1158,12 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
                 )
                 raise RuntimeError(error_msg)
             browser_config = BrowserConfig(
-                browser_binary_path=browser_path,
+                browser_binary_path=browser_path,  # type: ignore - browser-use might not type this
                 headless=headless_setting,
                 keep_alive=keep_alive_setting,  # type: ignore - browser-use type issue
             )
 
-        browser_instance = Browser(config=browser_config)
+        browser_instance = Browser(config=browser_config)  # type: ignore
         controller = BrowserController()
 
         # Need to set this due to a browser-use bug
@@ -1168,7 +1172,7 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
         agent = BrowserAgent(
             task=task,
             llm=model_config.instance,
-            browser=browser_instance,
+            browser=browser_instance,  # type: ignore - browser-use might not type this
             controller=controller,
         )
 
@@ -1422,10 +1426,12 @@ def create_audio_transcription_tool(
         language: Optional[str] = None,
         provider: Optional[str] = "openai",
     ) -> RadientTranscriptionResponseData:
-        """Transcribe an audio file to text using the Radient API. This tool takes the path to an audio file and returns the transcribed text. You can optionally specify the model, a prompt to guide transcription, the desired response format, temperature for sampling, the language of the audio, and the transcription provider.
+        """Transcribe an audio file to text using the Radient API. This tool takes the path to an audio file and returns the transcribed text. Supported audio formats include flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, and webm. You can optionally specify the model, a prompt to guide transcription, the desired response format, temperature for sampling, the language of the audio, and the transcription provider.
+
+        If the file that you need to transcribe is not one of the supported formats, you'll need to separate the audio from the video using a tool like ffmpeg first and then provide the audio file to this tool.
 
         Args:
-            file_path (str): Path to the audio file on disk to transcribe.
+            file_path (str): Path to the audio file on disk to transcribe. Must be a valid path to an audio file on disk. Supported formats: flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, webm.
             model (Optional[str], optional): The transcription model to use (e.g., "gpt-4o-transcribe").
                 Defaults to "gpt-4o-transcribe".
             prompt (Optional[str], optional): An optional text prompt to guide the model.
@@ -1603,6 +1609,8 @@ class ToolRegistry:
         self.add_tool("get_page_html_content", get_page_html_content)
         self.add_tool("get_page_text_content", get_page_text_content)
         self.add_tool("list_working_directory", list_working_directory)
+        self.add_tool("start_recording", start_recording_tool)
+        self.add_tool("stop_recording", stop_recording_tool)
 
         # Add search tool if any search client is available
         if self.radient_client or self.serp_api_client or self.tavily_client:

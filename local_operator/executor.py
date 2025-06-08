@@ -523,7 +523,12 @@ class LocalCodeExecutor:
         total_tokens = 0
         for entry in messages:
             if entry.content:  # Ensure content is not None or empty before encoding
-                total_tokens += len(tokenizer.encode(entry.content))
+                try:
+                    total_tokens += len(
+                        tokenizer.encode(entry.content, allowed_special={"<|endoftext|>"})
+                    )
+                except Exception as e:
+                    logging.warning(f"Could not count tokens for content: {e}")
         return total_tokens
 
     def get_session_token_usage(self) -> int:
@@ -2623,7 +2628,16 @@ class LocalCodeExecutor:
         # Calculate token count for the message content
         tokenizer = encoding_for_model("gpt-4o")
 
-        token_count = len(tokenizer.encode(msg.content or ""))
+        try:
+            token_count = len(
+                tokenizer.encode(msg.content or "", allowed_special={"<|endoftext|>"})
+            )
+        except Exception as e:
+            logging.warning(
+                "Could not count tokens for content, assuming it's long enough to summarize: "
+                f"{e}"
+            )
+            token_count = 0
 
         if token_count <= min_token_threshold:
             return msg.content
