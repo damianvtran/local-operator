@@ -1144,7 +1144,7 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
         elif existing_wss_url:
             print(f"Attempting to connect to existing browser session via WSS: {existing_wss_url}")
             browser_config = BrowserConfig(
-                wss_url=existing_wss_url,
+                wss_url=existing_wss_url,  # type: ignore - browser-use might not type this
                 headless=headless_setting,
                 keep_alive=keep_alive_setting,  # type: ignore - browser-use type issue
             )
@@ -1158,12 +1158,12 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
                 )
                 raise RuntimeError(error_msg)
             browser_config = BrowserConfig(
-                browser_binary_path=browser_path,
+                browser_binary_path=browser_path,  # type: ignore - browser-use might not type this
                 headless=headless_setting,
                 keep_alive=keep_alive_setting,  # type: ignore - browser-use type issue
             )
 
-        browser_instance = Browser(config=browser_config)
+        browser_instance = Browser(config=browser_config)  # type: ignore
         controller = BrowserController()
 
         # Need to set this due to a browser-use bug
@@ -1172,7 +1172,7 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
         agent = BrowserAgent(
             task=task,
             llm=model_config.instance,
-            browser=browser_instance,
+            browser=browser_instance,  # type: ignore - browser-use might not type this
             controller=controller,
         )
 
