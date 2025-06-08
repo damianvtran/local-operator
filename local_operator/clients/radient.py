@@ -1100,6 +1100,7 @@ class RadientClient:
         input_text: str,
         model: str,
         voice: str,
+        instructions: Optional[str] = None,
         response_format: Optional[str] = "mp3",
         speed: Optional[float] = 1.0,
         provider: Optional[str] = "openai",
@@ -1108,6 +1109,8 @@ class RadientClient:
 
         Args:
             input_text (str): The text to convert to speech.
+            instructions (Optional[str]): Additional prompt with instructions for the
+            speech generation.
             model (str): The TTS model to use (e.g., "tts-1").
             voice (str): The voice to use (e.g., "alloy").
             response_format (Optional[str]): The audio format. Defaults to "mp3".
@@ -1129,6 +1132,7 @@ class RadientClient:
         # Create the payload, excluding None values for optional fields
         payload_data = {
             "input": input_text,
+            "instructions": instructions,
             "model": model,
             "voice": voice,
             "response_format": response_format,

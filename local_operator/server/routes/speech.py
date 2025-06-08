@@ -32,6 +32,7 @@ async def create_speech(
     try:
         audio_data = radient_client.create_speech(
             input_text=speech_request.input,
+            instructions=speech_request.instructions,
             model=speech_request.model,
             voice=speech_request.voice,
             response_format=speech_request.response_format,

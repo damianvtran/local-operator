@@ -1492,6 +1492,7 @@ def create_speech_tool(radient_client: RadientClient) -> Callable[..., str]:
         model: str,
         voice: str,
         output_path: str,
+        instructions: Optional[str] = None,
         response_format: Optional[str] = "mp3",
         speed: Optional[float] = 1.0,
     ) -> str:
@@ -1502,6 +1503,7 @@ def create_speech_tool(radient_client: RadientClient) -> Callable[..., str]:
             model (str): The text-to-speech model to use (e.g., "tts-1", "tts-1-hd").
             voice (str): The voice to use (e.g., "alloy", "echo", "fable", "onyx", "nova", "shimmer").
             output_path (str): The path to save the generated audio file.
+            instructions (Optional[str]): Additional prompt with instructions for the speech generation.
             response_format (Optional[str]): The format of the audio ("mp3", "opus", "aac", "flac").
                                              Defaults to "mp3".
             speed (Optional[float]): The speed of the speech (0.25 to 4.0). Defaults to 1.0.
@@ -1526,6 +1528,7 @@ def create_speech_tool(radient_client: RadientClient) -> Callable[..., str]:
             input_text=input_text,
             model=model,
             voice=voice,
+            instructions=instructions,
             response_format=response_format,
             speed=speed,
         )
