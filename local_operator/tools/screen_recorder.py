@@ -137,169 +137,59 @@ async def _wait_for_pid(pid: int, timeout_seconds: float = 5.0) -> bool:
     return False
 
 
-# --- Device Detection for macOS avfoundation ---
-async def _find_avfoundation_device_index(device_type: str, hint: str) -> int | None:
-    """
-    List avfoundation devices and return index of the first device whose name contains the hint.
-    device_type: 'video' or 'audio'.
-    """
-    cmd = ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdin=DEVNULL, stdout=DEVNULL, stderr=PIPE
-        )
-        _, stderr = await proc.communicate()
-        output = stderr.decode(errors="ignore")
-    except Exception as e:
-        logger.warning("Could not list avfoundation devices: %s", e)
-        return None
-
-    found_index = None
-    lines = output.splitlines()
-    scanning = False
-    for line in lines:
-        if device_type == "video" and "AVFoundation video devices" in line:
-            scanning = True
-            continue
-        if device_type == "audio" and "AVFoundation audio devices" in line:
-            scanning = True
-            continue
-        if scanning:
-            m = re.search(r"\[([0-9]+)\]\s*(.+)", line)
-            if m:
-                idx = int(m.group(1))
-                name = m.group(2).strip()
-                if hint.lower() in name.lower():
-                    found_index = idx
-                    break
-    return found_index
-
-
-# --- OS Specific FFmpeg Arguments ---
-async def _get_os_specific_video_input(video_source: str) -> List[str]:
-    system = platform.system()
-    if video_source == "screen":
-        if system == "Darwin":
-            idx = await _find_avfoundation_device_index("video", "capture screen")
-            if idx is None:
-                logger.warning("Could not find screen capture device, using default index 1.")
-                idx = 1
-            return [
-                "-f",
-                "avfoundation",
-                "-thread_queue_size",
-                "512",
-                "-probesize",
-                "10M",
-                "-framerate",
-                "30",
-                "-i",
-                str(idx),
-            ]
-        if system == "Windows":
-            return ["-f", "gdigrab", "-framerate", "30", "-i", "desktop"]
-        if system == "Linux":
-            return [
-                "-f",
-                "x11grab",
-                "-thread_queue_size",
-                "512",
-                "-probesize",
-                "10M",
-                "-draw_mouse",
-                "1",
-                "-s",
-                "1920x1080",
-                "-i",
-                ":0.0",
-            ]
-        raise NotImplementedError(f"Screen capture not implemented for {system}")
-    if video_source == "window":
-        raise NotImplementedError("Window-specific recording is not supported yet.")
-    raise ValueError(f"Unsupported video_source: {video_source}")
-
-
-async def _get_os_specific_audio_input(audio_source: str) -> List[str]:
-    system = platform.system()
-
-    if system == "Darwin":
-        if audio_source == "system":
-            # On macOS, system audio capture usually requires a virtual audio device.
-            # We'll try to find one, otherwise fall back to the microphone.
-            idx = await _find_avfoundation_device_index("audio", "blackhole")
-            if idx is not None:
-                logger.info("Found system audio device (BlackHole).")
-                return ["-f", "avfoundation", "-thread_queue_size", "512", "-i", f":{idx}"]
-
-            logger.warning(
-                "Could not find a 'BlackHole' system audio device. "
-                "Falling back to default microphone input. "
-                "Please install BlackHole for system audio recording on macOS."
-            )
-            # Fall through to microphone
-            audio_source = "microphone"
-
-        if audio_source == "microphone":
-            idx = await _find_avfoundation_device_index("audio", "microphone")
-            if idx is None:
-                logger.warning("Could not find microphone, using default index 0.")
-                idx = 0
-            return ["-f", "avfoundation", "-thread_queue_size", "512", "-i", f":{idx}"]
-
-    elif system == "Windows":
-        if audio_source == "system":
-            return ["-f", "dshow", "-i", "audio=virtual-audio-capturer"]
-        if audio_source == "microphone":
-            return ["-f", "dshow", "-i", "audio=Microphone"]
-
-    elif system == "Linux":
-        if audio_source in ["system", "microphone"]:
-            return ["-f", "pulse", "-i", "default"]
-
-    raise ValueError(f"Unsupported audio_source '{audio_source}' for system '{system}'")
-
-
-# --- Public Tool Functions ---
 async def start_recording_tool(
     output_path: str,
     record_audio: bool = True,
     record_video: bool = True,
-    audio_source: str = "system",
-    video_source: str = "screen",
+    audio_device: str | None = None,
+    video_device: str | None = None,
 ) -> str:
     """Start recording screen and/or audio using FFmpeg.
 
-    This tool allows you to start recording the screen, audio, or both simultaneously.
+    This tool allows you to start recording from a specific video and/or audio device.
     The recording will continue until you call the stop_recording_tool. You must provide
-    an output path where the recording will be saved.
+    an output path where the recording will be saved.  Make an appropriate
+    and well-organized path and file name at your discretion unless the user
+    specifically tells you where to save the file.
 
-    By default, this tool will attempt to capture system audio. If you need to record
-    from a microphone, set the `audio_source` parameter to `'microphone'`. On macOS,
-    system audio capture may require a virtual audio driver like BlackHole to be installed.
+    To use this tool, you must first know the names of the devices you want to record from.
+    You can list the available devices by running the appropriate FFmpeg command in the
+    terminal. For example, on macOS, you can list devices with:
+    `ffmpeg -f avfoundation -list_devices true -i ""`.  Do not request
+    the user to run this command.  Instead, you must first run the command
+    and then use the output to determine the device names.
+
+    You must provide the exact device name for the `video_device` and/or `audio_device`
+    arguments.
 
     Args:
-        output_path (str): Path where the recording file will be saved (e.g., "recording.mp4").  Pick a well organized path and file name at your discretion unless the user specifically tells you where to save the file.  Don't ask them for this information if they don't specify it.
-        record_audio (bool, optional): Whether to record audio. Defaults to True.
-        record_video (bool, optional): Whether to record video. Defaults to True.
-        audio_source (str, optional): Audio source to record from. Options are "system"
-            for system audio or "microphone" for microphone input. Defaults to "system".
-            Unless otherwise specified, you should use the default "system" audio source.
-        video_source (str, optional): Video source to record from. Currently only
-            "screen" is supported. Defaults to "screen".
+        output_path (str): Path where the recording file will be saved (e.g., "recording.mp4").
+            Pick a well-organized path and file name at your discretion unless the user
+            specifically tells you where to save the file.
+        record_audio (bool, optional): Whether to record audio. Defaults to True. If True,
+            `audio_device` must be provided.
+        record_video (bool, optional): Whether to record video. Defaults to True. If True,
+            `video_device` must be provided.
+        audio_device (str, optional): The name of the audio device to record from.
+        video_device (str, optional): The name of the video device to record from. This can be
+            a screen capture device or a webcam.
 
     Returns:
         str: The unique ID for the recording session.
 
     Raises:
         ToolError: If FFmpeg is not installed or not found in PATH.
-        ValueError: If neither audio nor video recording is enabled, or if invalid
-            source options are provided.
-        NotImplementedError: If unsupported video_source options are used.
-    """  # noqa: E501
+        ValueError: If recording is enabled for a device type but no device name is provided,
+            or if neither audio nor video recording is enabled.
+    """
     if shutil.which("ffmpeg") is None:
         raise ToolError("FFmpeg executable not found. Please install FFmpeg.")
     if not (record_audio or record_video):
         raise ValueError("At least one of record_audio or record_video must be True.")
+    if record_video and not video_device:
+        raise ValueError("video_device must be provided when record_video is True.")
+    if record_audio and not audio_device:
+        raise ValueError("audio_device must be provided when record_audio is True.")
 
     rec_id = str(uuid.uuid4())
     TEMP_DIR_BASE.mkdir(parents=True, exist_ok=True)
@@ -309,7 +199,6 @@ async def start_recording_tool(
     final_output = Path(output_path).expanduser().resolve()
     final_output.parent.mkdir(parents=True, exist_ok=True)
 
-    # Determine video codec availability
     video_codec = "libx264"
     try:
         encoders = subprocess.check_output(["ffmpeg", "-encoders"], stderr=DEVNULL).decode(
@@ -321,33 +210,18 @@ async def start_recording_tool(
     except Exception:
         logger.warning("Could not check ffmpeg encoders; using libx264 by default")
 
-    # Build ffmpeg command: inputs first, then codec/output options
     cmd: List[str] = ["ffmpeg", "-y"]
+    system = platform.system()
 
-    # On macOS, combine audio and video in a single avfoundation input
-    if platform.system() == "Darwin" and record_video and record_audio:
-        v_idx = await _find_avfoundation_device_index("video", "capture screen")
-        if v_idx is None:
-            logger.warning("Could not find screen capture device, using default index 1.")
-            v_idx = 1
-
-        a_idx = None
-        if audio_source == "system":
-            a_idx = await _find_avfoundation_device_index("audio", "blackhole")
-            if a_idx is not None:
-                logger.info("Found system audio device (BlackHole) for combined recording.")
-            else:
-                logger.warning(
-                    "Could not find a 'BlackHole' system audio device for combined recording. "
-                    "Falling back to microphone."
-                )
-                # Fall through to try microphone
-
-        if a_idx is None:  # Either microphone source, or system source that fell through
-            a_idx = await _find_avfoundation_device_index("audio", "microphone")
-            if a_idx is None:
-                logger.warning("Could not find any audio device, using default index 0.")
-                a_idx = 0
+    # Input configuration
+    if system == "Darwin":
+        input_spec = ""
+        if record_video:
+            assert video_device is not None
+            input_spec += video_device
+        if record_audio:
+            assert audio_device is not None
+            input_spec = f":{audio_device}" if not record_video else f"{input_spec}:{audio_device}"
 
         cmd += [
             "-f",
@@ -359,13 +233,41 @@ async def start_recording_tool(
             "-framerate",
             "30",
             "-i",
-            f"{v_idx}:{a_idx}",
+            input_spec,
         ]
-    else:
+
+    elif system == "Windows":
         if record_video:
-            cmd += await _get_os_specific_video_input(video_source)
+            assert video_device is not None
+            if video_device == "desktop":
+                cmd += ["-f", "gdigrab", "-framerate", "30", "-i", "desktop"]
+            else:
+                cmd += ["-f", "dshow", "-i", f"video={video_device}"]
         if record_audio:
-            cmd += await _get_os_specific_audio_input(audio_source)
+            assert audio_device is not None
+            cmd += ["-f", "dshow", "-i", f"audio={audio_device}"]
+
+    elif system == "Linux":
+        if record_video:
+            assert video_device is not None
+            if ":" in video_device:
+                cmd += [
+                    "-f",
+                    "x11grab",
+                    "-draw_mouse",
+                    "1",
+                    "-framerate",
+                    "30",
+                    "-i",
+                    video_device,
+                ]
+            else:
+                cmd += ["-f", "v4l2", "-framerate", "30", "-i", video_device]
+        if record_audio:
+            assert audio_device is not None
+            cmd += ["-f", "pulse", "-i", audio_device]
+    else:
+        raise NotImplementedError(f"Recording not implemented for {system}")
 
     # Codec and output options
     if record_video:
