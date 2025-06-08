@@ -941,9 +941,7 @@ class Operator:
                 ConversationRecord(
                     role=ConversationRole.USER,
                     content=(
-                        "<system>I would like to change the subject.  Please stop the current task "
-                        "and pay attention to my new message.  Don't acknowledge "
-                        "this message directly.</system>"
+                        "<system>This is a potential subject change.  This message is here to help you figure out if you need to change directions in the conversation and work on a new task.  Pay attention to my next message and if it is a different subject then you'll need to stop the current task and respond to my new message.  Don't acknowledge this message directly.</system>"  # noqa: E501
                     ),
                     should_summarize=False,
                 )
