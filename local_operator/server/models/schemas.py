@@ -912,10 +912,11 @@ class AgentSpeechRequest(BaseModel):
     """Request body for agent-based speech generation endpoint.
 
     Attributes:
-        agent: The name of the agent to use for generating speech.
+        input_text: The text to generate speech from.
         response_format: The format of the audio response. Default: "mp3".
     """
 
+    input_text: str = Field(..., description="The text to generate speech from.")
     response_format: str = Field(
         "mp3", description='The format of the audio response. Default: "mp3".'
     )
