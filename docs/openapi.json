@@ -3,7 +3,7 @@
   "info": {
     "title": "Local Operator API",
     "description": "REST API interface for Local Operator agent",
-    "version": "0.13.0"
+    "version": "0.15.6"
   },
   "paths": {
     "/health": {
@@ -3078,10 +3078,62 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RadientTranscriptionResponseData"
+                  "$ref": "#/components/schemas/CRUDResponse_RadientTranscriptionResponseData_"
                 }
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tools/speech": {
+      "post": {
+        "tags": [
+          "Tools"
+        ],
+        "summary": "Generate speech from text",
+        "description": "Generates speech from text using a specified provider and returns the audio data. This endpoint is protected by API key authentication and is subject to billing.",
+        "operationId": "create_speech_v1_tools_speech_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpeechRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful speech generation",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "audio/mpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request, such as missing required fields"
+          },
+          "500": {
+            "description": "Internal server error"
           },
           "422": {
             "description": "Validation Error",
@@ -4432,6 +4484,34 @@
           "message"
         ],
         "title": "CRUDResponse[ProviderListResponse]"
+      },
+      "CRUDResponse_RadientTranscriptionResponseData_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RadientTranscriptionResponseData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[RadientTranscriptionResponseData]"
       },
       "CRUDResponse_ScheduleListResponse_": {
         "properties": {
@@ -6153,6 +6233,51 @@
             "unit": "HOURS"
           }
         ]
+      },
+      "SpeechRequest": {
+        "properties": {
+          "input": {
+            "type": "string",
+            "title": "Input",
+            "description": "The text to generate speech from."
+          },
+          "model": {
+            "type": "string",
+            "title": "Model",
+            "description": "The model to use for generation."
+          },
+          "voice": {
+            "type": "string",
+            "title": "Voice",
+            "description": "The voice to use for generation."
+          },
+          "response_format": {
+            "type": "string",
+            "title": "Response Format",
+            "description": "The format of the audio response. Default: \"mp3\".",
+            "default": "mp3"
+          },
+          "speed": {
+            "type": "number",
+            "title": "Speed",
+            "description": "The speed of the speech. Default: 1.0.",
+            "default": 1.0
+          },
+          "provider": {
+            "type": "string",
+            "title": "Provider",
+            "description": "The provider to use for generation. Default: \"openai\".",
+            "default": "openai"
+          }
+        },
+        "type": "object",
+        "required": [
+          "input",
+          "model",
+          "voice"
+        ],
+        "title": "SpeechRequest",
+        "description": "Request body for speech generation endpoint.\n\nAttributes:\n    input: The text to generate speech from.\n    model: The model to use for generation.\n    voice: The voice to use for generation.\n    response_format: The format of the audio response. Default: \"mp3\".\n    speed: The speed of the speech. Default: 1.0.\n    provider: The provider to use for generation. Default: \"openai\"."
       },
       "SystemPromptResponse": {
         "properties": {

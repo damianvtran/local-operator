@@ -878,3 +878,27 @@ class ExecutionVariablesResponse(BaseModel):
     execution_variables: List[ExecutionVariable] = Field(
         ..., description="A list of execution variables."
     )
+
+
+class SpeechRequest(BaseModel):
+    """Request body for speech generation endpoint.
+
+    Attributes:
+        input: The text to generate speech from.
+        model: The model to use for generation.
+        voice: The voice to use for generation.
+        response_format: The format of the audio response. Default: "mp3".
+        speed: The speed of the speech. Default: 1.0.
+        provider: The provider to use for generation. Default: "openai".
+    """
+
+    input: str = Field(..., description="The text to generate speech from.")
+    model: str = Field(..., description="The model to use for generation.")
+    voice: str = Field(..., description="The voice to use for generation.")
+    response_format: str = Field(
+        "mp3", description='The format of the audio response. Default: "mp3".'
+    )
+    speed: float = Field(1.0, description="The speed of the speech. Default: 1.0.")
+    provider: str = Field(
+        "openai", description='The provider to use for generation. Default: "openai".'
+    )
