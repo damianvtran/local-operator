@@ -906,3 +906,16 @@ class SpeechRequest(BaseModel):
     provider: str = Field(
         "openai", description='The provider to use for generation. Default: "openai".'
     )
+
+
+class AgentSpeechRequest(BaseModel):
+    """Request body for agent-based speech generation endpoint.
+
+    Attributes:
+        agent: The name of the agent to use for generating speech.
+        response_format: The format of the audio response. Default: "mp3".
+    """
+
+    response_format: str = Field(
+        "mp3", description='The format of the audio response. Default: "mp3".'
+    )
