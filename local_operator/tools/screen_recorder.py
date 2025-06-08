@@ -85,6 +85,16 @@ async def _run_ffmpeg_command(command: List[str], process_name: str, stderr_hand
             stdout=DEVNULL,
             stderr=stderr_handle,
         )
+        logger.info(f"Spawned FFmpeg process with PID: {process.pid} for {process_name}")
+        # Give it a moment to potentially fail and check its status
+        await asyncio.sleep(1.0)
+        if process.returncode is not None:
+            logger.error(
+                f"FFmpeg process {process.pid} for {process_name} "
+                f"terminated immediately with code {process.returncode}."
+            )
+            # The calling function will handle the cleanup and error reporting
+            # based on the process having exited.
     except Exception as exc:
         logger.exception("Failed to start FFmpeg process %s", process_name)
         if stderr_handle:
@@ -92,7 +102,11 @@ async def _run_ffmpeg_command(command: List[str], process_name: str, stderr_hand
                 stderr_handle.close()
             except Exception:
                 pass
-        raise ToolError(f"Could not start FFmpeg process '{process_name}': {exc}") from exc
+        # Be more specific about the error
+        error_message = (
+            f"Could not start FFmpeg process '{process_name}'. Reason: {type(exc).__name__}: {exc}"
+        )
+        raise ToolError(error_message) from exc
     return process
 
 
