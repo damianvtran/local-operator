@@ -3147,6 +3147,69 @@
           }
         }
       }
+    },
+    "/v1/agents/{agent_id}/speech": {
+      "post": {
+        "tags": [
+          "Tools"
+        ],
+        "summary": "Generate speech from an agent's last message",
+        "description": "Generates speech from an agent's last message, automatically determining the voice and instructions based on the agent's profile.",
+        "operationId": "create_agent_speech_v1_agents__agent_id__speech_post",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Agent Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentSpeechRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful speech generation",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "audio/mpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -3785,6 +3848,19 @@
         ],
         "title": "AgentListResult",
         "description": "Paginated list result for agents."
+      },
+      "AgentSpeechRequest": {
+        "properties": {
+          "response_format": {
+            "type": "string",
+            "title": "Response Format",
+            "description": "The format of the audio response. Default: \"mp3\".",
+            "default": "mp3"
+          }
+        },
+        "type": "object",
+        "title": "AgentSpeechRequest",
+        "description": "Request body for agent-based speech generation endpoint.\n\nAttributes:\n    agent: The name of the agent to use for generating speech.\n    response_format: The format of the audio response. Default: \"mp3\"."
       },
       "AgentUpdate": {
         "properties": {
@@ -6241,6 +6317,18 @@
             "title": "Input",
             "description": "The text to generate speech from."
           },
+          "instructions": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instructions",
+            "description": "Additional prompt with instructions for the speech generation."
+          },
           "model": {
             "type": "string",
             "title": "Model",
@@ -6277,7 +6365,7 @@
           "voice"
         ],
         "title": "SpeechRequest",
-        "description": "Request body for speech generation endpoint.\n\nAttributes:\n    input: The text to generate speech from.\n    model: The model to use for generation.\n    voice: The voice to use for generation.\n    response_format: The format of the audio response. Default: \"mp3\".\n    speed: The speed of the speech. Default: 1.0.\n    provider: The provider to use for generation. Default: \"openai\"."
+        "description": "Request body for speech generation endpoint.\n\nAttributes:\n    input: The text to generate speech from.\n    instructions: Additional prompt with instructions for the speech generation.\n    model: The model to use for generation.\n    voice: The voice to use for generation.\n    response_format: The format of the audio response. Default: \"mp3\".\n    speed: The speed of the speech. Default: 1.0.\n    provider: The provider to use for generation. Default: \"openai\"."
       },
       "SystemPromptResponse": {
         "properties": {
