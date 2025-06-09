@@ -1477,6 +1477,72 @@ def create_audio_transcription_tool(
     return create_audio_transcription
 
 
+def create_speech_tool(radient_client: RadientClient) -> Callable[..., str]:
+    """Create a tool function to generate speech from text using the Radient API.
+
+    Args:
+        radient_client (RadientClient): The Radient API client to use.
+
+    Returns:
+        Callable: A function that generates speech and saves it to a file.
+    """
+
+    def create_speech(
+        input_text: str,
+        model: str,
+        voice: str,
+        output_path: str,
+        instructions: Optional[str] = None,
+        response_format: Optional[str] = "mp3",
+        speed: Optional[float] = 1.0,
+    ) -> str:
+        """Generate speech from text and save it to a file. This tool uses the Radient API to convert text into speech and saves the resulting audio to the specified file path.
+
+        Args:
+            input_text (str): The text to be converted into speech.
+            model (str): The text-to-speech model to use (e.g., "tts-1", "tts-1-hd").
+            voice (str): The voice to use (e.g., "alloy", "echo", "fable", "onyx", "nova", "shimmer").
+            output_path (str): The path to save the generated audio file.
+            instructions (Optional[str]): Additional prompt with instructions for the speech generation.
+            response_format (Optional[str]): The format of the audio ("mp3", "opus", "aac", "flac").
+                                             Defaults to "mp3".
+            speed (Optional[float]): The speed of the speech (0.25 to 4.0). Defaults to 1.0.
+
+        Returns:
+            str: A confirmation message with the path to the saved audio file.
+
+        Raises:
+            RuntimeError: If the Radient client is not available or the request fails.
+            ValueError: If input parameters are invalid.
+        """  # noqa: E501
+        if not radient_client.api_key:
+            raise RuntimeError("RADIENT_API_KEY is not configured. Cannot create speech.")
+
+        # Basic validation
+        if not (1 <= len(input_text) <= 4096):
+            raise ValueError("Input text must be between 1 and 4096 characters.")
+        if speed is not None and not (0.25 <= speed <= 4.0):
+            raise ValueError("Speed must be between 0.25 and 4.0.")
+
+        audio_data = radient_client.create_speech(
+            input_text=input_text,
+            model=model,
+            voice=voice,
+            instructions=instructions,
+            response_format=response_format,
+            speed=speed,
+        )
+
+        try:
+            with open(output_path, "wb") as f:
+                f.write(audio_data)
+            return f"Speech generated and saved to {output_path}"
+        except IOError as e:
+            raise RuntimeError(f"Failed to save audio file: {str(e)}")
+
+    return create_speech
+
+
 class ToolRegistry:
     """Registry for tools that can be used by agents.
 
@@ -1605,6 +1671,7 @@ class ToolRegistry:
         - list_schedules: List active schedules for an agent
         - send_email_to_user: Send an email to the authenticated user
         - create_audio_transcription: Transcribe an audio file to text
+        - create_speech: Generate speech from text and save to a file
         """
         self.add_tool("get_page_html_content", get_page_html_content)
         self.add_tool("get_page_text_content", get_page_text_content)
@@ -1718,6 +1785,7 @@ class ToolRegistry:
                 "create_audio_transcription",
                 create_audio_transcription_tool(self.radient_client),
             )
+            self.add_tool("create_speech", create_speech_tool(self.radient_client))
 
     def add_tool(self, name: str, tool: Callable[..., Any]):
         """Add a new tool to the registry.
