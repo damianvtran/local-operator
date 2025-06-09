@@ -2694,6 +2694,44 @@
         }
       }
     },
+    "/v1/static/audio": {
+      "get": {
+        "tags": [
+          "Static"
+        ],
+        "summary": "Serve audio file",
+        "description": "Serves an audio file from disk by path. Only audio file types are allowed.",
+        "operationId": "get_audio_v1_static_audio_get",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Path to the audio file on disk",
+              "title": "Path"
+            },
+            "description": "Path to the audio file on disk"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/static/html": {
       "get": {
         "tags": [
@@ -3851,6 +3889,11 @@
       },
       "AgentSpeechRequest": {
         "properties": {
+          "input_text": {
+            "type": "string",
+            "title": "Input Text",
+            "description": "The text to generate speech from."
+          },
           "response_format": {
             "type": "string",
             "title": "Response Format",
@@ -3859,8 +3902,11 @@
           }
         },
         "type": "object",
+        "required": [
+          "input_text"
+        ],
         "title": "AgentSpeechRequest",
-        "description": "Request body for agent-based speech generation endpoint.\n\nAttributes:\n    agent: The name of the agent to use for generating speech.\n    response_format: The format of the audio response. Default: \"mp3\"."
+        "description": "Request body for agent-based speech generation endpoint.\n\nAttributes:\n    input_text: The text to generate speech from.\n    response_format: The format of the audio response. Default: \"mp3\"."
       },
       "AgentUpdate": {
         "properties": {
