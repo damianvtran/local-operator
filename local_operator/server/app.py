@@ -31,6 +31,7 @@ from local_operator.server.routes import (
     jobs,
     models,
     schedules,
+    speech,
     static,
     transcription,
     websockets,
@@ -180,4 +181,9 @@ app.include_router(
 # /v1/transcriptions
 app.include_router(
     transcription.router,
+)
+
+# /v1/speech
+app.include_router(
+    speech.router,
 )

@@ -1093,3 +1093,66 @@ class RadientClient:
             ) from e
         except Exception as e:
             raise RuntimeError(f"Failed to create transcription: {str(e)}") from e
+
+    # Speech Generation Methods
+    def create_speech(
+        self,
+        input_text: str,
+        model: str,
+        voice: str,
+        instructions: Optional[str] = None,
+        response_format: Optional[str] = "mp3",
+        speed: Optional[float] = 1.0,
+        provider: Optional[str] = "openai",
+    ) -> bytes:
+        """Generate speech from text using the Radient API.
+
+        Args:
+            input_text (str): The text to convert to speech.
+            instructions (Optional[str]): Additional prompt with instructions for the
+            speech generation.
+            model (str): The TTS model to use (e.g., "tts-1").
+            voice (str): The voice to use (e.g., "alloy").
+            response_format (Optional[str]): The audio format. Defaults to "mp3".
+            speed (Optional[float]): The speech speed. Defaults to 1.0.
+            provider (Optional[str]): The provider. Defaults to "openai".
+
+        Returns:
+            bytes: The binary audio data of the generated speech.
+
+        Raises:
+            RuntimeError: If the API request fails.
+        """
+        if not self.api_key:
+            raise RuntimeError("RADIENT_API_KEY is not configured. Cannot create speech.")
+
+        url = f"{self.base_url}/tools/speech"
+        headers = self._get_headers(require_api_key=True)
+
+        # Create the payload, excluding None values for optional fields
+        payload_data = {
+            "input": input_text,
+            "instructions": instructions,
+            "model": model,
+            "voice": voice,
+            "response_format": response_format,
+            "speed": speed,
+            "provider": provider,
+        }
+        payload = {k: v for k, v in payload_data.items() if v is not None}
+
+        try:
+            response = requests.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            return response.content
+        except requests.exceptions.RequestException as e:
+            error_body = (
+                e.response.content.decode()
+                if hasattr(e, "response") and e.response and e.response.content
+                else "No response body"
+            )
+            raise RuntimeError(
+                f"Failed to generate speech: {str(e)}, Response Body: {error_body}"
+            ) from e
+        except Exception as e:
+            raise RuntimeError(f"Failed to generate speech: {str(e)}") from e
