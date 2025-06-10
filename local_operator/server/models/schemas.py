@@ -931,6 +931,7 @@ class AgentEditFileRequest(BaseModel):
         file_path: The path to the file to edit.
         edit_prompt: The prompt for the edit.
         selection: The selection to edit.
+        attachments: The attachments to use for the edit.
     """
 
     hosting: str = Field(..., description="The hosting service to use for the edit.")
@@ -938,6 +939,9 @@ class AgentEditFileRequest(BaseModel):
     file_path: str = Field(..., description="The path to the file to edit.")
     selection: Optional[str] = Field(None, description="The selection to edit.")
     edit_prompt: str = Field(..., description="The prompt for the edit.")
+    attachments: Optional[List[str]] = Field(
+        None, description="The attachments to use for the edit."
+    )
 
 
 class AgentEditFileResponse(BaseModel):
