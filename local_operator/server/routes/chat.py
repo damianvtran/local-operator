@@ -16,7 +16,7 @@ from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
-from local_operator.helpers import parse_replacements
+from local_operator.helpers import parse_agent_action_xml, parse_replacements
 from local_operator.jobs import JobManager
 from local_operator.prompts import EditFileInstructionsPrompt
 
@@ -661,6 +661,7 @@ async def edit_file_with_agent(
             file_path=request.file_path,
             edit_prompt=request.edit_prompt,
             file_content=file_content,
+            selection=request.selection,
         )
 
         operator.executor.append_to_history(
@@ -672,12 +673,21 @@ async def edit_file_with_agent(
             operator.executor.get_conversation_history()
         )
 
-        # Parse the edit diffs from the response
-        edit_diffs = []
-        raw_response = ""
-        if response and response.content and isinstance(response.content, str):
-            edit_diffs = parse_replacements(response.content)
-            raw_response = response.content
+        response_content = (
+            response.content
+            if response and response.content and isinstance(response.content, str)
+            else ""
+        )
+
+        if response_content:
+            if "<action_response>" in response_content:
+                action_response = parse_agent_action_xml(response_content)
+                if action_response:
+                    edit_diffs = action_response.get("replacements", [])
+                    raw_response = action_response.get("raw_response", "")
+            else:
+                edit_diffs = parse_replacements(response_content)
+                raw_response = response_content
 
         # Return the edit response
         response_data = CRUDResponse(

@@ -988,6 +988,7 @@ text to replace 3
 </example>
 
 EDIT usage guidelines:
+- Make sure the SEARCH blocks contain exact text that exists in the file. You can make multiple edits in one response by using multiple SEARCH/REPLACE blocks.  Each edit will apply to the first instance of the search text in the file.  If you need to edit multiple instances of the same text, then be specific about the surrounding selection to deduplicate or otherwise provide multiple identical search queries to replace each in order.
 - After you edit the file, you will be shown the contents of the edited file with line numbers and lengths.  Please review and determine if your edit worked as expected.  If not, then try another EDIT action to amend the error.  If repeated edits fail, then rewrite the file from scratch instead with a WRITE action, making sure to stay accurate to the original file content.
 - Make sure that you include the replacements in the "replacements" field or you will run into parsing errors.
 - Do not duplicate headers in the replacements.  If you are replacing placeholders, make sure that you pay attention to the other text around the placeholder and don't repeat content that is already present in the file.  For example, if there is a header and then placeholder, don't include the header again in the replacements as it is already above the placeholder.
@@ -2321,24 +2322,28 @@ Specialized instructions for scheduled tasks
 
 EditFileInstructionsPrompt: str = """Please edit the following file based on the instruction provided.
 
-File path: {file_path}
+File path:
+<file_path>
+{file_path}
+</file_path>
 
-Edit instruction: {edit_prompt}
+Edit instruction:
+<edit_prompt>
+{edit_prompt}
+</edit_prompt>
 
 File content:
-```
+<file_content>
 {file_content}
-```
+</file_content>
 
-Please provide your response with SEARCH and REPLACE blocks to make the necessary changes. Use the exact format:
+Selection from file:
+<selection>
+{selection}
+</selection>
 
-<<<<<<< SEARCH
-exact text to search for
-=======
-exact text to replace with
->>>>>>> REPLACE
-
-Make sure the SEARCH blocks contain exact text that exists in the file. You can make multiple edits in one response by using multiple SEARCH/REPLACE blocks."""  # noqa: E501
+Please provide your EDIT action response with SEARCH and REPLACE blocks to make the necessary changes. You MUST use only the EDIT action in response to this message.
+"""  # noqa: E501
 
 
 def get_request_type_instructions(request_type: RequestType) -> str:

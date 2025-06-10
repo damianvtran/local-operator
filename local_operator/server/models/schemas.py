@@ -926,13 +926,17 @@ class AgentEditRequest(BaseModel):
     """Request body for agent edit endpoint.
 
     Attributes:
+        hosting: The hosting service to use for the edit.
+        model: The model to use for the edit.
         file_path: The path to the file to edit.
         edit_prompt: The prompt for the edit.
+        selection: The selection to edit.
     """
 
     hosting: str = Field(..., description="The hosting service to use for the edit.")
     model: str = Field(..., description="The model to use for the edit.")
     file_path: str = Field(..., description="The path to the file to edit.")
+    selection: Optional[str] = Field(None, description="The selection to edit.")
     edit_prompt: str = Field(..., description="The prompt for the edit.")
 
 
