@@ -922,7 +922,7 @@ class AgentSpeechRequest(BaseModel):
     )
 
 
-class AgentEditRequest(BaseModel):
+class AgentEditFileRequest(BaseModel):
     """Request body for agent edit endpoint.
 
     Attributes:
@@ -940,7 +940,7 @@ class AgentEditRequest(BaseModel):
     edit_prompt: str = Field(..., description="The prompt for the edit.")
 
 
-class AgentEditResponse(BaseModel):
+class AgentEditFileResponse(BaseModel):
     """Response from agent edit endpoint.
 
     Attributes:
@@ -953,4 +953,6 @@ class AgentEditResponse(BaseModel):
     file_path: str = Field(..., description="The path to the file that was edited.")
     raw_response: str = Field(..., description="The raw response from the model.")
     edit_prompt: str = Field(..., description="The prompt for the edit.")
-    edit_diffs: List[Dict[str, str]] = Field(..., description="The generated edit diffs.")
+    edit_diffs: List[Dict[str, str]] = Field(
+        ..., description="The generated edit diffs with dicts with find and replace keys."
+    )

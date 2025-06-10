@@ -32,8 +32,8 @@ from local_operator.server.dependencies import (
 )
 from local_operator.server.models.schemas import (
     AgentChatRequest,
-    AgentEditRequest,
-    AgentEditResponse,
+    AgentEditFileRequest,
+    AgentEditFileResponse,
     ChatRequest,
     ChatResponse,
     ChatStats,
@@ -590,7 +590,7 @@ async def chat_with_agent_async(
     },
 )
 async def edit_file_with_agent(
-    request: AgentEditRequest,
+    request: AgentEditFileRequest,
     credential_manager: CredentialManager = Depends(get_credential_manager),
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
@@ -693,7 +693,7 @@ async def edit_file_with_agent(
         response_data = CRUDResponse(
             status=200,
             message="File edit completed successfully",
-            result=AgentEditResponse(
+            result=AgentEditFileResponse(
                 file_path=request.file_path,
                 edit_prompt=request.edit_prompt,
                 edit_diffs=edit_diffs,
