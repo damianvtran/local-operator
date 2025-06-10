@@ -3840,6 +3840,21 @@
             "type": "string",
             "title": "Edit Prompt",
             "description": "The prompt for the edit."
+          },
+          "attachments": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attachments",
+            "description": "The attachments to use for the edit."
           }
         },
         "type": "object",
@@ -3850,7 +3865,7 @@
           "edit_prompt"
         ],
         "title": "AgentEditFileRequest",
-        "description": "Request body for agent edit endpoint.\n\nAttributes:\n    hosting: The hosting service to use for the edit.\n    model: The model to use for the edit.\n    file_path: The path to the file to edit.\n    edit_prompt: The prompt for the edit.\n    selection: The selection to edit."
+        "description": "Request body for agent edit endpoint.\n\nAttributes:\n    hosting: The hosting service to use for the edit.\n    model: The model to use for the edit.\n    file_path: The path to the file to edit.\n    edit_prompt: The prompt for the edit.\n    selection: The selection to edit.\n    attachments: The attachments to use for the edit."
       },
       "AgentExecutionHistoryResult": {
         "properties": {

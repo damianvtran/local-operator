@@ -664,8 +664,14 @@ async def edit_file_with_agent(
             selection=request.selection,
         )
 
+        processed_attachments = await process_attachments(request.attachments)
+
         operator.executor.append_to_history(
-            ConversationRecord(role=ConversationRole.USER, content=edit_instruction)
+            ConversationRecord(
+                role=ConversationRole.USER,
+                content=edit_instruction,
+                files=processed_attachments,
+            )
         )
 
         # Invoke the model to get edit suggestions
