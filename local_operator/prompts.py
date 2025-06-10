@@ -2319,6 +2319,27 @@ Don't make assumptions about variables or data that are already in your context 
 Specialized instructions for scheduled tasks
 """
 
+EditFileInstructionsPrompt: str = """Please edit the following file based on the instruction provided.
+
+File path: {file_path}
+
+Edit instruction: {edit_prompt}
+
+File content:
+```
+{file_content}
+```
+
+Please provide your response with SEARCH and REPLACE blocks to make the necessary changes. Use the exact format:
+
+<<<<<<< SEARCH
+exact text to search for
+=======
+exact text to replace with
+>>>>>>> REPLACE
+
+Make sure the SEARCH blocks contain exact text that exists in the file. You can make multiple edits in one response by using multiple SEARCH/REPLACE blocks."""  # noqa: E501
+
 
 def get_request_type_instructions(request_type: RequestType) -> str:
     """Get the specialized instructions for a given request type."""
