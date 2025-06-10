@@ -335,7 +335,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AgentEditRequest"
+                "$ref": "#/components/schemas/AgentEditFileRequest"
               }
             }
           }
@@ -3807,7 +3807,7 @@
         "title": "AgentCreate",
         "description": "Data required to create a new agent."
       },
-      "AgentEditRequest": {
+      "AgentEditFileRequest": {
         "properties": {
           "hosting": {
             "type": "string",
@@ -3849,7 +3849,7 @@
           "file_path",
           "edit_prompt"
         ],
-        "title": "AgentEditRequest",
+        "title": "AgentEditFileRequest",
         "description": "Request body for agent edit endpoint.\n\nAttributes:\n    hosting: The hosting service to use for the edit.\n    model: The model to use for the edit.\n    file_path: The path to the file to edit.\n    edit_prompt: The prompt for the edit.\n    selection: The selection to edit."
       },
       "AgentExecutionHistoryResult": {
