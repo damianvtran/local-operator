@@ -920,3 +920,33 @@ class AgentSpeechRequest(BaseModel):
     response_format: str = Field(
         "mp3", description='The format of the audio response. Default: "mp3".'
     )
+
+
+class AgentEditRequest(BaseModel):
+    """Request body for agent edit endpoint.
+
+    Attributes:
+        file_path: The path to the file to edit.
+        edit_prompt: The prompt for the edit.
+    """
+
+    hosting: str = Field(..., description="The hosting service to use for the edit.")
+    model: str = Field(..., description="The model to use for the edit.")
+    file_path: str = Field(..., description="The path to the file to edit.")
+    edit_prompt: str = Field(..., description="The prompt for the edit.")
+
+
+class AgentEditResponse(BaseModel):
+    """Response from agent edit endpoint.
+
+    Attributes:
+        file_path: The path to the file that was edited.
+        raw_response: The raw response from the model.
+        edit_prompt: The prompt for the edit.
+        edit_diffs: The generated edit diffs.
+    """
+
+    file_path: str = Field(..., description="The path to the file that was edited.")
+    raw_response: str = Field(..., description="The raw response from the model.")
+    edit_prompt: str = Field(..., description="The prompt for the edit.")
+    edit_diffs: List[Dict[str, str]] = Field(..., description="The generated edit diffs.")

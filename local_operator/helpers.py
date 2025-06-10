@@ -371,7 +371,7 @@ def _extract_tag_content(xml_string: str, tag_name: str) -> Tuple[str, int]:
     return content, next_search_start_index
 
 
-def _parse_replacements(replacements_str: str) -> List[Dict[str, str]]:
+def parse_replacements(replacements_str: str) -> List[Dict[str, str]]:
     """
     Parses the content of a <replacements> tag in diff notation, supporting nested SEARCH blocks.
 
@@ -553,7 +553,7 @@ def parse_agent_action_xml(xml_string: str) -> Dict[str, Any]:
 
     replacements_str, _ = _extract_tag_content(xml_content_to_parse, "replacements")
     if replacements_str:
-        parsed_data["replacements"] = _parse_replacements(replacements_str)
+        parsed_data["replacements"] = parse_replacements(replacements_str)
 
     mentioned_files_str, _ = _extract_tag_content(xml_content_to_parse, "mentioned_files")
     if mentioned_files_str:
