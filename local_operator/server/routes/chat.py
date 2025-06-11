@@ -5,6 +5,7 @@ This module contains the FastAPI route handlers for chat-related endpoints.
 """
 
 import logging
+from pathlib import Path as FilePath
 from typing import TYPE_CHECKING  # Added
 
 from fastapi import APIRouter, Depends, HTTPException, Path
@@ -627,14 +628,16 @@ async def edit_file_with_agent(
             logger.exception("Error retrieving agent")
             raise HTTPException(status_code=404, detail=f"Agent not found: {e}")
 
+        resolved_file_path = FilePath(request.file_path).expanduser().resolve()
+
         # Load the file content
         try:
-            with open(request.file_path, "r", encoding="utf-8") as f:
+            with open(resolved_file_path, "r", encoding="utf-8") as f:
                 file_content = f.read()
         except FileNotFoundError:
-            raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")
+            raise HTTPException(status_code=404, detail=f"File not found: {resolved_file_path}")
         except Exception as e:
-            logger.exception(f"Error reading file {request.file_path}")
+            logger.exception(f"Error reading file {resolved_file_path}")
             raise HTTPException(status_code=500, detail=f"Error reading file: {str(e)}")
 
         # Create operator with the agent
@@ -658,7 +661,7 @@ async def edit_file_with_agent(
 
         # Construct the edit prompt with file content
         edit_instruction = EditFileInstructionsPrompt.format(
-            file_path=request.file_path,
+            file_path=resolved_file_path,
             edit_prompt=request.edit_prompt,
             file_content=file_content,
             selection=request.selection,
@@ -692,7 +695,6 @@ async def edit_file_with_agent(
             )
 
             if response_content:
-                print(response_content)
                 if "<action_response>" in response_content:
                     action_response = parse_agent_action_xml(response_content)
                     if action_response:
@@ -716,7 +718,7 @@ async def edit_file_with_agent(
                 # If this is not the last attempt, add error message and retry
                 if attempt < max_retries - 1:
                     error_message = "The following SEARCH blocks were not "
-                    f"found in the file '{request.file_path}':\n"
+                    f"found in the file '{resolved_file_path}':\n"
                     for i, invalid_find in enumerate(invalid_finds, 1):
                         error_message += (
                             f"\n{i}. SEARCH block not found:\n---\n{invalid_find}\n---\n"
@@ -747,7 +749,7 @@ async def edit_file_with_agent(
             status=200,
             message="File edit completed successfully",
             result=AgentEditFileResponse(
-                file_path=request.file_path,
+                file_path=str(resolved_file_path),
                 edit_prompt=request.edit_prompt,
                 edit_diffs=edit_diffs,
                 raw_response=raw_response,
