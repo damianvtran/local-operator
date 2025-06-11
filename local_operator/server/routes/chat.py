@@ -679,8 +679,6 @@ async def edit_file_with_agent(
         edit_diffs = []
         raw_response = ""
 
-        print(request.selection)
-
         for attempt in range(max_retries):
             # Invoke the model to get edit suggestions
             response = await operator.executor.invoke_model(
