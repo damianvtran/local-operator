@@ -674,26 +674,75 @@ async def edit_file_with_agent(
             )
         )
 
-        # Invoke the model to get edit suggestions
-        response = await operator.executor.invoke_model(
-            operator.executor.get_conversation_history()
-        )
+        # Retry mechanism for edit suggestions
+        max_retries = 3
+        edit_diffs = []
+        raw_response = ""
 
-        response_content = (
-            response.content
-            if response and response.content and isinstance(response.content, str)
-            else ""
-        )
+        print(request.selection)
 
-        if response_content:
-            if "<action_response>" in response_content:
-                action_response = parse_agent_action_xml(response_content)
-                if action_response:
-                    edit_diffs = action_response.get("replacements", [])
-                    raw_response = action_response.get("raw_response", "")
-            else:
-                edit_diffs = parse_replacements(response_content)
-                raw_response = response_content
+        for attempt in range(max_retries):
+            # Invoke the model to get edit suggestions
+            response = await operator.executor.invoke_model(
+                operator.executor.get_conversation_history()
+            )
+
+            response_content = (
+                response.content
+                if response and response.content and isinstance(response.content, str)
+                else ""
+            )
+
+            if response_content:
+                print(response_content)
+                if "<action_response>" in response_content:
+                    action_response = parse_agent_action_xml(response_content)
+                    if action_response:
+                        edit_diffs = action_response.get("replacements", [])
+                        raw_response = action_response.get("raw_response", "")
+                else:
+                    edit_diffs = parse_replacements(response_content)
+                    raw_response = response_content
+
+                # Validate that all find strings exist in the file content
+                invalid_finds = []
+                for diff in edit_diffs:
+                    find_text = diff.get("find", "")
+                    if find_text and find_text not in file_content:
+                        invalid_finds.append(find_text)
+
+                # If all finds are valid, break out of retry loop
+                if not invalid_finds:
+                    break
+
+                # If this is not the last attempt, add error message and retry
+                if attempt < max_retries - 1:
+                    error_message = "The following SEARCH blocks were not "
+                    f"found in the file '{request.file_path}':\n"
+                    for i, invalid_find in enumerate(invalid_finds, 1):
+                        error_message += (
+                            f"\n{i}. SEARCH block not found:\n---\n{invalid_find}\n---\n"
+                        )
+
+                    error_message += (
+                        "\nPlease review the file content carefully and provide exact text matches "
+                        "for the SEARCH blocks. Make sure to include proper indentation, spacing, "
+                        "and line breaks exactly as they appear in the file."
+                    )
+
+                    operator.executor.append_to_history(
+                        ConversationRecord(
+                            role=ConversationRole.USER,
+                            content=error_message,
+                        )
+                    )
+                else:
+                    # Last attempt failed, return with error details
+                    error_details = (
+                        f"Failed to find valid search blocks after {max_retries} attempts. "
+                    )
+                    error_details += f"Invalid search blocks: {[find for find in invalid_finds]}"
+                    raise HTTPException(status_code=500, detail=error_details)
 
         # Return the edit response
         response_data = CRUDResponse(
