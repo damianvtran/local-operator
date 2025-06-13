@@ -5,6 +5,7 @@ This module contains the FastAPI route handlers for chat-related endpoints.
 """
 
 import logging
+from pathlib import Path as FilePath
 from typing import TYPE_CHECKING  # Added
 
 from fastapi import APIRouter, Depends, HTTPException, Path
@@ -16,7 +17,9 @@ from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
+from local_operator.helpers import parse_agent_action_xml, parse_replacements
 from local_operator.jobs import JobManager
+from local_operator.prompts import EditFileInstructionsPrompt
 
 # from local_operator.scheduler_service import SchedulerService # Moved to TYPE_CHECKING
 from local_operator.server.dependencies import (
@@ -30,6 +33,8 @@ from local_operator.server.dependencies import (
 )
 from local_operator.server.models.schemas import (
     AgentChatRequest,
+    AgentEditFileRequest,
+    AgentEditFileResponse,
     ChatRequest,
     ChatResponse,
     ChatStats,
@@ -46,7 +51,7 @@ from local_operator.server.utils.job_processor_queue import (
 )
 from local_operator.server.utils.operator import create_operator
 from local_operator.server.utils.websocket_manager import WebSocketManager
-from local_operator.types import ConversationRecord
+from local_operator.types import ConversationRecord, ConversationRole
 
 if TYPE_CHECKING:
     from local_operator.scheduler_service import SchedulerService
@@ -550,3 +555,212 @@ async def chat_with_agent_async(
     except Exception:
         logger.exception("Unexpected error while setting up async chat job")
         raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
+@router.post(
+    "/v1/chat/agents/{agent_id}/edit",
+    response_model=CRUDResponse,
+    summary="Edit a file using an agent",
+    description="Edit a file using a specific agent with an edit prompt",
+    responses={
+        200: {
+            "description": "Successful response containing the edit diffs",
+            "content": {
+                "application/json": {
+                    "schema": {"$ref": "#/components/schemas/CRUDResponse"},
+                    "example": {
+                        "status": 200,
+                        "message": "File edit completed successfully",
+                        "result": {
+                            "file_path": "/path/to/file.py",
+                            "edit_prompt": "Add error handling to the function",
+                            "edit_diffs": [
+                                {
+                                    "find": "def my_function():\n    return result",
+                                    "replace": "def my_function():\n    try:\n        return result\n    except Exception as e:\n        logger.error(f'Error: {e}')\n        raise",  # noqa: E501
+                                }
+                            ],
+                            "raw_response": "...",
+                        },
+                    },
+                }
+            },
+        },
+        404: {"description": "Agent not found"},
+        500: {"description": "Internal Server Error"},
+    },
+)
+async def edit_file_with_agent(
+    request: AgentEditFileRequest,
+    credential_manager: CredentialManager = Depends(get_credential_manager),
+    config_manager: ConfigManager = Depends(get_config_manager),
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
+    env_config: EnvConfig = Depends(get_env_config),
+    agent_id: str = Path(
+        ..., description="ID of the agent to use for editing", examples=["agent123"]
+    ),
+):
+    """
+    Edit a file using a specific agent with an edit prompt.
+
+    The endpoint loads the specified file, applies the agent's conversation history,
+    and uses the agent to generate edit diffs based on the provided edit prompt.
+
+    Args:
+        request: The edit request containing file path and edit prompt
+        credential_manager: Dependency for managing credentials
+        config_manager: Dependency for managing configuration
+        agent_registry: Dependency for accessing agent registry
+        env_config: Environment configuration
+        agent_id: ID of the agent to use for editing
+
+    Returns:
+        A response containing the generated edit diffs
+
+    Raises:
+        HTTPException: If there's an error retrieving the agent or processing the edit
+    """
+    try:
+        # Retrieve the specific agent from the registry
+        try:
+            agent_obj = agent_registry.get_agent(agent_id)
+        except KeyError as e:
+            logger.exception("Error retrieving agent")
+            raise HTTPException(status_code=404, detail=f"Agent not found: {e}")
+
+        resolved_file_path = FilePath(request.file_path).expanduser().resolve()
+
+        # Load the file content
+        try:
+            with open(resolved_file_path, "r", encoding="utf-8") as f:
+                file_content = f.read()
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"File not found: {resolved_file_path}")
+        except Exception as e:
+            logger.exception(f"Error reading file {resolved_file_path}")
+            raise HTTPException(status_code=500, detail=f"Error reading file: {str(e)}")
+
+        # Create operator with the agent
+        operator = create_operator(
+            request.hosting,
+            request.model,
+            credential_manager,
+            config_manager,
+            agent_registry,
+            current_agent=agent_obj,
+            persist_conversation=False,
+            env_config=env_config,
+        )
+
+        # Load agent conversation history
+        try:
+            operator.executor.initialize_conversation_history()
+        except ValueError:
+            # Conversation history already initialized
+            pass
+
+        # Construct the edit prompt with file content
+        edit_instruction = EditFileInstructionsPrompt.format(
+            file_path=resolved_file_path,
+            edit_prompt=request.edit_prompt,
+            file_content=file_content,
+            selection=request.selection,
+        )
+
+        processed_attachments = await process_attachments(request.attachments)
+
+        operator.executor.append_to_history(
+            ConversationRecord(
+                role=ConversationRole.USER,
+                content=edit_instruction,
+                files=processed_attachments,
+            )
+        )
+
+        # Retry mechanism for edit suggestions
+        max_retries = 3
+        edit_diffs = []
+        raw_response = ""
+
+        for attempt in range(max_retries):
+            # Invoke the model to get edit suggestions
+            response = await operator.executor.invoke_model(
+                operator.executor.get_conversation_history()
+            )
+
+            response_content = (
+                response.content
+                if response and response.content and isinstance(response.content, str)
+                else ""
+            )
+
+            raw_response = response_content
+
+            if response_content:
+                if "<action_response>" in response_content:
+                    action_response = parse_agent_action_xml(response_content)
+                    if action_response:
+                        edit_diffs = action_response.get("replacements", [])
+                else:
+                    edit_diffs = parse_replacements(response_content)
+
+                # Validate that all find strings exist in the file content
+                invalid_finds = []
+                for diff in edit_diffs:
+                    find_text = diff.get("find", "")
+                    if find_text and find_text not in file_content:
+                        invalid_finds.append(find_text)
+
+                # If all finds are valid, break out of retry loop
+                if not invalid_finds:
+                    break
+
+                # If this is not the last attempt, add error message and retry
+                if attempt < max_retries - 1:
+                    error_message = "The following SEARCH blocks were not "
+                    f"found in the file '{resolved_file_path}':\n"
+                    for i, invalid_find in enumerate(invalid_finds, 1):
+                        error_message += (
+                            f"\n{i}. SEARCH block not found:\n---\n{invalid_find}\n---\n"
+                        )
+
+                    error_message += (
+                        "\nPlease review the file content carefully and provide exact text matches "
+                        "for the SEARCH blocks. Make sure to include proper indentation, spacing, "
+                        "and line breaks exactly as they appear in the file."
+                    )
+
+                    operator.executor.append_to_history(
+                        ConversationRecord(
+                            role=ConversationRole.USER,
+                            content=error_message,
+                        )
+                    )
+                else:
+                    # Last attempt failed, return with error details
+                    error_details = (
+                        f"Failed to find valid search blocks after {max_retries} attempts. "
+                    )
+                    error_details += f"Invalid search blocks: {[find for find in invalid_finds]}"
+                    raise HTTPException(status_code=500, detail=error_details)
+
+        # Return the edit response
+        response_data = CRUDResponse(
+            status=200,
+            message="File edit completed successfully",
+            result=AgentEditFileResponse(
+                file_path=str(resolved_file_path),
+                edit_prompt=request.edit_prompt,
+                edit_diffs=edit_diffs,
+                raw_response=raw_response,
+            ),
+        )
+
+        return JSONResponse(status_code=200, content=jsonable_encoder(response_data))
+
+    except HTTPException:
+        # Re-raise HTTP exceptions to preserve their status code and detail
+        raise
+    except Exception as e:
+        logger.exception("Unexpected error while processing file edit")
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")

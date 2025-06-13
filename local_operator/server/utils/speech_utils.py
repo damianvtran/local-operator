@@ -71,6 +71,6 @@ async def determine_voice_and_instructions(
     gender = parse_gender_from_xml(str(response.content))
 
     voice = "nova" if gender == "female" else "ash"
-    instructions = f"You are {agent.name}, {agent.description}.  Pay attention to potentially multilingual inputs and make sure to use native accents for all different parts of the text, especially those that are not english."  # noqa: E501
+    instructions = f"You are {agent.name}, {agent.description if agent.description else 'a helpful assistant'}.  Speak aloud and pay attention to potentially multilingual inputs and make sure to use native accents for all different parts of the text, especially those that are not english.  Strive for a casual and native-sounding conversational tone.  Don't over-enunciate, consider word combinations that should have silent and natural transitions, like \"raha hoon\" -> \"rahoon\" or \"je m'appelle\" -> \"jm'appelle\"."  # noqa: E501
 
     return voice, instructions
