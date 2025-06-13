@@ -395,7 +395,6 @@ BaseSystemPrompt: str = (
 - 📝 When writing text for summaries, templates, and other writeups, be very thorough and detailed. Include and pay close attention to all the details and data you have gathered.
 - 📝 When writing reports, plan the sections of the report as a scaffold and then research and write each section in detail in separate steps. Assemble each of the sections into a comprehensive report as you go by extending the document. Ensure that reports are well-organized, thorough, and accurate, with proper citations and references. Include the source names, URLs, and dates of the information you are citing.
 - 🔧 When fixing errors in code, only re-run the minimum necessary code to fix the error. Use variables already in the context and avoid re-running code that has already succeeded. Focus error fixes on the specific failing section.
-- 💾 When making changes to files, make sure to save them in different versions instead of modifying the original. This will reduce the chances of losing original information or making dangerous changes.
 - 📚 For deep research tasks, break down into sections, research each thoroughly with multiple sources, and write iteratively. Include detailed citations and references with links, titles, and dates. Build the final output by combining well-researched sections.
 - 🧠 Avoid writing text files as intermediaries between steps except for deep research and report generation type tasks. For all other tasks, use variables in memory in the execution context to maintain state and pass data between steps.
 - 📝 Don't try to process natural language with code, load the data into the context window and then use that information to write manually. For text analysis, summarization, or generation tasks, read the content first, understand it, and then craft your response based on your understanding rather than trying to automate text processing with code as it will be more error prone and less accurate.
@@ -989,12 +988,11 @@ text to replace 3
 </example>
 
 EDIT usage guidelines:
+- Make sure the SEARCH blocks contain exact text that exists in the file. You can make multiple edits in one response by using multiple SEARCH/REPLACE blocks.  Each edit will apply to the first instance of the search text in the file.  If you need to edit multiple instances of the same text, then be specific about the surrounding selection to deduplicate or otherwise provide multiple identical search queries to replace each in order.
 - After you edit the file, you will be shown the contents of the edited file with line numbers and lengths.  Please review and determine if your edit worked as expected.  If not, then try another EDIT action to amend the error.  If repeated edits fail, then rewrite the file from scratch instead with a WRITE action, making sure to stay accurate to the original file content.
 - Make sure that you include the replacements in the "replacements" field or you will run into parsing errors.
 - Do not duplicate headers in the replacements.  If you are replacing placeholders, make sure that you pay attention to the other text around the placeholder and don't repeat content that is already present in the file.  For example, if there is a header and then placeholder, don't include the header again in the replacements as it is already above the placeholder.
 - If you have enough information to make multiple edits in a file at a time, you should do so instead of editing one at a time to be less expensive and more efficient.
-- Ensure that you use standard diff notation for the replacements.  For example, if you are replacing the word "old" with the word "new", then you should use "-old" and "+new" in the replacements.  Include newlines and ensure each replacement line is properly formatted.
-- Make sure that all lines have "- " or "+ " at the beginning of the line to indicate that they are being added or removed.  Do not include any other text in the replacements.
 - Be careful and precise with edits.  You can edit multiple times in one action, but if you are running into errors then you may need to break it up into separate edit actions, one section at a time.  If you keep running into errors, then you may need to rewrite the file from scratch instead with a WRITE action.
 
 #### Example for DELEGATE:
@@ -2319,6 +2317,99 @@ Don't make assumptions about variables or data that are already in your context 
 """
 Specialized instructions for scheduled tasks
 """
+
+EditFileInstructionsPrompt: str = """This is a new instruction from me through the Local Operator UI using the inline edit feature.  Please stop your current task and pay attention to this new instruction.
+
+Please make edits in the following file based on the edit prompt and selection hint from the file content provided.
+
+File path:
+<file_path>
+{file_path}
+</file_path>
+
+Edit instruction:
+<edit_prompt>
+{edit_prompt}
+</edit_prompt>
+
+Selection from file that I'm referring to:
+<selection>
+{selection}
+</selection>
+
+Current file content:
+<file_content>
+{file_content}
+</file_content>
+
+The selection is the text that I want to edit in the file and/or the text that I am referring to in the edit_prompt. Review the text against the actual file_content above and find it, then use the matching content in the SEARCH block for your EDIT action. Make sure the content of the SEARCH block exactly matches some text in the file_content, it does not need to match the selection if the selection is different (this can be because of formatting issues from the UI or other input source).
+
+CRITICAL: When creating SEARCH blocks, you must copy the text EXACTLY as it appears in the file_content, including:
+- All whitespace characters (spaces, tabs, newlines)
+- All punctuation and special characters
+- All formatting (markdown, HTML, etc.)
+- Line breaks and paragraph spacing
+- Bullet points, dashes, and list formatting
+
+If you need to edit multiple instances of the same text, then be specific about the surrounding selection to deduplicate or otherwise provide multiple identical search queries to replace each in order. Focus carefully on the selection that I have provided and make sure to be precise, only applying changes that are relevant to the selection and not the entire file, unless the selection encompasses the entire file.
+
+If the selection is empty, then it means that I have not selected any text and have just placed my cursor at a particular position and asked you to do an edit instruction. Often this means that an insertion is required at the cursor position.
+
+Here are the guidelines for the EDIT action for your reference:
+
+#### Example for EDIT:
+
+<example>
+Editing a file to update or add content.
+
+<action_response>
+<action>EDIT</action>
+
+<learnings>
+I learned about this new content that I found from the web.  It will be useful for the user to know this because of x reason.
+</learnings>
+
+<file_path>
+existing_file.txt
+</file_path>
+
+<replacements>
+<<<<<<< SEARCH
+original text 1
+
+original text 2
+=======
+text to replace 1
+
+text to replace 2
+>>>>>>> REPLACE
+
+<<<<<<< SEARCH
+original text 3
+=======
+text to replace 3
+>>>>>>> REPLACE
+</replacements>
+</action_response>
+</example>
+
+EDIT usage guidelines:
+- MOST IMPORTANT: The SEARCH blocks must contain EXACT and PRECISE text that exists in the file_content. Copy the text character-for-character, including all whitespace, line breaks, markdown formatting, HTML tags, and special characters. Even a single missing space or newline will cause the edit to fail.
+- Before creating a SEARCH block, locate the exact text in the file_content and copy it precisely. Pay special attention to:
+  * Line breaks and paragraph spacing
+  * Indentation (spaces vs tabs)
+  * Bullet points and list formatting (-, *, numbers)
+  * Markdown formatting (**bold**, *italic*, headers ##)
+  * Punctuation and special characters
+- You can make multiple edits in one response by using multiple SEARCH/REPLACE blocks. Each edit will apply to the first instance of the search text in the file.
+- If you need to edit multiple instances of the same text, then be specific about the surrounding selection to deduplicate or otherwise provide multiple identical search queries to replace each in order.
+- Make sure that you include the replacements in the "replacements" field or you will run into parsing errors.
+- Do not duplicate headers in the replacements. If you are replacing placeholders, make sure that you pay attention to the other text around the placeholder and don't repeat content that is already present in the file.
+- If you have enough information to make multiple edits in a file at a time, you should do so instead of editing one at a time to be less expensive and more efficient.
+- Be careful and precise with edits. You can edit multiple times in one action, but if you are running into errors then you may need to break it up into separate edit actions, one section at a time. If you keep running into errors, then you may need to rewrite the file from scratch instead with a WRITE action.
+
+Please provide your EDIT action response with SEARCH and REPLACE blocks to make the necessary changes. You MUST use only the EDIT action in response to this message.
+"""  # noqa: E501
 
 
 def get_request_type_instructions(request_type: RequestType) -> str:
