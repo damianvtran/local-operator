@@ -2318,7 +2318,9 @@ Don't make assumptions about variables or data that are already in your context 
 Specialized instructions for scheduled tasks
 """
 
-EditFileInstructionsPrompt: str = """Please make edits in the following file based on the edit prompt and selection hint from the file content provided.
+EditFileInstructionsPrompt: str = """This is a new instruction from me through the Local Operator UI using the inline edit feature.  Please stop your current task and pay attention to this new instruction.
+
+Please make edits in the following file based on the edit prompt and selection hint from the file content provided.
 
 File path:
 <file_path>
@@ -2330,7 +2332,7 @@ Edit instruction:
 {edit_prompt}
 </edit_prompt>
 
-Selection from file:
+Selection from file that I'm referring to:
 <selection>
 {selection}
 </selection>

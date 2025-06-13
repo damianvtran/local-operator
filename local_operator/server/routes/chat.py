@@ -694,15 +694,15 @@ async def edit_file_with_agent(
                 else ""
             )
 
+            raw_response = response_content
+
             if response_content:
                 if "<action_response>" in response_content:
                     action_response = parse_agent_action_xml(response_content)
                     if action_response:
                         edit_diffs = action_response.get("replacements", [])
-                        raw_response = action_response.get("raw_response", "")
                 else:
                     edit_diffs = parse_replacements(response_content)
-                    raw_response = response_content
 
                 # Validate that all find strings exist in the file content
                 invalid_finds = []
