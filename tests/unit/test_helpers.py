@@ -6,14 +6,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from local_operator.helpers import _extract_initial_think_tags  # Added import
-from local_operator.helpers import (
+from local_operator.helpers import (  # Added import
+    _extract_initial_think_tags,
     clean_json_response,
     clean_plain_text_response,
     get_posix_shell_path,
     get_windows_registry_path,
     is_marker_inside_json,
     parse_agent_action_xml,
+    parse_replacements,
     remove_think_tags,
     setup_cross_platform_environment,
 )
@@ -1244,3 +1245,107 @@ def test_extract_initial_think_tags(text, expected_thinking, expected_remaining)
     thinking, remaining = _extract_initial_think_tags(text)
     assert thinking == expected_thinking
     assert remaining == expected_remaining
+
+
+# --- Tests for parse_replacements ---
+@pytest.mark.parametrize(
+    "replacements_str, expected_output",
+    [
+        pytest.param(
+            "",
+            [],
+            id="empty_string",
+        ),
+        pytest.param(
+            "   \n  \n   ",
+            [],
+            id="whitespace_only",
+        ),
+        pytest.param(
+            "<<<<<<< SEARCH\nold_content\n=======\nnew_content\n>>>>>>> REPLACE",
+            [{"find": "old_content", "replace": "new_content"}],
+            id="basic_replacement",
+        ),
+        pytest.param(
+            "<<<<<<< SEARCH\nold_content\nwith multiple lines\n=======\nnew_content\nwith multiple lines\n>>>>>>> REPLACE",  # noqa: E501
+            [
+                {
+                    "find": "old_content\nwith multiple lines",
+                    "replace": "new_content\nwith multiple lines",
+                }
+            ],
+            id="multiline_replacement",
+        ),
+        pytest.param(
+            "<<<<<<< SEARCH\nfirst_old\n=======\nfirst_new\n>>>>>>> REPLACE\n\n<<<<<<< SEARCH\nsecond_old\n=======\nsecond_new\n>>>>>>> REPLACE",  # noqa: E501
+            [
+                {"find": "first_old", "replace": "first_new"},
+                {"find": "second_old", "replace": "second_new"},
+            ],
+            id="multiple_replacements",
+        ),
+        pytest.param(
+            "<<<<<<< SEARCH\nouter_old\n<<<<<<< SEARCH\ninner_old\n=======\ninner_new\n>>>>>>> REPLACE\n=======\nouter_new\n>>>>>>> REPLACE",  # noqa: E501
+            [
+                {
+                    "find": "outer_old\n<<<<<<< SEARCH\ninner_old\n=======\ninner_new\n>>>>>>> REPLACE",  # noqa: E501
+                    "replace": "outer_new",
+                }
+            ],
+            id="nested_search_blocks",
+        ),
+        pytest.param(
+            "<<<<<<< SEARCH\ncontent\n=======\n\n>>>>>>> REPLACE",
+            [{"find": "content", "replace": ""}],
+            id="empty_replace_content",
+        ),
+        pytest.param(
+            "<<<<<<< SEARCH\n\n=======\nnew_content\n>>>>>>> REPLACE",
+            [{"find": "", "replace": "new_content"}],
+            id="empty_find_content",
+        ),
+        pytest.param(
+            "<<<<<<< SEARCH\nold_content\n>>>>>>> REPLACE",
+            [],
+            id="missing_separator",
+        ),
+        pytest.param(
+            "<<<<<<< SEARCH\nold_content\n=======\nnew_content",
+            [],
+            id="missing_end_marker",
+        ),
+        pytest.param(
+            "old_content\n=======\nnew_content\n>>>>>>> REPLACE",
+            [],
+            id="missing_start_marker",
+        ),
+        pytest.param(
+            "Some random text\n<<<<<<< SEARCH\nold_content\n=======\nnew_content\n>>>>>>> REPLACE\nMore text",  # noqa: E501
+            [{"find": "old_content", "replace": "new_content"}],
+            id="replacement_with_surrounding_text",
+        ),
+        pytest.param(
+            "<<<<<<< SEARCH\n  old_content  \n=======\n  new_content  \n>>>>>>> REPLACE",
+            [{"find": "old_content", "replace": "new_content"}],
+            id="content_with_whitespace_stripped",
+        ),
+        pytest.param(
+            "<<<<<<< SEARCH\ncode = 'old'\nprint(code)\n=======\ncode = 'new'\nprint(code)\n>>>>>>> REPLACE",  # noqa: E501
+            [{"find": "code = 'old'\nprint(code)", "replace": "code = 'new'\nprint(code)"}],
+            id="code_replacement",
+        ),
+        pytest.param(
+            "<<<<<<< SEARCH\n# Old comment\ndef old_function():\n    pass\n=======\n# New comment\ndef new_function():\n    return True\n>>>>>>> REPLACE",  # noqa: E501
+            [
+                {
+                    "find": "# Old comment\ndef old_function():\n    pass",
+                    "replace": "# New comment\ndef new_function():\n    return True",
+                }
+            ],
+            id="function_replacement",
+        ),
+    ],
+)
+def test_parse_replacements(replacements_str, expected_output):
+    """Test the parse_replacements function."""
+    assert parse_replacements(replacements_str) == expected_output
