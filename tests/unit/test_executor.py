@@ -1714,25 +1714,28 @@ async def test_write_file_action(
 @pytest.mark.parametrize(
     "initial_content, replacements, expected_content, should_raise",
     [
-        (
+        pytest.param(
             "Original content",
             [{"find": "Original content", "replace": "Replacement content"}],
             "Replacement content",
             False,
+            id="simple_replacement",
         ),
-        (
+        pytest.param(
             "Line 1\nLine 2\nLine 3",
             [{"find": "Line 2", "replace": "Replaced Line 2"}],
             "Line 1\nReplaced Line 2\nLine 3",
             False,
+            id="single_line_replacement",
         ),
-        (
+        pytest.param(
             "Multiple copies of the same word word word",
             [{"find": "word", "replace": "replaced"}, {"find": "word", "replace": "replaced"}],
             "Multiple copies of the same replaced replaced word",
             False,
+            id="multiple_replacements_same_text",
         ),
-        (
+        pytest.param(
             "First line\nSecond line",
             [
                 {"find": "First line", "replace": "New first line"},
@@ -1740,24 +1743,117 @@ async def test_write_file_action(
             ],
             "New first line\nNew second line",
             False,
+            id="multiple_different_replacements",
         ),
-        (
+        pytest.param(
             "No match",
             [{"find": "Nonexistent", "replace": "Replacement"}],
             "No match",
             True,
+            id="no_match_should_raise",
         ),
-        (
+        pytest.param(
             "",
             [{"find": "", "replace": "Replacement"}],
             "Replacement",
             False,
+            id="empty_find_string",
         ),
-        (
+        pytest.param(
             "Initial content",
             [{"find": "Initial content", "replace": ""}],
             "",
             False,
+            id="replace_with_empty_string",
+        ),
+        pytest.param(
+            "```python\nprint('hello')\n```",
+            [{"find": "print('hello')", "replace": "print('world')"}],
+            "```python\nprint('world')\n```",
+            False,
+            id="markdown_code_block_replacement",
+        ),
+        pytest.param(
+            "# Header 1\n\nSome content\n\n## Header 2",
+            [{"find": "# Header 1", "replace": "# Updated Header"}],
+            "# Updated Header\n\nSome content\n\n## Header 2",
+            False,
+            id="markdown_header_replacement",
+        ),
+        pytest.param(
+            "Here is some `inline code` in markdown",
+            [{"find": "`inline code`", "replace": "`updated code`"}],
+            "Here is some `updated code` in markdown",
+            False,
+            id="markdown_inline_code_replacement",
+        ),
+        pytest.param(
+            "```javascript\nfunction test() {\n  return 'old';\n}\n```",
+            [{"find": "return 'old';", "replace": "return 'new';"}],
+            "```javascript\nfunction test() {\n  return 'new';\n}\n```",
+            False,
+            id="markdown_javascript_block_replacement",
+        ),
+        pytest.param(
+            "- Item 1\n- Item 2\n- Item 3",
+            [{"find": "- Item 2", "replace": "- Updated Item 2"}],
+            "- Item 1\n- Updated Item 2\n- Item 3",
+            False,
+            id="markdown_list_item_replacement",
+        ),
+        pytest.param(
+            "[Link text](https://example.com)",
+            [{"find": "https://example.com", "replace": "https://newsite.com"}],
+            "[Link text](https://newsite.com)",
+            False,
+            id="markdown_link_url_replacement",
+        ),
+        pytest.param(
+            "```\nGeneric code block\nwith multiple lines\n```",
+            [
+                {
+                    "find": "Generic code block\nwith multiple lines",
+                    "replace": "Updated code block\nwith new content",
+                }
+            ],
+            "```\nUpdated code block\nwith new content\n```",
+            False,
+            id="markdown_generic_multiline_block_replacement",
+        ),
+        pytest.param(
+            "```mermaid\ngraph TD\n  A --> B\n```",
+            [{"find": "A --> B", "replace": "A --> C"}],
+            "```mermaid\ngraph TD\n  A --> C\n```",
+            False,
+            id="markdown_mermaid_diagram_replacement",
+        ),
+        pytest.param(
+            "> This is a blockquote\n> with multiple lines",
+            [{"find": "> This is a blockquote", "replace": "> This is an updated blockquote"}],
+            "> This is an updated blockquote\n> with multiple lines",
+            False,
+            id="markdown_blockquote_replacement",
+        ),
+        pytest.param(
+            "| Column 1 | Column 2 |\n|----------|----------|\n| Value 1  | Value 2  |",
+            [{"find": "Value 1", "replace": "Updated Value"}],
+            "| Column 1 | Column 2 |\n|----------|----------|\n| Updated Value  | Value 2  |",
+            False,
+            id="markdown_table_cell_replacement",
+        ),
+        pytest.param(
+            "```yaml\nname: old-name\nversion: 1.0.0\n```",
+            [{"find": "name: old-name", "replace": "name: new-name"}],
+            "```yaml\nname: new-name\nversion: 1.0.0\n```",
+            False,
+            id="markdown_yaml_block_replacement",
+        ),
+        pytest.param(
+            "Text with **bold** and *italic* formatting",
+            [{"find": "**bold**", "replace": "**strong**"}],
+            "Text with **strong** and *italic* formatting",
+            False,
+            id="markdown_bold_text_replacement",
         ),
     ],
 )
