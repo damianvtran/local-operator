@@ -1344,6 +1344,126 @@ def test_extract_initial_think_tags(text, expected_thinking, expected_remaining)
             ],
             id="function_replacement",
         ),
+        pytest.param(
+            "<<<<<<< SEARCH\n- Old bullet point\n- Another old point\n- Third old point\n=======\n- New bullet point\n- Another new point\n- Third new point\n>>>>>>> REPLACE",  # noqa: E501
+            [
+                {
+                    "find": "- Old bullet point\n- Another old point\n- Third old point",  # noqa: E501
+                    "replace": "- New bullet point\n- Another new point\n- Third new point",  # noqa: E501
+                }
+            ],
+            id="markdown_bullet_list_replacement",
+        ),
+        pytest.param(
+            "<<<<<<< SEARCH\n* Item 1\n  * Nested item 1.1\n  * Nested item 1.2\n* Item 2\n=======\n* Updated Item 1\n  * Updated nested item 1.1\n  * Updated nested item 1.2\n* Updated Item 2\n>>>>>>> REPLACE",  # noqa: E501
+            [
+                {
+                    "find": "* Item 1\n  * Nested item 1.1\n  * Nested item 1.2\n* Item 2",  # noqa: E501
+                    "replace": "* Updated Item 1\n  * Updated nested item 1.1\n  * Updated nested item 1.2\n* Updated Item 2",  # noqa: E501
+                }
+            ],
+            id="markdown_nested_bullet_list_replacement",
+        ),
+        pytest.param(
+            "<<<<<<< SEARCH\n| Column 1 | Column 2 | Column 3 |\n|----------|----------|----------|\n| Old Val1 | Old Val2 | Old Val3 |\n| Old Val4 | Old Val5 | Old Val6 |\n=======\n| Column 1 | Column 2 | Column 3 |\n|----------|----------|----------|\n| New Val1 | New Val2 | New Val3 |\n| New Val4 | New Val5 | New Val6 |\n>>>>>>> REPLACE",  # noqa: E501
+            [
+                {
+                    "find": "| Column 1 | Column 2 | Column 3 |\n|----------|----------|----------|\n| Old Val1 | Old Val2 | Old Val3 |\n| Old Val4 | Old Val5 | Old Val6 |",  # noqa: E501
+                    "replace": "| Column 1 | Column 2 | Column 3 |\n|----------|----------|----------|\n| New Val1 | New Val2 | New Val3 |\n| New Val4 | New Val5 | New Val6 |",  # noqa: E501
+                }
+            ],
+            id="markdown_table_replacement",
+        ),
+        pytest.param(
+            "<<<<<<< SEARCH\n1. First numbered item\n2. Second numbered item\n   - Sub bullet under second\n   - Another sub bullet\n3. Third numbered item\n=======\n1. Updated first numbered item\n2. Updated second numbered item\n   - Updated sub bullet under second\n   - Updated another sub bullet\n3. Updated third numbered item\n>>>>>>> REPLACE",  # noqa: E501
+            [
+                {
+                    "find": "1. First numbered item\n2. Second numbered item\n   - Sub bullet under second\n   - Another sub bullet\n3. Third numbered item",  # noqa: E501
+                    "replace": "1. Updated first numbered item\n2. Updated second numbered item\n   - Updated sub bullet under second\n   - Updated another sub bullet\n3. Updated third numbered item",  # noqa: E501
+                }
+            ],
+            id="markdown_numbered_list_with_sub_bullets_replacement",
+        ),
+        pytest.param(
+            "<<<<<<< SEARCH\n> This is a blockquote\n> with multiple lines\n> and some **bold** text\n>\n> And a new paragraph in the quote\n=======\n> This is an updated blockquote\n> with multiple lines\n> and some **updated bold** text\n>\n> And an updated new paragraph in the quote\n>>>>>>> REPLACE",  # noqa: E501
+            [
+                {
+                    "find": "> This is a blockquote\n> with multiple lines\n> and some **bold** text\n>\n> And a new paragraph in the quote",  # noqa: E501
+                    "replace": "> This is an updated blockquote\n> with multiple lines\n> and some **updated bold** text\n>\n> And an updated new paragraph in the quote",  # noqa: E501
+                }
+            ],
+            id="markdown_multiline_blockquote_replacement",
+        ),
+        pytest.param(
+            '<<<<<<< SEARCH\n```python\ndef old_function(x, y):\n    """Old docstring"""\n    result = x + y\n    return result\n\nprint(old_function(1, 2))\n```\n=======\n```python\ndef new_function(x, y, z=0):\n    """New docstring with additional parameter"""\n    result = x + y + z\n    return result\n\nprint(new_function(1, 2, 3))\n```\n>>>>>>> REPLACE',  # noqa: E501
+            [
+                {
+                    "find": '```python\ndef old_function(x, y):\n    """Old docstring"""\n    result = x + y\n    return result\n\nprint(old_function(1, 2))\n```',  # noqa: E501
+                    "replace": '```python\ndef new_function(x, y, z=0):\n    """New docstring with additional parameter"""\n    result = x + y + z\n    return result\n\nprint(new_function(1, 2, 3))\n```',  # noqa: E501
+                }
+            ],
+            id="markdown_code_block_with_multiline_function_replacement",
+        ),
+        pytest.param(
+            "<<<<<<< SEARCH\n## Old Section Header\n\nSome content under the old header.\n\n### Old Subsection\n\n- Old bullet\n- Another old bullet\n\n=======\n## New Section Header\n\nSome updated content under the new header.\n\n### New Subsection\n\n- New bullet\n- Another new bullet\n\n>>>>>>> REPLACE",  # noqa: E501
+            [
+                {
+                    "find": "## Old Section Header\n\nSome content under the old header.\n\n### Old Subsection\n\n- Old bullet\n- Another old bullet",  # noqa: E501
+                    "replace": "## New Section Header\n\nSome updated content under the new header.\n\n### New Subsection\n\n- New bullet\n- Another new bullet",  # noqa: E501
+                }
+            ],
+            id="markdown_section_with_headers_and_content_replacement",
+        ),
+        pytest.param(
+            "<<<<<<< SEARCH\n- [ ] Unchecked task item\n- [x] Checked task item\n- [ ] Another unchecked item\n  - [ ] Nested unchecked subtask\n  - [x] Nested checked subtask\n=======\n- [x] Updated checked task item\n- [x] Updated checked task item\n- [ ] Updated unchecked item\n  - [x] Updated nested checked subtask\n  - [x] Updated nested checked subtask\n>>>>>>> REPLACE",  # noqa: E501
+            [
+                {
+                    "find": "- [ ] Unchecked task item\n- [x] Checked task item\n- [ ] Another unchecked item\n  - [ ] Nested unchecked subtask\n  - [x] Nested checked subtask",  # noqa: E501
+                    "replace": "- [x] Updated checked task item\n- [x] Updated checked task item\n- [ ] Updated unchecked item\n  - [x] Updated nested checked subtask\n  - [x] Updated nested checked subtask",  # noqa: E501
+                }
+            ],
+            id="markdown_checkbox_list_with_nested_items_replacement",
+        ),
+        pytest.param(
+            "<<<<<<< SEARCH\n    - [ ] Deeply indented unchecked item\n    - [x] Deeply indented checked item\n        - [ ] Even deeper unchecked\n        - [x] Even deeper checked\n            - [ ] Maximum depth unchecked\n=======\n    - [x] Updated deeply indented checked item\n    - [x] Updated deeply indented checked item\n        - [x] Updated even deeper checked\n        - [x] Updated even deeper checked\n            - [x] Updated maximum depth checked\n>>>>>>> REPLACE",  # noqa: E501
+            [
+                {
+                    "find": "    - [ ] Deeply indented unchecked item\n    - [x] Deeply indented checked item\n        - [ ] Even deeper unchecked\n        - [x] Even deeper checked\n            - [ ] Maximum depth unchecked",  # noqa: E501
+                    "replace": "    - [x] Updated deeply indented checked item\n    - [x] Updated deeply indented checked item\n        - [x] Updated even deeper checked\n        - [x] Updated even deeper checked\n            - [x] Updated maximum depth checked",  # noqa: E501
+                }
+            ],
+            id="markdown_deeply_indented_checkbox_list_replacement",
+        ),
+        pytest.param(
+            "<<<<<<< SEARCH\n1. [ ] Numbered checkbox item\n2. [x] Numbered checked item\n   - [ ] Sub checkbox under numbered\n   - [x] Sub checked under numbered\n3. [ ] Third numbered checkbox\n=======\n1. [x] Updated numbered checked item\n2. [x] Updated numbered checked item\n   - [x] Updated sub checked under numbered\n   - [x] Updated sub checked under numbered\n3. [x] Updated third numbered checked\n>>>>>>> REPLACE",  # noqa: E501
+            [
+                {
+                    "find": "1. [ ] Numbered checkbox item\n2. [x] Numbered checked item\n   - [ ] Sub checkbox under numbered\n   - [x] Sub checked under numbered\n3. [ ] Third numbered checkbox",  # noqa: E501
+                    "replace": "1. [x] Updated numbered checked item\n2. [x] Updated numbered checked item\n   - [x] Updated sub checked under numbered\n   - [x] Updated sub checked under numbered\n3. [x] Updated third numbered checked",  # noqa: E501
+                }
+            ],
+            id="markdown_numbered_checkbox_list_with_sub_items_replacement",
+        ),
+        pytest.param(
+            "<<<<<<< SEARCH\n        * [ ] Tab-indented checkbox\n        * [x] Tab-indented checked\n            * [ ] Double tab checkbox\n                * [x] Triple tab checked\n=======\n        * [x] Updated tab-indented checked\n        * [x] Updated tab-indented checked\n            * [x] Updated double tab checked\n                * [x] Updated triple tab checked\n>>>>>>> REPLACE",  # noqa: E501
+            [
+                {
+                    "find": "        * [ ] Tab-indented checkbox\n        * [x] Tab-indented checked\n            * [ ] Double tab checkbox\n                * [x] Triple tab checked",  # noqa: E501
+                    "replace": "        * [x] Updated tab-indented checked\n        * [x] Updated tab-indented checked\n            * [x] Updated double tab checked\n                * [x] Updated triple tab checked",  # noqa: E501
+                }
+            ],
+            id="markdown_tab_indented_checkbox_list_replacement",
+        ),
+        pytest.param(
+            "<<<<<<< SEARCH\n  - [ ] Mixed indentation checkbox\n    - [x] Different indent level\n      - [ ] Yet another indent\n        - [x] Final indent level\n=======\n  - [x] Updated mixed indentation checked\n    - [x] Updated different indent level\n      - [x] Updated yet another indent\n        - [x] Updated final indent level\n>>>>>>> REPLACE",  # noqa: E501
+            [
+                {
+                    "find": "  - [ ] Mixed indentation checkbox\n    - [x] Different indent level\n      - [ ] Yet another indent\n        - [x] Final indent level",  # noqa: E501
+                    "replace": "  - [x] Updated mixed indentation checked\n    - [x] Updated different indent level\n      - [x] Updated yet another indent\n        - [x] Updated final indent level",  # noqa: E501
+                }
+            ],
+            id="markdown_mixed_indentation_checkbox_list_replacement",
+        ),
     ],
 )
 def test_parse_replacements(replacements_str, expected_output):
