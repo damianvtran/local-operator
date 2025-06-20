@@ -1430,6 +1430,8 @@ def create_audio_transcription_tool(
 
         If the file that you need to transcribe is not one of the supported formats, you'll need to separate the audio from the video using a tool like ffmpeg first and then provide the audio file to this tool.
 
+        If the duration of the audio is longer than 10 minutes, then split the audio into 10 minute fragments to avoid server timeouts.
+
         Args:
             file_path (str): Path to the audio file on disk to transcribe. Must be a valid path to an audio file on disk. Supported formats: flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, webm.
             model (Optional[str], optional): The transcription model to use (e.g., "gpt-4o-transcribe").
