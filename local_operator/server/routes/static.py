@@ -7,17 +7,13 @@ This module contains the FastAPI route handlers for serving static files.
 import logging
 import mimetypes
 import os
-import tempfile
 from pathlib import Path
 from typing import List
 
-import pillow_heif
 from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi.responses import FileResponse
-from PIL import Image
 
-# Register HEIF opener with Pillow
-pillow_heif.register_heif_opener()
+from local_operator.helpers import convert_heic_to_png_file
 
 router = APIRouter(tags=["Static"])
 logger = logging.getLogger("local_operator.server.routes.static")
@@ -75,41 +71,6 @@ ALLOWED_HTML_TYPES: List[str] = [
 ]
 
 
-def _convert_heic_to_png(heic_path: Path) -> Path:
-    """
-    Convert a HEIC/HEIF file to PNG format.
-
-    Args:
-        heic_path: Path to the HEIC/HEIF file
-
-    Returns:
-        Path to the converted PNG file in a temporary directory
-
-    Raises:
-        Exception: If conversion fails or HEIF support is not available
-    """
-    try:
-        # Open the HEIC/HEIF file
-        with Image.open(heic_path) as img:
-            # Convert to RGB if necessary (HEIC can have different color modes)
-            if img.mode != "RGB":
-                img = img.convert("RGB")
-
-            # Create a temporary file for the PNG
-            temp_dir = tempfile.gettempdir()
-            temp_filename = f"converted_{heic_path.stem}.png"
-            temp_path = Path(temp_dir) / temp_filename
-
-            # Save as PNG
-            img.save(temp_path, "PNG", optimize=True)
-
-            return temp_path
-
-    except Exception as e:
-        logger.exception(f"Failed to convert HEIC/HEIF file {heic_path}: {e}")
-        raise Exception(f"Failed to convert HEIC/HEIF file: {str(e)}")
-
-
 @router.get(
     "/v1/static/images",
     summary="Serve image file",
@@ -162,7 +123,7 @@ async def get_image(
         if mime_type in ["image/heic", "image/heif"]:
             try:
                 # Convert HEIC/HEIF to PNG
-                converted_path = _convert_heic_to_png(expanded_path)
+                converted_path = convert_heic_to_png_file(expanded_path)
 
                 # Return the converted PNG file with PNG MIME type
                 return FileResponse(
