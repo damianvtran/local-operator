@@ -36,6 +36,8 @@ dependencies = [
     "python-multipart",
     "browser-use",
     "apscheduler",
+    "pillow",
+    "pillow-heif",
     # Constraints
     "faiss-cpu==1.10.0",
     "certifi>=2024.7.4",

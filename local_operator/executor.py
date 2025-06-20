@@ -727,7 +727,9 @@ class LocalCodeExecutor:
                 for file in record.files:
                     file_lower = file.lower()
                     try:
-                        if file_lower.endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")):
+                        if file_lower.endswith(
+                            (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".heic")
+                        ):
                             with open(file, "rb") as image_file:
                                 image_data = base64.b64encode(image_file.read()).decode("utf-8")
                             # Determine mime type
@@ -741,6 +743,8 @@ class LocalCodeExecutor:
                                 mime_type = "image/bmp"
                             elif file_lower.endswith(".webp"):
                                 mime_type = "image/webp"
+                            elif file_lower.endswith(".heic"):
+                                mime_type = "image/heic"
                             else:
                                 mime_type = "application/octet-stream"
                             data_url = f"data:{mime_type};base64,{image_data}"
