@@ -37,7 +37,11 @@ from local_operator.console import (
     print_task_interrupted,
     spinner_context,
 )
-from local_operator.helpers import clean_plain_text_response, process_json_response
+from local_operator.helpers import (
+    clean_plain_text_response,
+    convert_heic_to_png_data_url,
+    process_json_response,
+)
 from local_operator.model.configure import ModelConfiguration, calculate_cost
 from local_operator.prompts import (
     AgentHeadsUpDisplayPrompt,
@@ -728,26 +732,44 @@ class LocalCodeExecutor:
                     file_lower = file.lower()
                     try:
                         if file_lower.endswith(
-                            (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".heic")
+                            (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".heic", ".heif")
                         ):
-                            with open(file, "rb") as image_file:
-                                image_data = base64.b64encode(image_file.read()).decode("utf-8")
-                            # Determine mime type
-                            if file_lower.endswith(".png"):
-                                mime_type = "image/png"
-                            elif file_lower.endswith(".jpg") or file_lower.endswith(".jpeg"):
-                                mime_type = "image/jpeg"
-                            elif file_lower.endswith(".gif"):
-                                mime_type = "image/gif"
-                            elif file_lower.endswith(".bmp"):
-                                mime_type = "image/bmp"
-                            elif file_lower.endswith(".webp"):
-                                mime_type = "image/webp"
-                            elif file_lower.endswith(".heic"):
-                                mime_type = "image/heic"
+                            # Handle HEIC/HEIF files by converting to PNG
+                            if file_lower.endswith((".heic", ".heif")):
+                                try:
+                                    data_url, mime_type = convert_heic_to_png_data_url(file)
+                                except Exception as e:
+                                    logging.error(f"Failed to convert HEIC/HEIF file '{file}': {e}")
+                                    # Fall back to reading as binary if conversion fails
+                                    with open(file, "rb") as image_file:
+                                        image_data = base64.b64encode(image_file.read()).decode(
+                                            "utf-8"
+                                        )
+                                    mime_type = (
+                                        "image/heic"
+                                        if file_lower.endswith(".heic")
+                                        else "image/heif"
+                                    )
+                                    data_url = f"data:{mime_type};base64,{image_data}"
                             else:
-                                mime_type = "application/octet-stream"
-                            data_url = f"data:{mime_type};base64,{image_data}"
+                                # Handle other image formats normally
+                                with open(file, "rb") as image_file:
+                                    image_data = base64.b64encode(image_file.read()).decode("utf-8")
+                                # Determine mime type
+                                if file_lower.endswith(".png"):
+                                    mime_type = "image/png"
+                                elif file_lower.endswith(".jpg") or file_lower.endswith(".jpeg"):
+                                    mime_type = "image/jpeg"
+                                elif file_lower.endswith(".gif"):
+                                    mime_type = "image/gif"
+                                elif file_lower.endswith(".bmp"):
+                                    mime_type = "image/bmp"
+                                elif file_lower.endswith(".webp"):
+                                    mime_type = "image/webp"
+                                else:
+                                    mime_type = "application/octet-stream"
+                                data_url = f"data:{mime_type};base64,{image_data}"
+
                             content_parts.append(
                                 {"type": "image_url", "image_url": {"url": data_url}}
                             )
@@ -2229,7 +2251,17 @@ class LocalCodeExecutor:
         if not expanded_file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        image_extensions = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp"}
+        image_extensions = {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".bmp",
+            ".tiff",
+            ".webp",
+            ".heic",
+            ".heif",
+        }
         ocr_extensions = {".pdf"}
         file_ext = expanded_file_path.suffix.lower()
 
