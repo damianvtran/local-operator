@@ -32,6 +32,8 @@ setup(
         "browser-use>=0.1.45",
         "apscheduler>=3.11.0",
         "faiss-cpu==1.10.0",
+        "pillow>=11.2.1",
+        "pillow-heif>=0.22.0",
     ],
     python_requires=">=3.12",
     extras_require={
