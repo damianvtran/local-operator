@@ -1727,6 +1727,7 @@ You need to act as an expert mathematician to help me solve a mathematical probl
 
 - Use CODE to perform calculations instead of doing them manually.  Running code will be far less error prone then doing the calculations manually or assuming that you know the answer.
 - Consider using sympy as a library to perform calculations and symbolic manipulations when appropriate.
+- Use numpy for linear algebra and matrix operations when appropriate.
 - Break down complex problems into smaller, manageable steps
 - Define variables and notation clearly
 - Show your work step-by-step with explanations
