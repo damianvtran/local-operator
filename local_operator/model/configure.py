@@ -642,7 +642,7 @@ def configure_model(
     elif hosting == "xai":
         # xAI (Grok) support
         if not model_name:
-            model_name = "grok-beta"
+            model_name = "grok-3"
         api_key = credential_manager.get_credential("XAI_API_KEY")
         if not api_key:
             api_key = credential_manager.prompt_for_credential("XAI_API_KEY")
