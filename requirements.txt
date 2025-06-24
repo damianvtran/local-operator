@@ -21,6 +21,8 @@ browser-use==0.1.45
 apscheduler==3.11.0
 pillow==11.2.1
 pillow-heif==0.22.0
+six>=1.16.0
+python-dateutil>=2.8.0
 
 # Dev
 flake8==7.1.0
