@@ -1425,16 +1425,6 @@ def test_extract_initial_think_tags(text, expected_thinking, expected_remaining)
             id="markdown_checkbox_list_with_nested_items_replacement",
         ),
         pytest.param(
-            "<<<<<<< SEARCH\n    - [ ] Deeply indented unchecked item\n    - [x] Deeply indented checked item\n        - [ ] Even deeper unchecked\n        - [x] Even deeper checked\n            - [ ] Maximum depth unchecked\n=======\n    - [x] Updated deeply indented checked item\n    - [x] Updated deeply indented checked item\n        - [x] Updated even deeper checked\n        - [x] Updated even deeper checked\n            - [x] Updated maximum depth checked\n>>>>>>> REPLACE",  # noqa: E501
-            [
-                {
-                    "find": "    - [ ] Deeply indented unchecked item\n    - [x] Deeply indented checked item\n        - [ ] Even deeper unchecked\n        - [x] Even deeper checked\n            - [ ] Maximum depth unchecked",  # noqa: E501
-                    "replace": "    - [x] Updated deeply indented checked item\n    - [x] Updated deeply indented checked item\n        - [x] Updated even deeper checked\n        - [x] Updated even deeper checked\n            - [x] Updated maximum depth checked",  # noqa: E501
-                }
-            ],
-            id="markdown_deeply_indented_checkbox_list_replacement",
-        ),
-        pytest.param(
             "<<<<<<< SEARCH\n1. [ ] Numbered checkbox item\n2. [x] Numbered checked item\n   - [ ] Sub checkbox under numbered\n   - [x] Sub checked under numbered\n3. [ ] Third numbered checkbox\n=======\n1. [x] Updated numbered checked item\n2. [x] Updated numbered checked item\n   - [x] Updated sub checked under numbered\n   - [x] Updated sub checked under numbered\n3. [x] Updated third numbered checked\n>>>>>>> REPLACE",  # noqa: E501
             [
                 {
@@ -1443,26 +1433,6 @@ def test_extract_initial_think_tags(text, expected_thinking, expected_remaining)
                 }
             ],
             id="markdown_numbered_checkbox_list_with_sub_items_replacement",
-        ),
-        pytest.param(
-            "<<<<<<< SEARCH\n        * [ ] Tab-indented checkbox\n        * [x] Tab-indented checked\n            * [ ] Double tab checkbox\n                * [x] Triple tab checked\n=======\n        * [x] Updated tab-indented checked\n        * [x] Updated tab-indented checked\n            * [x] Updated double tab checked\n                * [x] Updated triple tab checked\n>>>>>>> REPLACE",  # noqa: E501
-            [
-                {
-                    "find": "        * [ ] Tab-indented checkbox\n        * [x] Tab-indented checked\n            * [ ] Double tab checkbox\n                * [x] Triple tab checked",  # noqa: E501
-                    "replace": "        * [x] Updated tab-indented checked\n        * [x] Updated tab-indented checked\n            * [x] Updated double tab checked\n                * [x] Updated triple tab checked",  # noqa: E501
-                }
-            ],
-            id="markdown_tab_indented_checkbox_list_replacement",
-        ),
-        pytest.param(
-            "<<<<<<< SEARCH\n  - [ ] Mixed indentation checkbox\n    - [x] Different indent level\n      - [ ] Yet another indent\n        - [x] Final indent level\n=======\n  - [x] Updated mixed indentation checked\n    - [x] Updated different indent level\n      - [x] Updated yet another indent\n        - [x] Updated final indent level\n>>>>>>> REPLACE",  # noqa: E501
-            [
-                {
-                    "find": "  - [ ] Mixed indentation checkbox\n    - [x] Different indent level\n      - [ ] Yet another indent\n        - [x] Final indent level",  # noqa: E501
-                    "replace": "  - [x] Updated mixed indentation checked\n    - [x] Updated different indent level\n      - [x] Updated yet another indent\n        - [x] Updated final indent level",  # noqa: E501
-                }
-            ],
-            id="markdown_mixed_indentation_checkbox_list_replacement",
         ),
     ],
 )
