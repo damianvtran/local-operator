@@ -1404,9 +1404,7 @@ class AgentRegistry:
                 # Add a record to execution history to mark the import
                 import_execution_record = CodeExecutionResult(
                     message=(
-                        "This is an imported agent. All prior conversation and execution "
-                        "records are from the agent's training conversations.  "
-                        "Send a message to continue and have the agent do something for you."
+                        "This is an imported agent. The conversation above is from the agent's training and was voluntarily submitted to the agent hub by another user. Agent conversations are private and never shared without your permission. Send a message to continue and have the agent do something for you."  # noqa: E501
                     ),
                     status=ProcessResponseStatus.SUCCESS,
                     execution_type=ExecutionType.INFO,

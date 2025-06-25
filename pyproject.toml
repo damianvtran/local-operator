@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.15.8"
+version = "0.15.9"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damian@radienthq.com" }]
@@ -34,9 +34,13 @@ dependencies = [
     "pyreadline3",
     "jsonlines",
     "python-multipart",
-    "browser-use",
     "apscheduler",
+    "pillow",
+    "pillow-heif",
     # Constraints
+    "browser-use==0.1.45",
+    "python-dateutil>=2.8.0",
+    "six>=1.16.0",
     "faiss-cpu==1.10.0",
     "certifi>=2024.7.4",
     "configobj>=5.0.9",

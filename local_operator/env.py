@@ -19,6 +19,8 @@ from pydantic import Field
 dotenv_path = Path(__file__).parent.parent / ".env"
 load_dotenv(dotenv_path, override=True)
 
+os.environ["ANONYMIZED_TELEMETRY"] = "false"
+
 
 @dataclass(frozen=True)
 class EnvConfig:
