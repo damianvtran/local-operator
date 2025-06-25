@@ -7,6 +7,9 @@ for maintaining the integrity and usability of the responses and ensuring proper
 setup for subprocess execution across different operating systems.
 """
 
+# Import standard library modules that are always available
+import base64
+import io
 import json
 import logging
 import os
@@ -14,14 +17,11 @@ import platform
 import re
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 from typing import Any, Dict, List, Tuple, Union
 
 try:
-    import base64
-    import io
-    import tempfile
-    from pathlib import Path
-
     from PIL import Image
     from pillow_heif import register_heif_opener
 
@@ -29,6 +29,8 @@ try:
     register_heif_opener()
     HEIF_SUPPORT = True
 except ImportError:
+    # PIL and pillow_heif are optional dependencies
+    Image = None  # type: ignore
     HEIF_SUPPORT = False
 
 from local_operator.types import ResponseJsonSchema
@@ -677,7 +679,7 @@ def convert_heic_to_png_data_url(file_path: Union[str, Path]) -> Tuple[str, str]
     Raises:
         Exception: If HEIF support is not available or conversion fails
     """
-    if not HEIF_SUPPORT:
+    if not HEIF_SUPPORT or Image is None:
         raise Exception("HEIF support not available. Please install pillow-heif.")
 
     try:
@@ -714,7 +716,7 @@ def convert_heic_to_png_file(heic_path: Union[str, Path]) -> Path:
     Raises:
         Exception: If conversion fails or HEIF support is not available
     """
-    if not HEIF_SUPPORT:
+    if not HEIF_SUPPORT or Image is None:
         raise Exception("HEIF support not available. Please install pillow-heif.")
 
     heic_path = Path(heic_path)
