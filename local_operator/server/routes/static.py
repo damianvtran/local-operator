@@ -13,6 +13,8 @@ from typing import List
 from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 
+from local_operator.helpers import convert_heic_to_png_file
+
 router = APIRouter(tags=["Static"])
 logger = logging.getLogger("local_operator.server.routes.static")
 
@@ -72,14 +74,17 @@ ALLOWED_HTML_TYPES: List[str] = [
 @router.get(
     "/v1/static/images",
     summary="Serve image file",
-    description="Serves an image file from disk by path. Only image file types are allowed.",
+    description=(
+        "Serves an image file from disk by path. Only image file types are allowed. "
+        "HEIC/HEIF files are automatically converted to PNG."
+    ),
     response_class=FileResponse,
 )
 async def get_image(
     path: str = Query(..., description="Path to the image file on disk"),
 ):
     """
-    Serve an image file from disk.
+    Serve an image file from disk. HEIC/HEIF files are automatically converted to PNG.
 
     Args:
         path: Path to the image file on disk
@@ -114,7 +119,25 @@ async def get_image(
                 detail=f"File is not an allowed image type: {mime_type or 'unknown'}",
             )
 
-        # Return the file
+        # Check if this is a HEIC/HEIF file that needs conversion
+        if mime_type in ["image/heic", "image/heif"]:
+            try:
+                # Convert HEIC/HEIF to PNG
+                converted_path = convert_heic_to_png_file(expanded_path)
+
+                # Return the converted PNG file with PNG MIME type
+                return FileResponse(
+                    path=converted_path,
+                    media_type="image/png",
+                    filename=f"{expanded_path.stem}.png",
+                )
+            except Exception as e:
+                logger.exception(f"Failed to convert HEIC/HEIF file {expanded_path}: {e}")
+                raise HTTPException(
+                    status_code=500, detail=f"Failed to convert HEIC/HEIF file: {str(e)}"
+                )
+
+        # Return the file as-is for other image types
         return FileResponse(path=expanded_path, media_type=mime_type, filename=expanded_path.name)
 
     except HTTPException:

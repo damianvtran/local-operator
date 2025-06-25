@@ -7,6 +7,9 @@ for maintaining the integrity and usability of the responses and ensuring proper
 setup for subprocess execution across different operating systems.
 """
 
+# Import standard library modules that are always available
+import base64
+import io
 import json
 import logging
 import os
@@ -14,7 +17,21 @@ import platform
 import re
 import subprocess
 import sys
-from typing import Any, Dict, List, Tuple
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, List, Tuple, Union
+
+try:
+    from PIL import Image
+    from pillow_heif import register_heif_opener
+
+    # Register HEIF opener with Pillow
+    register_heif_opener()
+    HEIF_SUPPORT = True
+except ImportError:
+    # PIL and pillow_heif are optional dependencies
+    Image = None  # type: ignore
+    HEIF_SUPPORT = False
 
 from local_operator.types import ResponseJsonSchema
 
@@ -644,6 +661,86 @@ def _extract_initial_think_tags(text: str) -> Tuple[str, str]:
                         return thinking_content, text[remaining_text_start_pos:]
 
     return "", text  # No initial think tag found or tag was malformed
+
+
+# --- HEIC/HEIF Conversion Helpers ---
+
+
+def convert_heic_to_png_data_url(file_path: Union[str, Path]) -> Tuple[str, str]:
+    """Convert HEIC/HEIF file to PNG format in memory and return as data URL.
+
+    Args:
+        file_path: Path to the HEIC/HEIF file
+
+    Returns:
+        Tuple[str, str]: (data_url, mime_type) where data_url is the PNG data URL
+        and mime_type is "image/png"
+
+    Raises:
+        Exception: If HEIF support is not available or conversion fails
+    """
+    if not HEIF_SUPPORT or Image is None:
+        raise Exception("HEIF support not available. Please install pillow-heif.")
+
+    try:
+        # Open and convert HEIC/HEIF to PNG in memory
+        with Image.open(file_path) as img:
+            # Convert to RGB if necessary (HEIF can have different color modes)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+
+            # Save as PNG to memory buffer
+            png_buffer = io.BytesIO()
+            img.save(png_buffer, format="PNG")
+            png_buffer.seek(0)
+
+            # Encode to base64
+            png_data = base64.b64encode(png_buffer.getvalue()).decode("utf-8")
+            data_url = f"data:image/png;base64,{png_data}"
+
+            return data_url, "image/png"
+
+    except Exception as e:
+        raise Exception(f"Failed to convert HEIC/HEIF file to PNG: {str(e)}")
+
+
+def convert_heic_to_png_file(heic_path: Union[str, Path]) -> Path:
+    """Convert a HEIC/HEIF file to PNG format and save to a temporary file.
+
+    Args:
+        heic_path: Path to the HEIC/HEIF file
+
+    Returns:
+        Path: Path to the converted PNG file in a temporary directory
+
+    Raises:
+        Exception: If conversion fails or HEIF support is not available
+    """
+    if not HEIF_SUPPORT or Image is None:
+        raise Exception("HEIF support not available. Please install pillow-heif.")
+
+    heic_path = Path(heic_path)
+
+    try:
+        # Open the HEIC/HEIF file
+        with Image.open(heic_path) as img:
+            # Convert to RGB if necessary (HEIC can have different color modes)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+
+            # Create a temporary file for the PNG
+            temp_dir = tempfile.gettempdir()
+            temp_filename = f"converted_{heic_path.stem}.png"
+            temp_path = Path(temp_dir) / temp_filename
+
+            # Save as PNG
+            img.save(temp_path, "PNG", optimize=True)
+
+            return temp_path
+
+    except Exception as e:
+        logger.exception(f"Failed to convert HEIC/HEIF file {heic_path}: {e}")
+        raise Exception(f"Failed to convert HEIC/HEIF file: {str(e)}")
 
 
 # --- Environment Setup ---

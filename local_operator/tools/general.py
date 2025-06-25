@@ -13,10 +13,23 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from uuid import UUID  # Added UUID
 
 import playwright.async_api as pw
-from browser_use import Agent as BrowserAgent
-from browser_use import Browser, BrowserConfig
-from browser_use import Controller as BrowserController
 from pydantic import SecretStr
+
+# Import browser_use components with error handling for resilience
+try:
+    from browser_use import Agent as BrowserAgent
+    from browser_use import Browser, BrowserConfig
+    from browser_use import Controller as BrowserController
+
+    BROWSER_USE_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: browser_use import failed: {e}")
+    print("Browser automation features will be disabled.")
+    BrowserAgent = None
+    Browser = None
+    BrowserConfig = None
+    BrowserController = None
+    BROWSER_USE_AVAILABLE = False
 
 from local_operator.agents import AgentRegistry
 from local_operator.clients.fal import FalClient, FalImageGenerationResponse, ImageSize
@@ -1108,6 +1121,12 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
             RuntimeError: If Chrome executable is not found or model instance is not available.
             TypeError: If the configured model instance is not a supported LLM type.
         """  # noqa: E501
+        if not BROWSER_USE_AVAILABLE:
+            raise RuntimeError(
+                "Browser automation is not available. The browser-use library failed to import. "
+                "This may be due to missing dependencies. Please check the installation."
+            )
+
         if not model_config or not model_config.instance:
             raise RuntimeError(
                 "ModelConfiguration or model instance is not available for "
@@ -1133,17 +1152,16 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
         headless_setting = False  # Default to non-headless for visibility
         keep_alive_setting = True  # As per original code's intent
 
-        browser_config: BrowserConfig
         if existing_cdp_url:
             print(f"Attempting to connect to existing browser session via CDP: {existing_cdp_url}")
-            browser_config = BrowserConfig(
+            browser_config = BrowserConfig(  # type: ignore
                 cdp_url=existing_cdp_url,  # type: ignore - browser-use might not type this
                 headless=headless_setting,
                 keep_alive=keep_alive_setting,  # type: ignore - browser-use type issue
             )
         elif existing_wss_url:
             print(f"Attempting to connect to existing browser session via WSS: {existing_wss_url}")
-            browser_config = BrowserConfig(
+            browser_config = BrowserConfig(  # type: ignore
                 wss_url=existing_wss_url,  # type: ignore - browser-use might not type this
                 headless=headless_setting,
                 keep_alive=keep_alive_setting,  # type: ignore - browser-use type issue
@@ -1157,19 +1175,19 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
                     "for launching. Ensure one is installed and in PATH, or provide path manually."
                 )
                 raise RuntimeError(error_msg)
-            browser_config = BrowserConfig(
+            browser_config = BrowserConfig(  # type: ignore
                 browser_binary_path=browser_path,  # type: ignore - browser-use might not type this
                 headless=headless_setting,
                 keep_alive=keep_alive_setting,  # type: ignore - browser-use type issue
             )
 
         browser_instance = Browser(config=browser_config)  # type: ignore
-        controller = BrowserController()
+        controller = BrowserController()  # type: ignore
 
         # Need to set this due to a browser-use bug
         os.environ["OPENAI_API_KEY"] = model_config.api_key.get_secret_value()
 
-        agent = BrowserAgent(
+        agent = BrowserAgent(  # type: ignore
             task=task,
             llm=model_config.instance,
             browser=browser_instance,  # type: ignore - browser-use might not type this
@@ -1429,6 +1447,8 @@ def create_audio_transcription_tool(
         """Transcribe an audio file to text using the Radient API. This tool takes the path to an audio file and returns the transcribed text. Supported audio formats include flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, and webm. You can optionally specify the model, a prompt to guide transcription, the desired response format, temperature for sampling, the language of the audio, and the transcription provider.
 
         If the file that you need to transcribe is not one of the supported formats, you'll need to separate the audio from the video using a tool like ffmpeg first and then provide the audio file to this tool.
+
+        If the duration of the audio is longer than 10 minutes, then split the audio into 10 minute fragments to avoid server timeouts.
 
         Args:
             file_path (str): Path to the audio file on disk to transcribe. Must be a valid path to an audio file on disk. Supported formats: flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, webm.
