@@ -10,7 +10,7 @@ readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damian@radienthq.com" }]
 license = { file = "LICENSE" }
 classifiers = [
-    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3.12",
 ]

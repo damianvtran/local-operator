@@ -1,6 +1,6 @@
 # Contributing to Local Operator
 
-Thank you for your interest in contributing to Local Operator! We welcome all contributions, including bug reports, feature requests, documentation improvements, and code contributions. By participating in this project, you agree to abide by its [GPL 3.0 License](LICENSE).
+Thank you for your interest in contributing to Local Operator! We welcome all contributions, including bug reports, feature requests, documentation improvements, and code contributions. By participating in this project, you agree to abide by its [MIT License](LICENSE).
 
 ## Project Structure
 
@@ -68,6 +68,7 @@ Refer to the [dependency graph](docs/dependencies.md) for a visual representatio
    ```
 
    This will:
+
    - Install pyenv if not already installed
    - Install Python 3.12 via pyenv if not already installed
    - Make Python 3.12 available as `python3.12` in your PATH
@@ -79,7 +80,7 @@ Refer to the [dependency graph](docs/dependencies.md) for a visual representatio
    ```bash
    # First, set up Python environment (installs pyenv and Python 3.12)
    make setup-python
-   
+
    # Then, manually create a virtual environment and install dependencies
    # (python3.12 should now be available in your PATH)
    python3.12 -m venv .venv
@@ -195,6 +196,7 @@ Please follow the following steps to contribute:
    ```
 
 3. Commit changes with descriptive messages
+
    - Use the present tense
    - Keep commits small and atomic
 

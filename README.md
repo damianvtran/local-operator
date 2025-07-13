@@ -31,7 +31,7 @@
 
 🔧 **Problem Solving** - Intelligently handles errors and roadblocks by adapting approaches and finding alternative solutions
 
-This project is proudly open source under the GPL 3.0 license. We believe AI tools should be accessible to everyone, given their transformative impact on productivity. Your contributions and feedback help make this vision a reality!
+This project is proudly open source under the MIT license. We believe AI tools should be accessible to everyone, given their transformative impact on productivity. Your contributions and feedback help make this vision a reality!
 
 > "Democratizing AI-powered productivity, one conversation at a time."
 
@@ -83,7 +83,7 @@ This project is proudly open source under the GPL 3.0 license. We believe AI too
 The Local Operator provides a command-line interface where you can:
 
 1. Interact with the AI assistant in natural language
-2. Execute Python code blocks marked with ```python``` syntax
+2. Execute Python code blocks marked with `python` syntax
 3. Get safety warnings before executing potentially dangerous operations
 4. View execution results and error messages
 5. Maintain context between code executions
@@ -100,12 +100,12 @@ Visit the [Local Operator website](https://local-operator.com) for visualization
 
 ### 🛠️ Installing Local Operator
 
-To run Local Operator with a 3rd party cloud-hosted LLM model, you need to have an API key.  You can get one from OpenAI, DeepSeek, Anthropic, or other providers.
+To run Local Operator with a 3rd party cloud-hosted LLM model, you need to have an API key. You can get one from OpenAI, DeepSeek, Anthropic, or other providers.
 
 ### 📦 Install via pip
-   >
-   > ⚠️ **Linux Installs (Ubuntu 23.04+, Fedora 38+, Debian 12+)**  
-   > Due to recent changes in how Python is managed on modern Linux distributions (see [PEP 668](https://peps.python.org/pep-0668/)), you **cannot use `pip install` globally** on system Python.  
+
+> ⚠️ **Linux Installs (Ubuntu 23.04+, Fedora 38+, Debian 12+)**  
+> Due to recent changes in how Python is managed on modern Linux distributions (see [PEP 668](https://peps.python.org/pep-0668/)), you **cannot use `pip install` globally** on system Python.
 
 - MacOS & Windows
 
@@ -129,17 +129,17 @@ To run Local Operator with a 3rd party cloud-hosted LLM model, you need to have 
 
 - 📌 (Optional) Enabling Web Browsing
 
-    This is not necessary to use the web browsing tool, as the agent will automatically install the browsers when they are needed, but it can be faster to install them ahead of start up if you know you will need them.
+  This is not necessary to use the web browsing tool, as the agent will automatically install the browsers when they are needed, but it can be faster to install them ahead of start up if you know you will need them.
 
-    ```bash
-    playwright install
-    ```
+  ```bash
+  playwright install
+  ```
 
 - 📌 (Optional) Enabling Web Search
 
-    To enable web search, you will need to get a free SERP API key from [SerpApi](https://serpapi.com/users/sign_up).  On the free plan, you get 100 credits per month which is generally sufficient for light to moderate personal use. The agent uses a web search tool integrated with SERP API to fetch information from the web if you have the `SERP_API_KEY` set up in the Local Operator credentials.  The agent can still browse the web without it, though information access will be less efficient.
+  To enable web search, you will need to get a free SERP API key from [SerpApi](https://serpapi.com/users/sign_up). On the free plan, you get 100 credits per month which is generally sufficient for light to moderate personal use. The agent uses a web search tool integrated with SERP API to fetch information from the web if you have the `SERP_API_KEY` set up in the Local Operator credentials. The agent can still browse the web without it, though information access will be less efficient.
 
-   1. Get your API key and then configure the `SERP_API_KEY` credential:
+  1.  Get your API key and then configure the `SERP_API_KEY` credential:
 
       ```bash
       local-operator credential update <SERP_API_KEY>
@@ -147,13 +147,13 @@ To run Local Operator with a 3rd party cloud-hosted LLM model, you need to have 
 
 - 📌 (Optional) Enabling Image Generation
 
-    To enable image generation capabilities, you'll need to get a FAL AI API key from [FAL AI](https://fal.ai/dashboard/keys). The Local Operator uses the FLUX.1 model from FAL AI to generate and modify images.
+  To enable image generation capabilities, you'll need to get a FAL AI API key from [FAL AI](https://fal.ai/dashboard/keys). The Local Operator uses the FLUX.1 model from FAL AI to generate and modify images.
 
-    1. Get your API key and then configure the `FAL_API_KEY` credential:
+  1. Get your API key and then configure the `FAL_API_KEY` credential:
 
-        ```bash
-        local-operator credential update <FAL_API_KEY>
-        ```
+     ```bash
+     local-operator credential update <FAL_API_KEY>
+     ```
 
 ### 📦 Install via Nix Flake
 
@@ -211,7 +211,7 @@ local-operator --hosting deepseek --model deepseek-chat
 local-operator --hosting openai --model gpt-4o
 ```
 
-This will run the operator starting in the current working directory.  It will prompt you for any missing API keys or configuration on first run.  Everything else is handled by the agent 😊
+This will run the operator starting in the current working directory. It will prompt you for any missing API keys or configuration on first run. Everything else is handled by the agent 😊
 
 Quit by typing `exit` or `quit`.
 
@@ -219,7 +219,7 @@ Run `local-operator --help` for more information about parameters and configurat
 
 ### 🔂 Run Single Execution Mode
 
-The operator can be run in a single execution mode where it will execute a single task and then exit.  This is useful for running the operator in a non-interactive way such as in a script.
+The operator can be run in a single execution mode where it will execute a single task and then exit. This is useful for running the operator in a non-interactive way such as in a script.
 
 ```bash
 local-operator exec "Make a new file called test.txt and write Hello World in it"
@@ -235,7 +235,7 @@ To run the operator as a server, use the following command:
 local-operator serve
 ```
 
-This will start the FastAPI server app and host at `http://localhost:8080` by default with uvicorn.  You can change the host and port by using the `--host` and `--port` arguments.  
+This will start the FastAPI server app and host at `http://localhost:8080` by default with uvicorn. You can change the host and port by using the `--host` and `--port` arguments.
 
 To view the API documentation, navigate to `http://localhost:8080/docs` in your browser for Swagger UI or `http://localhost:8080/redoc` for ReDoc.
 
@@ -243,10 +243,10 @@ For development, use the `--reload` argument to enable hot reloading.
 
 ### 🧠 Running in Agent mode
 
-The agents mode is helpful for passing on knowledge between agents and between runs.  It is also useful for creating reusable agentic experiences learned through conversation with the user.
+The agents mode is helpful for passing on knowledge between agents and between runs. It is also useful for creating reusable agentic experiences learned through conversation with the user.
 
-The agents CLI command can be used to create, edit, and delete agents.  Agents are
-metadata and persistence for conversation history.  They are an easy way to create replicable conversation experiences based on "training" through conversation with the user.
+The agents CLI command can be used to create, edit, and delete agents. Agents are
+metadata and persistence for conversation history. They are an easy way to create replicable conversation experiences based on "training" through conversation with the user.
 
 To create a new agent, use the following command:
 
@@ -254,7 +254,7 @@ To create a new agent, use the following command:
 local-operator agents create "My Agent"
 ```
 
-This will create a new agent with the name "My Agent" and a default conversation history.  The agent will be saved in the `~/.local-operator/agents` directory.
+This will create a new agent with the name "My Agent" and a default conversation history. The agent will be saved in the `~/.local-operator/agents` directory.
 
 To list all agents, use the following command:
 
@@ -284,9 +284,9 @@ local-operator --hosting openai --model gpt-4o exec "Make a new file called test
 
 ### 🔧 Configuration Values
 
-The operator uses a configuration file to manage API keys and other settings.  It can be created at `~/.local-operator/config.yml` with the `local-operator config create` command.  You can edit this file directly to change the configuration.
+The operator uses a configuration file to manage API keys and other settings. It can be created at `~/.local-operator/config.yml` with the `local-operator config create` command. You can edit this file directly to change the configuration.
 
-To create a new configuration file, use the following command:  
+To create a new configuration file, use the following command:
 
 ```bash
 local-operator config create
@@ -312,16 +312,16 @@ local-operator config list
 
 ### 🛠️ Configuration Options
 
-- `conversation_length`: The number of messages to keep in the conversation history.  Defaults to 100.
-- `detail_length`: The number of messages to keep in the detail history.  All messages beyond this number excluding the primary system prompt will be summarized into a shorter form to reduce token costs.  Defaults to 35.
-- `hosting`: The hosting platform to use.  Avoids needing to specify the `--hosting` argument every time.
-- `model_name`: The name of the model to use.  Avoids needing to specify the `--model` argument every time.
-- `max_learnings_history`: The maximum number of learnings to keep in the learnings history.  Defaults to 50.
-- `auto_save_conversation`: Whether to automatically save the conversation history to a file.  Defaults to `false`.
+- `conversation_length`: The number of messages to keep in the conversation history. Defaults to 100.
+- `detail_length`: The number of messages to keep in the detail history. All messages beyond this number excluding the primary system prompt will be summarized into a shorter form to reduce token costs. Defaults to 35.
+- `hosting`: The hosting platform to use. Avoids needing to specify the `--hosting` argument every time.
+- `model_name`: The name of the model to use. Avoids needing to specify the `--model` argument every time.
+- `max_learnings_history`: The maximum number of learnings to keep in the learnings history. Defaults to 50.
+- `auto_save_conversation`: Whether to automatically save the conversation history to a file. Defaults to `false`.
 
 ### 🔐 Credentials
 
-Credentials are stored in the `~/.local-operator/credentials.yml` file.  Credentials can be updated at any time by running `local-operator credential update <credential_name>`.
+Credentials are stored in the `~/.local-operator/credentials.yml` file. Credentials can be updated at any time by running `local-operator credential update <credential_name>`.
 
 Example:
 
@@ -335,39 +335,41 @@ To clear a credential, use the following command:
 local-operator credential delete SERP_API_KEY
 ```
 
-- `SERP_API_KEY`: The API key for the SERP API from [SerpApi](https://serpapi.com/users/sign_up).  This is used to search the web for information.  This is required for the agent to be able to do real time searches of the web using search engines.  The agent can still browse the web without it, though information access will be less efficient.
+- `SERP_API_KEY`: The API key for the SERP API from [SerpApi](https://serpapi.com/users/sign_up). This is used to search the web for information. This is required for the agent to be able to do real time searches of the web using search engines. The agent can still browse the web without it, though information access will be less efficient.
 
-- `TAVILY_API_KEY`: The API key for the Tavily API from [Tavily](https://tavily.com/signup).  Alternative to SERP API with pay as you go pricing.  The per unit cost is lower
-for personal use if you go over the SERP API 100 requests per month limit.  The disadvantage is that the search results are not based off of Google like SERP API so the search depth is not as extensive.  Good for if you have run into the SERP API limit for the month.
+- `TAVILY_API_KEY`: The API key for the Tavily API from [Tavily](https://tavily.com/signup). Alternative to SERP API with pay as you go pricing. The per unit cost is lower
+  for personal use if you go over the SERP API 100 requests per month limit. The disadvantage is that the search results are not based off of Google like SERP API so the search depth is not as extensive. Good for if you have run into the SERP API limit for the month.
 
 - `FAL_API_KEY`: The API key for the FAL AI API from [FAL AI](https://fal.ai/dashboard/keys). This enables image generation capabilities using the FLUX.1 text-to-image model. With this key, the agent can generate images from text descriptions and modify existing images based on prompts. The FAL AI API provides high-quality image generation with various customization options like image size, guidance scale, and inference steps.
 
-- `OPENROUTER_API_KEY`: The API key for the OpenRouter API.  This is used to access the OpenRouter service with a wide range of models.  It is the best option for being able to easily switch between models with less configuration.
+- `OPENROUTER_API_KEY`: The API key for the OpenRouter API. This is used to access the OpenRouter service with a wide range of models. It is the best option for being able to easily switch between models with less configuration.
 
-- `OPENAI_API_KEY`: The API key for the OpenAI API.  This is used to access the OpenAI model.
+- `OPENAI_API_KEY`: The API key for the OpenAI API. This is used to access the OpenAI model.
 
-- `DEEPSEEK_API_KEY`: The API key for the DeepSeek API.  This is used to access the DeepSeek model.
+- `DEEPSEEK_API_KEY`: The API key for the DeepSeek API. This is used to access the DeepSeek model.
 
-- `ANTHROPIC_API_KEY`: The API key for the Anthropic API.  This is used to access the Anthropic model.
+- `ANTHROPIC_API_KEY`: The API key for the Anthropic API. This is used to access the Anthropic model.
 
-- `GOOGLE_API_KEY`: The API key for the Google API.  This is used to access the Google model.
+- `GOOGLE_API_KEY`: The API key for the Google API. This is used to access the Google model.
 
-- `MISTRAL_API_KEY`: The API key for the Mistral API.  This is used to access the Mistral model.
+- `MISTRAL_API_KEY`: The API key for the Mistral API. This is used to access the Mistral model.
 
 ---
 
 ## 🌟 Radient Agent Hub and Automatic Model Selection
 
-Radient enables seamless sharing, hosting, and auto-selection of AI agents and models through the Agent Hub in Local Operator.  The Agent Hub is public and available to all for downloading agents, however to publish an agent you will need to set up an account on the [Radient Console](https://console.radienthq.com). You can push your agents to the Radient Hub, pull agents shared by others, and leverage Radient's automatic model selection for optimal performance and cost reductions.
+Radient enables seamless sharing, hosting, and auto-selection of AI agents and models through the Agent Hub in Local Operator. The Agent Hub is public and available to all for downloading agents, however to publish an agent you will need to set up an account on the [Radient Console](https://console.radienthq.com). You can push your agents to the Radient Hub, pull agents shared by others, and leverage Radient's automatic model selection for optimal performance and cost reductions.
 
 ### Setting Up a Radient Account
 
 1. **Sign Up & Create an Application**
+
    - Go to [https://console.radienthq.com](https://console.radienthq.com) and sign up for a free account.
    - After logging in, create a new application in the Radient Console Applications section.
    - Copy your generated **RADIENT_API_KEY** from the application creation dialog.
 
 2. **Configure Your API Key in Local Operator**
+
    - Set your Radient API key using the credentials manager:
 
      ```bash
@@ -377,6 +379,7 @@ Radient enables seamless sharing, hosting, and auto-selection of AI agents and m
 ### Pushing and Pulling Agents
 
 - **Push an Agent to Radient**
+
   - You must be logged in (RADIENT_API_KEY configured) to push agents.
   - Use either the agent's name or ID:
 
@@ -393,6 +396,7 @@ Radient enables seamless sharing, hosting, and auto-selection of AI agents and m
   - This uploads your agent to the Radient Agents Hub for sharing or backup.
 
 - **Pull an Agent from Radient**
+
   - Download an agent by its Radient ID (no RADIENT_API_KEY required):
 
     ```bash
@@ -415,7 +419,7 @@ Radient can automatically select the best model for your task, removing the need
    local-operator --hosting radient
    ```
 
-   - No `--model` argument is needed; Radient will select the optimal model automatically.  The model will be selected on a step-by-step basis to optimize for the best model for the job and reduce agentic AI costs.
+   - No `--model` argument is needed; Radient will select the optimal model automatically. The model will be selected on a step-by-step basis to optimize for the best model for the job and reduce agentic AI costs.
 
 #### Example Workflow
 
@@ -439,9 +443,9 @@ For more details, visit the [Radient Console](https://console.radienthq.com) or 
 
 ## 📝 Examples
 
-👉 Check out the [example notebooks](./examples/notebooks/) for detailed examples of tasks completed with Local Operator in Jupyter notebook format.  
+👉 Check out the [example notebooks](./examples/notebooks/) for detailed examples of tasks completed with Local Operator in Jupyter notebook format.
 
-These notebooks were created in Local Operator by asking the agent to save the conversation history to a notebook each time after asking the agent to complete tasks.  You can generally replicate them by asking the same user prompts with the same configuration settings.
+These notebooks were created in Local Operator by asking the agent to save the conversation history to a notebook each time after asking the agent to complete tasks. You can generally replicate them by asking the same user prompts with the same configuration settings.
 
 Some examples of helpful tasks completed with Local Operator:
 
@@ -476,4 +480,4 @@ The system includes multiple layers of protection:
 
 ## 📜 License
 
-This project is licensed under the GPL 3.0 License - see the LICENSE file for details.
+This project is licensed under the MIT License - see the LICENSE file for details.
