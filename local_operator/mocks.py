@@ -54,6 +54,7 @@ USER_MOCK_RESPONSES = {
     "think aloud about what you did and the outcome": ("I printed 'Hello World' to the console."),
     "hello world": "I have printed 'Hello World' to the console.",
     "please summarize": "[SUMMARY] this is a summary",
+    "determine a status for the following agent generated json response": "[SAFE]",
 }
 
 

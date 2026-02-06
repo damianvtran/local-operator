@@ -96,16 +96,17 @@ class ConfirmSafetyResult(Enum):
 
 def get_confirm_safety_result(response_content: str) -> ConfirmSafetyResult:
     """Get the result of the safety check from the response content."""
-    if not response_content:
-        return ConfirmSafetyResult.SAFE
+    if not isinstance(response_content, str) or not response_content.strip():
+        return ConfirmSafetyResult.UNSAFE
 
     content_lower = response_content.lower()
+    if "[unsafe]" in content_lower:
+        return ConfirmSafetyResult.UNSAFE
     if "[override]" in content_lower:
         return ConfirmSafetyResult.OVERRIDE
-    elif "[unsafe]" in content_lower:
-        return ConfirmSafetyResult.UNSAFE
-    else:
+    if "[safe]" in content_lower:
         return ConfirmSafetyResult.SAFE
+    return ConfirmSafetyResult.UNSAFE
 
 
 def get_context_vars_str(context_vars: Dict[str, Any]) -> str:
@@ -1865,6 +1866,7 @@ class LocalCodeExecutor:
             )
 
         execution_result = None
+        action_error: Exception | None = None
 
         async with spinner_context(
             f"Executing {str(response.action).lower()}",
@@ -2091,6 +2093,7 @@ class LocalCodeExecutor:
                         raise ValueError('"code" field is required for CODE actions')
 
             except Exception as e:
+                action_error = e
                 log_action_error(e, str(response.action), self.verbosity_level)
 
                 self.append_to_history(
@@ -2104,6 +2107,22 @@ class LocalCodeExecutor:
                         should_summarize=True,
                     )
                 )
+
+                execution_result = CodeExecutionResult(
+                    stdout="",
+                    stderr=str(e),
+                    logging="",
+                    formatted_print=format_error_output(e, 1),
+                    code=response.code,
+                    message=f"Action execution failed: {str(e)}",
+                    role=ConversationRole.ASSISTANT,
+                    status=ProcessResponseStatus.ERROR,
+                    files=[],
+                    execution_type=ExecutionType.ACTION,
+                    action=response.action,
+                )
+
+                await self.update_job_execution_state(execution_result)
 
         token_metrics = self.get_token_metrics()
 
@@ -2151,10 +2170,12 @@ class LocalCodeExecutor:
         if self.verbosity_level >= VerbosityLevel.VERBOSE:
             print("\n")  # New line for next spinner
 
-        output = ProcessResponseOutput(
-            status=ProcessResponseStatus.SUCCESS,
-            message=execution_result.message if execution_result else "Action completed",
+        output_status = (
+            ProcessResponseStatus.ERROR if action_error else ProcessResponseStatus.SUCCESS
         )
+        output_message = execution_result.message if execution_result else "Action completed"
+
+        output = ProcessResponseOutput(status=output_status, message=output_message)
 
         return output, execution_result
 
