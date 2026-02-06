@@ -1321,13 +1321,54 @@ class AgentRegistry:
             logging.error(f"Failed to migrate context for agent {agent_id}: {str(e)}")
             return False
 
+    @staticmethod
+    def _zip_member_is_symlink(zip_info: zipfile.ZipInfo) -> bool:
+        """Check whether a ZIP member is a symlink entry."""
+        return ((zip_info.external_attr >> 16) & 0o170000) == 0o120000
+
+    def _safe_extract_zip(self, zip_ref: zipfile.ZipFile, destination: Path) -> None:
+        """Extract ZIP content while preventing path traversal and symlink extraction."""
+        destination_resolved = destination.resolve()
+
+        for member in zip_ref.infolist():
+            member_name = member.filename
+            if not member_name:
+                continue
+
+            normalized_name = member_name.replace("\\", "/")
+            member_path = Path(normalized_name)
+
+            if (
+                normalized_name.startswith("/")
+                or normalized_name.startswith("../")
+                or "/../" in normalized_name
+                or member_path.is_absolute()
+                or ".." in member_path.parts
+            ):
+                raise ValueError(f"Unsafe file path in ZIP: {member_name}")
+
+            if self._zip_member_is_symlink(member):
+                raise ValueError(f"ZIP contains unsupported symlink entry: {member_name}")
+
+            target_path = (destination / member_path).resolve()
+            if not (target_path == destination_resolved or destination_resolved in target_path.parents):
+                raise ValueError(f"Unsafe file path in ZIP: {member_name}")
+
+            if member.is_dir():
+                target_path.mkdir(parents=True, exist_ok=True)
+                continue
+
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            with zip_ref.open(member, "r") as source, target_path.open("wb") as target:
+                shutil.copyfileobj(source, target)
+
     def import_agent(self, zip_path: Path) -> AgentData:
         """
         Import an agent from a ZIP file.
 
         The ZIP file should contain agent state files with an agent.yml file.
-        A new ID will be assigned to the imported agent, and the current working directory
-        will be reset to local-operator-home.
+        The current working directory will be reset to local-operator-home.
+        For security, serialized execution context (`context.pkl`) is not imported.
 
         Args:
             zip_path (Path): Path to the ZIP file containing agent state files
@@ -1346,7 +1387,7 @@ class AgentRegistry:
             try:
                 # Extract the ZIP file
                 with zipfile.ZipFile(zip_path, "r") as zip_ref:
-                    zip_ref.extractall(temp_dir_path)
+                    self._safe_extract_zip(zip_ref, temp_dir_path)
 
                 # Check if agent.yml exists in the extracted files
                 agent_yml_path = None
@@ -1388,6 +1429,12 @@ class AgentRegistry:
                 extracted_agent_dir = agent_yml_path.parent
                 for item in extracted_agent_dir.iterdir():
                     if item.is_file():
+                        if item.name == "context.pkl":
+                            logging.info(
+                                "Skipping imported context.pkl for security reasons "
+                                f"(agent: {agent_id})"
+                            )
+                            continue
                         shutil.copy2(item, agent_dir)
 
                 # Create a new AgentData object directly from the data
@@ -1449,6 +1496,8 @@ class AgentRegistry:
                 raise ValueError("Invalid ZIP file")
             except yaml.YAMLError:
                 raise ValueError("Invalid YAML in agent.yml")
+            except ValueError:
+                raise
             except Exception as e:
                 raise Exception(f"Error importing agent: {str(e)}")
 

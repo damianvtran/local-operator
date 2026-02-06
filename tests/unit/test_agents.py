@@ -1,8 +1,10 @@
 import json
+import io
 import os
 import shutil
 import ssl
 import uuid
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1665,6 +1667,63 @@ def test_import_agent_and_export_agent_roundtrip(temp_agents_dir: Path):
     assert imported_agent.description == agent.description
     assert imported_agent.tags == agent.tags
     assert imported_agent.categories == agent.categories
+
+
+def test_import_agent_rejects_zip_with_path_traversal(temp_agents_dir: Path):
+    """Import should reject archives containing unsafe traversal paths."""
+    registry = AgentRegistry(temp_agents_dir)
+    zip_path = temp_agents_dir / "unsafe-agent.zip"
+
+    agent_data = {
+        "id": "unsafe-agent-id",
+        "name": "Unsafe Agent",
+        "created_date": datetime.now(timezone.utc).isoformat(),
+        "version": "0.1.0",
+    }
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        zip_file.writestr("../agent.yml", yaml.dump(agent_data))
+        zip_file.writestr("agent.yml", yaml.dump(agent_data))
+
+    with pytest.raises(ValueError, match="Unsafe file path in ZIP"):
+        registry.import_agent(zip_path)
+
+
+def test_import_agent_skips_context_pickle(temp_agents_dir: Path):
+    """Import should ignore context.pkl to avoid loading untrusted serialized context."""
+    registry = AgentRegistry(temp_agents_dir)
+    zip_path = temp_agents_dir / "agent-with-context.zip"
+
+    agent_data = {
+        "id": "import-context-agent",
+        "name": "Import Context Agent",
+        "created_date": datetime.now(timezone.utc).isoformat(),
+        "version": "0.1.0",
+        "security_prompt": "Test security prompt",
+        "hosting": "openrouter",
+        "model": "openai/gpt-4o-mini",
+        "description": "Agent with context payload",
+        "last_message": "",
+        "last_message_datetime": datetime.now(timezone.utc).isoformat(),
+        "current_working_directory": "/tmp/old-path",
+    }
+
+    context_payload = {"variables": {"x": 123}}
+    context_bytes = io.BytesIO()
+    dill.dump(context_payload, context_bytes)
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        zip_file.writestr("agent.yml", yaml.dump(agent_data))
+        zip_file.writestr("conversation.jsonl", "")
+        zip_file.writestr("execution_history.jsonl", "")
+        zip_file.writestr("learnings.jsonl", "")
+        zip_file.writestr("context.pkl", context_bytes.getvalue())
+
+    imported_agent = registry.import_agent(zip_path)
+    imported_agent_dir = registry.agents_dir / imported_agent.id
+
+    assert not (imported_agent_dir / "context.pkl").exists()
+    assert registry.load_agent_context(imported_agent.id) is None
 
 
 def test_upload_agent_to_radient_new_and_overwrite(tmp_path: Path):

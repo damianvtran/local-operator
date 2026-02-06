@@ -730,24 +730,24 @@ async def test_execute_code_safety_with_override(executor, mock_model_config):
             "expected": ConfirmSafetyResult.OVERRIDE,
         },
         {
-            "name": "Default to safe",
+            "name": "Missing marker defaults to unsafe",
             "input": "Some response without any safety markers",
-            "expected": ConfirmSafetyResult.SAFE,
+            "expected": ConfirmSafetyResult.UNSAFE,
         },
         {
             "name": "Empty string",
             "input": "",
-            "expected": ConfirmSafetyResult.SAFE,
+            "expected": ConfirmSafetyResult.UNSAFE,
         },
         {
             "name": "Just whitespace",
             "input": "   \n  ",
-            "expected": ConfirmSafetyResult.SAFE,
+            "expected": ConfirmSafetyResult.UNSAFE,
         },
         {
             "name": "None input",
             "input": None,
-            "expected": ConfirmSafetyResult.SAFE,
+            "expected": ConfirmSafetyResult.UNSAFE,
         },
         {
             "name": "Case insensitive SAFE",
@@ -1428,7 +1428,7 @@ def test_process_json_response(
             None,
             "test.txt",
             "new content",
-            [{"old": "old", "new": "new"}],
+            [{"find": "old", "replace": "new"}],
             None,
             None,
         ),
@@ -1476,6 +1476,8 @@ async def test_perform_action(
     original_execute_code = executor.execute_code
     original_delegate_to_agent = executor.delegate_to_agent
     original_delegate_callback = executor.delegate_callback
+    original_check_and_confirm_safety = executor.check_and_confirm_safety
+    original_handle_safety_result = executor.handle_safety_result
 
     executor.delegate_callback = AsyncMock(
         return_value=CodeExecutionResult(
@@ -1492,6 +1494,8 @@ async def test_perform_action(
             action=ActionType.DELEGATE,
         )
     )
+    executor.check_and_confirm_safety = AsyncMock(return_value=ConfirmSafetyResult.SAFE)
+    executor.handle_safety_result = AsyncMock(return_value=None)
 
     if action_type == ActionType.READ:
         executor.read_file = AsyncMock(
@@ -1587,6 +1591,8 @@ async def test_perform_action(
     executor.execute_code = original_execute_code
     executor.delegate_to_agent = original_delegate_to_agent
     executor.delegate_callback = original_delegate_callback
+    executor.check_and_confirm_safety = original_check_and_confirm_safety
+    executor.handle_safety_result = original_handle_safety_result
 
 
 @pytest.mark.asyncio
@@ -1603,14 +1609,18 @@ async def test_perform_action_handles_exception(executor: LocalCodeExecutor):
     )
 
     executor.execute_code = AsyncMock(side_effect=Exception("Execution failed"))
+    executor.check_and_confirm_safety = AsyncMock(return_value=ConfirmSafetyResult.SAFE)
+    executor.handle_safety_result = AsyncMock(return_value=None)
 
     with patch("sys.stdout", new_callable=io.StringIO):
-        result, _ = await executor.perform_action(
+        result, execution_result = await executor.perform_action(
             response, RequestClassification(type="data_science")
         )
         assert "error encountered" in executor.agent_state.conversation[-1].content
         assert result is not None
-        assert result.status == ProcessResponseStatus.SUCCESS
+        assert result.status == ProcessResponseStatus.ERROR
+        assert execution_result is not None
+        assert execution_result.status == ProcessResponseStatus.ERROR
 
 
 @pytest.mark.asyncio
