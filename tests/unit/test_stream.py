@@ -407,8 +407,7 @@ print(search_results)
             id="code_with_learnings",
         ),
         pytest.param(
-            "<think>My thinking process for the search.</think>"
-            """
+            "<think>My thinking process for the search.</think>" """
 To gather the latest news on Donald Trump, I will perform a web search using multiple queries to get a broad range of information. I'll start with a general search and then follow up with more specific queries if needed.
 
 Let's begin with the initial search.

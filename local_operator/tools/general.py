@@ -463,13 +463,11 @@ async def get_page_html_content(url: str) -> str:
             page = await context.new_page()
 
             # Add stealth mode
-            await page.add_init_script(
-                """
+            await page.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', {get: () => false});
                 Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
                 window.chrome = { runtime: {} };
-            """
-            )
+            """)
 
             await page.goto(url, wait_until="domcontentloaded")
             await page.wait_for_timeout(2000)  # Wait additional time for dynamic content
@@ -510,20 +508,17 @@ async def get_page_text_content(url: str) -> str:
             page = await context.new_page()
 
             # Add stealth mode
-            await page.add_init_script(
-                """
+            await page.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', {get: () => false});
                 Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
                 window.chrome = { runtime: {} };
-            """
-            )
+            """)
 
             await page.goto(url, wait_until="domcontentloaded")
             await page.wait_for_timeout(2000)  # Wait additional time for dynamic content
 
             # Extract text from semantic elements
-            text_elements = await page.evaluate(
-                """
+            text_elements = await page.evaluate("""
                 () => {
                     const selectors = 'h1, h2, h3, h4, h5, h6, p, li, td, th, figcaption, pre, blockquote, code, a, div[class*="text-"]';
                     const elements = document.querySelectorAll(selectors);
@@ -533,8 +528,7 @@ async def get_page_text_content(url: str) -> str:
                         .map(text => text.trim())
                         .map(text => text.replace(/\\s+/g, ' '));
                 }
-            """  # noqa: E501
-            )
+            """)  # noqa: E501
 
             await browser.close()
 
