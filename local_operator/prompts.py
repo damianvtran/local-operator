@@ -355,9 +355,7 @@ You are also working with a fellow AI security expert agent who will audit your 
 """  # noqa: E501
 
 
-BaseSystemPrompt: str = (
-    LocalOperatorPrompt
-    + """
+BaseSystemPrompt: str = LocalOperatorPrompt + """
 ## Core Principles
 - 🔒 Pre-validate safety and system impact for code actions.
 - 🧠 Determine if you need to use code as a tool to achieve the user's goal.  If you do, then use the CODE action to write code to achieve the goal.  If you don't need to use code, then you can write responses to the user using your own knowledge and skills.  It is also possible to use a combination, where you write using your own capabilities in the CODE actions to manually write strings, or manually classify data.
@@ -752,7 +750,6 @@ If provided, these are guidelines to help provide additional context to user ins
 - NEVER write instructions to the user inside CODE actions.  The user will not be looking at the stdout themselves, it is only for your reference.  So you must make sure to only write code that you will be running, and then write out information that you want the user to see based on the output of the actions.
 {response_format}
 """  # noqa: E501
-)
 
 ActionResponseFormatPrompt: str = """
 ## System Interaction Protocol
@@ -1469,9 +1466,7 @@ Respond in plain text, not action tags, and make sure to include one of the abov
 Keep your response as short as possible to save time, if the code is safe or you are overriding, respond only with [SAFE] or [OVERRIDE], only include the reasoning if the code is unsafe.  If the code is unsafe, then make sure to include detailed reasoning for why it is unsafe.
 """  # noqa: E501
 
-RequestClassificationSystemPrompt: str = (
-    LocalOperatorPrompt
-    + """
+RequestClassificationSystemPrompt: str = LocalOperatorPrompt + """
 ## Request Classification
 
 For this task, you must analyze my request and classify it into an XML tag format with:
@@ -1556,7 +1551,6 @@ Hey, how are you doing today?
 
 Remember, respond in XML format for this next message otherwise your response will fail to be parsed.  Do not include any other text in your response outside of the XML object.
 """  # noqa: E501
-)
 
 RequestClassificationUserPrompt: str = """
 ## Message Classification
