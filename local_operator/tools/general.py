@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from uuid import UUID  # Added UUID
 
 import playwright.async_api as pw
-from pydantic import SecretStr
+from pydantic import BaseModel, SecretStr
 
 # Import browser_use components with error handling for resilience
 try:
@@ -1092,6 +1092,292 @@ def _scan_for_browser_connection_urls() -> Optional[Tuple[Optional[str], Optiona
     return None
 
 
+class _BrowserUseLangChainAdapter:
+    """Adapt a LangChain chat model to browser-use's native LLM interface."""
+
+    def __init__(self, chat: Any):
+        self.chat = chat
+
+    @property
+    def model(self) -> str:
+        return self.name
+
+    @property
+    def name(self) -> str:
+        model_name = getattr(self.chat, "model_name", None)
+        if model_name:
+            return str(model_name)
+
+        model_attr = getattr(self.chat, "model", None)
+        if model_attr:
+            return str(model_attr)
+
+        return self.chat.__class__.__name__
+
+    @property
+    def provider(self) -> str:
+        model_class_name = self.chat.__class__.__name__.lower()
+        if "openai" in model_class_name:
+            return "openai"
+        if "anthropic" in model_class_name or "claude" in model_class_name:
+            return "anthropic"
+        if "google" in model_class_name or "gemini" in model_class_name:
+            return "google"
+        if "groq" in model_class_name:
+            return "groq"
+        if "ollama" in model_class_name:
+            return "ollama"
+        if "deepseek" in model_class_name:
+            return "deepseek"
+        return "langchain"
+
+    @staticmethod
+    def _safe_part_get(part: Any, field_name: str, default: Any = None) -> Any:
+        if isinstance(part, dict):
+            return part.get(field_name, default)
+        return getattr(part, field_name, default)
+
+    @classmethod
+    def _serialize_user_content(cls, content: Any) -> str | list[str | dict[str, Any]]:
+        if isinstance(content, str):
+            return content
+
+        if not isinstance(content, list):
+            return str(content)
+
+        serialized_parts: list[str | dict[str, Any]] = []
+        for part in content:
+            part_type = cls._safe_part_get(part, "type", "")
+            if part_type == "text":
+                text = cls._safe_part_get(part, "text")
+                if text is not None:
+                    serialized_parts.append({"type": "text", "text": str(text)})
+            elif part_type == "image_url":
+                image_payload = cls._safe_part_get(part, "image_url")
+                url = None
+                detail = None
+                if isinstance(image_payload, dict):
+                    url = image_payload.get("url")
+                    detail = image_payload.get("detail")
+                else:
+                    url = getattr(image_payload, "url", None)
+                    detail = getattr(image_payload, "detail", None)
+
+                if url:
+                    image_part: dict[str, Any] = {"type": "image_url", "image_url": {"url": url}}
+                    if detail:
+                        image_part["image_url"]["detail"] = detail
+                    serialized_parts.append(image_part)
+
+        return serialized_parts
+
+    @classmethod
+    def _serialize_text_content(cls, content: Any) -> str:
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return str(content)
+
+        text_parts: list[str] = []
+        for part in content:
+            part_type = cls._safe_part_get(part, "type", "")
+            if part_type == "text":
+                text = cls._safe_part_get(part, "text")
+                if text:
+                    text_parts.append(str(text))
+        return "\n".join(text_parts)
+
+    @classmethod
+    def _serialize_messages(cls, messages: list[Any]) -> list[Any]:
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+        serialized_messages: list[Any] = []
+        for message in messages:
+            role = getattr(message, "role", None)
+            content = getattr(message, "content", "")
+            name = getattr(message, "name", None)
+
+            if role == "system":
+                serialized_messages.append(
+                    SystemMessage(content=cls._serialize_text_content(content), name=name)
+                )
+            elif role == "assistant":
+                serialized_messages.append(
+                    AIMessage(content=cls._serialize_text_content(content), name=name)
+                )
+            else:
+                serialized_messages.append(
+                    HumanMessage(content=cls._serialize_user_content(content), name=name)
+                )
+
+        return serialized_messages
+
+    @staticmethod
+    def _extract_usage(response: Any) -> Any:
+        usage_metadata = getattr(response, "usage_metadata", None)
+        if not isinstance(usage_metadata, dict):
+            return None
+
+        from browser_use.llm.views import ChatInvokeUsage
+
+        prompt_tokens = (
+            usage_metadata.get("input_tokens", usage_metadata.get("prompt_tokens", 0)) or 0
+        )
+        completion_tokens = (
+            usage_metadata.get("output_tokens", usage_metadata.get("completion_tokens", 0)) or 0
+        )
+        total_tokens = usage_metadata.get("total_tokens", prompt_tokens + completion_tokens) or 0
+
+        input_details = usage_metadata.get("input_token_details", {}) or {}
+        prompt_cached_tokens = input_details.get("cache_read")
+        prompt_cache_creation_tokens = input_details.get("cache_creation")
+
+        return ChatInvokeUsage(
+            prompt_tokens=int(prompt_tokens),
+            prompt_cached_tokens=(
+                int(prompt_cached_tokens) if prompt_cached_tokens is not None else None
+            ),
+            prompt_cache_creation_tokens=(
+                int(prompt_cache_creation_tokens)
+                if prompt_cache_creation_tokens is not None
+                else None
+            ),
+            prompt_image_tokens=None,
+            completion_tokens=int(completion_tokens),
+            total_tokens=int(total_tokens),
+        )
+
+    def _model_error(self, message: str) -> Exception:
+        try:
+            from browser_use.llm.exceptions import ModelProviderError
+
+            return ModelProviderError(message=message, model=self.name)
+        except Exception:
+            return RuntimeError(message)
+
+    async def ainvoke(
+        self, messages: list[Any], output_format: type[BaseModel] | None = None
+    ) -> Any:
+        from browser_use.llm.views import ChatInvokeCompletion
+        from langchain_core.messages import AIMessage
+
+        langchain_messages = self._serialize_messages(messages)
+
+        try:
+            if output_format is None:
+                response = await self.chat.ainvoke(langchain_messages)
+                content = getattr(response, "content", "")
+                if isinstance(content, list):
+                    content = "\n".join(str(part) for part in content)
+
+                return ChatInvokeCompletion(
+                    completion=str(content),
+                    usage=self._extract_usage(response),
+                )
+
+            if hasattr(self.chat, "with_structured_output"):
+                try:
+                    structured_chat = self.chat.with_structured_output(output_format)
+                    structured_response = await structured_chat.ainvoke(langchain_messages)
+                    if isinstance(structured_response, output_format):
+                        return ChatInvokeCompletion(completion=structured_response, usage=None)
+                    if isinstance(structured_response, dict):
+                        return ChatInvokeCompletion(
+                            completion=output_format(**structured_response),
+                            usage=None,
+                        )
+                except (AttributeError, NotImplementedError, TypeError):
+                    # Fall back to JSON parsing if structured output is not supported.
+                    pass
+
+            fallback_response = await self.chat.ainvoke(langchain_messages)
+            if isinstance(fallback_response, AIMessage):
+                raw_content = fallback_response.content
+            else:
+                raw_content = getattr(fallback_response, "content", str(fallback_response))
+
+            if isinstance(raw_content, list):
+                raw_content = "\n".join(str(part) for part in raw_content)
+            if not isinstance(raw_content, str):
+                raise ValueError("Structured response content is not a string.")
+
+            parsed_data = json.loads(raw_content)
+            if not isinstance(parsed_data, dict):
+                raise ValueError("Structured response must decode into a JSON object.")
+
+            return ChatInvokeCompletion(
+                completion=output_format(**parsed_data),
+                usage=self._extract_usage(fallback_response),
+            )
+        except Exception as e:
+            raise self._model_error(f"LangChain model error: {e}") from e
+
+
+def _browser_use_native_llm_api_available() -> bool:
+    try:
+        import browser_use.llm  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+def _looks_like_browser_use_native_llm(model_instance: Any) -> bool:
+    if not callable(getattr(model_instance, "ainvoke", None)):
+        return False
+
+    module_name = getattr(type(model_instance), "__module__", "")
+    return module_name.startswith("browser_use.")
+
+
+def _prepare_browser_use_llm(model_instance: Any) -> Any:
+    """Return a browser-use compatible LLM instance."""
+    if not _browser_use_native_llm_api_available():
+        return model_instance
+
+    if _looks_like_browser_use_native_llm(model_instance):
+        return model_instance
+
+    try:
+        from langchain_core.language_models.chat_models import (
+            BaseChatModel as LangChainBaseChatModel,
+        )
+
+        if isinstance(model_instance, LangChainBaseChatModel):
+            return _BrowserUseLangChainAdapter(model_instance)
+    except Exception:
+        return model_instance
+
+    return model_instance
+
+
+def _create_browser_config_with_fallbacks(**kwargs: Any) -> Any:
+    """Create BrowserConfig while tolerating version-specific kwargs."""
+    try:
+        return BrowserConfig(**kwargs)  # type: ignore
+    except TypeError:
+        kwargs_without_keep_alive = dict(kwargs)
+        kwargs_without_keep_alive.pop("keep_alive", None)
+        return BrowserConfig(**kwargs_without_keep_alive)  # type: ignore
+
+
+def _create_launch_browser_config(browser_path: str, headless: bool, keep_alive: bool) -> Any:
+    base_kwargs = {"headless": headless, "keep_alive": keep_alive}
+
+    try:
+        return _create_browser_config_with_fallbacks(
+            executable_path=browser_path,
+            **base_kwargs,
+        )
+    except TypeError:
+        return _create_browser_config_with_fallbacks(
+            browser_binary_path=browser_path,
+            **base_kwargs,
+        )
+
+
 def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any]:
     """Create a tool function to run a browser automation task.
 
@@ -1154,14 +1440,14 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
 
         if existing_cdp_url:
             print(f"Attempting to connect to existing browser session via CDP: {existing_cdp_url}")
-            browser_config = BrowserConfig(  # type: ignore
+            browser_config = _create_browser_config_with_fallbacks(
                 cdp_url=existing_cdp_url,  # type: ignore - browser-use might not type this
                 headless=headless_setting,
                 keep_alive=keep_alive_setting,  # type: ignore - browser-use type issue
             )
         elif existing_wss_url:
             print(f"Attempting to connect to existing browser session via WSS: {existing_wss_url}")
-            browser_config = BrowserConfig(  # type: ignore
+            browser_config = _create_browser_config_with_fallbacks(
                 wss_url=existing_wss_url,  # type: ignore - browser-use might not type this
                 headless=headless_setting,
                 keep_alive=keep_alive_setting,  # type: ignore - browser-use type issue
@@ -1175,21 +1461,22 @@ def run_browser_task_tool(model_config: ModelConfiguration) -> Callable[..., Any
                     "for launching. Ensure one is installed and in PATH, or provide path manually."
                 )
                 raise RuntimeError(error_msg)
-            browser_config = BrowserConfig(  # type: ignore
-                browser_binary_path=browser_path,  # type: ignore - browser-use might not type this
+            browser_config = _create_launch_browser_config(
+                browser_path=browser_path,
                 headless=headless_setting,
-                keep_alive=keep_alive_setting,  # type: ignore - browser-use type issue
+                keep_alive=keep_alive_setting,
             )
 
         browser_instance = Browser(config=browser_config)  # type: ignore
         controller = BrowserController()  # type: ignore
 
-        # Need to set this due to a browser-use bug
-        os.environ["OPENAI_API_KEY"] = model_config.api_key.get_secret_value()
+        llm_for_browser_use = _prepare_browser_use_llm(model_config.instance)
+        if llm_for_browser_use is not model_config.instance:
+            print("Using LangChain compatibility adapter for browser-use.")
 
         agent = BrowserAgent(  # type: ignore
             task=task,
-            llm=model_config.instance,
+            llm=llm_for_browser_use,
             browser=browser_instance,  # type: ignore - browser-use might not type this
             controller=controller,
         )
