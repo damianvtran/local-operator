@@ -38,7 +38,7 @@ dependencies = [
     "pillow",
     "pillow-heif",
     # Constraints
-    "browser-use==0.1.45",
+    "browser-use==0.4.0",
     "python-dateutil>=2.8.0",
     "six>=1.16.0",
     "faiss-cpu==1.10.0",

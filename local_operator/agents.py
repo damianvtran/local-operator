@@ -1351,7 +1351,10 @@ class AgentRegistry:
                 raise ValueError(f"ZIP contains unsupported symlink entry: {member_name}")
 
             target_path = (destination / member_path).resolve()
-            if not (target_path == destination_resolved or destination_resolved in target_path.parents):
+            if not (
+                target_path == destination_resolved
+                or destination_resolved in target_path.parents
+            ):
                 raise ValueError(f"Unsafe file path in ZIP: {member_name}")
 
             if member.is_dir():
