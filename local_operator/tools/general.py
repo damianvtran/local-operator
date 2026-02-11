@@ -2,6 +2,7 @@ import asyncio
 import base64
 import fnmatch
 import http.client
+import importlib
 import json
 import os
 import platform
@@ -1092,6 +1093,17 @@ def _scan_for_browser_connection_urls() -> Optional[Tuple[Optional[str], Optiona
     return None
 
 
+def _load_browser_use_llm_views_module() -> Any:
+    """Load browser-use's llm views module dynamically for compatibility."""
+    return importlib.import_module("browser_use.llm.views")
+
+
+def _load_browser_use_model_provider_error() -> Any:
+    """Load browser-use ModelProviderError dynamically for compatibility."""
+    exceptions_module = importlib.import_module("browser_use.llm.exceptions")
+    return getattr(exceptions_module, "ModelProviderError")
+
+
 class _BrowserUseLangChainAdapter:
     """Adapt a LangChain chat model to browser-use's native LLM interface."""
 
@@ -1220,7 +1232,7 @@ class _BrowserUseLangChainAdapter:
         if not isinstance(usage_metadata, dict):
             return None
 
-        from browser_use.llm.views import ChatInvokeUsage
+        chat_invoke_usage_cls = _load_browser_use_llm_views_module().ChatInvokeUsage
 
         prompt_tokens = (
             usage_metadata.get("input_tokens", usage_metadata.get("prompt_tokens", 0)) or 0
@@ -1234,7 +1246,7 @@ class _BrowserUseLangChainAdapter:
         prompt_cached_tokens = input_details.get("cache_read")
         prompt_cache_creation_tokens = input_details.get("cache_creation")
 
-        return ChatInvokeUsage(
+        return chat_invoke_usage_cls(
             prompt_tokens=int(prompt_tokens),
             prompt_cached_tokens=(
                 int(prompt_cached_tokens) if prompt_cached_tokens is not None else None
@@ -1251,18 +1263,18 @@ class _BrowserUseLangChainAdapter:
 
     def _model_error(self, message: str) -> Exception:
         try:
-            from browser_use.llm.exceptions import ModelProviderError
+            model_provider_error_cls = _load_browser_use_model_provider_error()
 
-            return ModelProviderError(message=message, model=self.name)
+            return model_provider_error_cls(message=message, model=self.name)
         except Exception:
             return RuntimeError(message)
 
     async def ainvoke(
         self, messages: list[Any], output_format: type[BaseModel] | None = None
     ) -> Any:
-        from browser_use.llm.views import ChatInvokeCompletion
         from langchain_core.messages import AIMessage
 
+        chat_invoke_completion_cls = _load_browser_use_llm_views_module().ChatInvokeCompletion
         langchain_messages = self._serialize_messages(messages)
 
         try:
@@ -1272,7 +1284,7 @@ class _BrowserUseLangChainAdapter:
                 if isinstance(content, list):
                     content = "\n".join(str(part) for part in content)
 
-                return ChatInvokeCompletion(
+                return chat_invoke_completion_cls(
                     completion=str(content),
                     usage=self._extract_usage(response),
                 )
@@ -1282,9 +1294,11 @@ class _BrowserUseLangChainAdapter:
                     structured_chat = self.chat.with_structured_output(output_format)
                     structured_response = await structured_chat.ainvoke(langchain_messages)
                     if isinstance(structured_response, output_format):
-                        return ChatInvokeCompletion(completion=structured_response, usage=None)
+                        return chat_invoke_completion_cls(
+                            completion=structured_response, usage=None
+                        )
                     if isinstance(structured_response, dict):
-                        return ChatInvokeCompletion(
+                        return chat_invoke_completion_cls(
                             completion=output_format(**structured_response),
                             usage=None,
                         )
@@ -1307,7 +1321,7 @@ class _BrowserUseLangChainAdapter:
             if not isinstance(parsed_data, dict):
                 raise ValueError("Structured response must decode into a JSON object.")
 
-            return ChatInvokeCompletion(
+            return chat_invoke_completion_cls(
                 completion=output_format(**parsed_data),
                 usage=self._extract_usage(fallback_response),
             )
@@ -1317,8 +1331,7 @@ class _BrowserUseLangChainAdapter:
 
 def _browser_use_native_llm_api_available() -> bool:
     try:
-        import browser_use.llm  # noqa: F401
-
+        importlib.import_module("browser_use.llm")
         return True
     except Exception:
         return False
