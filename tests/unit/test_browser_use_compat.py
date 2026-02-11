@@ -5,7 +5,10 @@ import pytest
 from langchain_core.messages import AIMessage
 from pydantic import BaseModel
 
-from local_operator.tools.general import _BrowserUseLangChainAdapter, _prepare_browser_use_llm
+from local_operator.tools.general import (
+    _BrowserUseLangChainAdapter,
+    _prepare_browser_use_llm,
+)
 
 HAS_BROWSER_USE_NATIVE_LLM_API = importlib.util.find_spec("browser_use.llm") is not None
 pytestmark = pytest.mark.skipif(
