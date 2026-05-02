@@ -62,6 +62,7 @@ This project is proudly open source under the MIT license. We believe AI tools s
   - [🔐 Credentials](#-credentials)
 - [🌟 Radient Agent Hub and Automatic Model Selection](#-radient-agent-hub-and-automatic-model-selection)
 - [📝 Examples](#-examples)
+- [❓ FAQ](#-faq)
 - [👥 Contributing](#-contributing)
 - [🔒 Safety Features](#-safety-features)
 - [📜 License](#-license)
@@ -481,3 +482,46 @@ The system includes multiple layers of protection:
 ## 📜 License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
+
+## ❓ FAQ
+
+### What is Local Operator?
+Local Operator is an AI agent assistant that runs Python code safely on your own machine through an intuitive chat interface. It plans and executes complex goals, handles errors intelligently, and provides real-time code execution through natural conversation.
+
+### How is Local Operator different from other AI assistants?
+Unlike cloud-based AI assistants, Local Operator executes code **on your device**, giving you full control over your data and computations. It includes built-in safety verification, supports both local (Ollama) and cloud LLM providers, and can handle complex multi-step tasks with error recovery.
+
+### Which LLM providers does Local Operator support?
+Local Operator supports:
+- **Local models**: Ollama (fully offline, privacy-preserving)
+- **Cloud providers**: OpenAI, DeepSeek, and any provider compatible with LangChain's ChatOpenAI interface
+
+### Is Local Operator safe to use?
+Yes. Local Operator includes multiple safety layers:
+- **AI safety review**: Every code block is analyzed by an independent AI for potentially dangerous operations
+- **User confirmation**: You approve code execution before it runs
+- **Sandboxed execution**: Code runs in a controlled environment with limited system access
+
+### Can I use Local Operator without an internet connection?
+Yes! If you use Ollama for local LLM inference, Local Operator can run completely offline. You just need to install Ollama and download your preferred model locally.
+
+### How does Local Operator handle complex tasks?
+Local Operator uses an agent mode that breaks down complex goals into manageable steps. It plans the execution path, runs each step, handles errors by adapting its approach, and finds alternative solutions when roadblocks are encountered.
+
+### Can I run Local Operator as a server?
+Yes. Local Operator has a server mode powered by FastAPI that allows you to interact with the agent through a web interface. A separate open-source UI is also available for a richer experience.
+
+### What can I do with Local Operator?
+Common use cases include:
+- Data analysis and visualization
+- File processing and transformation
+- Web scraping and API interactions
+- Machine learning prototyping
+- Automation of repetitive tasks
+- Learning Python through interactive conversation
+
+### Where can I get help?
+- [Website](https://local-operator.com)
+- [GitHub Issues](https://github.com/damianvtran/local-operator/issues) for bug reports and feature requests
+- [Examples](#-examples) section in this README for usage patterns
+
