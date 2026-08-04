@@ -1,80 +1,87 @@
-from typing import Any, Dict, List, Optional, Union
+"""Model configuration on top of the new provider layer.
+
+Rewritten for the harness rewrite (docs/REWRITE.md §B). The public surface
+legacy code depends on is preserved:
+
+- :class:`ModelConfiguration` (plus ``.spec``, the harness ``ModelSpec``).
+- :func:`configure_model` — same signature, returns a ``ModelConfiguration``.
+- :func:`validate_model` — same endpoints as the legacy if/elif chain, now a
+  per-provider descriptor table.
+- :func:`calculate_cost`, ``DEFAULT_TEMPERATURE``, ``DEFAULT_TOP_P``.
+
+New: :func:`create_stream_fn` builds the ``LoopConfig.stream_fn`` from an
+:class:`~local_operator.providers.auth_store.AuthStore`, resolving API keys
+and dispatching to the right wire client through
+:func:`~local_operator.providers.failover.stream_with_failover`.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+from collections.abc import AsyncIterator, Callable, Mapping
+from typing import Any, Optional
 
 import requests
-from langchain_anthropic import ChatAnthropic
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_ollama import ChatOllama
-from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
-from local_operator.clients.openrouter import OpenRouterClient
-from local_operator.clients.radient import RadientClient
-from local_operator.credentials import CredentialManager
-from local_operator.env import EnvConfig
-from local_operator.mocks import ChatMock, ChatNoop
-from local_operator.model.registry import (
-    ModelInfo,
-    get_model_info,
-    openrouter_default_model_info,
-    radient_default_model_info,
-)
-
-ModelType = Union[
-    ChatOpenAI,
-    ChatOllama,
-    ChatAnthropic,
-    ChatGoogleGenerativeAI,
-    ChatMock,
-    ChatNoop,
-]
+from local_operator.harness.types import AbortSignal, ChatRequest, ModelSpec, StreamEvent
+from local_operator.model.registry import ModelInfo, get_model_info
 
 DEFAULT_TEMPERATURE = 0.2
 """Default temperature value for language models."""
 DEFAULT_TOP_P = 0.9
 """Default top_p value for language models."""
 
+# Per-hosting defaults preserved byte-for-byte from the legacy chain so
+# existing config files and CLI invocations keep picking the same model.
+DEFAULT_MODEL_NAMES: dict[str, str] = {
+    "deepseek": "deepseek-chat",
+    "openai": "gpt-4o",
+    "openrouter": "google/gemini-2.0-flash-001",
+    "anthropic": "claude-3-5-sonnet-latest",
+    "kimi": "moonshot-v1-32k",
+    "alibaba": "qwen-plus",
+    "google": "gemini-2.0-flash-001",
+    "mistral": "mistral-large-latest",
+    "radient": "auto",
+    "xai": "grok-3",
+}
+
+# Sensible ModelSpec fallbacks when the legacy registry knows nothing.
+UNKNOWN_CONTEXT_WINDOW = 128_000
+UNKNOWN_MAX_OUTPUT = 8_192
+
 
 class ModelConfiguration:
-    """
-    Configuration class for language models.
+    """Configuration for one model on one hosting provider.
 
-    Attributes:
-        hosting (str): The hosting provider name
-        name (str): The model name
-        instance (ModelType): An instance of the language model (e.g., ChatOpenAI,
-        ChatOllama).
-        info (ModelInfo): Information about the model, such as pricing and rate limits.
-        api_key (Optional[SecretStr]): API key for the model.
-        temperature (float): The temperature for the model.
-        top_p (float): The top_p for the model.
-        top_k (Optional[int]): The top_k for the model.
-        max_tokens (Optional[int]): The max_tokens for the model.
-        frequency_penalty (Optional[float]): The frequency_penalty for the model.
-        presence_penalty (Optional[float]): The presence_penalty for the model.
-        stop (Optional[List[str]]): The stop for the model.
-        seed (Optional[int]): The seed for the model.
+    Legacy attributes are unchanged (``hosting``, ``name``, ``instance``,
+    ``info``, ``api_key``, sampling knobs); ``spec`` is the new harness
+    descriptor consumed by wire clients. ``instance`` is ``None`` in the new
+    engine — streaming happens through ``LoopConfig.stream_fn``.
     """
 
     hosting: str
     name: str
-    instance: ModelType
+    instance: Any
     info: ModelInfo
-    api_key: Optional[SecretStr] = None
-    temperature: float = DEFAULT_TEMPERATURE
-    top_p: float = DEFAULT_TOP_P
-    top_k: Optional[int] = None
-    max_tokens: Optional[int] = None
-    frequency_penalty: Optional[float] = None
-    presence_penalty: Optional[float] = None
-    stop: Optional[List[str]] = None
-    seed: Optional[int] = None
+    api_key: Optional[SecretStr]
+    temperature: float
+    top_p: float
+    top_k: Optional[int]
+    max_tokens: Optional[int]
+    frequency_penalty: Optional[float]
+    presence_penalty: Optional[float]
+    stop: Optional[list[str]]
+    seed: Optional[int]
+    spec: ModelSpec
 
     def __init__(
         self,
         hosting: str,
         name: str,
-        instance: ModelType,
-        info: ModelInfo,
+        instance: Any = None,
+        info: ModelInfo | None = None,
         api_key: Optional[SecretStr] = None,
         temperature: float = DEFAULT_TEMPERATURE,
         top_p: float = DEFAULT_TOP_P,
@@ -82,13 +89,14 @@ class ModelConfiguration:
         max_tokens: Optional[int] = None,
         frequency_penalty: Optional[float] = None,
         presence_penalty: Optional[float] = None,
-        stop: Optional[List[str]] = None,
+        stop: Optional[list[str]] = None,
         seed: Optional[int] = None,
-    ):
+        spec: ModelSpec | None = None,
+    ) -> None:
         self.hosting = hosting
         self.name = name
         self.instance = instance
-        self.info = info
+        self.info = info or ModelInfo(id=name, name=name, description="Unknown model")
         self.api_key = api_key
         self.temperature = temperature
         self.top_p = top_p
@@ -98,41 +106,109 @@ class ModelConfiguration:
         self.presence_penalty = presence_penalty
         self.stop = stop
         self.seed = seed
+        self.spec = spec or build_model_spec(hosting, name, self.info)
 
 
-def _check_model_exists_payload(hosting: str, model: str, response_data: Dict[str, Any]) -> bool:
+def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = None) -> ModelSpec:
+    """Derive a harness ``ModelSpec`` from the legacy registry when known."""
+    from local_operator.providers.registry import get_provider_definition
+
+    canonical = "test" if hosting == "noop" else hosting
+    if info is None:
+        try:
+            info = get_model_info(canonical, model_name)
+        except (ValueError, KeyError):  # legacy registry KeyErrors on unknown openai models
+            info = None
+
+    context_window = UNKNOWN_CONTEXT_WINDOW
+    max_output = UNKNOWN_MAX_OUTPUT
+    supports_images = True
+    supports_cache = False
+    if info is not None:
+        # Legacy sentinels: -1 means "no data", not a real limit.
+        if info.context_window and info.context_window > 0:
+            context_window = info.context_window
+        if info.max_tokens and info.max_tokens > 0:
+            max_output = info.max_tokens
+        if info.supports_images is not None:
+            supports_images = info.supports_images
+        supports_cache = info.supports_prompt_cache
+
+    definition = get_provider_definition(canonical)
+    lowered = model_name.lower()
+    reasoning = any(marker in lowered for marker in ("o1", "o3", "reasoner", "thinking", "deep-research"))
+
+    return ModelSpec(
+        provider=canonical,
+        model_id=model_name,
+        context_window=context_window,
+        max_output_tokens=max_output,
+        supports_tools=True,
+        supports_images=supports_images,
+        supports_prompt_cache=supports_cache,
+        base_url=definition.base_url if definition else None,
+        reasoning=reasoning,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Validation — legacy endpoints, table-driven
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class ValidationDescriptor:
+    """Where and how a provider lists its models for validation."""
+
+    url: str
+    header_style: str = "bearer"  # bearer | x-api-key | x-goog-api-key | none
+    extra_headers: Mapping[str, str] = dataclasses.field(default_factory=dict)
+
+
+VALIDATION_ENDPOINTS: dict[str, ValidationDescriptor] = {
+    "deepseek": ValidationDescriptor("https://api.deepseek.com/v1/models"),
+    "openai": ValidationDescriptor("https://api.openai.com/v1/models"),
+    "openrouter": ValidationDescriptor("https://openrouter.ai/api/v1/models"),
+    "radient": ValidationDescriptor("https://api.radienthq.com/v1/models"),
+    "anthropic": ValidationDescriptor(
+        "https://api.anthropic.com/v1/models",
+        header_style="x-api-key",
+        extra_headers={"anthropic-version": "2023-06-01"},
+    ),
+    "kimi": ValidationDescriptor("https://api.moonshot.cn/v1/models"),
+    "alibaba": ValidationDescriptor("https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models"),
+    "google": ValidationDescriptor(
+        "https://generativelanguage.googleapis.com/v1/models", header_style="x-goog-api-key"
+    ),
+    "mistral": ValidationDescriptor("https://api.mistral.ai/v1/models"),
+    "ollama": ValidationDescriptor("http://localhost:11434/api/tags", header_style="none"),
+    "xai": ValidationDescriptor("https://api.x.ai/v1/models"),
+}
+
+
+def _check_model_exists_payload(hosting: str, model: str, response_data: dict[str, Any]) -> bool:
     """Check if a model exists in the provider's response data.
 
-    Args:
-        hosting (str): The hosting provider name
-        model (str): The model name to check
-        response_data (dict): Raw response data from the provider's API
-
-    Returns:
-        bool: True if model exists in the response data, False otherwise
+    Payload shapes differ per provider (Google nests under ``models`` with
+    ``models/`` prefixes; Ollama uses ``name``; the rest use ``data`` with
+    ``id`` or ``name``). Anthropic ``-latest`` aliases match by prefix.
     """
     if hosting == "google":
-        # Google uses "models" key and model name in format "models/model-name"
         models = response_data.get("models", [])
         return any(m.get("name", "").replace("models/", "") == model for m in models)
 
     if hosting == "ollama":
-        # Ollama uses "models" key with "name" field
         models = response_data.get("models", [])
         return any(m.get("name", "") == model for m in models)
 
-    # Other providers use "data" key
     models = response_data.get("data", [])
     if not models:
         return False
 
-    # Handle special case for Anthropic "latest" models
     if hosting == "anthropic" and model.endswith("-latest"):
         base_model = model.replace("-latest", "")
-        # Check if any model ID starts with the base model name
         return any(m.get("id", "").startswith(base_model) for m in models)
 
-    # Different providers use different model ID fields
     for m in models:
         model_id = m.get("id") or m.get("name") or ""
         if model_id == model:
@@ -140,549 +216,150 @@ def _check_model_exists_payload(hosting: str, model: str, response_data: Dict[st
     return False
 
 
-def validate_model(hosting: str, model: str, api_key: SecretStr) -> bool:
-    """Validate if the model exists and API key is valid by calling provider's model list API.
+def validate_model(hosting: str, model: str, api_key: SecretStr | str) -> bool:
+    """Validate that the model exists and the key is accepted.
 
-    Args:
-        hosting (str): The hosting provider name
-        model (str): The model name to validate
-        api_key (SecretStr): API key to use for validation
-
-    Returns:
-        bool: True if model exists and API key is valid, False otherwise
-
-    Raises:
-        requests.exceptions.RequestException: If API request fails
+    Same endpoints and semantics as the legacy chain; network errors raise
+    ``requests.exceptions.RequestException`` (callers catch and report).
     """
-    if hosting == "deepseek":
-        response = requests.get(
-            "https://api.deepseek.com/v1/models",
-            headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
-        )
-    elif hosting == "openai":
-        response = requests.get(
-            "https://api.openai.com/v1/models",
-            headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
-        )
-    elif hosting == "openrouter":
-        response = requests.get(
-            "https://openrouter.ai/api/v1/models",
-            headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
-        )
-    elif hosting == "radient":
-        response = requests.get(
-            "https://api.radienthq.com/v1/models",
-            headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
-        )
-    elif hosting == "anthropic":
-        response = requests.get(
-            "https://api.anthropic.com/v1/models",
-            headers={"x-api-key": api_key.get_secret_value(), "anthropic-version": "2023-06-01"},
-        )
-    elif hosting == "kimi":
-        response = requests.get(
-            "https://api.moonshot.cn/v1/models",
-            headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
-        )
-    elif hosting == "alibaba":
-        response = requests.get(
-            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models",
-            headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
-        )
-    elif hosting == "google":
-        response = requests.get(
-            "https://generativelanguage.googleapis.com/v1/models",
-            headers={"x-goog-api-key": api_key.get_secret_value()},
-        )
-    elif hosting == "mistral":
-        response = requests.get(
-            "https://api.mistral.ai/v1/models",
-            headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
-        )
-    elif hosting == "ollama":
-        # Ollama is local, so just check if model exists
-        response = requests.get("http://localhost:11434/api/tags")
-    elif hosting == "xai":
-        response = requests.get(
-            "https://api.x.ai/v1/models",
-            headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
-        )
-    else:
+    descriptor = VALIDATION_ENDPOINTS.get(hosting)
+    if descriptor is None:
         return True
 
+    key = api_key.get_secret_value() if isinstance(api_key, SecretStr) else str(api_key)
+    headers: dict[str, str] = dict(descriptor.extra_headers)
+    if descriptor.header_style == "bearer":
+        headers["Authorization"] = f"Bearer {key}"
+    elif descriptor.header_style == "x-api-key":
+        headers["x-api-key"] = key
+    elif descriptor.header_style == "x-goog-api-key":
+        headers["x-goog-api-key"] = key
+
+    # Byte-compatible call shape: omit the headers kwarg entirely when empty
+    # (legacy tests assert the exact call arguments, e.g. ollama).
+    response = (
+        requests.get(descriptor.url, headers=headers) if headers else requests.get(descriptor.url)
+    )
     if response.status_code == 200:
         return _check_model_exists_payload(hosting, model, response.json())
     return False
 
 
-def get_model_info_from_openrouter(client: OpenRouterClient, model_name: str) -> ModelInfo:
+# ---------------------------------------------------------------------------
+# Model info via OpenRouter/Radient clients (duck-typed; no legacy imports)
+# ---------------------------------------------------------------------------
+
+
+def _info_from_listing(listing: Any, model_name: str, template: ModelInfo, source: str) -> ModelInfo:
+    """Find ``model_name`` in a ``list_models()`` payload and price it.
+
+    ``listing`` is the legacy clients' ``list_models()`` result (object with
+    ``.data`` of items carrying ``id``, ``description``, ``pricing``).
     """
-    Retrieves model information from OpenRouter based on the model name.
-
-    Args:
-        client (OpenRouterClient): The OpenRouter client instance.
-        model_name (str): The name of the model to retrieve information for.
-
-    Returns:
-        ModelInfo: The model information retrieved from OpenRouter.
-
-    Raises:
-        ValueError: If the model is not found on OpenRouter.
-        RuntimeError: If there is an error retrieving the model information.
-    """
-    models = client.list_models()
-    for model in models.data:
+    for model in listing.data:
         if model.id == model_name:
-            model_info = openrouter_default_model_info
-            # Openrouter returns the price per million tokens, so we need to convert it to
-            # the price per token.
-            model_info.input_price = model.pricing.prompt * 1_000_000
-            model_info.output_price = model.pricing.completion * 1_000_000
-            model_info.description = model.description
-            return model_info
-
-    raise ValueError(f"Model not found from openrouter models API: {model_name}")
+            info = template.model_copy(deep=True)
+            # Providers quote price per token here; normalize to per-million.
+            info.input_price = model.pricing.prompt * 1_000_000
+            info.output_price = model.pricing.completion * 1_000_000
+            info.description = model.description
+            return info
+    raise ValueError(f"Model not found from {source} models API: {model_name}")
 
 
-def get_model_info_from_radient(client: RadientClient, model_name: str) -> ModelInfo:
-    """
-    Retrieves model information from Radient based on the model name.
+def get_model_info_from_openrouter(client: Any, model_name: str) -> ModelInfo:
+    """Model info from the OpenRouter models listing (legacy-compatible)."""
+    from local_operator.model.registry import openrouter_default_model_info
 
-    Args:
-        client (RadientClient): The Radient client instance.
-        model_name (str): The name of the model to retrieve information for.
+    return _info_from_listing(client.list_models(), model_name, openrouter_default_model_info, "openrouter")
 
-    Returns:
-        ModelInfo: The model information retrieved from Radient.
 
-    Raises:
-        ValueError: If the model is not found on Radient.
-        RuntimeError: If there is an error retrieving the model information.
-    """
-    models = client.list_models()
-    for model in models.data:
-        if model.id == model_name:
-            model_info = radient_default_model_info
-            # Radient returns the price per million tokens, so we need to convert it to
-            # the price per token.
-            model_info.input_price = model.pricing.prompt * 1_000_000
-            model_info.output_price = model.pricing.completion * 1_000_000
-            model_info.description = model.description
-            return model_info
+def get_model_info_from_radient(client: Any, model_name: str) -> ModelInfo:
+    """Model info from the Radient models listing (legacy-compatible)."""
+    from local_operator.model.registry import radient_default_model_info
 
-    raise ValueError(f"Model not found from radient models API: {model_name}")
+    return _info_from_listing(client.list_models(), model_name, radient_default_model_info, "radient")
+
+
+# ---------------------------------------------------------------------------
+# configure_model
+# ---------------------------------------------------------------------------
 
 
 def configure_model(
     hosting: str,
     model_name: str,
-    credential_manager: CredentialManager,
-    model_info_client: Optional[Union[OpenRouterClient, RadientClient]] = None,
-    env_config: Optional[EnvConfig] = None,
+    credential_manager: Any = None,
+    model_info_client: Any = None,
+    env_config: Any = None,
     temperature: float = DEFAULT_TEMPERATURE,
     top_p: float = DEFAULT_TOP_P,
     top_k: Optional[int] = None,
     max_tokens: Optional[int] = None,
     frequency_penalty: Optional[float] = None,
     presence_penalty: Optional[float] = None,
-    stop: Optional[List[str]] = None,
+    stop: Optional[list[str]] = None,
     seed: Optional[int] = None,
 ) -> ModelConfiguration:
-    """Configure and return the appropriate model based on hosting platform.
+    """Configure a model for ``hosting``.
 
-    Args:
-        hosting (str): Hosting platform (deepseek, openai, anthropic, ollama, xai, or noop)
-        model_name (str): Model name to use
-        credential_manager: CredentialManager instance for API key management
-        model_info_client: OpenRouterClient instance for model info
-        temperature (float, optional): Controls randomness in responses. Defaults to
-        DEFAULT_TEMPERATURE.
-        top_p (float, optional): Controls diversity via nucleus sampling. Defaults to DEFAULT_TOP_P.
-        top_k (Optional[int], optional): Limits token selection to top k options. Defaults to None.
-        max_tokens (Optional[int], optional): Maximum tokens to generate. Defaults to None.
-        frequency_penalty (Optional[float], optional): Reduces repetition of tokens.
-        Defaults to None.
-        presence_penalty (Optional[float], optional): Reduces likelihood of prompt tokens.
-        Defaults to None.
-        stop (Optional[List[str]], optional): Sequences that stop generation. Defaults to None.
-        seed (Optional[int], optional): Random seed for deterministic generation. Defaults to None.
-
-    Returns:
-        ModelConfiguration: Config object containing the configured model instance and API
-        key if applicable
-
-    Raises:
-        ValueError: If hosting is not provided or unsupported
+    Key resolution happens lazily at stream time through the auth store in
+    the new engine; this function only records a best-effort ``api_key`` for
+    legacy consumers (no interactive prompting — headless-safe). Raises
+    ``ValueError`` for missing hosting, unknown hosting, or ollama without a
+    model name.
     """
     if not hosting:
         raise ValueError("Hosting is required")
 
-    # Early return for test and noop cases
-    if hosting == "test":
-        return ModelConfiguration(
-            hosting=hosting,
-            name=model_name,
-            instance=ChatMock(),
-            info=ModelInfo(
-                id=model_name,
-                name=model_name,
-                description="Mock model",
-                recommended=True,
-            ),
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            max_tokens=max_tokens,
-            frequency_penalty=frequency_penalty,
-            presence_penalty=presence_penalty,
-            stop=stop,
-            seed=seed,
-        )
-    if hosting == "noop":
-        return ModelConfiguration(
-            hosting=hosting,
-            name=model_name,
-            instance=ChatNoop(),
-            info=ModelInfo(
-                id=model_name,
-                name=model_name,
-                description="Noop model",
-                recommended=True,
-            ),
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            max_tokens=max_tokens,
-            frequency_penalty=frequency_penalty,
-            presence_penalty=presence_penalty,
-            stop=stop,
-            seed=seed,
-        )
+    canonical = "test" if hosting == "noop" else hosting
+    from local_operator.providers.registry import get_provider_definition
 
-    configured_model = None
-    api_key: Optional[SecretStr] = None
-
-    if hosting == "radient":
-        # Use custom base URL from env if provided, otherwise use default
-        base_url = (
-            env_config.radient_api_base_url
-            if env_config and env_config.radient_api_base_url
-            else "https://api.radienthq.com/v1"
-        )
-
-        if not model_name:
-            model_name = "auto"
-        api_key = credential_manager.get_credential("RADIENT_API_KEY")
-        if not api_key:
-            api_key = credential_manager.prompt_for_credential("RADIENT_API_KEY")
-
-        model_kwargs = {
-            "api_key": api_key,
-            "temperature": temperature,
-            "top_p": top_p,
-            "model": model_name,
-            "base_url": base_url,
-            "default_headers": {
-                "HTTP-Referer": "https://local-operator.com",
-                "X-Title": "Local Operator",
-                "X-Description": "AI agents doing work for you on your own device",
-            },
-        }
-        if max_tokens is not None:
-            model_kwargs["max_tokens"] = max_tokens
-        if frequency_penalty is not None:
-            model_kwargs["frequency_penalty"] = frequency_penalty
-        if presence_penalty is not None:
-            model_kwargs["presence_penalty"] = presence_penalty
-        if stop is not None:
-            model_kwargs["stop"] = stop
-        if seed is not None:
-            model_kwargs["seed"] = seed
-
-        configured_model = ChatOpenAI(**model_kwargs)
-
-    elif hosting == "deepseek":
-        base_url = "https://api.deepseek.com/v1"
-        if not model_name:
-            model_name = "deepseek-chat"
-        api_key = credential_manager.get_credential("DEEPSEEK_API_KEY")
-        if not api_key:
-            api_key = credential_manager.prompt_for_credential("DEEPSEEK_API_KEY")
-
-        model_kwargs = {
-            "api_key": api_key,
-            "temperature": temperature,
-            "top_p": top_p,
-            "base_url": base_url,
-            "model": model_name,
-        }
-        if max_tokens is not None:
-            model_kwargs["max_tokens"] = max_tokens
-        if frequency_penalty is not None:
-            model_kwargs["frequency_penalty"] = frequency_penalty
-        if presence_penalty is not None:
-            model_kwargs["presence_penalty"] = presence_penalty
-        if stop is not None:
-            model_kwargs["stop"] = stop
-        if seed is not None:
-            model_kwargs["seed"] = seed
-
-        configured_model = ChatOpenAI(**model_kwargs)
-
-    elif hosting == "openai":
-        if not model_name:
-            model_name = "gpt-4o"
-        api_key = credential_manager.get_credential("OPENAI_API_KEY")
-        if not api_key:
-            api_key = credential_manager.prompt_for_credential("OPENAI_API_KEY")
-
-        # Override temperature for specific models
-        model_temperature = 1.0 if model_name.startswith(("o1", "o3")) else temperature
-
-        model_kwargs = {
-            "api_key": api_key,
-            "temperature": model_temperature,
-            "model": model_name,
-            "stream_usage": True,
-        }
-
-        # top_p not supported for o1 and o3 models
-        if not model_name.startswith(("o1", "o3")):
-            model_kwargs["top_p"] = top_p
-
-        if max_tokens is not None:
-            model_kwargs["max_tokens"] = max_tokens
-        if frequency_penalty is not None:
-            model_kwargs["frequency_penalty"] = frequency_penalty
-        if presence_penalty is not None:
-            model_kwargs["presence_penalty"] = presence_penalty
-        if stop is not None:
-            model_kwargs["stop"] = stop
-        if seed is not None:
-            model_kwargs["seed"] = seed
-
-        configured_model = ChatOpenAI(**model_kwargs)
-
-    elif hosting == "openrouter":
-        if not model_name:
-            model_name = "google/gemini-2.0-flash-001"
-        api_key = credential_manager.get_credential("OPENROUTER_API_KEY")
-        if not api_key:
-            api_key = credential_manager.prompt_for_credential("OPENROUTER_API_KEY")
-
-        model_kwargs = {
-            "api_key": api_key,
-            "temperature": temperature,
-            "top_p": top_p,
-            "model": model_name,
-            "base_url": "https://openrouter.ai/api/v1",
-            "default_headers": {
-                "HTTP-Referer": "https://local-operator.com",
-                "X-Title": "Local Operator",
-                "X-Description": "AI agents doing work for you on your own device",
-            },
-        }
-        if max_tokens is not None:
-            model_kwargs["max_tokens"] = max_tokens
-        if frequency_penalty is not None:
-            model_kwargs["frequency_penalty"] = frequency_penalty
-        if presence_penalty is not None:
-            model_kwargs["presence_penalty"] = presence_penalty
-        if stop is not None:
-            model_kwargs["stop"] = stop
-        if seed is not None:
-            model_kwargs["seed"] = seed
-
-        configured_model = ChatOpenAI(**model_kwargs)
-
-    elif hosting == "anthropic":
-        if not model_name:
-            model_name = "claude-3-5-sonnet-latest"
-        api_key = credential_manager.get_credential("ANTHROPIC_API_KEY")
-        if not api_key:
-            api_key = credential_manager.prompt_for_credential("ANTHROPIC_API_KEY")
-
-        if not api_key:
-            raise ValueError("Anthropic API key is required")
-
-        model_kwargs = {
-            "api_key": api_key,
-            "temperature": temperature,
-            "top_p": top_p,
-            "model_name": model_name,
-            "timeout": None,
-            "stop": stop,
-        }
-        if max_tokens is not None:
-            model_kwargs["max_tokens"] = max_tokens
-
-        configured_model = ChatAnthropic(**model_kwargs)
-
-    elif hosting == "kimi":
-        if not model_name:
-            model_name = "moonshot-v1-32k"
-        api_key = credential_manager.get_credential("KIMI_API_KEY")
-        if not api_key:
-            api_key = credential_manager.prompt_for_credential("KIMI_API_KEY")
-
-        model_kwargs = {
-            "api_key": api_key,
-            "temperature": temperature,
-            "top_p": top_p,
-            "model": model_name,
-            "base_url": "https://api.moonshot.cn/v1",
-        }
-        if max_tokens is not None:
-            model_kwargs["max_tokens"] = max_tokens
-        if frequency_penalty is not None:
-            model_kwargs["frequency_penalty"] = frequency_penalty
-        if presence_penalty is not None:
-            model_kwargs["presence_penalty"] = presence_penalty
-        if stop is not None:
-            model_kwargs["stop"] = stop
-        if seed is not None:
-            model_kwargs["seed"] = seed
-
-        configured_model = ChatOpenAI(**model_kwargs)
-
-    elif hosting == "alibaba":
-        if not model_name:
-            model_name = "qwen-plus"
-        api_key = credential_manager.get_credential("ALIBABA_CLOUD_API_KEY")
-        if not api_key:
-            api_key = credential_manager.prompt_for_credential("ALIBABA_CLOUD_API_KEY")
-
-        model_kwargs = {
-            "api_key": api_key,
-            "temperature": temperature,
-            "top_p": top_p,
-            "model": model_name,
-            "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-        }
-        if max_tokens is not None:
-            model_kwargs["max_tokens"] = max_tokens
-        if frequency_penalty is not None:
-            model_kwargs["frequency_penalty"] = frequency_penalty
-        if presence_penalty is not None:
-            model_kwargs["presence_penalty"] = presence_penalty
-        if stop is not None:
-            model_kwargs["stop"] = stop
-        if seed is not None:
-            model_kwargs["seed"] = seed
-
-        configured_model = ChatOpenAI(**model_kwargs)
-
-    elif hosting == "google":
-        if not model_name:
-            model_name = "gemini-2.0-flash-001"
-        api_key = credential_manager.get_credential("GOOGLE_AI_STUDIO_API_KEY")
-        if not api_key:
-            api_key = credential_manager.prompt_for_credential("GOOGLE_AI_STUDIO_API_KEY")
-
-        model_kwargs = {
-            "api_key": api_key,
-            "temperature": temperature,
-            "top_p": top_p,
-            "model": model_name,
-        }
-        if max_tokens is not None:
-            model_kwargs["max_tokens"] = max_tokens
-        if top_k is not None:
-            model_kwargs["top_k"] = top_k
-        if stop is not None:
-            model_kwargs["stop"] = stop
-
-        configured_model = ChatGoogleGenerativeAI(**model_kwargs)
-
-    elif hosting == "mistral":
-        if not model_name:
-            model_name = "mistral-large-latest"
-        api_key = credential_manager.get_credential("MISTRAL_API_KEY")
-        if not api_key:
-            api_key = credential_manager.prompt_for_credential("MISTRAL_API_KEY")
-
-        model_kwargs = {
-            "api_key": api_key,
-            "temperature": temperature,
-            "top_p": top_p,
-            "model": model_name,
-            "base_url": "https://api.mistral.ai/v1",
-        }
-        if max_tokens is not None:
-            model_kwargs["max_tokens"] = max_tokens
-        if frequency_penalty is not None:
-            model_kwargs["frequency_penalty"] = frequency_penalty
-        if presence_penalty is not None:
-            model_kwargs["presence_penalty"] = presence_penalty
-        if stop is not None:
-            model_kwargs["stop"] = stop
-        if seed is not None:
-            model_kwargs["seed"] = seed
-
-        configured_model = ChatOpenAI(**model_kwargs)
-
-    elif hosting == "ollama":
-        if not model_name:
-            raise ValueError("Model is required for ollama hosting")
-
-        model_kwargs = {
-            "model": model_name,
-            "temperature": temperature,
-            "top_p": top_p,
-        }
-        if max_tokens is not None:
-            model_kwargs["max_tokens"] = max_tokens
-        if top_k is not None:
-            model_kwargs["top_k"] = top_k
-        if stop is not None:
-            model_kwargs["stop"] = stop
-
-        configured_model = ChatOllama(**model_kwargs)
-
-    elif hosting == "xai":
-        # xAI (Grok) support
-        if not model_name:
-            model_name = "grok-3"
-        api_key = credential_manager.get_credential("XAI_API_KEY")
-        if not api_key:
-            api_key = credential_manager.prompt_for_credential("XAI_API_KEY")
-
-        model_kwargs: Dict[str, Any] = {
-            "model": model_name,
-            "base_url": "https://api.x.ai/v1",
-            "api_key": api_key.get_secret_value(),
-        }
-
-        if temperature is not None:
-            model_kwargs["temperature"] = temperature
-        if top_p is not None:
-            model_kwargs["top_p"] = top_p
-        if max_tokens is not None:
-            model_kwargs["max_tokens"] = max_tokens
-        if stop is not None:
-            model_kwargs["stop"] = stop
-
-        configured_model = ChatOpenAI(**model_kwargs)
-
-    else:
+    definition = get_provider_definition(canonical)
+    if definition is None:
         raise ValueError(f"Unsupported hosting platform: {hosting}")
 
-    model_info: ModelInfo
+    if canonical == "ollama" and not model_name:
+        raise ValueError("Model is required for ollama hosting")
+    if not model_name:
+        model_name = DEFAULT_MODEL_NAMES.get(canonical, "")
 
-    if model_info_client:
-        if hosting == "openrouter" and isinstance(model_info_client, OpenRouterClient):
+    # Best-effort static key for legacy consumers; the cascade at stream time
+    # re-resolves (OAuth refresh, env, stored keys) — see AuthStore.
+    api_key: Optional[SecretStr] = None
+    if credential_manager is not None and isinstance(definition.env_keys, str):
+        try:
+            secret = credential_manager.get_credential(definition.env_keys)
+        except Exception:
+            secret = None
+        if secret is not None and secret.get_secret_value():
+            api_key = secret
+
+    model_info: ModelInfo
+    if model_info_client is not None:
+        if canonical == "openrouter":
             model_info = get_model_info_from_openrouter(model_info_client, model_name)
-        elif hosting == "radient" and isinstance(model_info_client, RadientClient):
+        elif canonical == "radient":
             model_info = get_model_info_from_radient(model_info_client, model_name)
         else:
             raise ValueError(f"Model info client not supported for hosting: {hosting}")
     else:
-        model_info = get_model_info(hosting, model_name)
+        try:
+            model_info = get_model_info(canonical, model_name)
+        except (ValueError, KeyError):
+            model_info = ModelInfo(id=model_name, name=model_name, description="Unknown model")
+
+    spec = build_model_spec(canonical, model_name, model_info)
+    # Radient base URL is env-overridable (legacy EnvConfig behaviour).
+    if canonical == "radient" and env_config is not None:
+        base_url = getattr(env_config, "radient_api_base_url", None)
+        if base_url:
+            spec = spec.model_copy(update={"base_url": base_url})
 
     return ModelConfiguration(
         hosting=hosting,
         name=model_name,
-        instance=configured_model,
+        instance=None,
         info=model_info,
         api_key=api_key,
         temperature=temperature,
@@ -693,23 +370,44 @@ def configure_model(
         presence_penalty=presence_penalty,
         stop=stop,
         seed=seed,
+        spec=spec,
     )
 
 
-def calculate_cost(model_info: ModelInfo, input_tokens: int, output_tokens: int) -> float:
+# ---------------------------------------------------------------------------
+# stream_fn factory
+# ---------------------------------------------------------------------------
+
+
+def create_stream_fn(
+    auth_store: Any, settings: Mapping[str, Any] | None = None
+) -> Callable[[ChatRequest, AbortSignal | None], AsyncIterator[StreamEvent]]:
+    """Build the ``LoopConfig.stream_fn`` for a session.
+
+    Resolves the API key through ``auth_store`` (7-step cascade + OAuth
+    refresh), picks the wire client from the request's ``ModelSpec``, and
+    wraps the call in credential-rotation + model-fallback failover.
     """
-    Calculates the cost of a request based on token usage and model pricing.
+    from local_operator.providers.clients import client_for_spec
+    from local_operator.providers.failover import stream_with_failover
 
-    Args:
-        model_info (ModelInfo): The pricing information for the model.
-        input_tokens (int): The number of input tokens used in the request.
-        output_tokens (int): The number of output tokens generated by the request.
+    def client_for(spec: ModelSpec) -> Any:
+        return client_for_spec(spec)
 
-    Returns:
-        float: The total cost of the request.
+    async def stream_fn(request: ChatRequest, signal: AbortSignal | None) -> AsyncIterator[StreamEvent]:
+        async for event in stream_with_failover(
+            request, auth_store, settings, client_for, signal=signal
+        ):
+            yield event
+
+    return stream_fn
+
+
+def calculate_cost(model_info: ModelInfo, input_tokens: int, output_tokens: int) -> float:
+    """Cost of a request from per-million token pricing.
 
     Raises:
-        ValueError: If there is an error during cost calculation.
+        ValueError: on any arithmetic failure (keeps the legacy contract).
     """
     try:
         input_cost = (float(input_tokens) / 1_000_000.0) * model_info.input_price
