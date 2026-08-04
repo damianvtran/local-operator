@@ -1,0 +1,503 @@
+"""Session facade tests: turn flow, events, steering, abort, wake wiring,
+compaction hook, dispose."""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+import types
+
+import pytest
+
+from local_operator.harness.types import (
+    AbortSignal,
+    AgentEndEvent,
+    AgentEvent,
+    AgentTool,
+    ChatRequest,
+    CustomMessage,
+    Message,
+    ModelSpec,
+    StreamEndEvent,
+    StreamTextDelta,
+    StreamToolCallDelta,
+    TextContent,
+    ToolResult,
+)
+from local_operator.session.session import Session
+from local_operator.session.transcript import Transcript
+
+MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
+
+
+async def wait_for(predicate, timeout: float = 2.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() > deadline:
+            raise AssertionError("timed out waiting for condition")
+        await asyncio.sleep(0.005)
+
+
+class ScriptedStream:
+    """Replays per-call event scripts; records requests."""
+
+    def __init__(self, turns: list[list]) -> None:
+        self.turns = turns
+        self.requests: list[ChatRequest] = []
+
+    def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+        self.requests.append(request)
+        turn = self.turns[len(self.requests) - 1]
+
+        async def gen():
+            for event in turn:
+                yield event
+
+        return gen()
+
+
+def echo_tool(executed: list[str], delay: float = 0.0) -> AgentTool:
+    async def execute(tool_call_id, args, signal, on_update, context):
+        if delay:
+            await asyncio.sleep(delay)
+        executed.append("echo")
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="echo", content=[TextContent(text="ok")]
+        )
+
+    return AgentTool(
+        name="echo",
+        parameters={"type": "object", "properties": {"text": {"type": "string"}}},
+        execute=execute,
+    )
+
+
+def make_session(tmp_path, stream, tools=None, **kwargs) -> Session:
+    transcript = Transcript(tmp_path / "sess")
+    return Session(
+        model=MODEL,
+        stream_fn=stream,
+        tools=tools or [],
+        transcript=transcript,
+        system_blocks_provider=kwargs.pop("system_blocks_provider", lambda: ["stable", "env"]),
+        **kwargs,
+    )
+
+
+@pytest.mark.asyncio
+async def test_prompt_full_turn_events_and_persistence(tmp_path):
+    """prompt() drives a text→tool→text turn; handlers see ordered events;
+    every produced message lands in the transcript."""
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            [
+                StreamTextDelta(delta="Hi"),
+                StreamToolCallDelta(index=0, id="c1", name="echo", argument_delta='{"text":"x"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="Bye"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream, tools=[echo_tool(executed)])
+
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+
+    await session.prompt("hello")
+
+    assert executed == ["echo"]
+    assert events[0].type == "agent_start"
+    assert events[-1].type == "agent_end"
+    assert isinstance(events[-1], AgentEndEvent)
+    assert events[-1].aborted is False
+    assert session.is_streaming is False
+
+    # Transcript: user msg + assistant1 + tool result + assistant2.
+    message_entries = [e for e in session._transcript.entries() if e.type == "message"]
+    assert len(message_entries) == 4
+
+    # Context carries the same four messages.
+    assert len(session._context.messages) == 4
+
+    # System blocks reached the provider.
+    assert stream.requests[0].system_blocks == ["stable", "env"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_subscribe_sync_async_and_exception_isolation(tmp_path):
+    """Sync and async handlers both receive events in order; a raising handler
+    is isolated with a warning and never breaks the others."""
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+
+    seen_sync: list[str] = []
+    seen_async: list[str] = []
+    broken_calls: list[int] = []
+
+    def broken(event):
+        broken_calls.append(1)
+        raise RuntimeError("handler exploded")
+
+    async def async_handler(event):
+        seen_async.append(event.type)
+
+    session.subscribe(lambda event: seen_sync.append(event.type))
+    session.subscribe(broken)
+    unsubscribe = session.subscribe(async_handler)
+
+    await session.prompt("hi")
+
+    assert len(broken_calls) == len(seen_sync)  # broken ran for every event...
+    assert seen_sync == seen_async  # ...without breaking the others' ordering
+    assert seen_sync[0] == "agent_start" and seen_sync[-1] == "agent_end"
+
+    seen_sync.clear()
+    seen_async.clear()
+    broken_calls.clear()
+    unsubscribe()
+    await session.prompt("again")
+    assert seen_sync == seen_async and "agent_end" in seen_sync
+    assert len(broken_calls) == len(seen_sync)  # remaining handlers still subscribed
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_steer_interrupts_and_persists(tmp_path):
+    """steer() during a tool batch: the steering message reaches the next
+    model call and is persisted to the transcript."""
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(index=0, id="c1", name="echo", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="adjusted"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream, tools=[echo_tool(executed, delay=0.05)])
+
+    prompt_task = asyncio.ensure_future(session.prompt("start"))
+    await wait_for(lambda: bool(executed))
+    session.steer("change direction")
+    await prompt_task
+
+    # Steering drained mid-turn and reached the second model call.
+    assert len(stream.requests) == 2
+    assert any(
+        isinstance(m, Message) and m.text == "change direction"
+        for m in stream.requests[1].messages
+    )
+    # Persisted as a message entry.
+    texts = [
+        entry.payload.get("content", [{}])[0].get("text")
+        for entry in session._transcript.entries()
+        if entry.type == "message" and entry.payload.get("kind") == "message"
+    ]
+    assert "change direction" in texts
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_abort_emits_aborted_agent_end(tmp_path):
+    """abort() mid-stream: the turn ends with an aborted agent_end."""
+    started = asyncio.Event()
+
+    async def slow_stream(request, signal):
+        started.set()
+        assert signal is not None
+        await signal.wait()
+        yield StreamEndEvent(stop_reason="aborted")
+
+    session = make_session(tmp_path, slow_stream)
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+
+    prompt_task = asyncio.ensure_future(session.prompt("long task"))
+    await started.wait()
+    session.abort("user cancelled")
+    await prompt_task
+
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.aborted is True
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_yolo_disables_approval(tmp_path):
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    approvals: list[str] = []
+
+    async def approve(name, summary):
+        approvals.append(name)
+        return True
+
+    session = make_session(tmp_path, stream, yolo=True, request_approval=approve)
+    context = session._build_tool_context()
+    assert context.request_approval is None
+    assert approvals == []
+
+    strict = make_session(tmp_path, stream, request_approval=approve, session_id="s2")
+    assert strict._build_tool_context().request_approval is not None
+    await session.dispose()
+    await strict.dispose()
+
+
+@pytest.mark.asyncio
+async def test_wake_schedule_persistence_and_reload(tmp_path):
+    """set_wake_schedules persists a wake_schedules custom entry; a reopened
+    session loads them (newest entry wins)."""
+    from local_operator.harness.wake import WakeSchedule
+
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+
+    schedule = WakeSchedule(
+        id="w1", message="check in", next_due_at=1_700_000_060_000, created_at=1_700_000_000_000
+    )
+    await session.set_wake_schedules([schedule])
+    assert len(session.wake_scheduler.schedules) == 1
+
+    details = session._transcript.latest_custom("wake_schedules")
+    assert details is not None and len(details["schedules"]) == 1
+
+    # Reopen: fresh Session over the same transcript adopts the schedules.
+    reopened = Session(
+        model=MODEL,
+        stream_fn=stream,
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: [],
+    )
+    assert len(reopened.wake_scheduler.schedules) == 1
+    assert reopened.wake_scheduler.schedules[0].id == "w1"
+    await session.dispose()
+    await reopened.dispose()
+
+
+@pytest.mark.asyncio
+async def test_wake_delivery_goes_through_prompt_path(tmp_path):
+    """A fired wake is delivered as a user-attributed wake_prompt custom
+    message through the prompt machinery."""
+    stream = ScriptedStream([[StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+
+    from local_operator.harness.wake import DueWake, WakeSchedule
+
+    schedule = WakeSchedule(id="w1", message="wake up", next_due_at=0, created_at=0)
+    due = DueWake(schedule=schedule, occurrence=1, planned_total=1, final=True)
+    await session._deliver_wake(due)
+    await wait_for(lambda: bool(stream.requests))  # the spawned turn ran
+
+    delivered = stream.requests[0].messages
+    assert any(m.text.startswith("(alarm) Scheduled wake w1") for m in delivered)
+    assert "wake up" in delivered[-1].text
+
+    # The wake_prompt message was persisted with user attribution.
+    wake_entries = [
+        e
+        for e in session._transcript.entries()
+        if e.type == "message" and e.payload.get("kind") == "custom"
+    ]
+    assert wake_entries
+    assert wake_entries[0].payload["attribution"] == "user"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_compaction_runs_when_due(tmp_path, monkeypatch):
+    """Post-turn compaction: prune -> trigger (compaction_context_tokens) ->
+    summarize -> transcript entry -> context rebuilt to marker + kept messages.
+    Default threshold min(window*0.8, 600_000) applies at the call site."""
+    from pydantic import BaseModel, Field
+
+    class CompactionSettings(BaseModel):
+        enabled: bool = True
+        reserve_tokens: int = 16384
+        keep_recent_tokens: int = 20000
+        threshold_percent: float = -1.0
+        threshold_tokens: int = Field(default=-1)
+        auto_continue: bool = True
+
+    prune_calls: list[tuple] = []
+
+    def prune_tool_outputs(messages, now_ts, last_activity_ts, **kwargs):
+        prune_calls.append((now_ts, last_activity_ts))
+        return list(messages), False
+
+    fake_api = types.ModuleType("local_operator.compaction.api")
+    fake_api.CompactionSettings = CompactionSettings
+    fake_api.prune_tool_outputs = prune_tool_outputs
+    fake_api.estimate_messages_tokens = lambda messages: 90_000
+    fake_api.compaction_context_tokens = lambda provider, local: max(provider or 0, local)
+    fake_api.find_cut_point = lambda messages, keep: 1  # cut after first message
+    fake_api.resolve_threshold_tokens = lambda window, settings: settings.threshold_tokens
+    fake_api.RECOVERY_BAND = 0.8
+
+    seen_threshold: list[int] = []
+
+    def should_compact(ctx_tokens, window, settings):
+        seen_threshold.append(settings.threshold_tokens)
+        return ctx_tokens > settings.threshold_tokens
+
+    fake_api.should_compact = should_compact
+
+    async def summarize(messages, complete_fn):
+        assert callable(complete_fn)
+        summary = await complete_fn("sys", "summarize this")
+        return f"SUMMARY({summary})"
+
+    fake_api.summarize_messages = summarize
+
+    fake_pkg = types.ModuleType("local_operator.compaction")
+    fake_pkg.api = fake_api
+    monkeypatch.setitem(sys.modules, "local_operator.compaction", fake_pkg)
+    monkeypatch.setitem(sys.modules, "local_operator.compaction.api", fake_api)
+    # Stub out strategy resolution to context-full (no snapcompact module).
+    fake_thresholds = types.ModuleType("local_operator.compaction.thresholds")
+    monkeypatch.setitem(sys.modules, "local_operator.compaction.thresholds", fake_thresholds)
+    fake_snap = types.ModuleType("local_operator.compaction.snapcompact")
+    monkeypatch.setitem(sys.modules, "local_operator.compaction.snapcompact", fake_snap)
+
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="turn one"), StreamEndEvent(stop_reason="stop")],
+            # The one-shot summary call (tool_choice none).
+            [StreamTextDelta(delta="compressed"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream, compaction_settings=CompactionSettings())
+
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+    await session.prompt("do work")
+
+    # Default threshold applied at the call site: min(100_000 * 0.8, 600_000).
+    assert seen_threshold == [80_000]
+    # Prune ran BEFORE the trigger with millisecond timestamps.
+    assert prune_calls and prune_calls[0][0] > 10**12
+
+    # Compaction summary call was issued with no tools.
+    summary_request = stream.requests[1]
+    assert summary_request.tools == []
+    assert summary_request.tool_choice == "none"
+
+    # Context rebuilt: marker + the kept assistant message (cut=1 keeps it).
+    assert len(session._context.messages) == 2
+    marker = session._context.messages[0]
+    assert isinstance(marker, CustomMessage)
+    assert marker.custom_type == "compaction_summary"
+    assert marker.details["summary"] == "SUMMARY(compressed)"
+
+    # Transcript got a compaction entry.
+    compactions = [e for e in session._transcript.entries() if e.type == "compaction"]
+    assert len(compactions) == 1
+    assert compactions[0].payload["summary"] == "SUMMARY(compressed)"
+
+    assert [e.type for e in events if e.type.startswith("compaction")] == [
+        "compaction_start",
+        "compaction_end",
+    ]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_no_compaction_module_degrades_gracefully(tmp_path, monkeypatch):
+    """Without the compaction package, turns run without compaction."""
+    monkeypatch.setitem(sys.modules, "local_operator.compaction", None)
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    await session.prompt("hi")
+    compactions = [e for e in session._transcript.entries() if e.type == "compaction"]
+    assert compactions == []
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_events_carry_monotonic_generation(tmp_path):
+    """agent_start/agent_end carry the per-session turn generation (TUI
+    supersede guard)."""
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="one"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="two"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+    await session.prompt("first")
+    await session.prompt("second")
+
+    gens = [(e.type, e.generation) for e in events if e.type in ("agent_start", "agent_end")]
+    assert gens == [("agent_start", 1), ("agent_end", 1), ("agent_start", 2), ("agent_end", 2)]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_compaction_preserve_data_round_trip(tmp_path):
+    """append_compaction stores preserve_data; replay surfaces it on the
+    marker details."""
+    transcript = Transcript(tmp_path / "sess")
+    m1 = Message.user("before")
+    await transcript.append_message(m1)
+    keep = Message.user("kept")
+    entry = await transcript.append_message(keep)
+    await transcript.append_compaction(
+        "S", entry.id, 100, preserve_data={"snapcompact": {"text": "archive"}}
+    )
+    compactions = [e for e in transcript.entries() if e.type == "compaction"]
+    assert compactions[0].payload["preserve_data"] == {"snapcompact": {"text": "archive"}}
+
+    history = transcript.build_llm_history()
+    marker = history[0]
+    assert isinstance(marker, CustomMessage)
+    assert marker.details["preserve_data"] == {"snapcompact": {"text": "archive"}}
+
+
+@pytest.mark.asyncio
+async def test_dispose_cancels_jobs_and_wakes(tmp_path):
+    stream = ScriptedStream([])
+    session = make_session(tmp_path, stream)
+
+    gate = asyncio.Event()
+
+    async def blocked(job_id, signal, report_progress):
+        await gate.wait()
+
+    job_id = session.jobs.register("task", "bg", blocked)
+    await session.dispose()
+    assert session.jobs.get(job_id).status == "cancelled"
+    assert session.wake_scheduler.disposed is True
+
+    with pytest.raises(RuntimeError):
+        await session.prompt("after dispose")
+
+
+@pytest.mark.asyncio
+async def test_async_system_blocks_provider(tmp_path):
+    """system_blocks_provider may be async (skill selection needs await)."""
+
+    async def provider():
+        await asyncio.sleep(0)
+        return ["block-a", "block-b"]
+
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream, system_blocks_provider=provider)
+    await session.prompt("hi")
+    assert stream.requests[0].system_blocks == ["block-a", "block-b"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_model_label_and_ids(tmp_path):
+    stream = ScriptedStream([])
+    session = make_session(tmp_path, stream, session_id="sess-42", agent_id="Sub")
+    assert session.session_id == "sess-42"
+    assert session.agent_id == "Sub"
+    assert session.model_label == "test/m"
+    await session.dispose()
