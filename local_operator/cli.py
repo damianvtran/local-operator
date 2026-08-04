@@ -1,18 +1,33 @@
 """
 Main entry point for the Local Operator CLI application.
 
-This script initializes the DeepSeekCLI interface for interactive chat or,
-when the "serve" subcommand is used, starts up the FastAPI server to handle HTTP requests.
+This script initializes the interactive agent experience or, when a
+subcommand is given, dispatches to it: ``serve`` (FastAPI server), ``exec``
+(one-shot headless task), ``credential``/``config``/``agents`` management,
+``login``/``logout``/``login-status`` provider auth, and ``mcp`` server
+management.
 
-The application uses asyncio for asynchronous operation and includes
-error handling for graceful failure.
+Rewrite constraints (docs/REWRITE.md section E + backward-compat contracts):
+
+- EVERY legacy flag/subcommand/dest/default/exit code survives byte-for-byte
+  (``build_cli_parser`` is imported by server tests; ``main`` is the
+  console-script entry). New flags are strictly additive.
+- No module-level import of textual / providers / session internals / TUI:
+  those are lazy-imported at the point of use so ``import local_operator.cli``
+  stays cheap and cannot break while parallel rewrite streams are mid-flight.
+- Exit codes preserved: 0 success, -1 legacy error banner; ``exec`` returns
+  0/1 per the README contract.
 
 Example Usage:
-    python main.py --hosting deepseek --model deepseek-chat
-    python main.py --hosting openai --model gpt-4
-    python main.py --hosting ollama --model llama2
-    python main.py exec "write a hello world program" --hosting ollama --model llama2
+    local-operator --hosting deepseek --model deepseek-chat
+    local-operator --hosting openai --model gpt-4o
+    local-operator --hosting ollama --model llama2
+    local-operator exec "write a hello world program" --hosting ollama --model llama2
+    local-operator exec "long task" --background
+    local-operator login anthropic
 """
+
+from __future__ import annotations
 
 import argparse
 import asyncio
@@ -20,6 +35,7 @@ import math
 import os
 import platform
 import subprocess
+import sys
 import traceback
 from importlib.metadata import version
 from pathlib import Path
@@ -27,19 +43,10 @@ from typing import Optional
 
 import uvicorn
 
-from local_operator.agents import AgentData  # Import AgentData type
-from local_operator.agents import AgentEditFields, AgentRegistry
-from local_operator.bootstrap import initialize_operator  # Import the new function
-from local_operator.clients.radient import RadientClient
 from local_operator.config import ConfigManager
-from local_operator.console import VerbosityLevel  # Import VerbosityLevel
 from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config
 from local_operator.helpers import setup_cross_platform_environment
-from local_operator.jobs import JobManager  # Added
-from local_operator.operator import OperatorType
-from local_operator.scheduler_service import SchedulerService  # Added
-from local_operator.server.utils.websocket_manager import WebSocketManager  # Added
 
 CLI_DESCRIPTION = """
     Local Operator - An environment for agentic AI models to perform tasks on the local device.
@@ -56,6 +63,10 @@ CLI_DESCRIPTION = """
 def build_cli_parser() -> argparse.ArgumentParser:
     """
     Build and return the CLI argument parser.
+
+    Backward compatibility is a hard contract here: every legacy flag,
+    subcommand, dest, and default must parse exactly as before. New flags and
+    subcommands are additive only (docs/REWRITE.md section E).
 
     Returns:
         argparse.ArgumentParser: The CLI argument parser
@@ -126,6 +137,19 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="The working directory to run the operator in.  Must be a valid directory.",
         dest="run_in",
     )
+    # --- Additive root flags (rewrite) ------------------------------------
+    parser.add_argument(
+        "--yolo",
+        action="store_true",
+        help="Auto-approve all tool executions (read/write/exec tiers) without prompting",
+    )
+    parser.add_argument(
+        "--no-tui",
+        action="store_true",
+        dest="no_tui",
+        help="Disable the full-screen TUI; use the plain headless REPL instead",
+    )
+
     subparsers = parser.add_subparsers(dest="subcommand")
     # Credential command
     credential_parser = subparsers.add_parser(
@@ -291,6 +315,111 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=str,
         help="The command to execute",
     )
+    # --- Additive exec flags (rewrite) ------------------------------------
+    exec_parser.add_argument(
+        "--background",
+        action="store_true",
+        help="Detach the task: spawn a background worker with a log file and exit immediately",
+    )
+    exec_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_mode",
+        help="Emit one JSON line per agent event instead of the final text",
+    )
+    exec_parser.add_argument(
+        "--agent-id",
+        type=str,
+        dest="agent_id",
+        help="ID of the agent to use for this execution (alternative to --agent by name)",
+    )
+
+    # --- Additive auth subcommands (rewrite) -------------------------------
+    login_parser = subparsers.add_parser(
+        "login",
+        help="Log in to a provider (OAuth or API key)",
+        parents=[parent_parser],
+    )
+    login_parser.add_argument(
+        "provider",
+        type=str,
+        nargs="?",
+        default=None,
+        help="Provider to log in to (e.g., openai, anthropic, kimi, xai). "
+        "Omit to list login-capable providers.",
+    )
+    logout_parser = subparsers.add_parser(
+        "logout",
+        help="Log out of a provider (removes stored credentials)",
+        parents=[parent_parser],
+    )
+    logout_parser.add_argument(
+        "provider",
+        type=str,
+        help="Provider to log out of",
+    )
+    subparsers.add_parser(
+        "login-status",
+        help="List stored provider credentials and their status",
+        parents=[parent_parser],
+    )
+    # Alias matching the docs/REWRITE.md section B spelling (`status`).
+    subparsers.add_parser(
+        "status",
+        help="Alias for login-status: list stored provider credentials",
+        parents=[parent_parser],
+    )
+
+    # --- Additive MCP subcommands (rewrite) --------------------------------
+    mcp_parser = subparsers.add_parser(
+        "mcp", help="Manage MCP servers", parents=[parent_parser]
+    )
+    mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command")
+    mcp_subparsers.add_parser(
+        "list", help="List configured MCP servers (all sources merged)", parents=[parent_parser]
+    )
+    mcp_add_parser = mcp_subparsers.add_parser(
+        "add", help="Add an MCP server (stdio command or http/sse URL)", parents=[parent_parser]
+    )
+    mcp_add_parser.add_argument("name", type=str, help="Server name")
+    mcp_add_parser.add_argument(
+        "--command", type=str, default=None, help="Stdio command to launch the server"
+    )
+    mcp_add_parser.add_argument(
+        "--arg",
+        action="append",
+        default=None,
+        dest="server_args",
+        help="Stdio command argument (repeatable)",
+    )
+    mcp_add_parser.add_argument(
+        "--env",
+        action="append",
+        default=None,
+        dest="server_env",
+        help="Environment variable KEY=VALUE for the stdio server (repeatable)",
+    )
+    mcp_add_parser.add_argument(
+        "--url", type=str, default=None, help="HTTP/SSE server URL (alternative to --command)"
+    )
+    mcp_add_parser.add_argument(
+        "--scope",
+        type=str,
+        choices=["global", "project"],
+        default="global",
+        help="Config scope to write (default: global ~/.local-operator/mcp.json)",
+    )
+    mcp_remove_parser = mcp_subparsers.add_parser(
+        "remove", help="Remove an MCP server from a config scope", parents=[parent_parser]
+    )
+    mcp_remove_parser.add_argument("name", type=str, help="Server name to remove")
+    mcp_remove_parser.add_argument(
+        "--scope",
+        type=str,
+        choices=["global", "project"],
+        default="global",
+        help="Config scope to remove from (default: global)",
+    )
 
     return parser
 
@@ -421,7 +550,7 @@ def serve_command(host: str, port: int, reload: bool) -> int:
     return 0
 
 
-def agents_list_command(args: argparse.Namespace, agent_registry: AgentRegistry) -> int:
+def agents_list_command(args: argparse.Namespace, agent_registry: "AgentRegistry") -> int:
     """List all agents."""
     agents = agent_registry.list_agents()
     if not agents:
@@ -464,7 +593,7 @@ def agents_list_command(args: argparse.Namespace, agent_registry: AgentRegistry)
     return 0
 
 
-def agents_create_command(name: str, agent_registry: AgentRegistry) -> int:
+def agents_create_command(name: str, agent_registry: "AgentRegistry") -> int:
     """Create a new agent with the given name."""
 
     # If name not provided, prompt user for input
@@ -477,6 +606,8 @@ def agents_create_command(name: str, agent_registry: AgentRegistry) -> int:
         except (KeyboardInterrupt, EOFError):
             print("\n\033[1;31mAgent creation cancelled\033[0m")
             return -1
+
+    from local_operator.agents import AgentEditFields  # lazy: heavy module
 
     agent = agent_registry.create_agent(
         AgentEditFields(
@@ -509,7 +640,7 @@ def agents_create_command(name: str, agent_registry: AgentRegistry) -> int:
 
 
 def agents_delete_command(
-    args: argparse.Namespace, agent_registry: AgentRegistry, config_dir: Path
+    args: argparse.Namespace, agent_registry: "AgentRegistry", config_dir: Path
 ) -> int:
     """
     Delete an agent by name (local) or by ID (Radient).
@@ -529,8 +660,6 @@ def agents_delete_command(
     elif getattr(args, "agent_id", None):
         # Delete from Radient by ID
         from local_operator.clients.radient import RadientClient
-        from local_operator.config import ConfigManager
-        from local_operator.credentials import CredentialManager
 
         credential_manager = CredentialManager(config_dir)
         api_key = credential_manager.get_credential("RADIENT_API_KEY")
@@ -553,6 +682,204 @@ def agents_delete_command(
     else:
         print("\n\033[1;31mError: Must provide --name or --id for delete\033[0m")
         return -1
+
+
+# --- Additive subcommand handlers (rewrite) --------------------------------
+
+
+def _build_auth_stack(config_dir: Path) -> tuple:
+    """(auth_store, credential_manager) for the login handlers.
+
+    Lazy import of the providers stream's AuthStore — the CLI module top
+    level must never depend on it.
+    """
+    from local_operator.providers.auth_store import AuthStore
+
+    credential_manager = CredentialManager(config_dir)
+    auth_store = AuthStore(credential_manager=credential_manager)
+    return auth_store, credential_manager
+
+
+def login_command(args: argparse.Namespace) -> int:
+    """Run the OAuth/API-key login flow for one provider."""
+    try:
+        from local_operator.providers.auth_cli import run_login
+    except ImportError:
+        print("\n\033[1;31mError: provider login support is not available in this build\033[0m")
+        return -1
+    auth_store, credential_manager = _build_auth_stack(Path.home() / ".local-operator")
+    try:
+        return run_login(getattr(args, "provider", None), credential_manager, auth_store)
+    finally:
+        auth_store.close()
+
+
+def logout_command(args: argparse.Namespace) -> int:
+    """Remove all stored credentials for one provider."""
+    try:
+        from local_operator.providers.auth_cli import run_logout
+    except ImportError:
+        print("\n\033[1;31mError: provider login support is not available in this build\033[0m")
+        return -1
+    auth_store, _credential_manager = _build_auth_stack(Path.home() / ".local-operator")
+    try:
+        return run_logout(args.provider, auth_store)
+    finally:
+        auth_store.close()
+
+
+def login_status_command() -> int:
+    """List stored provider credentials and their status."""
+    try:
+        from local_operator.providers.auth_cli import list_logins
+    except ImportError:
+        print("\n\033[1;31mError: provider login support is not available in this build\033[0m")
+        return -1
+    auth_store, credential_manager = _build_auth_stack(Path.home() / ".local-operator")
+    try:
+        return list_logins(auth_store, credential_manager)
+    finally:
+        auth_store.close()
+
+
+def mcp_command(args: argparse.Namespace) -> int:
+    """Dispatch ``mcp list|add|remove`` to the MCP config module (stream E).
+
+    Lazy import: the MCP package keeps its SDK imports lazy too, and this
+    CLI must survive builds where it has not landed yet.
+    """
+    try:
+        from local_operator.mcp import config as mcp_config
+    except ImportError:
+        print("\n\033[1;31mError: MCP support is not available in this build\033[0m")
+        return -1
+
+    if args.mcp_command == "list":
+        servers = mcp_config.list_effective_servers(Path.cwd())
+        if not servers:
+            print("No MCP servers configured.")
+            return 0
+        print("\n\033[1;32m╭─ MCP Servers ─────────────────────────────────\033[0m")
+        for name, server in sorted(servers.items()):
+            target = server.get("command") or server.get("url") or "(unconfigured)"
+            print(f"\033[1;32m│ {name}: {target}\033[0m")
+        print("\033[1;32m╰──────────────────────────────────────────────\033[0m")
+        return 0
+    elif args.mcp_command == "add":
+        env: dict[str, str] = {}
+        for item in getattr(args, "server_env", None) or []:
+            if "=" not in item:
+                print(f"\n\033[1;31mError: --env expects KEY=VALUE, got: {item}\033[0m")
+                return -1
+            key, value = item.split("=", 1)
+            env[key] = value
+        return mcp_config.add_server(
+            args.name,
+            command=getattr(args, "command", None),
+            args=getattr(args, "server_args", None),
+            env=env or None,
+            url=getattr(args, "url", None),
+            scope=getattr(args, "scope", "global"),
+        )
+    elif args.mcp_command == "remove":
+        return mcp_config.remove_server(args.name, scope=getattr(args, "scope", "global"))
+    else:
+        print(f"\n\033[1;31mError: Invalid mcp command: {args.mcp_command}\033[0m")
+        return -1
+
+
+# --- Session factory facade -------------------------------------------------
+
+
+async def create_session(
+    args: argparse.Namespace,
+    config_manager: ConfigManager,
+    credential_manager: CredentialManager,
+    agent_registry: "AgentRegistry",
+    *,
+    has_ui: bool = False,
+):
+    """Build a wired harness session for interactive/headless use.
+
+    Thin facade over :func:`local_operator.session_factory.create_session`
+    (the composition root shared with ``exec`` and the background worker).
+    The engine import is lazy so importing ``cli`` never pulls in
+    providers/session internals.
+    """
+    from local_operator.session_factory import create_session as _create_session
+
+    return await _create_session(
+        args, config_manager, credential_manager, agent_registry, has_ui=has_ui
+    )
+
+
+# --- Shared helpers ----------------------------------------------------------
+
+
+def _apply_run_in(run_in: Optional[str]) -> Optional[int]:
+    """Validate and chdir into ``--run-in`` (legacy prints preserved).
+
+    Returns -1 when the directory is invalid, None on success/no-op.
+    """
+    if not run_in:
+        return None
+    run_in_path = Path(run_in).resolve()
+    if not run_in_path.is_dir():
+        print(f"\n\033[1;31mError: Invalid working directory: {run_in}\033[0m")
+        return -1
+    os.chdir(run_in_path)
+    print(f"\n\033[1;32mSetting working directory to: {run_in_path}\033[0m")
+    return None
+
+
+async def _run_headless_repl(
+    args: argparse.Namespace,
+    config_manager: ConfigManager,
+    credential_manager: CredentialManager,
+    agent_registry: "AgentRegistry",
+) -> int:
+    """Plain-stream REPL for non-tty stdout or ``--no-tui``.
+
+    Mirrors the TUI loop semantics in miniature: one session for the whole
+    REPL, assistant text streamed to stdout as it arrives, tool rows dim on
+    stderr, Ctrl+C aborts the running turn (not the REPL), Ctrl+D/EOF exits.
+    """
+    from rich.console import Console
+
+    from local_operator.headless_print import PrintRenderer
+
+    console = Console(stderr=True, highlight=False)
+    session = await create_session(
+        args, config_manager, credential_manager, agent_registry, has_ui=False
+    )
+    renderer = PrintRenderer(stream_text=True)
+    unsubscribe = renderer.attach(session)
+    console.print(
+        "[bold cyan]Local Operator[/bold cyan] "
+        "[dim](headless REPL — Ctrl-C interrupts a turn, Ctrl-D exits)[/dim]"
+    )
+    try:
+        while True:
+            try:
+                line = input("> ")
+            except (EOFError, KeyboardInterrupt):
+                console.print()
+                break
+            if not line.strip():
+                continue
+            renderer.failed = False
+            try:
+                await session.prompt(line)
+            except KeyboardInterrupt:
+                # Abort the turn, keep the REPL alive (TUI parity).
+                session.abort("interrupted")
+            except Exception as exc:  # noqa: BLE001 — keep the REPL alive
+                console.print(f"[red]Error: {exc}[/red]")
+    finally:
+        if callable(unsubscribe):
+            unsubscribe()
+        await session.dispose()
+    return 0
 
 
 def main() -> int:
@@ -594,6 +921,8 @@ def main() -> int:
             else:
                 parser.error(f"Invalid config command: {args.config_command}")
         elif args.subcommand == "agents":
+            from local_operator.agents import AgentRegistry  # lazy: heavy module
+
             agent_registry = AgentRegistry(config_dir)
             if args.agents_command == "list":
                 return agents_list_command(args, agent_registry)
@@ -603,6 +932,8 @@ def main() -> int:
                 return agents_delete_command(args, agent_registry, config_dir)
             elif args.agents_command == "push":
                 # Push agent to Radient
+                from local_operator.clients.radient import RadientClient  # lazy
+
                 credential_manager = CredentialManager(config_dir)
                 api_key = credential_manager.get_credential("RADIENT_API_KEY")
                 if not api_key:
@@ -654,6 +985,8 @@ def main() -> int:
                     return -1
             elif args.agents_command == "pull":
                 # Pull agent from Radient
+                from local_operator.clients.radient import RadientClient  # lazy
+
                 agent_id = args.id
                 # Get Radient base URL from config or use default
                 config_manager = ConfigManager(config_dir)
@@ -678,22 +1011,50 @@ def main() -> int:
         elif args.subcommand == "serve":
             # Use the provided host, port, and reload options for serving the API.
             return serve_command(args.host, args.port, args.reload)
+        elif args.subcommand == "login":
+            return login_command(args)
+        elif args.subcommand == "logout":
+            return logout_command(args)
+        elif args.subcommand in ("login-status", "status"):
+            return login_status_command()
+        elif args.subcommand == "mcp":
+            return mcp_command(args)
+        elif args.subcommand == "exec":
+            # Single-execution mode: headless one-shot (README contract —
+            # exit 0 on success, non-zero on error). Working-directory
+            # handling matches the legacy pre-run behavior.
+            invalid = _apply_run_in(args.run_in)
+            if invalid is not None:
+                return invalid
+            from local_operator.exec_mode import ExecArgs, run_exec
+
+            return run_exec(
+                args.command,
+                ExecArgs(
+                    background=args.background,
+                    json_mode=args.json_mode,
+                    agent_name=args.agent_name,
+                    agent_id=getattr(args, "agent_id", None),
+                    yolo=args.yolo,
+                    hosting=args.hosting,
+                    model=args.model,
+                ),
+            )
 
         config_manager = ConfigManager(config_dir)
         credential_manager = CredentialManager(config_dir)
-        agent_registry = AgentRegistry(config_dir)
 
         # Override config with CLI args where provided
         config_manager.update_config_from_args(args)
 
         # Set working directory if provided and valid
-        if args.run_in:
-            run_in_path = Path(args.run_in).resolve()
-            if not run_in_path.is_dir():
-                print(f"\n\033[1;31mError: Invalid working directory: {args.run_in}\033[0m")
-                return -1
-            os.chdir(run_in_path)
-            print(f"\n\033[1;32mSetting working directory to: {run_in_path}\033[0m")
+        invalid = _apply_run_in(args.run_in)
+        if invalid is not None:
+            return invalid
+
+        from local_operator.agents import AgentData, AgentEditFields, AgentRegistry  # lazy
+
+        agent_registry = AgentRegistry(config_dir)
 
         # Get agent if name provided
         current_agent: Optional[AgentData] = None  # Use AgentData type hint
@@ -738,77 +1099,40 @@ def main() -> int:
                     print("\n\033[1;31mError: Failed to create or retrieve agent.\033[0m")
                     return -1
 
-        # Determine training mode and single execution mode
-        training_mode = bool(args.train)
-        single_execution_mode = args.subcommand == "exec"
-
-        # Determine auto-save behavior
+        # Legacy behavior: the auto-save config value persists interactive
+        # sessions via the registry's autosave agent (exec is excluded —
+        # single-execution mode never autosaved).
         auto_save_enabled = config_manager.get_config_value("auto_save_conversation", False)
-        auto_save_active = auto_save_enabled and not single_execution_mode
+        if auto_save_enabled:
+            args.train = True
 
-        # Create autosave agent if needed
-        if auto_save_active:
-            agent_registry.create_autosave_agent()
+        # Interactive path: full-screen TUI when stdout is a tty and not
+        # disabled; plain headless REPL otherwise.
+        use_tui = not getattr(args, "no_tui", False) and sys.stdout.isatty()
+        run_tui = None
+        if use_tui:
+            try:
+                from local_operator.tui import run_tui  # lazy: textual
+            except ImportError:
+                run_tui = None
+                use_tui = False
 
-        # Determine verbosity level
-        verbosity = VerbosityLevel.DEBUG if args.debug else VerbosityLevel.VERBOSE
+        if use_tui and run_tui is not None:
 
-        # Initialize the operator using the bootstrap function
-        scheduler_service: Optional[SchedulerService] = (
-            None  # Initialize scheduler_service variable
+            async def session_factory():
+                return await create_session(
+                    args,
+                    config_manager,
+                    credential_manager,
+                    agent_registry,
+                    has_ui=True,
+                )
+
+            return asyncio.run(run_tui(session_factory))
+
+        return asyncio.run(
+            _run_headless_repl(args, config_manager, credential_manager, agent_registry)
         )
-        try:
-            # First, create the SchedulerService instance
-            # Instantiate JobManager and WebSocketManager for CLI context
-            job_manager = JobManager()
-            websocket_manager = WebSocketManager()  # Will be unused but needed for constructor
-
-            scheduler_service = SchedulerService(
-                agent_registry=agent_registry,
-                config_manager=config_manager,
-                credential_manager=credential_manager,
-                env_config=env_config,
-                operator_type=OperatorType.CLI,
-                verbosity_level=verbosity,
-                job_manager=job_manager,  # Added
-                websocket_manager=websocket_manager,  # Added
-            )
-
-            operator = initialize_operator(
-                operator_type=OperatorType.CLI,
-                config_manager=config_manager,
-                credential_manager=credential_manager,
-                agent_registry=agent_registry,
-                env_config=env_config,
-                scheduler_service=scheduler_service,  # Pass the created scheduler_service
-                current_agent=current_agent,
-                persist_conversation=training_mode,
-                auto_save_conversation=auto_save_active,
-                verbosity_level=verbosity,
-            )
-        except ValueError as e:
-            print(f"\n\033[1;31mError initializing operator: {e}\033[0m")
-            return -1
-
-        # Create an async main function to handle operator and scheduler start
-        async def async_main_cli():
-            if scheduler_service:
-                await scheduler_service.start()  # Start the scheduler
-
-            # Start the async chat interface or execute single command
-            if single_execution_mode:
-                _, final_response = await operator.execute_single_command(args.command)
-                if final_response:
-                    print(final_response)
-            else:
-                await operator.chat()
-
-            if scheduler_service:  # Shutdown scheduler gracefully
-                await scheduler_service.shutdown()
-
-        asyncio.run(async_main_cli())  # Run the new async main
-
-        return 0
     except Exception as e:
         print(f"\n\033[1;31mError: {str(e)}\033[0m")
         print("\033[1;34m╭─ Stack Trace ────────────────────────────────────\033[0m")
