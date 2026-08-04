@@ -312,6 +312,9 @@ class AgentEvent(BaseModel):
 
 class AgentStartEvent(AgentEvent):
     type: Literal["agent_start"] = "agent_start"
+    # Per-session monotonic turn counter; lets UIs drop a superseded
+    # agent_end that arrives after the next agent_start.
+    generation: int = 0
 
 
 class AgentEndEvent(AgentEvent):
@@ -319,6 +322,7 @@ class AgentEndEvent(AgentEvent):
     messages: list[AgentMessage] = Field(default_factory=list)
     aborted: bool = False
     error: str | None = None
+    generation: int = 0
 
 
 class TurnStartEvent(AgentEvent):

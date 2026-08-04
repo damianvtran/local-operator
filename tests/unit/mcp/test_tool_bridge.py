@@ -1,0 +1,217 @@
+"""Tool bridge: name mangling, arg hygiene, result formatting, retriable errors."""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+from local_operator.mcp.tool_bridge import (
+    INTENT_FIELD,
+    build_agent_tool,
+    create_mcp_tool_name,
+    format_mcp_result,
+    is_retriable_connection_error,
+    normalize_input_schema,
+    prepare_outbound_args,
+)
+
+
+class TestCreateMcpToolName:
+    def test_basic_shape(self) -> None:
+        assert create_mcp_tool_name("linear", "create_issue") == "mcp__linear_create_issue"
+
+    def test_redundant_server_prefix_stripped(self) -> None:
+        assert (
+            create_mcp_tool_name("puppeteer", "puppeteer_screenshot")
+            == "mcp__puppeteer_screenshot"
+        )
+
+    def test_sanitization_lowercase_runs_edges(self) -> None:
+        # Non-[a-z_] runs collapse to one underscore; edges trimmed; lowercase.
+        assert create_mcp_tool_name("My-Server 2", "Do The Thing!") == "mcp__my_server_2_do_the_thing"
+
+    def test_prefix_strip_after_sanitization(self) -> None:
+        # Sanitization must run before the prefix check: 'Git Hub' + 'git_hub_status'.
+        assert create_mcp_tool_name("Git Hub", "git_hub_status") == "mcp__git_hub_status"
+
+    def test_empty_parts_fall_back(self) -> None:
+        assert create_mcp_tool_name("!!!", "???") == "mcp__server_tool"
+
+    def test_partial_prefix_not_stripped(self) -> None:
+        # 'puppeteer' is not a prefix+underscore of 'puppet_screenshot'.
+        assert (
+            create_mcp_tool_name("puppeteer", "puppet_screenshot")
+            == "mcp__puppeteer_puppet_screenshot"
+        )
+
+
+class TestNormalizeInputSchema:
+    def test_ensures_object_and_defaults(self) -> None:
+        assert normalize_input_schema(None) == {"type": "object", "properties": {}, "required": []}
+        assert normalize_input_schema({"type": "string"})["type"] == "object"
+
+    def test_preserves_existing(self) -> None:
+        schema = {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]}
+        assert normalize_input_schema(schema) == schema
+
+
+class TestPrepareOutboundArgs:
+    def test_strips_undeclared_intent_when_strict(self) -> None:
+        """The harness-injected 'i' field must not reach a strict server."""
+        out = prepare_outbound_args(
+            {INTENT_FIELD: "why", "query": "x"},
+            {"query": {"type": "string"}},
+            required=["query"],
+            additional_properties=False,
+        )
+        assert out == {"query": "x"}
+
+    def test_strips_any_undeclared_when_additional_unset(self) -> None:
+        out = prepare_outbound_args(
+            {"a": 1, "stray": 2},
+            {"a": {"type": "number"}},
+            required=[],
+            additional_properties=None,
+        )
+        assert out == {"a": 1}
+
+    def test_keeps_undeclared_when_additional_true(self) -> None:
+        out = prepare_outbound_args(
+            {"a": 1, INTENT_FIELD: "why"},
+            {"a": {"type": "number"}},
+            required=[],
+            additional_properties=True,
+        )
+        assert out == {"a": 1, INTENT_FIELD: "why"}
+
+    def test_keeps_declared_intent(self) -> None:
+        """A server that declares 'i' as its own parameter is unaffected."""
+        out = prepare_outbound_args(
+            {INTENT_FIELD: "why"},
+            {INTENT_FIELD: {"type": "string"}},
+            required=[INTENT_FIELD],
+            additional_properties=False,
+        )
+        assert out == {INTENT_FIELD: "why"}
+
+    def test_drops_empty_optionals(self) -> None:
+        out = prepare_outbound_args(
+            {"keep": "v", "empty_str": "", "empty_dict": {}, "none_val": None, "req_empty": ""},
+            {
+                "keep": {"type": "string"},
+                "empty_str": {"type": "string"},
+                "empty_dict": {"type": "object"},
+                "none_val": {"type": "string"},
+                "req_empty": {"type": "string"},
+            },
+            required=["req_empty"],
+        )
+        assert out == {"keep": "v", "req_empty": ""}
+
+    def test_non_dict_input(self) -> None:
+        assert prepare_outbound_args(None, {"a": {}}) == {}
+        assert prepare_outbound_args({"a": 1}, None) == {}  # strict w/o properties drops all
+
+
+class TestFormatMcpResult:
+    def test_text_joined(self) -> None:
+        result = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="one"), SimpleNamespace(type="text", text="two")],
+            is_error=False,
+        )
+        formatted = format_mcp_result(result, "id1", "mcp__srv_tool")
+        assert formatted.text == "one\n\ntwo"
+        assert formatted.is_error is False
+        assert formatted.tool_call_id == "id1"
+        assert formatted.tool_name == "mcp__srv_tool"
+
+    def test_image_placeholder(self) -> None:
+        result = SimpleNamespace(
+            content=[SimpleNamespace(type="image", mime_type="image/png")], is_error=False
+        )
+        assert format_mcp_result(result).text == "[Image: image/png]"
+
+    def test_resource_uri_plus_text(self) -> None:
+        result = SimpleNamespace(
+            content=[
+                SimpleNamespace(type="resource", resource=SimpleNamespace(uri="file:///a", text="body")),
+                SimpleNamespace(type="resource", resource=SimpleNamespace(uri="file:///b", text=None)),
+            ],
+            is_error=False,
+        )
+        assert format_mcp_result(result).text == "[Resource: file:///a]\nbody\n\n[Resource: file:///b]"
+
+    def test_is_error_prefix_and_flag(self) -> None:
+        result = SimpleNamespace(content=[SimpleNamespace(type="text", text="boom")], is_error=True)
+        formatted = format_mcp_result(result)
+        assert formatted.is_error is True
+        assert formatted.text == "Error: boom"
+
+    def test_dict_result_shape(self) -> None:
+        """Cached/serialized results (plain dicts) flatten identically."""
+        result = {
+            "content": [{"type": "text", "text": "hi"}],
+            "isError": True,
+        }
+        formatted = format_mcp_result(result)
+        assert formatted.is_error is True
+        assert formatted.text == "Error: hi"
+
+    def test_empty_content(self) -> None:
+        assert format_mcp_result(SimpleNamespace(content=[], is_error=False)).text == ""
+
+
+class TestIsRetriableConnectionError:
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "connect ECONNREFUSED 127.0.0.1:3000",
+            "read ECONNRESET",
+            "Transport closed",
+            "transport not connected",
+            "HTTP 404: session not found",
+            "HTTP 502: bad gateway",
+            "HTTP 503: service unavailable",
+            "fetch failed",
+            "network error during request",
+        ],
+    )
+    def test_retriable(self, message: str) -> None:
+        assert is_retriable_connection_error(RuntimeError(message)) is True
+
+    @pytest.mark.parametrize(
+        "message",
+        ["tool not found", "invalid arguments", "HTTP 401: unauthorized", "timeout waiting"],
+    )
+    def test_not_retriable(self, message: str) -> None:
+        assert is_retriable_connection_error(RuntimeError(message)) is False
+
+
+class TestBuildAgentTool:
+    def test_wraps_sdk_tool_model(self) -> None:
+        mcp_tool = SimpleNamespace(
+            name="search",
+            description="Search things",
+            input_schema={"type": "object", "properties": {"q": {"type": "string"}}},
+        )
+
+        async def call_fn(*args, **kwargs):  # pragma: no cover - not invoked here
+            raise AssertionError
+
+        tool = build_agent_tool("linear", mcp_tool, call_fn)
+        assert tool.name == "mcp__linear_search"
+        assert tool.label == "linear/search"
+        assert tool.description == "Search things"
+        assert tool.parameters["type"] == "object"
+        assert tool.parameters["properties"] == {"q": {"type": "string"}}
+
+    def test_wraps_cached_dict(self) -> None:
+        entry = {"name": "ping", "description": "", "inputSchema": None}
+
+        async def call_fn(*args, **kwargs):  # pragma: no cover
+            raise AssertionError
+
+        tool = build_agent_tool("srv", entry, call_fn)
+        assert tool.name == "mcp__srv_ping"
+        assert tool.parameters == {"type": "object", "properties": {}, "required": []}
