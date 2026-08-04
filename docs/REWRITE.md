@@ -193,10 +193,16 @@ Skills (differences from omp are deliberate, user-requested):
   hook injected by the session — C provides the resolver, A provides the
   hook. Contract: `SkillResolver = Callable[[str], str | None]` returning
   content or None if not a skill URL.
-- Compaction (`compaction/`): port omp context-full strategy.
+- Compaction (`compaction/`): strategies `context-full` and `snapcompact`,
+  auto-selected: snapcompact when the active model supports image input,
+  else context-full.
+  - **Default threshold**: the lesser of 80% of the model context window and
+    600,000 tokens (user-configurable via `values.compaction.threshold_tokens`
+    / `threshold_percent`).
   - Settings in config.yml `values.compaction.*`: enabled (true),
-    reserve_tokens (16384), keep_recent_tokens (20000), threshold_percent
-    (-1), auto_continue (true), mid_turn_enabled (true).
+    strategy (auto), reserve_tokens (16384), keep_recent_tokens (20000),
+    threshold_percent (-1), threshold_tokens (-1), auto_continue (true),
+    mid_turn_enabled (true).
   - `should_compact`/`resolve_threshold_tokens` math as in omp;
     `COMPACTION_RECOVERY_BAND = 0.8`.
   - `find_cut_point`: walk backwards accumulating estimated tokens, never cut
@@ -205,8 +211,20 @@ Skills (differences from omp are deliberate, user-requested):
     Key Decisions / Next Steps / Critical Context), preserve unanswered
     questions verbatim, keep exact paths/names/errors; `<files>` appendix.
   - `CompactionEntry` appended to transcript (`summary`,
-    `first_kept_entry_id`, `tokens_before`); replay = summary message +
-    entries from first_kept onward.
+    `first_kept_entry_id`, `tokens_before`, `preserve_data`); replay =
+    summary message + entries from first_kept onward.
+  - **snapcompact** (vision-model archival, ported from omp snapcompact):
+    discarded history serialized, whitespace-collapsed, rendered onto PNG
+    bitmap frames of pixel-font text (Pillow `ImageDraw.text`, monospace
+    bitmap rendering) that vision models read back. `Archive { frames, text,
+    text_head, text_tail }` stored in the CompactionEntry's `preserve_data`
+    so later compactions re-render from text rather than carrying old PNGs.
+    Tool results truncated to 2000 chars, useless pairs dropped, head/tail
+    plain-text edges with the imaged middle (foveation: 3 HQ edge frames).
+    Per-provider shapes (Anthropic ~1568-1932px wide bw, OpenAI 1568, Google
+    flat-billed any size). Budgets: max 80 frames, ~5024 tokens/frame
+    estimate. Requires image input support; falls back to context-full with
+    a warning otherwise.
   - Pruning: superseded reads + useless-flag blanking in place (never
     delete), `MIN_PRUNE_TOKENS = 50`, warm-suffix guard
     `PRUNE_CACHE_WARM_SUFFIX_TOKENS = 8000` (precompute suffix token sums),
@@ -260,6 +278,32 @@ Skills (differences from omp are deliberate, user-requested):
   `enabledServers`.
 - `mcp/tool_bridge.py`: `mcp__<server>_<tool>` naming (sanitize lowercase
   `[a-z_]`, strip redundant server prefix), outbound arg hygiene (drop
+
+## Performance contract (user requirements, binding)
+
+- **Start-of-session context budget**: a fresh conversation with the full
+  installed skill set (the user's omp skills at `~/.omp/agent/skills` as the
+  benchmark corpus) MUST start at ≤ 30,000 context tokens. Semantic skill
+  selection is what makes this possible — only matched skill descriptions
+  are injected. A benchmark script (`scripts/bench_context_budget.py`)
+  measures it and fails CI if the budget is blown; optimize the system
+  prompt if so.
+- **Cache rate target**: ≥ 90% prompt-cache hit rate on multi-turn E2E
+  tasks (omp achieves ~95%). Requirements that serve this: byte-stable
+  system blocks (date not timestamp; deterministic skill ordering; volatile
+  content isolated in the last block), append-only history, pruning gated on
+  the warm-suffix guard, one compaction boundary instead of drip edits.
+  E2E runs record per-turn cache_read/cache_write tokens from provider
+  usage and report the rate.
+- **Speed**: tool batches with `concurrency="shared"` run via
+  `asyncio.gather` (never serial); exclusive tools run alone. Provider
+  streaming starts as early as possible (no pre-turn classification or
+  planning round trips — the old triple-LLM-call per turn is gone).
+- **Streaming/UI contract preserved**: the server websocket contract
+  (`/v1/ws/messages/{message_id}` push shape, `CRUDResponse` envelope) is
+  unchanged for the existing UI. The new engine pushes incremental
+  `message_update` deltas rather than re-sending whole messages — same
+  endpoint, lower latency. The AgentEvent stream is additive.
   harness-injected fields the server doesn't declare, drop empty optionals),
   retriable-error classification → one reconnect + one retry.
 - stdio hardening: `start_new_session=True` on POSIX except macOS; Windows
