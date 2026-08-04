@@ -176,9 +176,10 @@ Skills (differences from omp are deliberate, user-requested):
   normalized — deterministic, offline, always available). Default: API when
   an embeddings-capable key is configured, else local.
 - Index: faiss-cpu `IndexFlatIP` over description+name embeddings, cached at
-  `~/.local-operator/cache/skills.index` keyed by a content hash of
-  (path, mtime, name, description); rebuilt lazily when stale. Skill count
-  is small — rebuild is cheap.
+  `~/.local-operator/cache/<identity>.skills.npz` + `<identity>.meta.json`
+  (identity = digest of skill roots + backend), keyed by a content hash of
+  (path, mtime, name, description) in discovery order; rebuilt lazily when
+  stale. Skill count is small — rebuild is cheap.
 - Per-turn: embed the last user message (+ latest compaction summary if
   any); select top-k (k=8) above cosine threshold 0.18 (local embedder needs
   a low bar; API backends can be stricter — make threshold configurable per
@@ -253,6 +254,21 @@ lines only where truly necessary (e.g. the single input top border carrying
 the status line). Add omp-style shimmer/strobe animations: animated spinner
 frames on running indicators and a subtle shimmer repaint on the active
 streaming block (omp's `activity` spinner ~30fps, status spinner ~12.5fps).
+
+**Character refinement (user feedback, supersedes "too simplistic"):**
+borderless does NOT mean bare. The omp TUI is the reference for character
+(user's own screenshot): tool calls render as subtle BACKGROUND-FILLED cards
+(one step brighter than the ground — the kit's `surface` #1e1a14; elevation
+is a background step, never a border), with a per-tool icon, the tool name
+in a tinted label color, the command/summary dim, and a right-aligned dim
+`⟨expand⟩` hint (future expansion surface) plus duration. Structured
+sections use tree glyphs (├─ └─) and tinted labels. The status line is a
+full-width band on the kit's `sunken` ground with icon-led segments
+(model · effort · cwd left; tokens/cost/jobs right) separated by `·`, not a
+thin rule. The input sits on a `surface` panel with the `❯` chevron, no
+border. Shimmer rides the working text (green crest over dim), exactly like
+omp. Keep the island palette — omp's violet becomes our green/string tint;
+the STRUCTURE is what we borrow, not the hue.
 
 - Layout (top→bottom): transcript scroll area; status line rendered as the
   TOP BORDER of the input box (zero extra rows, omp trick); multiline input.
