@@ -236,19 +236,32 @@ Skills (differences from omp are deliberate, user-requested):
 
 - Textual app, alt-screen, dark-first island theme from the brand kit:
   bg `#14110c`, fg `#e9e5db`, muted `#b5afa2`, dim `#837c6d`, edge
-  `#3b3527`, accent `#38c96a`, success string green `#57c785`, amber
+  `#3b3527`, accent `#38c96a`, string/success `#57c785`, amber
   `#e0b04b`, danger `#ef8078`. Light theme: paper `#f7f4ee`, ink `#211e18`,
   accent `#177b45`, hairline `#e5e0d5`. CSS variables generated from a JSON
   token dict (`tui/theme.py`) — one source of truth.
+
+**Style direction (user mandate, supersedes earlier border plans):**
+borderless chrome everywhere — NO bordered boxes. Structure comes from
+symbols, text treatment, color, and spacing, the way the omp TUI does it
+(see ~/oss/oh-my-pi docs/tui.md + packages/coding-agent/src/modes for
+reference: status segments, tree glyphs, icon-prefixed one-liners). One
+space of padding at the screen edges (left/right/bottom) but NOT along the
+top while scrolling — content meets the top edge. Sophisticated, slick,
+minimal: prefer unicode symbols + dim/accent text over any rule lines;
+lines only where truly necessary (e.g. the single input top border carrying
+the status line). Add omp-style shimmer/strobe animations: animated spinner
+frames on running indicators and a subtle shimmer repaint on the active
+streaming block (omp's `activity` spinner ~30fps, status spinner ~12.5fps).
+
 - Layout (top→bottom): transcript scroll area; status line rendered as the
   TOP BORDER of the input box (zero extra rows, omp trick); multiline input.
 - **Minimalism rules**: one line per action. Tool executions render as a
   single row `icon name summary … status/duration` (collapsible expand later,
-  default collapsed). No padding blank lines between blocks beyond one
-  separator. Assistant markdown rendered with rich; streaming uses the
-  frozen-prefix trick (re-render only the tail after the last settled block
-  boundary; `markdown-it-py`), 30 Hz coalesced updates via timer, equality
-  guard on identical text.
+  default collapsed). Assistant markdown rendered with rich; streaming uses
+  the frozen-prefix trick (re-render only the tail after the last settled
+  block boundary; `markdown-it-py`), 30 Hz coalesced updates via timer,
+  equality guard on identical text.
 - Event-driven: `EventController` subscribes to `AgentEvent`s and mutates
   widgets; the agent never imports the TUI. Ordering hazards: superseded
   `agent_end` after next `agent_start`; orphaned tool ends buffered.
