@@ -16,47 +16,49 @@ classifiers = [
 ]
 keywords = ["local", "agent", "execution", "operator", "agent-to-agent", "agentic", "local-first", "ai", "proactive"]
 dependencies = [
-    "langchain-openai",
-    "langchain-ollama", 
-    "langchain-anthropic",
-    "langchain-google-genai",
-    "langchain",
-    "langchain-community",
-    "python-dotenv",
-    "pydantic",
+    # Harness / providers
+    "httpx>=0.27",
+    "pydantic>=2.7",
     "tiktoken",
+    "python-dotenv",
+    "pyyaml",
+    "jsonlines",
+    "python-dateutil>=2.8.0",
+    # Server / API contract
     "uvicorn",
     "fastapi",
-    "playwright",
-    "requests",
-    "psutil",
-    "dill",
-    "pyreadline3",
-    "jsonlines",
     "python-multipart",
+    "websockets>=15.0.1",
+    "requests>=2.32.0",
+    # Scheduler / persistence
     "apscheduler",
+    # TUI
+    "textual>=1.0",
+    "rich>=13.7",
+    "markdown-it-py>=3.0",
+    # MCP
+    "mcp>=1.2",
+    # Skills semantic search
+    "faiss-cpu==1.10.0",
+    # Platform glue / media
+    "psutil",
     "pillow",
     "pillow-heif",
-    # Constraints
-    "browser-use==0.4.0",
-    "python-dateutil>=2.8.0",
-    "six>=1.16.0",
-    "faiss-cpu==1.10.0",
-    "certifi>=2024.7.4",
-    "configobj>=5.0.9",
-    "cryptography>=43.0.1",
-    "idna>=3.7",
-    "jinja2>=3.1.5",
-    "requests>=2.32.0",
-    "twisted>=24.7.0rc1",
-    "urllib3>=2.2.2",
-    "websockets>=15.0.1",
-    "setuptools>=78.1.1",
+    "pyreadline3",
 ]
 requires-python = ">=3.12"
 
 [project.optional-dependencies]
-dev = ["black", "isort", "pylint", "pyright", "pytest", "pytest-asyncio", "pip-audit"]
+dev = [
+    "ruff",
+    "pyright",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "pytest-textual-snapshot",
+    "pip-audit",
+]
+browser = ["playwright", "browser-use==0.4.0"]
 
 [project.urls]
 Homepage = "https://github.com/damianvtran/local-operator"
