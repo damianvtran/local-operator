@@ -60,6 +60,9 @@ dev = [
 ]
 browser = ["playwright", "browser-use==0.4.0"]
 
+[tool.setuptools.package-data]
+local_operator = ["prompts_md/*.md", "tui/*.tcss"]
+
 [project.urls]
 Homepage = "https://github.com/damianvtran/local-operator"
 
