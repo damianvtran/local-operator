@@ -81,6 +81,14 @@ class FakeSession:
     def set_model(self, model):
         pass
 
+    @property
+    def goal(self) -> str:
+        return getattr(self, "_goal", "")
+
+    def set_goal(self, text: str) -> str:
+        self._goal = (text or "").strip()
+        return self._goal
+
     async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
         self.prompts.append(text)
 
@@ -111,7 +119,13 @@ async def _factory(session: FakeSession) -> FakeSession:
     return session
 
 
-def _tool_end(call_id: str, name: str, text: str, is_error: bool = False) -> ToolExecutionEndEvent:
+def _tool_end(
+    call_id: str,
+    name: str,
+    text: str,
+    is_error: bool = False,
+    details: dict[str, Any] | None = None,
+) -> ToolExecutionEndEvent:
     from local_operator.harness.types import TextContent
 
     return ToolExecutionEndEvent(
@@ -122,12 +136,19 @@ def _tool_end(call_id: str, name: str, text: str, is_error: bool = False) -> Too
             tool_name=name,
             content=[TextContent(type="text", text=text)],
             is_error=is_error,
+            details=details,
         ),
     )
 
 
 def _populate(session: FakeSession) -> None:
-    """Drive one full turn: streamed markdown + three tool cards (one error)."""
+    """Drive one full turn: streamed markdown + four tool cards (one error).
+
+    The cards deliberately cover the full row vocabulary — a plain success,
+    a failure, a result with nothing to expand, and a write carrying diff
+    counters — so the frame regression actually sees every segment the row
+    can grow.
+    """
     session.emit(AgentStartEvent())
     session.emit(TurnStartEvent())
     session.emit(MessageStartEvent(message=Message.assistant("")))
@@ -147,6 +168,21 @@ def _populate(session: FakeSession) -> None:
         ToolExecutionStartEvent(tool_call_id="t3", tool_name="read", args={"path": "src/parser.py"})
     )
     session.emit(_tool_end("t3", "read", "ok"))
+    session.emit(
+        ToolExecutionStartEvent(
+            tool_call_id="t4",
+            tool_name="write",
+            args={"path": "src/parser.py", "content": "def parse(src):\n    ...\n"},
+        )
+    )
+    session.emit(
+        _tool_end(
+            "t4",
+            "write",
+            "Overwrote src/parser.py (412 chars).",
+            details={"path": "src/parser.py", "added": 12, "removed": 3},
+        )
+    )
     # Engine-faithful: the loop always emits turn_end carrying the assistant
     # message and its tool results; the status line reads usage off it, so a
     # bare event freezes frames the live app can never show.
@@ -175,13 +211,26 @@ def _make_app() -> tuple[OperatorApp, FakeSession]:
     return OperatorApp(lambda: _factory(session)), session
 
 
+def _freeze_cursor(pilot) -> None:  # type: ignore[no-untyped-def]
+    """Stop the editor's cursor blinking.
+
+    The blink is a timer, so whether the frame catches the cursor ON or OFF
+    is a race — and a single inverted cell is enough to fail an SVG compare.
+    That is the whole of the "snapshots are flaky" reputation these tests
+    had; pinning it here makes the frames byte-stable across runs.
+    """
+    pilot.app.query_one(Editor).cursor_blink = False
+
+
 async def _boot_only(pilot) -> None:  # type: ignore[no-untyped-def]
     await pilot.pause()
+    _freeze_cursor(pilot)
     await pilot.pause()
 
 
 async def _populate_and_submit(pilot) -> None:  # type: ignore[no-untyped-def]
     await pilot.pause()
+    _freeze_cursor(pilot)
     await pilot.pause()
     pilot.app.query_one(Editor).focus()
     await pilot.pause()

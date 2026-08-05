@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import re
 
+from rich.cells import cell_len
 from rich.console import Group
 from rich.markdown import Markdown
 from rich.text import Text
@@ -197,6 +198,8 @@ class AssistantBlock(TranscriptBlock):
     next update re-renders against the new ramp.
     """
 
+    SPACING_KIND = "assistant"
+
     def __init__(self) -> None:
         super().__init__()
         self.add_class("assistant-block")
@@ -320,6 +323,21 @@ class AssistantBlock(TranscriptBlock):
         if self._frozen_rendered is not None:
             return _measure_rows(self._frozen_rendered, self.size.width or 80)
         return 0
+
+    def spans_multiple_rows(self) -> bool:
+        """Answered from the source text, never by rendering the Markdown.
+
+        Spacing only needs "one row or more"; a full render of a message
+        that may be thousands of lines long to learn that is waste. Any
+        embedded newline settles it; otherwise the single line is multi-row
+        exactly when it is wider than the block.
+        """
+        text = self._full_text.strip()
+        if not text:
+            return False
+        if "\n" in text:
+            return True
+        return cell_len(text) > max(self.size.width or 80, 10)
 
     def text(self) -> str:
         """The accumulated message text (for tests and export)."""

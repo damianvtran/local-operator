@@ -9,10 +9,13 @@
  *     spacing. The only rule in the app is the input panel's thin top line,
  *     structural $lo-dim — the focus accent moves to the chevron, never the
  *     rule (D23/D24).
- *   - no blank filler rows between blocks; blocks own no outer margin and
- *     this sheet declares no margin/padding on any block selector
- *   - one line per tool action; each action is a subtle background-filled
- *     card (elevation = a background step, never a border or shadow)
+ *   - NO uniform filler rows. Blocks own no outer margin; separation is
+ *     ADAPTIVE and rides one opt-in class (.gap-above) that the transcript
+ *     container applies only where the rhythm needs it — a run of one-line
+ *     tool traces stays flush, prose and expanded output get a blank row.
+ *   - one line per tool action while collapsed; each action is a subtle
+ *     background-filled card (elevation = a background step, never a border
+ *     or shadow) whose FILL carries the outcome
  *   - the accent green is spent ONLY on: the running indicator, links, and
  *     the focused chevron. Everything else is warm neutrals.
  *
@@ -39,10 +42,17 @@ TranscriptView {
 }
 
 /* Blocks: zero outer margin, zero padding — no declarations here by design
- * (the minimalism defense asserts their absence). */
+ * (the minimalism defense asserts their absence; anything uniform here would
+ * be the "blank row between everything" regression). */
 TranscriptBlock, UserBlock, NoticeBlock, RichBlock, AssistantBlock, ToolCard {
     width: 1fr;
     height: auto;
+}
+
+/* The ONLY separator in the app: one blank row, applied per block by the
+ * transcript container's adaptive spacing rule. */
+.gap-above {
+    margin-top: 1;
 }
 
 UserBlock {
@@ -63,10 +73,43 @@ AssistantBlock {
 }
 
 /* ONE LINE PER ACTION — the row is a background-filled card, one elevation
- * step brighter than the ground (kit surface on bg). */
+ * step brighter than the ground (kit surface on bg).
+ *
+ * The collapsed height is PINNED rather than left to `auto`, and that is
+ * load-bearing: a card is built before it is laid out, so its very first
+ * row is measured against a guessed width and can be a cell or two wide.
+ * Under `auto` that first measurement resolves to two rows and stays there
+ * even after the resize rebuilds the row to fit — a ledger of one-line
+ * traces silently doubles in height. Pinning makes the worst case a clipped
+ * cell for one frame, which is the right failure. */
 ToolCard {
     height: 1;
     background: $lo-surface;
+}
+
+/* Expanded is the ONE case that is content-sized: the summary row plus one
+ * row per line of revealed tool output (each already truncated to width, so
+ * nothing reflows). The class beats the type selector above. */
+ToolCard.tool-expanded {
+    height: auto;
+}
+
+/* State reaches the GROUND, not just the glyph: a live action sits one step
+ * proud of its settled neighbours, and a failure stops being neutral. Both
+ * tints sit near the surface luminance so the ledger never shouts. */
+ToolCard.tool-running {
+    background: $lo-raised;
+}
+
+ToolCard.tool-error {
+    background: $lo-tint-danger;
+}
+
+/* Mouse affordance: the whole row is the click target for expand/collapse,
+ * so the whole row lights on hover. Last rule wins over the state tints —
+ * pointing at a row should always look the same. */
+ToolCard:hover {
+    background: $lo-overlay;
 }
 
 /* The status band is the input panel's FIRST row: it lives inside the input

@@ -2,9 +2,12 @@
 
 - The tcss sheet carries NO literal hex: every color resolves through the
   brand-token CSS variables injected from ``tui/theme.py`` (single source).
-- A tool execution is ONE row (the filled card); a finished card settles at
-  exactly one row.
+- A COLLAPSED tool execution is ONE row (the filled card); it only grows
+  when the user clicks it open.
 - The status line is ONE full-width band row.
+- Separation is adaptive and opt-in: no block selector carries a uniform
+  margin, and the only spacing declaration in the sheet is the class the
+  transcript container applies deliberately.
 """
 
 from __future__ import annotations
@@ -28,19 +31,34 @@ def test_tcss_has_no_literal_hex() -> None:
     assert not _HEX_RE.search(text), f"literal hex in tcss: {_HEX_RE.findall(text)}"
 
 
-def test_tcss_tool_card_and_status_band_are_single_rows() -> None:
+def test_tcss_pins_one_row_for_tool_cards_and_the_status_band() -> None:
+    """The collapsed card and the status band are both pinned to one row.
+
+    Pinning is not decoration here. A card builds its first row before it is
+    laid out, against a guessed width; under ``height: auto`` that first
+    over-wide measurement resolves to TWO rows and never comes back down,
+    turning a ledger of one-line traces into a double-spaced list. The pin
+    makes the worst case a clipped cell for one frame instead.
+
+    Exactly one selector may opt out: an EXPANDED card, whose whole purpose
+    is to be taller than one row.
+    """
     text = TCSS.read_text()
     tool_block = re.search(r"^ToolCard\s*\{([^}]*)\}", text, re.MULTILINE)
+    expanded = re.search(r"^ToolCard\.tool-expanded\s*\{([^}]*)\}", text, re.MULTILINE)
     band_block = re.search(r"^#status-band\s*\{([^}]*)\}", text, re.MULTILINE)
     assert tool_block is not None and "height: 1;" in tool_block.group(1)
+    assert expanded is not None and "height: auto;" in expanded.group(1)
     assert band_block is not None and "height: 1;" in band_block.group(1)
 
 
 def test_block_selectors_declare_no_margin_or_padding() -> None:
     """The tcss comment claims the density contract — the blocks own no outer
-    margin/padding (a margin would insert blank filler rows between blocks,
-    the single largest violation of the minimalist mandate). Pin it so the
-    claim cannot silently rot."""
+    margin/padding. A margin HERE would insert a blank filler row between
+    every pair of blocks, the single largest violation of the minimalist
+    mandate; adaptive spacing deliberately rides a separate opt-in class
+    (``.gap-above``) that the container applies only where the rhythm needs
+    it. Pin the base rule so the claim cannot silently rot."""
     text = TCSS.read_text()
     match = re.search(
         r"^TranscriptBlock,\s*UserBlock,\s*NoticeBlock,\s*RichBlock,\s*"
@@ -51,6 +69,21 @@ def test_block_selectors_declare_no_margin_or_padding() -> None:
     assert match is not None, "block selectors rule not found in tcss"
     body = match.group(1)
     assert not re.search(r"\b(margin|padding)\s*:", body)
+
+
+def test_gap_class_is_the_only_block_spacing_declaration() -> None:
+    """Exactly one rule in the sheet may open a blank row between blocks.
+
+    A second source of vertical spacing is how "adaptive" quietly decays
+    back into "a blank row everywhere", so the count is pinned at one.
+    """
+    text = TCSS.read_text()
+    gap = re.search(r"^\.gap-above\s*\{([^}]*)\}", text, re.MULTILINE)
+    assert gap is not None, ".gap-above rule not found in tcss"
+    assert "margin-top: 1;" in gap.group(1)
+    # No other rule anywhere in the sheet declares a vertical margin.
+    margins = re.findall(r"margin(?:-top|-bottom)?\s*:[^;]*;", text)
+    assert margins == ["margin-top: 1;"], margins
 
 
 def test_tool_card_renders_a_single_row() -> None:

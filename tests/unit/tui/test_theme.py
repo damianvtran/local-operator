@@ -28,6 +28,7 @@ def test_dark_tokens_exact_hexes() -> None:
         "danger": "#ef8078",
         "signal": "#6ea8d8",
         "label": "#b48cd6",
+        "tint-danger": "#2c1a16",
     }
 
 
@@ -53,6 +54,7 @@ def test_light_tokens_exact_hexes() -> None:
         "danger": "#b23a31",
         "signal": "#2b6ea8",
         "label": "#7c5a9e",
+        "tint-danger": "#f6e2dd",
     }
 
 

@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import time
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -28,6 +29,7 @@ from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
+from local_operator.harness.types import AgentEndEvent, EventHandler, Message
 from local_operator.jobs import JobManager, JobStatus
 from local_operator.scheduler_service import SchedulerService
 from local_operator.types import Schedule, ScheduleUnit
@@ -40,41 +42,40 @@ from local_operator.types import Schedule, ScheduleUnit
 class FakeSession:
     """Minimal stand-in for the rewritten engine's Session.
 
-    Duck-typed against the parts the scheduler uses: ``subscribe`` /
-    ``prompt`` / ``dispose``. Emits one ``agent_end`` per successful prompt.
+    Implements the parts the scheduler uses: ``subscribe`` / ``prompt`` /
+    ``dispose``. Emits one real ``AgentEndEvent`` per successful prompt —
+    the scheduler narrows on the event and message TYPES, so a look-alike
+    namespace would silently exercise a path production never takes.
     """
 
     def __init__(self, fail: BaseException | None = None):
         self.prompts: list[str] = []
         self.disposed = False
         self._fail = fail
-        self._handlers: list[Any] = []
+        self._handlers: list[EventHandler] = []
 
-    def subscribe(self, handler):
+    def subscribe(self, handler: EventHandler) -> Callable[[], None]:
         self._handlers.append(handler)
 
-        def _unsubscribe():
+        def _unsubscribe() -> None:
             if handler in self._handlers:
                 self._handlers.remove(handler)
 
         return _unsubscribe
 
-    async def prompt(self, text: str, attachments=None) -> None:
+    async def prompt(self, text: str) -> None:
         self.prompts.append(text)
         if self._fail is not None:
             raise self._fail
-        end = SimpleNamespace(
-            type="agent_end",
-            error=None,
-            aborted=False,
+        end = AgentEndEvent(
             messages=[
-                SimpleNamespace(role="user", text=text),
-                SimpleNamespace(role="assistant", text=f"scheduled response #{len(self.prompts)}"),
+                Message.user(text),
+                Message.assistant(f"scheduled response #{len(self.prompts)}"),
             ],
         )
         for handler in list(self._handlers):
             outcome = handler(end)
-            if hasattr(outcome, "__await__"):
+            if inspect.isawaitable(outcome):
                 await outcome
 
     async def dispose(self) -> None:
@@ -114,7 +115,7 @@ class SlowSessionFactory(FakeSessionFactory):
     ):
         session = FakeSession()
 
-        async def _hanging_prompt(text: str, attachments=None) -> None:
+        async def _hanging_prompt(text: str) -> None:
             session.prompts.append(text)
             await asyncio.sleep(3600)
 

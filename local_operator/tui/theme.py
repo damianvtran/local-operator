@@ -39,6 +39,11 @@ BRAND_TOKENS: dict[str, dict[str, str]] = {
         "danger": "#ef8078",  # errors
         "signal": "#6ea8d8",  # cool counterweight: links, file paths (NOT green)
         "label": "#b48cd6",  # violet meta: tips, skill labels
+        # State grounds for the tool rows. A tool row's ELEVATION already
+        # carries "this is an action"; its TINT carries the outcome. Both
+        # sit at roughly the same luminance as `surface` so a failed row
+        # never shouts — it just stops being neutral.
+        "tint-danger": "#2c1a16",  # failed tool row ground (warm red cast)
     },
     # Warm paper ramp (D22: real kit semantics; danger is NEVER the green).
     "light": {
@@ -60,6 +65,7 @@ BRAND_TOKENS: dict[str, dict[str, str]] = {
         "danger": "#b23a31",
         "signal": "#2b6ea8",
         "label": "#7c5a9e",
+        "tint-danger": "#f6e2dd",
     },
 }
 
@@ -86,6 +92,7 @@ _SEMANTIC_ALIASES: dict[str, dict[str, str]] = {
         "string": "string",
         "signal": "signal",
         "label": "label",
+        "tint-danger": "tint-danger",
     },
     "light": {
         "bg": "paper",
@@ -106,6 +113,7 @@ _SEMANTIC_ALIASES: dict[str, dict[str, str]] = {
         "string": "string",
         "signal": "signal",
         "label": "label",
+        "tint-danger": "tint-danger",
     },
 }
 

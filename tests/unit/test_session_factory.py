@@ -7,6 +7,7 @@ the real wiring (hosting ``test``) where the contract demands it.
 from __future__ import annotations
 
 import argparse
+import inspect
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -318,17 +319,31 @@ class FakeMcpManager:
 
 
 class FakeSessionShell:
-    """Minimal session surface for the MCP seams (refresh_tools + dispose)."""
+    """Minimal session surface for the MCP seams (refresh_tools + dispose).
+
+    Mirrors the real ``Session`` dispose contract: host teardown is registered
+    through ``add_dispose_hook`` and runs after the session's own dispose, in
+    registration order.
+    """
 
     def __init__(self) -> None:
         self.tools: list = []
         self.disposed = 0
+        self.mcp_manager = None
+        self._dispose_hooks: list = []
 
     def refresh_tools(self, tools) -> None:
         self.tools = list(tools)
 
+    def add_dispose_hook(self, hook) -> None:
+        self._dispose_hooks.append(hook)
+
     async def dispose(self) -> None:
         self.disposed += 1
+        for hook in self._dispose_hooks:
+            outcome = hook()
+            if inspect.isawaitable(outcome):
+                await outcome
 
 
 @pytest.mark.asyncio

@@ -17,14 +17,33 @@ text (no panel, no rule line — structure comes from weight and tint).
 
 from __future__ import annotations
 
+from typing import cast
+
+from pygments.token import (
+    Comment,
+    Error,
+    Generic,
+    Keyword,
+    Name,
+    Number,
+    Operator,
+    Punctuation,
+    String,
+    Token,
+    _TokenType,
+)
 from rich.markdown import CodeBlock, Heading, Markdown
 from rich.style import Style
-from rich.syntax import Syntax, SyntaxTheme
+from rich.syntax import Syntax, SyntaxTheme, TokenType
 from rich.theme import Theme
 
 from local_operator.tui import theme as theme_mod
 
 _C = theme_mod.semantic_color
+
+#: Root of the pygments token hierarchy — the terminal fallback for a token
+#: whose whole ancestry is absent from the ramp.
+_TOKEN_ROOT = Token
 
 
 class IslandSyntaxTheme(SyntaxTheme):
@@ -32,20 +51,7 @@ class IslandSyntaxTheme(SyntaxTheme):
     number/warning amber, comment dim. Replaces the Monokai slab palette."""
 
     def __init__(self) -> None:
-        from pygments.token import (
-            Comment,
-            Error,
-            Generic,
-            Keyword,
-            Name,
-            Number,
-            Operator,
-            Punctuation,
-            String,
-            Token,
-        )
-
-        self._styles = {
+        self._styles: dict[_TokenType, Style] = {
             Token: Style(color=_C("fg")),
             Comment: Style(color=_C("dim")),
             Keyword: Style(color=_C("accent")),
@@ -62,14 +68,26 @@ class IslandSyntaxTheme(SyntaxTheme):
             Generic: Style(color=_C("fg")),
         }
 
-    def get_style_for_token(self, token_type):  # type: ignore[override]
-        while token_type:
-            if token_type in self._styles:
-                return self._styles[token_type]
-            token_type = token_type.parent
-        from pygments.token import Token
+    def get_style_for_token(self, token_type: TokenType) -> Style:
+        """Walk up the token hierarchy to the nearest ramp entry.
 
-        return self._styles[Token]
+        Pygments token types are tuples that carry a ``parent``, so a token
+        the ramp does not name (``Name.Function.Magic``) resolves to the
+        nearest ancestor that it does (``Name.Function``) instead of falling
+        all the way to the base ink.
+
+        The parameter is rich's ``TokenType`` (a plain ``tuple[str, ...]``)
+        because that is what the abstract method declares; pygments' richer
+        ``_TokenType`` is the concrete class that actually arrives, and it is
+        the one carrying ``parent``.
+        """
+        node = cast("_TokenType | None", token_type)
+        while node:
+            style = self._styles.get(node)
+            if style is not None:
+                return style
+            node = node.parent
+        return self._styles[_TOKEN_ROOT]
 
     def get_background_style(self) -> Style:  # type: ignore[override]
         return Style(bgcolor=_C("bg"))
@@ -106,12 +124,17 @@ def brand_markdown_theme() -> Theme:
             "markdown.item.bullet": Style(color=_C("dim")),
             "markdown.item.number": Style(color=_C("dim")),
             "markdown.hr": Style(color=_C("edge")),
+            # Headings carry a real three-step ramp. With no rules, panels,
+            # or size changes available in a terminal, WEIGHT and TINT are
+            # the only depth cues there are — h5/h6 previously matched h3/h4
+            # minus the bold, which flattened the tail of long documents
+            # into a single indistinguishable level.
             "markdown.h1": Style(color=_C("fg"), bold=True),
             "markdown.h2": Style(color=_C("fg"), bold=True),
             "markdown.h3": Style(color=_C("muted"), bold=True),
             "markdown.h4": Style(color=_C("muted"), bold=True),
-            "markdown.h5": Style(color=_C("muted")),
-            "markdown.h6": Style(color=_C("muted")),
+            "markdown.h5": Style(color=_C("dim"), bold=True),
+            "markdown.h6": Style(color=_C("dim")),
             "markdown.link": Style(color=_C("signal")),
             "markdown.link_url": Style(color=_C("signal"), underline=True),
         },

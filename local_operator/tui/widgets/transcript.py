@@ -6,10 +6,15 @@ treated as immutable by the container — its content is never updated again —
 and ``settled_rows()`` reports how many of its rows are provably stable now
 (used later for scroll accounting).
 
-Minimalism rule (the brand): blocks own NO outer margin and the container
-never adds blank filler rows. Structure comes from symbols, tint, and
-spacing — never rules or blank rows. The tcss pins zero margin/padding on
-every block.
+Spacing rhythm (the brand): blocks own NO uniform outer margin — the
+container never pads a run of one-line tool rows apart. Separation is
+ADAPTIVE and opt-in: a block takes a single blank row above it only when
+the block before it was a different KIND of thing, or when that block
+rendered taller than one row. Consecutive one-line tool traces therefore
+stack into a dense ledger, while a paragraph of prose or an expanded tool
+output gets air on both sides. The gap rides one CSS class
+(:data:`GAP_CLASS`); the base block selectors stay margin-free so no
+"filler row everywhere" regression can slip back in.
 
 Layout rhythm (D20): user blocks sit at the gutter (``❯`` at column 0);
 everything else indents two cells so the turn spine reads at a glance.
@@ -19,7 +24,7 @@ from __future__ import annotations
 
 from typing import Callable, ClassVar
 
-from rich.console import Console
+from rich.console import Console, RenderableType
 from rich.style import Style
 from rich.text import Text
 from textual.containers import ScrollableContainer
@@ -30,6 +35,11 @@ from local_operator.tui import theme as theme_mod
 #: The turn spine (D20): user prompts sit at the gutter; everything else
 #: indents two cells so the ``❯`` column reads at a glance.
 SPINE_INDENT = 2
+
+#: CSS class opening exactly one blank row above a block. Applied by the
+#: container, never by a block itself: only the container knows what came
+#: before, and "what came before" is the entire spacing rule.
+GAP_CLASS = "gap-above"
 
 
 class TranscriptBlock(Static):
@@ -48,23 +58,36 @@ class TranscriptBlock(Static):
 
     DEFAULT_CSS = ""  # all styling lives in local_operator.tcss
 
+    #: Grouping key for adaptive spacing. Blocks that share a kind stack
+    #: tight while each stays one row; a change of kind always opens a gap.
+    SPACING_KIND: ClassVar[str] = "block"
+    #: True for a block that always opens a gap above itself regardless of
+    #: what preceded it — the turn boundary, not a content difference.
+    SPACING_LEAD: ClassVar[bool] = False
+    #: True for blocks that appear and vanish within a turn. They neither
+    #: take a gap nor anchor one, so nothing flickers when they are lifted.
+    SPACING_TRANSIENT: ClassVar[bool] = False
+
     #: Set False once the block will never mutate again.
     _finalized: bool = False
     #: Last applied content, kept for lazy settled_rows measurement.
-    _content: object = None
+    _content: RenderableType | None = None
     #: Memoized settled row count (None = not measured yet).
     _settled_rows_cache: int | None = None
+    #: Memoized "taller than one row?" answer for the spacing decision.
+    _multirow_cache: bool | None = None
 
-    def set_content(self, renderable: object) -> None:
+    def set_content(self, renderable: RenderableType) -> None:
         """Apply ``renderable`` as the block content (no-op once finalized)."""
         if self._finalized:
             return
         self._content = renderable
         self._settled_rows_cache = None  # invalidate the lazy count
+        self._multirow_cache = None
         self.update(renderable)
 
     @property
-    def renderable(self) -> object:
+    def renderable(self) -> RenderableType | None:
         """The current content renderable (rich) — inspection/test hook.
 
         Textual 8's ``Static`` no longer exposes a public ``renderable``;
@@ -93,9 +116,27 @@ class TranscriptBlock(Static):
             self._settled_rows_cache = _count_rows(self._content, self.size.width or 80)
         return self._settled_rows_cache
 
+    def spans_multiple_rows(self) -> bool:
+        """True when the block currently renders taller than a single row.
+
+        The ONE question adaptive spacing asks — deliberately a predicate
+        rather than a row count, so a block that can answer it from its own
+        state (a tool card knows; a streaming message knows from its source
+        text) never pays for a full render just to be spaced correctly.
+        The default measures whatever renderable is applied, memoized per
+        content revision.
+        """
+        if self._multirow_cache is None:
+            self._multirow_cache = _count_rows(self._content, self.size.width or 80) > 1
+        return self._multirow_cache
+
 
 class UserBlock(TranscriptBlock):
     """One user prompt at the gutter: a dim ``❯`` chevron at column 0."""
+
+    #: A prompt starts a turn — always give it air, whatever came before.
+    SPACING_KIND = "user"
+    SPACING_LEAD = True
 
     def __init__(self, text: str) -> None:
         super().__init__()
@@ -117,6 +158,8 @@ NOTICE_GLYPHS: dict[str, str] = {
 
 class NoticeBlock(TranscriptBlock):
     """One notice line: glyph + text, tinted by kind (D14), on the spine."""
+
+    SPACING_KIND = "notice"
 
     _KIND_TOKENS: ClassVar[dict[str, str]] = {
         "info": "dim",
@@ -146,7 +189,9 @@ class RichBlock(TranscriptBlock):
     Content rides the spine indent (D20).
     """
 
-    def __init__(self, renderable: object) -> None:
+    SPACING_KIND = "rich"
+
+    def __init__(self, renderable: RenderableType) -> None:
         super().__init__()
         self.add_class("rich-block")
         from rich.padding import Padding
@@ -162,6 +207,10 @@ class WorkingBlock(TranscriptBlock):
     shimmer is disabled (settings/env), the line falls back to a static dim
     marker so the running state stays legible in a still frame (D26).
     """
+
+    #: Lifted at turn end; it neither takes a gap nor anchors one, so no
+    #: blank row appears and then vanishes underneath the settled rows.
+    SPACING_TRANSIENT = True
 
     #: Repaint cadence — repaints animated loader text at 30 fps.
     _FRAME_MS = 33
@@ -202,13 +251,42 @@ class WorkingBlock(TranscriptBlock):
             self._timer = None
 
 
+def needs_gap_above(previous: "TranscriptBlock | None", block: "TranscriptBlock") -> bool:
+    """Whether ``block`` opens with one blank row given what preceded it.
+
+    The whole adaptive-spacing rule, in one pure function so it can be
+    reasoned about (and tested) without a running app:
+
+    - nothing above → no gap; the transcript meets the top edge
+    - either side transient (the working line) → no gap; it will vanish
+    - a turn-leading block (a user prompt) → always a gap
+    - a different KIND of block → a gap; the change of subject is the cue
+    - same kind, previous was ONE row → no gap; one-line tool traces are a
+      ledger and a ledger is dense
+    - same kind, previous was taller → a gap; multi-row output needs air or
+      the next block reads as its continuation
+    """
+    if previous is None:
+        return False
+    if block.SPACING_TRANSIENT or previous.SPACING_TRANSIENT:
+        return False
+    if block.SPACING_LEAD:
+        return True
+    if previous.SPACING_KIND != block.SPACING_KIND:
+        return True
+    return previous.spans_multiple_rows()
+
+
 class TranscriptView(ScrollableContainer):
     """The scrolling column every block appends into.
 
-    Owns exactly one separator behavior: none. Blocks carry no outer margin
-    and the container adds no blank filler rows (density is the brand); the
-    tcss pins ``padding: 0; margin: 0`` on every block. Appends scroll to
-    the bottom unless the user has scrolled up to read.
+    Separation is ADAPTIVE, decided by :func:`needs_gap_above` at the moment
+    a block is appended (and re-decided for the one block below a tool card
+    that expands). Consecutive one-line tool rows stay flush; prose and
+    multi-row output get a single blank row. Nothing else pads: the base
+    block selectors in the tcss declare no margin at all, so the gap can
+    only ever come from the deliberate class. Appends scroll to the bottom
+    unless the user has scrolled up to read.
 
     ``clear_blocks`` notifies an optional ``on_clear`` hook (TUI-009) so the
     app can reset its streaming/tool-card bookkeeping.
@@ -233,17 +311,62 @@ class TranscriptView(ScrollableContainer):
         virtual size (TUI-022) — an immediate scroll would target the stale
         pre-mount extent and land short.
         """
+        self._apply_gap(self._anchor_before(len(self._blocks)), block)
         self._blocks.append(block)
         stick_to_bottom = self._is_near_bottom()
         self.mount(block)
         if stick_to_bottom:
             self.call_after_refresh(self.scroll_end, animate=False)
 
+    def refresh_gap_after(self, block: TranscriptBlock) -> None:
+        """Re-decide the gap for the first real block below ``block``.
+
+        Called when a block changes height after the fact — a tool card
+        expanding from one row to many. Only the immediate neighbour can
+        change, so this stays O(1) rather than restyling the transcript.
+        """
+        try:
+            index = self._blocks.index(block)
+        except ValueError:
+            return
+        for following in self._blocks[index + 1 :]:
+            if following.SPACING_TRANSIENT:
+                continue
+            self._apply_gap(block, following)
+            return
+
+    def _anchor_before(self, index: int) -> TranscriptBlock | None:
+        """The last block before ``index`` that counts as "what came before".
+
+        Transient blocks are invisible to spacing: the working line sits
+        between a tool row and the next one for a second and must not change
+        how they relate.
+        """
+        for candidate in reversed(self._blocks[:index]):
+            if not candidate.SPACING_TRANSIENT:
+                return candidate
+        return None
+
+    @staticmethod
+    def _apply_gap(previous: TranscriptBlock | None, block: TranscriptBlock) -> None:
+        block.set_class(needs_gap_above(previous, block), GAP_CLASS)
+
     def remove_block(self, block: TranscriptBlock) -> None:
         """Remove one block (used to lift the boot hint, D9)."""
-        if block in self._blocks:
-            self._blocks.remove(block)
-            block.remove()
+        if block not in self._blocks:
+            return
+        index = self._blocks.index(block)
+        self._blocks.remove(block)
+        block.remove()
+        # Whatever fell into the removed block's place now has a different
+        # neighbour above it — most visibly the very first block, which must
+        # never carry a gap once the boot hint is lifted off the top.
+        for offset in range(index, len(self._blocks)):
+            following = self._blocks[offset]
+            if following.SPACING_TRANSIENT:
+                continue
+            self._apply_gap(self._anchor_before(offset), following)
+            return
 
     def blocks(self) -> list[TranscriptBlock]:
         """Blocks in append order (live and finalized)."""
@@ -266,7 +389,7 @@ class TranscriptView(ScrollableContainer):
         return self.scroll_offset.y >= max_offset - 2
 
 
-def _count_rows(renderable: object, width: int = 80) -> int:
+def _count_rows(renderable: RenderableType | None, width: int = 80) -> int:
     """Row count a renderable occupies, measured through rich (one model).
 
     Only called lazily from ``settled_rows`` — never on the streaming path.

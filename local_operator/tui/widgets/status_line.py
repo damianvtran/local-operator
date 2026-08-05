@@ -21,7 +21,7 @@ from pathlib import Path
 from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
-from textual.widget import Widget
+from textual.widgets import Static
 
 from local_operator.tui import theme as theme_mod
 
@@ -63,7 +63,9 @@ class StatusLine:
     follows the new width (one width model: ``rich.cells.cell_len``).
     """
 
-    def __init__(self, dock: Widget) -> None:
+    def __init__(self, dock: Static) -> None:
+        # A `Static`, not a bare `Widget`: the band is repainted by handing
+        # it a rich renderable, which only content widgets accept.
         self._dock = dock
         self._model_label: str = ""
         self._cwd: str = ""
@@ -110,6 +112,10 @@ class StatusLine:
     def _render(self, width: int) -> Text:
         dim = Style(color=theme_mod.semantic_color("dim"))
         muted = Style(color=theme_mod.semantic_color("muted"))
+        # Separators must sit BELOW the things they separate or they read as
+        # content: `faint` is the ramp step under `dim` and exists for
+        # exactly this — the dots recede and the segments group themselves.
+        seam = Style(color=theme_mod.semantic_color("faint"))
 
         # Left: brand glyph · model · cwd
         left = Text()
@@ -118,19 +124,19 @@ class StatusLine:
             left.append(self._model_label, style=muted)
         if self._cwd:
             if self._model_label:
-                left.append(_SEPARATOR, style=dim)
+                left.append(_SEPARATOR, style=seam)
             left.append(Path(self._cwd).name or self._cwd, style=dim)
         if self._streaming:
-            left.append(_SEPARATOR, style=dim)
+            # The aggregate working LINE (WorkingBlock) carries the shimmer;
+            # the band keeps a quiet activity glyph so a still frame still
+            # reads "live" (D26). With shimmer off, that line is static too,
+            # so the band spells the state out rather than relying on a
+            # glyph the eye may read as decoration.
             from local_operator.tui.shimmer import shimmer_enabled
 
-            if shimmer_enabled():
-                # The aggregate working LINE (WorkingBlock) carries the
-                # shimmer; the band keeps a quiet static activity glyph so a
-                # still frame still reads "live" (D26).
-                left.append(_SPINNER_FRAMES[self._spinner_index], style=dim)
-            else:
-                left.append(_SPINNER_FRAMES[self._spinner_index], style=dim)
+            left.append(_SEPARATOR, style=seam)
+            left.append(_SPINNER_FRAMES[self._spinner_index], style=dim)
+            if not shimmer_enabled():
                 left.append(" working", style=dim)
 
         # Right: tokens · cost
@@ -139,7 +145,7 @@ class StatusLine:
             right.append(f"{format_context_tokens(self._context_tokens)} tok", style=dim)
         if self._cost:
             if self._context_tokens > 0:
-                right.append(_SEPARATOR, style=dim)
+                right.append(_SEPARATOR, style=seam)
             right.append(self._cost, style=dim)
 
         left_cells = cell_len(left.plain)
