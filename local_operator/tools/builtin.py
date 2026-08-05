@@ -31,14 +31,16 @@ Conventions every tool here follows:
   that will change; paths outside the workspace are flagged in the approval
   text and always require approval, even for read-tier tools.
 
-The ``wake`` tool delegates to ``local_operator.harness.wake``; the import is
-deferred to execute time so this module has no hard dependency on the wake
-subsystem being importable (the session may run without wakes).
+The ``wake`` tool delegates its schedule maths to
+``local_operator.harness.wake``, which is pure data plus a timer and costs
+nothing to import; the tool itself is only advertised when the host actually
+attached a scheduler to the ``ToolContext``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import difflib
 import contextlib
 import fnmatch
 import os
@@ -57,10 +59,14 @@ from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
     AgentToolUpdate,
+    BrowserSurfaceProtocol,
     TextContent,
     ToolContext,
     ToolResult,
+    VariableStoreProtocol,
+    WakeSchedulerProtocol,
 )
+from local_operator.harness.wake import WakeSchedule, build_wake_schedule, format_duration
 
 # ---------------------------------------------------------------------------
 # Shared limits and helpers
@@ -213,7 +219,7 @@ def _text(
     text: str,
     *,
     useless: bool = False,
-    details: Any = None,
+    details: dict[str, Any] | None = None,
 ) -> ToolResult:
     """Build a plain-text result; ``details`` carries structured payload for
     renderers and compaction pruning (e.g. ``path`` for file tools)."""
@@ -236,7 +242,23 @@ def _validation_error(tool_call_id: str, tool_name: str, exc: ValidationError) -
     return _error(tool_call_id, tool_name, "invalid arguments:\n" + "\n".join(lines))
 
 
-def _guard(tool_name: str) -> Callable[..., Any]:
+#: The shape every ``execute_*`` in this module has. It differs from
+#: ``ToolExecuteFn`` only in accepting ``context=None``, which the bare-tool
+#: tests rely on; a function that accepts None also satisfies the stricter
+#: harness signature, so these still slot into ``AgentTool.execute``.
+ToolExecutor = Callable[
+    [
+        str,
+        dict[str, Any],
+        AbortSignal | None,
+        Callable[[AgentToolUpdate], None] | None,
+        ToolContext | None,
+    ],
+    Awaitable[ToolResult],
+]
+
+
+def _guard(tool_name: str) -> Callable[[ToolExecutor], ToolExecutor]:
     """Wrap an execute coroutine so unexpected exceptions become error results.
 
     The harness contract is that tools never throw into the loop: provider
@@ -245,7 +267,7 @@ def _guard(tool_name: str) -> Callable[..., Any]:
     model can self-correct and we can debug from transcripts.
     """
 
-    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+    def decorator(fn: ToolExecutor) -> ToolExecutor:
         async def wrapper(
             tool_call_id: str,
             args: dict[str, Any],
@@ -399,7 +421,11 @@ async def execute_bash(
     stdout_chunks: list[bytes] = []
     stderr_chunks: list[bytes] = []
 
-    async def _pump(stream: asyncio.StreamReader, sink: list[bytes]) -> None:
+    async def _pump(stream: asyncio.StreamReader | None, sink: list[bytes]) -> None:
+        # Both pipes were requested at spawn, so neither is ever None here;
+        # the guard keeps the reader honest instead of asserting.
+        if stream is None:
+            return
         try:
             while True:
                 chunk = await stream.read(65536)
@@ -724,6 +750,38 @@ class WriteParams(BaseModel):
     content: str = Field(description="Full file content to write.")
 
 
+def _line_delta(before: str, after: str) -> tuple[int, int]:
+    """Line counts added/removed between two file states, for the UI's +N/-N.
+
+    Uses a real sequence match rather than a length difference so a same-size
+    rewrite still reports its churn, and a pure insertion does not falsely
+    report removals. Whole-file replacement (write over an existing file) and
+    a one-hunk edit both funnel through here so the two tools cannot drift.
+
+    Cheap by construction: SequenceMatcher over LINES (not characters), and
+    the inputs are files a human is editing, so this is not a hot path.
+    """
+    if before == after:
+        return 0, 0
+    old_lines = before.splitlines()
+    new_lines = after.splitlines()
+    if not before:
+        return len(new_lines), 0
+    if not after:
+        return 0, len(old_lines)
+    added = removed = 0
+    matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "replace":
+            removed += i2 - i1
+            added += j2 - j1
+        elif tag == "delete":
+            removed += i2 - i1
+        elif tag == "insert":
+            added += j2 - j1
+    return added, removed
+
+
 @_guard("write")
 async def execute_write(
     tool_call_id: str,
@@ -743,14 +801,23 @@ async def execute_write(
     path, inside = _resolve_workspace_path(params.path, _safe_cwd(context))
 
     existed = path.exists()
+    previous = ""
+    if existed:
+        try:
+            previous = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            # Binary or unreadable prior content: we still write, we just
+            # cannot report a meaningful diff for it.
+            previous = ""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(params.content, encoding="utf-8")
     verb = "Overwrote" if existed else "Created"
+    added, removed = _line_delta(previous, params.content)
     return _text(
         tool_call_id,
         "write",
         f"{verb} {path} ({len(params.content)} chars).",
-        details={"path": str(path)},
+        details={"path": str(path), "added": added, "removed": removed},
     )
 
 
@@ -837,11 +904,12 @@ async def execute_edit(
         updated = content.replace(params.old_text, params.new_text, 1)
     path.write_text(updated, encoding="utf-8")
     replaced = occurrences if params.replace_all else 1
+    added, removed = _line_delta(content, updated)
     return _text(
         tool_call_id,
         "edit",
         f"Edited {path}: replaced {replaced} occurrence(s) of old_text.",
-        details={"path": str(path)},
+        details={"path": str(path), "added": added, "removed": removed},
     )
 
 
@@ -1148,8 +1216,9 @@ def build_grep_tool() -> AgentTool:
 #: this table (keyed by the context object's id when no session id exists).
 TODO_STORE: dict[str, list[dict[str, str]]] = {}
 #: Fallback store for contexts without a session id, so their lists never
-#: collide under the shared "" key.
-_CONTEXT_TODO_STORE: dict[int, list[dict[str, str]]] = {}
+#: collide under the shared "" key. Keyed by the context object's id rendered
+#: as a string, so every todo store in this module has one key type.
+_CONTEXT_TODO_STORE: dict[str, list[dict[str, str]]] = {}
 
 
 class TodoParams(BaseModel):
@@ -1164,20 +1233,23 @@ class TodoParams(BaseModel):
     )
 
 
-def _todo_store_and_key(
-    context: ToolContext | None,
-) -> tuple[dict[Any, list[dict[str, str]]], Any]:
+#: Every todo store — host-attached or module-level — maps one owner key to
+#: that owner's list of ``{"text": ..., "status": ...}`` items.
+TodoStore = dict[str, list[dict[str, str]]]
+
+
+def _todo_store_and_key(context: ToolContext | None) -> tuple[TodoStore, str]:
     """Resolve ``(store, key)`` for this context. An attached ``todos`` dict
     wins; otherwise the module table keyed by session id; a context with NO
     session id gets its own slot keyed by object id, never the shared "" key.
     """
-    store = getattr(context, "todos", None) if context else None
-    if isinstance(store, dict):
-        session_id = context.session_id if context else ""
-        return store, session_id or id(context)
+    if context is not None and context.todos is not None:
+        # A host-attached store wins even without a session id; the context's
+        # own identity keys the slot so bare contexts never share one.
+        return context.todos, context.session_id or str(id(context))
     if context is not None and context.session_id:
         return TODO_STORE, context.session_id
-    return _CONTEXT_TODO_STORE, id(context)
+    return _CONTEXT_TODO_STORE, str(id(context))
 
 
 @_guard("todo")
@@ -1286,17 +1358,15 @@ class WakeParams(BaseModel):
     id: str | None = Field(default=None, description="Schedule id (cancel; from wake list).")
 
 
-def _wake_due_label(schedule: Any) -> str:
-    from local_operator.harness.wake import _format_duration
-
+def _wake_due_label(schedule: WakeSchedule) -> str:
     due = datetime.fromtimestamp(schedule.next_due_at / 1000, tz=UTC)
-    every = f" every {_format_duration(schedule.every_ms)}" if schedule.every_ms else ""
+    every = f" every {format_duration(schedule.every_ms)}" if schedule.every_ms else ""
     fired = f" (fired {schedule.fired_count}x)" if schedule.fired_count else ""
     return f"next at {due.isoformat()}{every}{fired}"
 
 
-async def _wake_list(tool_call_id: str, scheduler: Any) -> ToolResult:
-    schedules = list(getattr(scheduler, "schedules", []))
+async def _wake_list(tool_call_id: str, scheduler: WakeSchedulerProtocol) -> ToolResult:
+    schedules = list(scheduler.schedules)
     if not schedules:
         return _text(
             tool_call_id,
@@ -1310,13 +1380,9 @@ async def _wake_list(tool_call_id: str, scheduler: Any) -> ToolResult:
 
 
 async def _wake_create(
-    tool_call_id: str, params: WakeParams, scheduler: Any, now_ms: int
+    tool_call_id: str, params: WakeParams, scheduler: WakeSchedulerProtocol, now_ms: int
 ) -> ToolResult:
-    # Deferred import: wakes are optional for the session; a missing module
-    # must not break tool import at startup.
-    from local_operator.harness import wake as wake_module
-
-    existing = list(getattr(scheduler, "schedules", []))
+    existing = list(scheduler.schedules)
     request: dict[str, Any] = {
         "message": params.message or "",
         "in": params.field_in,
@@ -1325,7 +1391,7 @@ async def _wake_create(
         "until": params.until,
         "limit": params.limit,
     }
-    outcome = wake_module.build_wake_schedule(request, existing, now_ms)
+    outcome = build_wake_schedule(request, existing, now_ms)
     if "error" in outcome:
         return _error(tool_call_id, "wake", outcome["error"])
     schedule = outcome["schedule"]
@@ -1339,10 +1405,12 @@ async def _wake_create(
     )
 
 
-async def _wake_cancel(tool_call_id: str, params: WakeParams, scheduler: Any) -> ToolResult:
+async def _wake_cancel(
+    tool_call_id: str, params: WakeParams, scheduler: WakeSchedulerProtocol
+) -> ToolResult:
     if not params.id:
         return _error(tool_call_id, "wake", "'cancel' requires the schedule id (see wake list)")
-    existing = list(getattr(scheduler, "schedules", []))
+    existing = list(scheduler.schedules)
     remaining = [s for s in existing if s.id != params.id]
     if len(remaining) == len(existing):
         ids = ", ".join(s.id for s in existing) or "none"
@@ -1359,7 +1427,7 @@ def build_wake_tool(context: ToolContext) -> AgentTool | None:
     """CreateIf builder: the tool only exists when the context carries a wake
     scheduler. A session without wakes must not advertise a tool whose every
     call errors (the createIf convention)."""
-    if getattr(context, "wake_scheduler", None) is None:
+    if context.wake_scheduler is None:
         return None
     return AgentTool(
         name="wake",
@@ -1391,7 +1459,7 @@ async def execute_wake(
         params = WakeParams(**args)
     except ValidationError as exc:
         return _validation_error(tool_call_id, "wake", exc)
-    scheduler = getattr(context, "wake_scheduler", None) if context else None
+    scheduler = context.wake_scheduler if context else None
     if scheduler is None:
         return _error(
             tool_call_id,
@@ -1431,13 +1499,13 @@ class ReadVariableParams(BaseModel):
 MAX_VARIABLE_VALUE_CHARS = 4000
 
 
-def _variable_store(context: ToolContext | None) -> Any:
+def _variable_store(context: ToolContext | None) -> VariableStoreProtocol:
     """The session's VariableStore, or a fresh env-only store as fallback.
 
     A session attaches its store (config variables + project file + env) to
     ``context.variables``; when absent (bare tool tests) we fall back to a
     store over the process environment so the tools still answer."""
-    if context is not None and getattr(context, "variables", None) is not None:
+    if context is not None and context.variables is not None:
         return context.variables
     from local_operator.variables import VariableStore
 
@@ -1575,25 +1643,25 @@ def cmux_browser_available() -> bool:
 class _BrowserSession:
     """Per-session browser state: the last opened surface id.
 
-    Lives on ToolContext (``context.browser``, extra="allow") so a subsequent
-    ``goto``/``screenshot`` reuses the surface the agent opened, and there is
-    one browser per agent session — never a fresh leaky surface per call.
+    Satisfies :class:`~local_operator.harness.types.BrowserSurfaceProtocol`
+    and lives on ``context.browser`` so a subsequent ``goto``/``screenshot``
+    reuses the surface the agent opened, and there is one browser per agent
+    session — never a fresh leaky surface per call.
     """
-
-    surface_id: str = ""
 
     def __init__(self) -> None:
         self.surface_id = ""
 
 
-def _browser_state(context: ToolContext | None) -> _BrowserSession:
-    state = getattr(context, "browser", None) if context else None
-    if state is None:
-        state = _BrowserSession()
-        if context is not None:
-            # Store back so later calls in the same session reuse it.
-            setattr(context, "browser", state)
-    return state
+def _browser_state(context: ToolContext | None) -> BrowserSurfaceProtocol:
+    if context is None:
+        # No context to remember it on: the caller gets a throwaway surface
+        # handle, which is why 'goto'/'screenshot' then report nothing open.
+        return _BrowserSession()
+    if context.browser is None:
+        # Store back so later calls in the same session reuse the surface.
+        context.browser = _BrowserSession()
+    return context.browser
 
 
 async def _run_cmux(argv: list[str], timeout: float = 30.0) -> tuple[int, str]:
@@ -1683,42 +1751,61 @@ async def execute_browser(
             return _error(tool_call_id, "browser", f"cmux goto failed: {out.strip()}")
         return _text(tool_call_id, "browser", f"Navigated {surface} to {params.url}.")
 
-    # screenshot
+    # screenshot — cmux takes the destination as ``--out <path>``; passing it
+    # positionally is silently IGNORED (cmux writes into its own temp dir and
+    # still exits 0), which would make us report a file that does not exist.
     target = params.path or ""
     if not target:
         import tempfile
 
         target = os.path.join(tempfile.gettempdir(), f"lo-browser-{surface}.png")
-    code, out = await _run_cmux(["browser", "--surface", surface, "screenshot", target])
+    code, out = await _run_cmux(["browser", "--surface", surface, "screenshot", "--out", target])
     if code != 0:
         return _error(tool_call_id, "browser", f"cmux screenshot failed: {out.strip()}")
+    # Exit 0 is not proof of a write: confirm the file landed before telling
+    # the model it can read it.
+    if not os.path.exists(target):
+        return _error(
+            tool_call_id,
+            "browser",
+            f"cmux reported success but no file at {target}: {out.strip()}",
+        )
     return _text(
         tool_call_id, "browser", f"Screenshot saved to {target}.", details={"path": target}
     )
 
 
-def _parse_surface_id(out: str) -> str:
-    """Best-effort surface id extraction from ``cmux --json new-surface``.
+#: A cmux surface handle looks like ``surface:73`` — a word, a colon, digits.
+#: Requiring that shape is what stops a status banner or an error message
+#: ("done", "error: could not start") from being adopted as a handle and then
+#: passed to every later --surface call.
+_SURFACE_REF_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:[0-9A-Za-z_-]+$")
 
-    Tolerates plain text or JSON; returns "" unless a plausible surface-id
-    token is found so a human banner never becomes a bogus --surface value."""
+
+def _parse_surface_id(out: str) -> str:
+    """Extract the surface handle from ``cmux --json new-surface`` output.
+
+    cmux emits ``surface_ref`` (e.g. ``{"surface_ref": "surface:73", ...}``);
+    the other spellings are accepted only as tolerant fallbacks. Returns ""
+    when nothing ref-shaped is found, so ``goto``/``screenshot`` fail with the
+    honest "no browser surface open" rather than a bogus handle.
+    """
     cleaned = out.strip()
     if cleaned.startswith("{"):
         import json as _json
 
         try:
             data = _json.loads(cleaned)
-            surface = data.get("surface") or data.get("surface_id") or data.get("id")
-            if surface:
-                return str(surface)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 — unparseable output is just no id
             return ""
-    # Fallback: a trailing token that looks like a surface id (letters/digits
-    # and dashes/underscores) — anything else is a banner, not an id.
+        for key in ("surface_ref", "surface", "surface_id", "id"):
+            value = data.get(key)
+            if value:
+                return str(value)
+        return ""
+    # Plain-text fallback: only a genuinely ref-shaped trailing token.
     token = cleaned.split()[-1] if cleaned else ""
-    if token and all(c.isalnum() or c in "-_" for c in token):
-        return token
-    return ""
+    return token if _SURFACE_REF_RE.match(token) else ""
 
 
 def build_browser_tool(context: ToolContext | None) -> AgentTool | None:

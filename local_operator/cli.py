@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import math
 import os
 import platform
@@ -886,10 +887,12 @@ def _apply_run_in(run_in: Optional[str]) -> Optional[int]:
         return None
     run_in_path = Path(run_in).resolve()
     if not run_in_path.is_dir():
-        print(f"\n\033[1;31mError: Invalid working directory: {run_in}\033[0m")
+        print(f"\n\033[1;31mError: Invalid working directory: {run_in}\033[0m", file=sys.stderr)
         return -1
     os.chdir(run_in_path)
-    print(f"\n\033[1;32mSetting working directory to: {run_in_path}\033[0m")
+    # These are OPERATOR notices, not data: they must go to stderr so they
+    # never interleave into the `exec --json` event stream on stdout.
+    print(f"\n\033[1;32mSetting working directory to: {run_in_path}\033[0m", file=sys.stderr)
     return None
 
 
@@ -1384,12 +1387,19 @@ def main() -> int:
             tui_auth_store = AuthStore(credential_manager=credential_manager)
             tui_controller = ProviderController(tui_auth_store, credential_manager)
             try:
+                # BIND BY KEYWORD. ``_run_with_scheduler`` forwards *args
+                # positionally, so a positional controller lands in whatever
+                # parameter happens to sit in that slot (it once landed in
+                # ``login_handler``) and leaves provider_controller None,
+                # disabling every provider slash command while the app still
+                # starts cleanly. functools.partial pins it by name so a future
+                # signature change cannot re-introduce that silent failure.
+                tui_entry = functools.partial(run_tui, provider_controller=tui_controller)
                 return asyncio.run(
                     _run_with_scheduler(
-                        run_tui,
+                        tui_entry,
                         session_factory,
                         theme_name,
-                        tui_controller,
                     )
                 )
             finally:

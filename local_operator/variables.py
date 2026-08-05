@@ -18,17 +18,23 @@ exposed wholesale to an auto-approved tool. What is visible:
 3. ONLY environment variables whose name starts with the ``LOCAL_OPERATOR_``
    opt-in prefix. Anything else in the environment is invisible to the agent.
 
-Names matching secret patterns (contain the substring ``key``, ``token``,
-``secret``, ``password``/``passwd``, ``credential``, ``auth``) are excluded
-from BOTH listing and reading, regardless of source, so a teammate-supplied
-project file cannot smuggle a credential past the denylist. Over-matching is
-the safe direction.
+Names matching secret patterns are excluded from BOTH listing and reading,
+regardless of source, so a teammate-supplied project file cannot smuggle a
+credential past the denylist. The pattern targets credential KINDS
+(``secret``, ``token``, ``password``/``passwd``, ``credential``,
+``authorization``, ``bearer``, ``api_key``/``apikey``) plus a name that ends
+in ``_key`` or is exactly ``key`` — deliberately NOT any name merely
+containing "key", which is far too common in legitimate config
+(``keyboard_layout``, ``monkeypatch``). Names are NFKC-normalised before
+matching so a Unicode homoglyph cannot slip a credential past it.
+Over-matching is the safe direction: it hides more, never less.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import unicodedata
 from pathlib import Path
 from typing import Mapping
 
@@ -41,12 +47,20 @@ ENV_ALLOW_PREFIX = "LOCAL_OPERATOR_"
 #: token "key" which is far too common in legitimate config names. The
 #: matching is deliberately loose — over-matching only hides more.
 _SECRET_RE = re.compile(
-    r"(?i)(secret|token|password|passwd|credential|authorization|bearer|" r"api_?key|_key$|^key\b)"
+    r"(?i)(secret|token|password|passwd|credential|authorization|bearer|"
+    r"api[_-]?key|apikey|[_-]key$|^key([_\-.]|$))"
 )
 
 
 def _is_secret(name: str) -> bool:
-    return bool(_SECRET_RE.search(name))
+    """True when a name looks like a credential and must stay invisible.
+
+    The name is NFKC-normalised first: without it a homoglyph or compatibility
+    codepoint (fullwidth ``ＡＰＩ_ＫＥＹ``, for example) reads as a different
+    string to the regex while still naming the same env var to the OS, which
+    would be a silent exfiltration path through a teammate-supplied file.
+    """
+    return bool(_SECRET_RE.search(unicodedata.normalize("NFKC", name)))
 
 
 class VariableStore:

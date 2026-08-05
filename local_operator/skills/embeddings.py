@@ -105,10 +105,22 @@ class LocalEmbedder:
     common-English noise floor that pure 3-gram TF carries, without erasing
     the 3-gram recall on short tokens.
 
-    Calibration (``tests/unit/skills/test_calibration.py`` is the contract):
-    over an 8-skill corpus, median unrelated-pair cosine ≈ 0.07, a clearly
-    matching query scores ≥ 0.42 on its skill while its best unrelated score
-    stays ≤ 0.15. ``default_threshold`` is the shipped midpoint of that gap.
+    Calibration (``tests/unit/skills/test_calibration.py`` is the contract).
+    The threshold is the midpoint of the gap between the WORST relevant score
+    and the BEST unrelated score, measured over a real 15-skill corpus with
+    the short phrasings people actually type ("deploy this MR to qa", "roll
+    back prod-2") rather than keyword-stuffed ideal queries:
+
+        relevant, correct skill : min 0.213, median 0.289
+        unrelated, best of any  : max 0.150, median 0.081
+        max-margin midpoint     : 0.182  ->  shipped 0.18
+
+    At 0.18 recall is 18/18 with zero false positives; the earlier 0.27 was
+    derived from an 8-skill corpus using only "clearly matching" queries that
+    scored >= 0.42, and on realistic input it silently returned NOTHING for
+    44% of queries whose correct skill still ranked first. Selecting nothing
+    is the expensive failure: the agent then works without the playbook it
+    needed, and no warning is emitted because zero matches is a legal result.
 
     Empty/short texts map to the zero vector, which scores 0 against
     everything — a skill with an empty routing signal is never injected.
@@ -119,8 +131,10 @@ class LocalEmbedder:
 
     def __init__(self, dim: int = 4096) -> None:
         self.dim = dim
-        # Shipped constant from the calibration corpus; pinned by test.
-        self.default_threshold = 0.27
+        # Max-margin midpoint from the 15-skill calibration above; pinned by
+        # test. Raising this trades recall for nothing — false positives are
+        # already zero at 0.18 with a 0.03 margin below the worst true match.
+        self.default_threshold = 0.18
 
     def _tokens(self, text: str) -> list[str]:
         return [_stem(token) for token in _WORD_RE.findall(text.lower()) if token not in _STOPWORDS]

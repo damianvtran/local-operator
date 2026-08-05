@@ -1,16 +1,29 @@
 """LocalEmbedder calibration: the contract behind the shipped threshold.
 
-RS-03: the previous 0.18 threshold sat BELOW the measured noise floor of its
-own vector space (median unrelated-pair cosine 0.31 at dim 512), so with
-k=8 selection degenerated toward full listing — exactly what blows the
-≤30k start-of-session token budget (docs/REWRITE.md performance contract).
+History, because this constant has moved twice and both moves had a reason:
+
+* 0.18 -> 0.27 (RS-03). At **dim 512** the median unrelated-pair cosine was
+  0.31, so 0.18 sat BELOW the noise floor and k=8 selection degenerated
+  toward full listing — exactly what blows the <=30k start-of-session token
+  budget (docs/REWRITE.md performance contract).
+* 0.27 -> 0.18 (this module). The dim is now **4096**, where the unrelated
+  noise floor is 0.07-0.08 and the best unrelated score across a real
+  15-skill corpus is 0.150. The old 0.27 was additionally derived from
+  keyword-rich "clearly matching" queries scoring >=0.42; measured against
+  the short phrasings people actually type it returned NOTHING for 44% of
+  queries whose correct skill still ranked FIRST. Selecting nothing is the
+  expensive failure mode: the agent proceeds without the playbook and no
+  warning fires, because zero matches is a legal result.
+
+Do not raise this back toward 0.27 on the strength of the RS-03 note alone —
+that measurement belongs to a vector space with 8x fewer dimensions. If the
+dim changes again, re-measure both ends of the gap and move the midpoint.
 
 This module ships the recalibration as a TEST: an 8-skill corpus spanning
-unrelated domains, absolute (not relative) assertions on the separation,
-and the pinned shipped constants (dim 4096, threshold 0.27 = midpoint of the
-measured gap between the worst unrelated score and the best match score).
-The test is the contract — the constants in ``embeddings.py`` exist because
-this corpus produces them.
+unrelated domains for the separation assertions, a realistic short-query set
+for the recall assertion, and the pinned shipped constants (dim 4096,
+threshold 0.18 = midpoint of the measured gap). The test is the contract —
+the constants in ``embeddings.py`` exist because these corpora produce them.
 """
 
 from __future__ import annotations
@@ -190,3 +203,131 @@ class TestCalibration:
                 unrelated = [score for name, score in score_map.items() if name != expected_name]
                 assert max(unrelated) < MAX_UNRELATED_QUERY_SCORE
                 assert embedder.default_threshold > max(unrelated)
+
+
+#: The six skills the realistic queries route to, with descriptions trimmed
+#: from the real shipped skills. Kept separate from CORPUS: that one is an
+#: 8-way unrelated-domain spread for SEPARATION, this one is a realistic
+#: same-organisation set where several entries share vocabulary ("tenant",
+#: "prod", "minerva") — which is exactly the condition a threshold has to
+#: survive, and the condition an 8-way spread of unrelated domains hides.
+REALISTIC_CORPUS: dict[str, str] = {
+    "minerva-platform-deployments": (
+        "End-to-end runbook for deploying, promoting, and rolling back Minerva "
+        "services and interfaces on EKS, including shipping an MR to qa, prod, "
+        "or prod-2, Kubernetes manifests, ingress, Terraform, ECR, and ArgoCD "
+        "promotion, rollback, and deploy pipelines."
+    ),
+    "minerva-support-workspace": (
+        "Minerva support workspace workflow for Slack, Gmail, Google Calendar, "
+        "and Drive. Support triage, customer issue context gathering, Slack "
+        "thread summaries or replies, Gmail support requests, and composing "
+        "customer support notes."
+    ),
+    "minerva-usage-metrics": (
+        "Minerva usage and data-audit playbooks. Customer search usage, search "
+        "volume, tenant activity, ClickHouse metrics tables, search counts, "
+        "token and cost usage, and reporting exact usage windows for "
+        "production or QA."
+    ),
+    "minerva-observability": (
+        "Datadog observability playbooks for support and incident "
+        "investigations. Production or QA logs, traces, spans, metrics, "
+        "monitors, error searches, and latency bottlenecks."
+    ),
+    "minerva-software-development": (
+        "Minerva SDLC and engineering guardrails for implementing, reviewing, "
+        "testing, and releasing code changes, plus architecture, MR prep, and "
+        "the agent review gate every merge request needs."
+    ),
+    "minerva-admin-apis": (
+        "Minerva operational API playbooks for support and tenant "
+        "administration. Admin API user and organization management, tenant "
+        "limits and entitlements, user invites, and LaunchDarkly feature flags."
+    ),
+}
+
+
+#: Short, realistic phrasings — the shape a user actually types, NOT the
+#: keyword-stuffed ideal query the original 0.27 was derived from. Each pairs
+#: a query with the skill that must be selected for it.
+REALISTIC_QUERIES: list[tuple[str, str]] = [
+    ("deploy this MR to qa", "minerva-platform-deployments"),
+    ("roll back prod-2", "minerva-platform-deployments"),
+    ("summarize the slack thread and reply", "minerva-support-workspace"),
+    ("customer search usage last month", "minerva-usage-metrics"),
+    ("check production logs for errors", "minerva-observability"),
+    ("open an MR and get it reviewed", "minerva-software-development"),
+]
+
+#: Queries with no matching skill in the corpus. The threshold must reject
+#: every one of them — recall is worthless if it is bought with noise.
+OFF_CORPUS_QUERIES: list[str] = [
+    "translate this poem into french",
+    "what is the capital of peru",
+    "sort this list of integers in python",
+    "explain quantum entanglement",
+    "aaaaaa bbbbbb cccccc",
+]
+
+
+class TestRealisticQueryRecall:
+    """The defect the 0.18 recalibration fixes.
+
+    At 0.27 every one of these queries ranked its correct skill FIRST and was
+    still dropped, because a short query's cosine lands in the 0.21-0.29 band.
+    Ranking was never the problem; the cut was.
+    """
+
+    def _corpus_scores(self, embedder: LocalEmbedder, query: str) -> dict[str, float]:
+        query_vec = embedder.embed_one(query)
+        return {
+            name: _cos(query_vec, embedder.embed_one(f"{name}: {desc}"))
+            for name, desc in REALISTIC_CORPUS.items()
+        }
+
+    def test_shipped_threshold_admits_every_realistic_query(self) -> None:
+        embedder = LocalEmbedder()
+        missed: list[str] = []
+        for query, expected in REALISTIC_QUERIES:
+            scores = self._corpus_scores(embedder, query)
+            if scores[expected] < embedder.default_threshold:
+                missed.append(f"{query!r} -> {expected} scored {scores[expected]:.4f}")
+        assert not missed, "threshold drops relevant skills:\n  " + "\n  ".join(missed)
+
+    def test_correct_skill_ranks_first_for_realistic_queries(self) -> None:
+        """Separate from the threshold: if ranking breaks, no threshold saves
+        it, so the two failure modes get separate tests."""
+        embedder = LocalEmbedder()
+        wrong: list[str] = []
+        for query, expected in REALISTIC_QUERIES:
+            scores = self._corpus_scores(embedder, query)
+            top = max(scores, key=lambda name: scores[name])
+            if top != expected:
+                wrong.append(f"{query!r} -> {top} (expected {expected})")
+        assert not wrong, "ranking regressed:\n  " + "\n  ".join(wrong)
+
+    def test_off_corpus_queries_select_nothing(self) -> None:
+        """The other half of the contract: 100% recall must cost 0% noise."""
+        embedder = LocalEmbedder()
+        leaked: list[str] = []
+        for query in OFF_CORPUS_QUERIES:
+            scores = self._corpus_scores(embedder, query)
+            best = max(scores, key=lambda name: scores[name])
+            if scores[best] >= embedder.default_threshold:
+                leaked.append(f"{query!r} -> {best} scored {scores[best]:.4f}")
+        assert not leaked, "threshold admits unrelated skills:\n  " + "\n  ".join(leaked)
+
+    def test_threshold_sits_inside_the_realistic_gap(self) -> None:
+        """Pins the MARGIN, not just the constant: the shipped threshold must
+        stay strictly between the worst true match and the best false one, so
+        a future embedder change that narrows the gap fails here loudly."""
+        embedder = LocalEmbedder()
+        worst_relevant = min(self._corpus_scores(embedder, q)[exp] for q, exp in REALISTIC_QUERIES)
+        best_unrelated = max(
+            max(self._corpus_scores(embedder, q).values()) for q in OFF_CORPUS_QUERIES
+        )
+        assert best_unrelated < embedder.default_threshold < worst_relevant, (
+            f"threshold {embedder.default_threshold} outside realistic gap "
+            f"({best_unrelated:.4f}, {worst_relevant:.4f})"
+        )

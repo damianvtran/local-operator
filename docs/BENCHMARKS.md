@@ -29,15 +29,31 @@ Notes:
 ## Base harness overhead
 
 Constructing one session (imports + auth store + skills index + embedding
-backend + tool inventory + transcript) adds about **+50 MiB peak RSS** on top
-of a bare interpreter (20 MiB -> 70 MiB). That is almost entirely the enabled
-skills/embedding stack and the module graph; a session with no skills skips
-the embedder. This is the fixed cost — everything else is agent workload.
+backend + tool inventory + transcript) adds **+49.3 MiB peak RSS** on top of
+a bare interpreter (20.0 -> 70.3 MiB maxrss, measured). That is almost
+entirely the enabled skills/embedding stack and the module graph; a session
+with no skills skips the embedder. This is the fixed cost — everything else
+is agent workload.
 
-`scripts/bench_context_budget.py` measures the startup system-prompt size:
-**~2 000 tokens** against the <=30k budget.
-`scripts/bench_cache_rate.py` measures structural prefix stability: **93.5%**
-(contract >= 90%).
+`scripts/bench_context_budget.py` measures the startup system-prompt size.
+The figure depends on the skills corpus, so it is only meaningful quoted
+alongside one:
+
+| skills corpus | static listing | semantic worst case | tool schemas | total |
+|---|---|---|---|---|
+| 15 skills (`~/.omp/agent/skills`) | 2 859 | 1 392 (3 of 15 selected) | 1 175 | **2 567** |
+
+That is 8.5% of the <=30k budget. Reproduce with:
+
+```
+.venv/bin/python scripts/bench_context_budget.py --skills-dir <corpus>
+```
+
+`scripts/bench_cache_rate.py` measures structural prefix stability: **94.1%**
+(contract >= 90%). A live 30-turn trajectory measured a **94.2%** cache rate,
+$0.0164 against $0.0517 uncached (68% saving). OpenRouter's shared pool does
+not report cache statistics, so live figures require a direct provider key;
+the structural number is the one this repo can reproduce unattended.
 
 ## Token / turn discipline
 
@@ -49,3 +65,35 @@ Values and skills are deliberately NOT baked into the context:
   skills block rides LAST in a fixed-arity block list so the conversation
   prefix stays byte-stable (the cache design).
 - The env block is ~3 lines (platform, python, cwd), never a full dump.
+
+## Install weight
+
+The default install carries no compiled wheel except `pydantic-core`, which
+is what makes a Windows install fast and build-tool-free:
+
+| install | packages | site-packages |
+|---|---|---|
+| default (`pip install -e .`) | 25 | 23 MB |
+| everything (`.[all]`) | 56 | 76 MB |
+| before this work | 63 | 112 MB |
+
+Optional features live behind extras (`server`, `mcp`, `images`,
+`tokenizer`) and each degrades with an actionable message naming the extra
+rather than an ImportError. `faiss-cpu`+`numpy` (34 MB of compiled code) were
+replaced by an exhaustive inner-product scan, and Pillow by a ~100-line
+grayscale PNG encoder; both are exercised by the test suite against
+reference implementations.
+
+## Browser use
+
+The `browser` tool is advertised only when a CMUX browser is reachable, so
+the model never sees a capability the host cannot honour. Verified end to end
+against the real `cmux` binary — the agent opened `https://example.com`,
+captured a 1600x1200 / 67 821-byte PNG, and confirmed the file itself with
+`ls`:
+
+```
+browser {"action":"open","url":"https://example.com"}   -> surface:95
+browser {"action":"screenshot","path":".../example.png"} -> saved
+bash    ls -la .../example.png                           -> 67821 bytes
+```
