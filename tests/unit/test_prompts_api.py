@@ -137,10 +137,12 @@ DATE = "2026-08-04"
 
 
 def test_blocks_isolate_volatile_content() -> None:
-    # With skills: [instructions, inventory, skills, env].
+    # Fixed arity, cache-layout order: [instructions, inventory, env, skills].
+    # The per-turn volatile skills block rides LAST so a selection change can
+    # never invalidate the conversation prefix after it.
     blocks = build_system_blocks(TOOLS, SKILLS, ENV, DATE)
     assert len(blocks) == 4
-    instructions, inventory, skills, env_block = blocks
+    instructions, inventory, env_block, skills = blocks
 
     # block 0: stable instructions only
     assert "Local Operator" in instructions
@@ -155,21 +157,24 @@ def test_blocks_isolate_volatile_content() -> None:
     assert "demo" not in inventory
     assert DATE not in inventory and "Darwin" not in inventory
 
-    # block 2: the skills listing verbatim, in its own block
-    assert skills == SKILLS
-
-    # last block: date + env only
+    # block 2: date + env only
     assert DATE in env_block
     assert "Darwin" in env_block
     assert "demo" not in env_block
 
+    # last block: the skills listing verbatim
+    assert skills == SKILLS
 
-def test_no_skills_drops_the_skills_block_but_env_stays_last() -> None:
+
+def test_no_skills_keeps_fixed_arity_with_placeholder() -> None:
+    # The block list is fixed-arity: an empty selection emits the constant
+    # placeholder, never drops the block (breakpoint derivation counts
+    # blocks).
     blocks = build_system_blocks(TOOLS, "", ENV, DATE)
-    assert len(blocks) == 3
+    assert len(blocks) == 4
     assert "- bash: Run a shell command." in blocks[1]
-    assert "## Skills" not in blocks[1]
-    assert blocks[-1].startswith(f"Today is {DATE}.")
+    assert blocks[2].startswith(f"Today is {DATE}.")
+    assert blocks[3] == "<skills/>"
 
 
 def test_block_zero_and_one_are_byte_stable_across_turns() -> None:
@@ -186,14 +191,16 @@ def test_block_zero_and_one_are_byte_stable_across_turns() -> None:
 def test_skills_only_ever_appear_in_their_own_block() -> None:
     blocks = build_system_blocks(TOOLS, SKILLS, ENV, DATE)
     for index, block in enumerate(blocks):
-        if index == 2:
-            continue  # the skills block itself
+        if index == 3:
+            continue  # the skills block itself (last, volatile)
         assert "demo: A demo skill." not in block
 
 
-def test_env_and_date_only_in_the_last_block() -> None:
+def test_env_and_date_never_in_the_stable_head() -> None:
+    # The stable head (instructions, inventory) must stay byte-stable; env
+    # and date ride in their own block (index 2), skills last.
     blocks = build_system_blocks(TOOLS, SKILLS, ENV, DATE)
-    for block in blocks[:-1]:
+    for block in blocks[:2]:
         assert DATE not in block
         assert "Darwin" not in block
 
@@ -212,4 +219,4 @@ def test_inventory_block_matches_default_tool_order() -> None:
 
 def test_env_block_handles_empty_env_details() -> None:
     blocks = build_system_blocks(TOOLS, "", "", DATE)
-    assert blocks[-1] == f"Today is {DATE}."
+    assert blocks[2] == f"Today is {DATE}."

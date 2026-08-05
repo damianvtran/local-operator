@@ -250,12 +250,12 @@ def _env_details() -> str:
 @dataclass
 class _SkillsHooks:
     """Shared mutable state for skills wiring: the built index, the name map,
-    and a per-query block cache (retries re-ask the blocks provider; the
-    embedding round-trip must not repeat for an identical query)."""
+    and the session-frozen skills block (the first prompt selects; later
+    turns reuse it so the system prefix stays byte-stable)."""
 
     index: Any = None
     by_name: dict[str, Any] = field(default_factory=dict)
-    block_cache: dict[str, str] = field(default_factory=dict)
+    frozen_block: str | None = None
 
 
 async def _setup_skills(
@@ -312,21 +312,29 @@ async def _setup_skills(
 
 
 async def _select_skills_block(hooks: _SkillsHooks, query: str) -> str:
-    """Per-turn semantic selection: embed the query, top-k above threshold,
-    render the volatile ``<skills>`` block. Cached per query text; every
-    failure degrades to an empty block (the provider closure catches)."""
+    """Session-frozen semantic selection: the FIRST prompt selects, later
+    turns reuse the frozen block.
+
+    Per-turn re-selection is incompatible with prompt caching: the skills
+    block sits in the system prefix, and any change to it invalidates the
+    entire conversation after it on every turn (the cache bench measured
+    ~40% stability under per-turn churn). omp resolves this by selecting at
+    session start and letting the agent pull deeper context via skill://
+    reads (progressive disclosure) — the same contract here: the frozen
+    listing names the relevant skills, the read tool fetches their bodies.
+    Every failure degrades to an empty block.
+    """
+    if hooks.frozen_block is not None:
+        return hooks.frozen_block
     query = query.strip()
     if not query or hooks.index is None:
+        hooks.frozen_block = ""
         return ""
-    cached = hooks.block_cache.get(query)
-    if cached is not None:
-        return cached
     from local_operator.skills.api import render_block
 
     picked = await hooks.index.select(query)
-    block = render_block(picked)
-    hooks.block_cache[query] = block
-    return block
+    hooks.frozen_block = render_block(picked)
+    return hooks.frozen_block
 
 
 def _make_skill_resolver(hooks: _SkillsHooks) -> Callable[[str], str | None]:
