@@ -102,6 +102,12 @@ def test_background_job_notices_go_to_stderr(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", lambda _a: None)
     monkeypatch.setattr(exec_mode, "_ensure_logs_dir", lambda: tmp_path)
     monkeypatch.setattr(exec_mode, "_append_job_record", lambda *a, **k: None)
+    # LOGS_DIR is resolved at IMPORT time from Path.home(), so patching only
+    # _ensure_logs_dir left the log path pointing at the real $HOME — the test
+    # passed on a machine that happened to have that directory and failed on a
+    # clean one. Both have to be redirected.
+    monkeypatch.setattr(exec_mode, "LOGS_DIR", tmp_path)
+    monkeypatch.setattr(exec_mode, "JOBS_LEDGER", tmp_path / "jobs.jsonl", raising=False)
 
     class FakeProc:
         pid = 4242
@@ -125,3 +131,30 @@ def test_the_purity_assertion_itself_catches_pollution(polluted: str) -> None:
     three shapes that shipped to stdout in the past."""
     with pytest.raises(AssertionError):
         _assert_stdout_is_json_only('{"type":"agent_start"}\n' + polluted + "\n", "fixture")
+
+
+def test_foreground_exec_preflight_errors_go_to_stderr(monkeypatch) -> None:
+    """The FOREGROUND `exec --json` preflight. The background twins of these two
+    prints were fixed first and these were missed, which is why the path with
+    the highest chance of being scripted is covered explicitly."""
+    from local_operator import exec_mode
+
+    def boom(_args):
+        raise ValueError("Model name is not configured.")
+
+    monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", boom)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["local-operator", "--hosting", "openrouter", "exec", "--json", "say hi"],
+    )
+    stdout, stderr = _streams(cli.main)
+    _assert_stdout_is_json_only(stdout, "foreground exec preflight (ValueError)")
+    assert "Model name is not configured." in stderr
+
+    def explode(_args):
+        raise RuntimeError("resolver exploded")
+
+    monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", explode)
+    stdout, stderr = _streams(cli.main)
+    _assert_stdout_is_json_only(stdout, "foreground exec preflight (Exception)")
+    assert "preflight failed" in stderr

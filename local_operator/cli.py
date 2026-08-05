@@ -1274,10 +1274,19 @@ def main() -> int:
                 try:
                     hosting, _model = resolve_hosting_model_dry(exec_args)
                 except ValueError as exc:
-                    print(f"\n\033[1;31mError: {exc}\033[0m")
+                    # stderr: this is the FOREGROUND `exec --json` path, so
+                    # stdout is the event stream. The byte-identical twins in
+                    # exec_mode._spawn_background were fixed earlier and these
+                    # were missed — the flag combination that reaches them
+                    # (`exec --json` with a bad or absent hosting/model) is the
+                    # most likely one to be scripted.
+                    print(f"\n\033[1;31mError: {exc}\033[0m", file=sys.stderr)
                     return -1
                 except Exception as exc:  # noqa: BLE001
-                    print(f"\n\033[1;31mError: preflight failed: {exc}\033[0m")
+                    print(
+                        f"\n\033[1;31mError: preflight failed: {exc}\033[0m",
+                        file=sys.stderr,
+                    )
                     return -1
                 key_result = _preflight_api_key(hosting, CredentialManager(config_dir))
                 if key_result is not None:
