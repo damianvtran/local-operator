@@ -3,6 +3,7 @@ streaming with fake clients/auth."""
 
 from __future__ import annotations
 
+import asyncio
 import random
 from collections.abc import AsyncIterator
 from typing import Any
@@ -228,7 +229,9 @@ class ScriptedClient:
         self._events = events
         self.calls = 0
 
-    async def stream(self, request: ChatRequest, api_key: str | None) -> AsyncIterator[Any]:
+    async def stream(
+        self, request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
         self.calls += 1
         if isinstance(self._events, Exception):
             raise self._events
@@ -258,7 +261,9 @@ async def test_stream_auth_error_rotates_credential() -> None:
     used_keys: list[str | None] = []
 
     async def client_for(spec: ModelSpec) -> Any:
-        def wrapper(request: ChatRequest, api_key: str | None) -> AsyncIterator[Any]:
+        def wrapper(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
             used_keys.append(api_key)
             return (failing if api_key == "bad-key" else succeeding).stream(request, api_key)
 
@@ -280,8 +285,10 @@ class _FnClient:
     def __init__(self, fn: Any) -> None:
         self._fn = fn
 
-    async def stream(self, request: ChatRequest, api_key: str | None) -> AsyncIterator[Any]:
-        async for event in self._fn(request, api_key):
+    async def stream(
+        self, request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        async for event in self._fn(request, api_key, oauth_access):
             yield event
 
 
@@ -318,7 +325,7 @@ async def test_stream_non_retryable_stops_provider_immediately() -> None:
     the fallback chain instead of re-trying the same key."""
     calls = {"n": 0}
 
-    def fail(request: ChatRequest, api_key: str | None) -> AsyncIterator[Any]:
+    def fail(request: ChatRequest, api_key: str | None, oauth_access: Any = None) -> AsyncIterator[Any]:
         calls["n"] += 1
         raise ProviderError(400, "bad request", retryable=False)
 
@@ -336,3 +343,105 @@ async def test_stream_non_retryable_stops_provider_immediately() -> None:
     ]
     assert calls["n"] == 1  # 400 is not retried on the same provider
     assert any(isinstance(e, StreamTextDelta) and e.delta == "b" for e in got)
+
+
+async def test_transport_retries_honor_budget_same_key_first() -> None:
+    """PR-06: retryable 5xx consumes retry.maxRetries on the SAME key with
+    backoff BEFORE any credential rotation."""
+    attempts: list[str | None] = []
+
+    def flaky(request: ChatRequest, api_key: str | None, oauth_access: Any = None) -> AsyncIterator[Any]:
+        attempts.append(api_key)
+        raise ProviderError(503, "flaky", retryable=True)
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return _FnClient(flaky)
+
+    auth = FakeAuth({"openai": ["k1", "k2"]})
+    settings = {"retry": {"baseDelayMs": 1, "maxRetries": 2, "fallbackChains": {}}}
+    with pytest.raises(ProviderError) as excinfo:
+        async for _ in stream_with_failover(_request(), auth, settings, client_for):
+            pass
+    assert excinfo.value.status == 503
+    # Two same-key retries before rotation, then the sibling once.
+    assert attempts == ["k1", "k1", "k1", "k2", "k2", "k2"]
+    assert len(auth.rotations) == 1  # rotation only after the budget is spent
+
+
+async def test_403_rotates_once_per_credential_no_double_rotation() -> None:
+    """PR-04/26: a 403 must go through resolve_next_key ONLY — one
+    rotate_sibling per failed credential, never the old direct double rotate."""
+    used: list[str | None] = []
+
+    def denied(request: ChatRequest, api_key: str | None, oauth_access: Any = None) -> AsyncIterator[Any]:
+        used.append(api_key)
+        raise ProviderError(403, "forbidden", auth_error=True)
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return _FnClient(denied)
+
+    auth = FakeAuth({"openai": ["k1", "k2"]})
+    with pytest.raises(ProviderError) as excinfo:
+        async for _ in stream_with_failover(
+            _request(), auth, {"retry": {"baseDelayMs": 1, "fallbackChains": {}}}, client_for
+        ):
+            pass
+    assert excinfo.value.status == 403
+    assert used == ["k1", "k2"]
+    # Exactly one rotation per credential (old code rotated twice per 403).
+    assert [key for _provider, key in auth.rotations] == ["k1", "k2"]
+
+
+async def test_ordinary_401_single_refresh_plus_single_switch() -> None:
+    """PR-07: an ordinary 401 gets exactly one refresh + one sibling switch
+    (legacyAuthSwitchUsed), even when more siblings exist."""
+    used: list[str | None] = []
+
+    def unauthorized(request: ChatRequest, api_key: str | None, oauth_access: Any = None) -> AsyncIterator[Any]:
+        used.append(api_key)
+        raise ProviderError(401, "unauthorized", auth_error=True)
+
+    class SwitchOnceAuth(FakeAuth):
+        async def get_api_key(self, provider: str, session_id: str | None = None, **kwargs: Any) -> str | None:
+            # Force-refresh returns the SAME (failed) bearer; only the
+            # last_chance leg yields the next sibling.
+            if kwargs.get("force_refresh"):
+                return self.keys[provider][0]
+            return await super().get_api_key(provider, session_id, **kwargs)
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return _FnClient(unauthorized)
+
+    auth = SwitchOnceAuth({"openai": ["k1", "k2", "k3"]})
+    with pytest.raises(ProviderError):
+        async for _ in stream_with_failover(
+            _request(), auth, {"retry": {"baseDelayMs": 1, "fallbackChains": {}}}, client_for
+        ):
+            pass
+    assert used == ["k1", "k2"]  # k3 never touched: switch spent
+
+
+async def test_abort_interrupts_backoff_sleep() -> None:
+    """PR-19: the backoff sleep races the abort signal and loses."""
+    from local_operator.harness.types import AbortSignal
+
+    def flaky(request: ChatRequest, api_key: str | None, oauth_access: Any = None) -> AsyncIterator[Any]:
+        raise ProviderError(503, "flaky", retryable=True)
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return _FnClient(flaky)
+
+    signal = AbortSignal()
+    settings = {"retry": {"baseDelayMs": 60_000, "fallbackChains": {}}}
+
+    async def abort_soon() -> None:
+        await asyncio.sleep(0.05)
+        signal.abort("user cancelled")
+
+    task = asyncio.create_task(abort_soon())
+    with pytest.raises(ProviderError):
+        async for _ in stream_with_failover(
+            _request(), FakeAuth({"openai": ["k"]}), settings, client_for, signal=signal
+        ):
+            pass
+    await task

@@ -19,8 +19,15 @@ from local_operator.providers.registry import (
 )
 
 
-def _callbacks_interactive() -> LoginCallbacks:
-    """input()/print-based callbacks for terminal logins."""
+def _callbacks_interactive(definition: Any) -> LoginCallbacks:
+    """print-based callbacks for terminal logins.
+
+    The paste-code prompt is attached ONLY for providers that declare
+    ``paste_code_flow`` (omp trap: for the rest it races the loopback HTTP
+    callback and leaves the terminal blocked). It runs in a thread via
+    ``asyncio.to_thread(input, ...)`` so the callback server keeps serving
+    the browser redirect while the prompt is pending.
+    """
 
     def on_auth_url(url: str, instructions: str | None = None) -> None:
         print(f"\nOpen this URL to authorize:\n  {url}")
@@ -30,15 +37,16 @@ def _callbacks_interactive() -> LoginCallbacks:
     def on_progress(message: str) -> None:
         print(message)
 
-    def on_manual_code_input() -> str | None:
+    async def on_manual_code_input() -> str | None:
         try:
-            value = input("Paste the code here (empty to cancel): ").strip()
+            value = await asyncio.to_thread(input, "Paste the code here (empty to cancel): ")
         except (EOFError, KeyboardInterrupt):
             return None
-        return value or None
+        return value.strip() or None
 
+    manual_input = on_manual_code_input if getattr(definition, "paste_code_flow", False) else None
     return LoginCallbacks(
-        on_auth_url=on_auth_url, on_progress=on_progress, on_manual_code_input=on_manual_code_input
+        on_auth_url=on_auth_url, on_progress=on_progress, on_manual_code_input=manual_input
     )
 
 
@@ -61,7 +69,7 @@ def run_login(provider_id: str | None, credential_manager: Any, auth_store: Any)
         return 1
 
     async def _run() -> Any:
-        return await definition.login(_callbacks_interactive())  # type: ignore[misc]
+        return await definition.login(_callbacks_interactive(definition))  # type: ignore[misc]
 
     try:
         result = asyncio.run(_run())

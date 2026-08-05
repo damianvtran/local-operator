@@ -72,6 +72,7 @@ class AnthropicOAuthFlow(OAuthCallbackFlow):
         open_browser: Any = None,
         signal: AbortSignal | None = None,
         manual_input_only: bool = False,
+        http_client: httpx.AsyncClient | None = None,
     ) -> None:
         super().__init__(
             CallbackFlowOptions(
@@ -84,7 +85,8 @@ class AnthropicOAuthFlow(OAuthCallbackFlow):
             signal=signal,
         )
         self._verifier: str | None = None
-        self._http: httpx.AsyncClient | None = None
+        # Injected httpx client (tests) — ctor-injected like every other flow.
+        self._http = http_client
 
     async def generate_auth_url(self, state: str, redirect_uri: str) -> str:
         verifier, challenge = create_pkce_pair()
@@ -135,13 +137,16 @@ class AnthropicOAuthFlow(OAuthCallbackFlow):
         return await _build_credentials(token, http_client=self._http, include_org=True)
 
 
-async def _fetch_identity(access_token: str, http_client: httpx.AsyncClient | None) -> dict[str, Any]:
+async def _fetch_identity(
+    access_token: str, http_client: httpx.AsyncClient | None, model: str = "claude-sonnet-4-5"
+) -> dict[str, Any]:
     """Fallback identity source when the token response carries no org info."""
     client = http_client or httpx.AsyncClient(timeout=30.0)
     try:
         response = await client.get(
             BOOTSTRAP_URL,
-            params={"entrypoint": "cli", "includeOrg": "true"},
+            # omp sends the model too; the bootstrap response is model-scoped.
+            params={"entrypoint": "cli", "includeOrg": "true", "model": model},
             headers={"Authorization": f"Bearer {access_token}"},
         )
         if response.status_code != 200:
@@ -184,7 +189,7 @@ async def _build_credentials(
         email, account_id, org_id, org_name = _extract_identity(token)
         if account_id is None:
             identity = await _fetch_identity(access, http_client)
-            email, account_id, org_id, org_name = _extract_identity(identity) or (None, None, None, None)
+            email, account_id, org_id, org_name = _extract_identity(identity)
         if email:
             creds["email"] = email
         if account_id:
@@ -210,8 +215,8 @@ async def login_anthropic(
         open_browser=open_browser,
         signal=signal,
         manual_input_only=manual_input_only,
+        http_client=http_client,
     )
-    flow._http = http_client  # reserved for tests that inject a transport
     return await flow.run()
 
 

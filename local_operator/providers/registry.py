@@ -21,9 +21,6 @@ from local_operator.providers.oauth.callback_server import LoginCallbacks
 
 WireFormat = Literal["openai-compat", "anthropic", "google", "mock"]
 
-# Returned by env-key callables when nothing is set.
-AUTHENTICATED_SENTINEL = "<authenticated>"
-
 LoginFn = Callable[..., Awaitable[Any]]
 RefreshFn = Callable[..., Awaitable[dict[str, Any]]]
 GetApiKeyFn = Callable[[dict[str, Any]], str]

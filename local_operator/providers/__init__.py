@@ -15,7 +15,7 @@ public surface consumed by other streams:
   ``LoopConfig.stream_fn`` from an ``AuthStore``.
 """
 
-from local_operator.providers.auth_store import AuthStore, StoredCredential
+from local_operator.providers.auth_store import AuthStore, OAuthAccess, StoredCredential
 from local_operator.providers.clients import (
     AnthropicClient,
     GoogleClient,
@@ -49,12 +49,10 @@ __all__ = [
     "AuthStore",
     "GoogleClient",
     "MockClient",
+    "OAuthAccess",
     "OpenAICompatClient",
     "ProviderDefinition",
     "ProviderError",
-    "RetrySettings",
-    "StoredCredential",
-    "WireClient",
     "backoff_delay_ms",
     "env_key_name",
     "expand_fallback_candidates",
