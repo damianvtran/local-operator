@@ -198,12 +198,26 @@ class Transcript:
             first_kept_id = compaction.payload.get("first_kept_entry_id")
             # The first kept entry normally sits BEFORE the compaction marker
             # (messages are persisted as they happen; the marker comes last),
-            # so scan the whole transcript.
-            start = compaction_index + 1
-            for i in range(len(entries)):
-                if entries[i].id == first_kept_id:
-                    start = i
-                    break
+            # so scan the whole transcript. If the id no longer resolves (a
+            # dropped malformed line, a converter-minted id), replaying from
+            # compaction_index + 1 would point PAST the kept window and lose
+            # every message compaction promised to preserve. Replaying too
+            # much is recoverable at the next compaction; silent amnesia is
+            # not, so fall back to the full history with an error.
+            start = 0
+            if first_kept_id is None:
+                start = compaction_index + 1
+            else:
+                for i in range(len(entries)):
+                    if entries[i].id == first_kept_id:
+                        start = i
+                        break
+                else:
+                    logger.error(
+                        "first_kept_entry_id %s not found in transcript; "
+                        "replaying full history",
+                        first_kept_id,
+                    )
 
         out: list[AgentMessage] = list(prefix)
         for entry in entries[start:]:

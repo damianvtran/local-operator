@@ -157,41 +157,17 @@ def resolve_hosting_model(
 def default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
     """Render transcript entries into the LLM-visible message list.
 
-    The harness has no default converter (stream A contract), so the host
-    supplies one. Plain :class:`Message` entries pass through; custom entries
-    render by ``custom_type``:
-
-    - ``compaction_summary`` -> a system-attributed user message carrying the
-      summary (the model must see it as context, not as its own words);
-    - ``wake_prompt`` -> a user message of the scheduled prompt text;
-    - anything else is dropped (skill prompts and bookkeeping entries are
-      volatile; they reach the model via the system blocks, not the log).
+    Thin alias over the engine's single converter
+    (:func:`local_operator.session.session._default_convert_to_llm`). Two
+    renderings of the same entry type is exactly what let the snapcompact
+    path diverge — the host converter replayed the archive's full text while
+    dropping the frames, so a compaction pass reduced nothing. One renderer,
+    imported, keeps the frame replay and the entry-id passthrough in the
+    request path.
     """
-    out: list[Message] = []
-    for message in messages:
-        if isinstance(message, Message):
-            out.append(message)
-            continue
-        custom_type = getattr(message, "custom_type", "")
-        details = getattr(message, "details", {}) or {}
-        if custom_type == "compaction_summary":
-            summary = str(details.get("summary", "")).strip()
-            if summary:
-                out.append(
-                    Message(
-                        role="user",
-                        content=[
-                            TextContent(
-                                text=f"[System summary of the earlier conversation]\n{summary}"
-                            )
-                        ],
-                    )
-                )
-        elif custom_type == "wake_prompt":
-            text = str(details.get("text", "")).strip()
-            if text:
-                out.append(Message(role="user", content=[TextContent(text=text)]))
-    return out
+    from local_operator.session.session import _default_convert_to_llm
+
+    return _default_convert_to_llm(list(messages))
 
 def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
     """Build the tool-approval gate.

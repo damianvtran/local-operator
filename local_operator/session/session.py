@@ -248,6 +248,12 @@ class Session:
         # whether the run continues, `_logical_generation` remembers which
         # agent_start the eventual end belongs to. Both are None outside a run.
         self._held_end: AgentEndEvent | None = None
+        self._abort_requested = False  # sticky across the continuation gap
+        # Last completed provider request (epoch ms). Distinct from
+        # _last_activity_ms: the idle-flush pruning must measure provider-cache
+        # age, and stamping turn bookkeeping right before the check made the
+        # 90-minute flush dead code.
+        self._last_provider_request_ms = 0
         self._logical_generation: int | None = None
         self._fallback_tool_resolver: Callable[[str], AgentTool | None] | None = None
 
@@ -352,6 +358,8 @@ class Session:
             raise RuntimeError("session is already streaming; use steer() to inject mid-turn")
         await self._turn_lock.acquire()
         try:
+            # A fresh user prompt supersedes any earlier interrupt request.
+            self._abort_requested = False
             if self._is_streaming:
                 raise RuntimeError(
                     "session is already streaming; use steer() to inject mid-turn"
@@ -366,7 +374,15 @@ class Session:
         self._steering_queue.put_nowait(Message.user(text))
 
     def abort(self, reason: str = "interrupted") -> None:
-        """Abort the running turn; the engine emits an aborted agent_end."""
+        """Abort the running turn; the engine emits an aborted agent_end.
+
+        Sticky: between a turn and its post-compaction continuation the live
+        signal is None, so a Ctrl+C in that window would otherwise be dropped
+        and the agent would run the continuation the user just tried to stop.
+        The flag is checked at the top of the continuation drain and pre-aborts
+        the next turn's signal.
+        """
+        self._abort_requested = True
         if self._signal is not None:
             self._signal.abort(reason)
 
@@ -473,6 +489,11 @@ class Session:
         self._last_activity_ms = int(time.time() * 1000)
         signal = AbortSignal()
         self._signal = signal
+        if self._abort_requested:
+            # A Ctrl+C landed in the gap between turns (signal was None);
+            # honour it on the fresh signal instead of running the
+            # continuation the user tried to stop.
+            signal.abort("interrupted")
         try:
             for message in initial:
                 await self._transcript.append_message(message)
@@ -510,10 +531,22 @@ class Session:
                     new_messages = list(event.messages)
                     if event.aborted or event.error:
                         # A failed or interrupted run is a real boundary: never
-                        # hold it behind a compaction that may not happen.
+                        # hold it behind a compaction that may not happen. The
+                        # end is re-stamped with the generation of the start
+                        # the UI saw (the continuation's own stamp would split
+                        # the pair), and the continuation queue is dropped so
+                        # no further run can open a second boundary inside the
+                        # same prompt (§B).
+                        self._abort_requested = True
+                        self._continuation_queue.clear()
                         self._held_end = None
+                        generation = self._logical_generation or event.generation
                         self._logical_generation = None
-                        await self._emit(event)
+                        await self._emit(
+                            event
+                            if event.generation == generation
+                            else event.model_copy(update={"generation": generation})
+                        )
                     else:
                         # Held until _maybe_compact has had its say; the
                         # pipeline flushes it if no continuation is queued.
@@ -527,6 +560,10 @@ class Session:
                     self._last_usage = message.usage
                     break
             self._last_activity_ms = int(time.time() * 1000)
+            # The run just completed provider round-trips; the idle flush
+            # measures provider-cache age from this stamp, not turn
+            # bookkeeping (which would always read ~0 and kill the flush).
+            self._last_provider_request_ms = int(time.time() * 1000)
 
             # Persist everything the turn produced (initial messages were
             # written before the run).
@@ -547,6 +584,11 @@ class Session:
         notice so a thrashing recovery band cannot re-prompt forever."""
         continuations = 0
         while self._continuation_queue and not self._disposed:
+            if self._abort_requested:
+                # Ctrl+C landed in the gap between turns; the continuation
+                # the user interrupted must not run.
+                self._continuation_queue.clear()
+                return
             if continuations >= _MAX_CONTINUATIONS:
                 dropped = len(self._continuation_queue)
                 self._continuation_queue.clear()
@@ -684,9 +726,13 @@ class Session:
 
         # (1) Prune before deciding: blanked outputs shrink the estimate and
         # may avoid a compaction pass entirely. Mutates messages in place.
+        # The idle flush compares against the last PROVIDER request, not turn
+        # bookkeeping, so a genuinely idle session reclaims the warm region.
         now_ms = int(time.time() * 1000)
         try:
-            compaction_api.prune_tool_outputs(llm_history, now_ms, self._last_activity_ms)
+            compaction_api.prune_tool_outputs(
+                llm_history, now_ms, self._last_provider_request_ms
+            )
         except (ImportError, AttributeError):
             pass  # optional pruning hook absent; degrade to no pruning
 
@@ -701,6 +747,18 @@ class Session:
 
         cut = compaction_api.find_cut_point(llm_history, settings.keep_recent_tokens)
         if cut is None or cut <= 0:
+            return
+
+        # The kept window must start at an entry the transcript can replay:
+        # first_kept_entry_id is persisted and matched on resume, and a cut
+        # whose first kept message has no transcript entry (a converter-minted
+        # id) would make replay drop the whole kept window silently.
+        entry_ids = {entry.id for entry in self._transcript.entries()}
+        if llm_history[cut].id not in entry_ids:
+            logger.warning(
+                "compaction cut rejected: kept[0].id %s is not a transcript entry",
+                llm_history[cut].id,
+            )
             return
 
         await self._emit(CompactionStartEvent(reason="context-window"))
@@ -770,8 +828,12 @@ class Session:
         """Summary text + optional ``preserve_data`` for one compaction pass.
 
         Snapcompact stores ``{"snapcompact": <archive dump>}`` (JSON-safe:
-        base64 frames) and uses the archive text as the summary; any error —
-        including ImportError — falls back to the one-shot LLM summary.
+        base64 frames) and renders the frames back into context through the
+        converter. The TEXT slot must therefore be a real short summary —
+        never ``archive.text``: the archive is the full bounded history, and
+        replaying it as text while the frames are dropped means the pass
+        reduces nothing and re-fires on the next turn. Any error — including
+        ImportError — falls back to the one-shot LLM summary.
         """
         if strategy == "snapcompact":
             try:
@@ -782,8 +844,14 @@ class Session:
                     self._model.provider,
                     self._model.model_id,
                     self._previous_archive_text(),
+                    context_window=self._model.context_window,
                 )
-                return archive.text or " ", {"snapcompact": _archive_to_json(archive)}
+                # The frames are the durable record; the text slot is a
+                # compact digest for hosts that render summaries as text.
+                summary = await compaction_api.summarize_messages(
+                    to_summarize, self._one_shot_complete
+                )
+                return summary or " ", {"snapcompact": _archive_to_json(archive)}
             except Exception:
                 logger.warning("snapcompact failed; falling back to context-full", exc_info=True)
         summary = await compaction_api.summarize_messages(to_summarize, self._one_shot_complete)

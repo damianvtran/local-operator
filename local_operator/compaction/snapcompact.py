@@ -452,8 +452,15 @@ class Archive(BaseModel):
 
 
 def _paginate(text: str, shape: Shape) -> list[str]:
-    """Split ``text`` into frame pages of at most ``shape.capacity`` chars,
-    breaking on line boundaries so frame edges stay legible."""
+    """Split ``text`` into frame pages, breaking on line boundaries.
+
+    Two budgets: ``capacity`` chars is the byte ceiling, ``lines_per_frame``
+    lines is the real page break. render_frame draws at most lines_per_frame
+    wrapped lines, so a char-only budget silently slices short-line transcripts
+    (role headers, code, JSON) — ~70% of a realistic page — before drawing,
+    with no marker that history is missing. Bounding by both keeps every
+    serialized line in exactly one page.
+    """
     cols = shape.chars_per_line
     capacity = shape.capacity
     pages: list[str] = []
@@ -461,7 +468,9 @@ def _paginate(text: str, shape: Shape) -> list[str]:
     current_len = 0
     for line in _wrap_lines(text, cols):
         cost = len(line) + 1  # + newline separator
-        if current and current_len + cost > capacity:
+        if current and (
+            current_len + cost > capacity or len(current) >= shape.lines_per_frame
+        ):
             pages.append("\n".join(current))
             current, current_len = [], 0
         current.append(line)
@@ -469,8 +478,6 @@ def _paginate(text: str, shape: Shape) -> list[str]:
     if current:
         pages.append("\n".join(current))
     return pages
-
-
 def compact_to_archive(
     messages: Sequence[Message],
     provider: str,
@@ -478,6 +485,7 @@ def compact_to_archive(
     previous_text: str | None = None,
     *,
     max_frames: int = MAX_FRAMES,
+    context_window: int | None = None,
 ) -> Archive:
     """Run one snapcompact pass over discarded ``messages``.
 
@@ -486,7 +494,10 @@ def compact_to_archive(
     laid out as plain text at both chronological edges with the middle imaged.
     When the imaged middle overflows the frame budget, the OLDEST middle pages
     are dropped (with a marker) — mirrors how iterative summaries fade the
-    oldest detail.
+    oldest detail. ``context_window`` caps the archive by TOKENS as well as
+    frame count: 80 frames at ~5024 visual tokens each is twice a 200k window,
+    so without the cap the pass that exists to get under the threshold can
+    itself overflow it on the next turn.
     """
     shape = resolve_shape(provider, model_id)
     max_frames = max(1, min(max_frames, MAX_FRAMES))
@@ -519,8 +530,28 @@ def compact_to_archive(
         pages = pages[len(pages) - max_frames :]
         text_head += f"\n[... {truncated_chars} chars of oldest history dropped]"
 
+    # Token budget: the frame COUNT cap alone allows 80 * FRAME_TOKEN_ESTIMATE
+    # visual tokens, which exceeds most windows. Drop oldest middle pages
+    # until the replayed archive fits a reserve-adjusted share of the window.
+    if context_window and context_window > 0:
+        budget = max(FRAME_TOKEN_ESTIMATE, int(context_window * 0.5))
+        while pages and estimate_archive_tokens(
+            Archive(
+                frames=[],
+                text=text_head + "\n".join(pages) + text_tail,
+                text_head=text_head,
+                text_tail=text_tail,
+            )
+        ) + len(pages) * FRAME_TOKEN_ESTIMATE > budget:
+            truncated_chars += len(pages[0])
+            pages = pages[1:]
+            text_head += f"\n[... {truncated_chars} chars of oldest history dropped]"
+
     frames = [render_frame(page, shape) for page in pages]
-    kept_middle = "".join(pages)
+    # Pages carry no trailing newline; joining without one glues the last
+    # line of page N onto the first of page N+1, and Archive.text is the
+    # source re-rendered on every later pass, so the corruption compounds.
+    kept_middle = "\n".join(pages)
     return Archive(
         frames=frames,
         text=text_head + kept_middle + text_tail,
