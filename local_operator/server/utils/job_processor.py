@@ -21,7 +21,7 @@ from local_operator.jobs import (
     JobResult,
     JobStatus,
 )
-from local_operator.server.utils.operator import create_operator
+from local_operator.server.utils.operator import ExecutorInitError, create_operator
 from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import ConversationRecord
 
@@ -84,7 +84,7 @@ def run_job_in_process(
                     env_config=env_config,
                 )
 
-                # Initialize conversation history
+                # Seed the conversation projection with the caller's context
                 if context:
                     conversation_history = [
                         ConversationRecord(role=msg.role, content=msg.content) for msg in context
@@ -95,24 +95,18 @@ def run_job_in_process(
                 else:
                     try:
                         process_operator.executor.initialize_conversation_history()
-                    except ValueError:
+                    except ExecutorInitError:
                         # Conversation history already initialized
                         pass
 
-                # Configure model options if provided
-                model_instance = process_operator.executor.model_configuration.instance
+                # Sampling overrides ride on the ModelConfiguration now: the
+                # rewritten engine has no mutable chat-model object.
+                model_configuration = process_operator.executor.model_configuration
                 if options:
-                    # Handle temperature
-                    if "temperature" in options and options["temperature"] is not None:
-                        if hasattr(model_instance, "temperature"):
-                            # Use setattr to avoid type checking issues
-                            setattr(model_instance, "temperature", options["temperature"])
-
-                    # Handle top_p
-                    if "top_p" in options and options["top_p"] is not None:
-                        if hasattr(model_instance, "top_p"):
-                            # Use setattr to avoid type checking issues
-                            setattr(model_instance, "top_p", options["top_p"])
+                    if options.get("temperature") is not None:
+                        model_configuration.temperature = options["temperature"]
+                    if options.get("top_p") is not None:
+                        model_configuration.top_p = options["top_p"]
 
                 # Process the request
                 _, final_response = await process_operator.handle_user_input(prompt)
@@ -211,20 +205,9 @@ def run_agent_job_in_process(
                     env_config=env_config,
                 )
 
-                # Configure model options if provided
-                model_instance = process_operator.executor.model_configuration.instance
-
-                # Handle temperature
-                if hasattr(agent_obj, "temperature") and agent_obj.temperature is not None:
-                    if hasattr(model_instance, "temperature"):
-                        # Use setattr to avoid type checking issues
-                        setattr(model_instance, "temperature", agent_obj.temperature)
-
-                # Handle top_p
-                if hasattr(agent_obj, "top_p") and agent_obj.top_p is not None:
-                    if hasattr(model_instance, "top_p"):
-                        # Use setattr to avoid type checking issues
-                        setattr(model_instance, "top_p", agent_obj.top_p)
+                # The agent's sampling knobs are already folded into the
+                # ModelConfiguration by ``create_operator``; there is no
+                # mutable chat-model object left to patch.
 
                 # Process the request
                 _, final_response = await process_operator.handle_user_input(

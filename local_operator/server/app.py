@@ -20,7 +20,6 @@ from local_operator.env import get_env_config
 from local_operator.helpers import setup_cross_platform_environment
 from local_operator.jobs import JobManager
 from local_operator.logger import get_logger
-from local_operator.operator import OperatorType
 from local_operator.scheduler_service import SchedulerService
 from local_operator.server.routes import (
     agents,
@@ -37,6 +36,7 @@ from local_operator.server.routes import (
     websockets,
 )
 from local_operator.server.utils.websocket_manager import WebSocketManager
+from local_operator.types import OperatorType
 
 logger = get_logger("local_operator.server")
 

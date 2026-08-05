@@ -33,7 +33,7 @@ dependencies = [
     # Scheduler / persistence
     "apscheduler",
     # TUI
-    "textual>=1.0",
+    "textual>=8.0.0",
     "rich>=13.7",
     "markdown-it-py>=3.0",
     # MCP
@@ -58,7 +58,6 @@ dev = [
     "pytest-textual-snapshot",
     "pip-audit",
 ]
-browser = ["playwright", "browser-use==0.4.0"]
 
 [tool.setuptools.package-data]
 local_operator = ["prompts_md/*.md", "tui/*.tcss"]

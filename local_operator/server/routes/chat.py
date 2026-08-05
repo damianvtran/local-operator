@@ -19,7 +19,7 @@ from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.helpers import parse_agent_action_xml, parse_replacements
 from local_operator.jobs import JobManager
-from local_operator.prompts import EditFileInstructionsPrompt
+from local_operator.prompts_api import render_template
 
 # from local_operator.scheduler_service import SchedulerService # Moved to TYPE_CHECKING
 from local_operator.server.dependencies import (
@@ -49,7 +49,7 @@ from local_operator.server.utils.job_processor_queue import (
     run_agent_job_in_process_with_queue,
     run_job_in_process_with_queue,
 )
-from local_operator.server.utils.operator import create_operator
+from local_operator.server.utils.operator import ExecutorInitError, create_operator
 from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import ConversationRecord, ConversationRole
 
@@ -59,6 +59,11 @@ if TYPE_CHECKING:
 
 router = APIRouter(tags=["Chat"])
 logger = logging.getLogger("local_operator.server.routes.chat")
+
+#: Inline-edit prompt template (``local_operator/prompts_md/``). Lives on disk
+#: rather than as a Python constant so prompt edits stay diffable — the same
+#: reason the harness's system prompt moved out of the deleted ``prompts.py``.
+EDIT_FILE_INSTRUCTIONS_TEMPLATE = "edit_file_instructions.md"
 
 
 @router.post(
@@ -108,7 +113,7 @@ async def chat_endpoint(
         description: Internal Server Error
     """
     try:
-        # Create a new executor for this request using the provided hosting and model
+        # Build the per-request session facade for the requested hosting/model
         operator = create_operator(
             request.hosting,
             request.model,
@@ -118,7 +123,7 @@ async def chat_endpoint(
             env_config=env_config,
         )
 
-        model_instance = operator.executor.model_configuration.instance
+        model_configuration = operator.executor.model_configuration
 
         if request.context and len(request.context) > 0:
             # Override the default system prompt with the provided context
@@ -129,16 +134,18 @@ async def chat_endpoint(
         else:
             try:
                 operator.executor.initialize_conversation_history()
-            except ValueError:
+            except ExecutorInitError:
                 # Conversation history already initialized
                 pass
 
-        # Configure model options if provided
+        # Sampling overrides now live on the ModelConfiguration: the rewritten
+        # engine has no mutable per-provider chat-model object, the wire
+        # clients read these off the request built from this configuration.
         if request.options:
-            temperature = request.options.temperature or model_instance.temperature
-            if temperature is not None:
-                model_instance.temperature = temperature
-            model_instance.top_p = request.options.top_p or model_instance.top_p
+            if request.options.temperature is not None:
+                model_configuration.temperature = request.options.temperature
+            if request.options.top_p is not None:
+                model_configuration.top_p = request.options.top_p
 
         processed_attachments = await process_attachments(request.attachments)
         response_json, final_response = await operator.handle_user_input(
@@ -237,7 +244,7 @@ async def chat_with_agent(
             logger.exception("Error retrieving agent")
             raise HTTPException(status_code=404, detail=f"Agent not found: {e}")
 
-        # Create a new executor for this request using the provided hosting and model
+        # Build the per-request session facade bound to this agent
         operator = create_operator(
             request.hosting,
             request.model,
@@ -248,14 +255,14 @@ async def chat_with_agent(
             persist_conversation=request.persist_conversation,
             env_config=env_config,
         )
-        model_instance = operator.executor.model_configuration.instance
+        model_configuration = operator.executor.model_configuration
 
-        # Configure model options if provided
+        # Request-level sampling overrides beat the agent's stored knobs.
         if request.options:
-            temperature = request.options.temperature or model_instance.temperature
-            if temperature is not None:
-                model_instance.temperature = temperature
-            model_instance.top_p = request.options.top_p or model_instance.top_p
+            if request.options.temperature is not None:
+                model_configuration.temperature = request.options.temperature
+            if request.options.top_p is not None:
+                model_configuration.top_p = request.options.top_p
 
         processed_attachments = await process_attachments(request.attachments)
         response_json, final_response = await operator.handle_user_input(
@@ -655,16 +662,19 @@ async def edit_file_with_agent(
         # Load agent conversation history
         try:
             operator.executor.initialize_conversation_history()
-        except ValueError:
+        except ExecutorInitError:
             # Conversation history already initialized
             pass
 
         # Construct the edit prompt with file content
-        edit_instruction = EditFileInstructionsPrompt.format(
-            file_path=resolved_file_path,
-            edit_prompt=request.edit_prompt,
-            file_content=file_content,
-            selection=request.selection,
+        edit_instruction = render_template(
+            EDIT_FILE_INSTRUCTIONS_TEMPLATE,
+            {
+                "file_path": str(resolved_file_path),
+                "edit_prompt": request.edit_prompt,
+                "file_content": file_content,
+                "selection": request.selection,
+            },
         )
 
         processed_attachments = await process_attachments(request.attachments)

@@ -1,0 +1,146 @@
+/* Local Operator TUI — island-dark, borderless, one green.
+ *
+ * Brand tokens ($lo-*) are injected by OperatorApp.get_css_variables() from
+ * local_operator.tui.theme (single source of truth; this file never carries
+ * a literal hex). The dark ramp is the product's "island" night.
+ *
+ * Minimalism contract (density is the brand):
+ *   - NO bordered boxes anywhere. Structure comes from symbols, tint, and
+ *     spacing. The only rule in the app is the input panel's thin top line,
+ *     structural $lo-dim — the focus accent moves to the chevron, never the
+ *     rule (D23/D24).
+ *   - no blank filler rows between blocks; blocks own no outer margin and
+ *     this sheet declares no margin/padding on any block selector
+ *   - one line per tool action; each action is a subtle background-filled
+ *     card (elevation = a background step, never a border or shadow)
+ *   - the accent green is spent ONLY on: the running indicator, links, and
+ *     the focused chevron. Everything else is warm neutrals.
+ *
+ * Edge spacing: one cell at the left, right, and bottom screen edges; NONE
+ * along the top while scrolling (content meets the top edge).
+ */
+
+Screen {
+    background: $lo-bg;
+    color: $lo-fg;
+}
+
+/* Transcript takes all the space above the input panel. One cell of edge
+ * padding left/right; nothing at the top. The scrollbar column is reserved
+ * permanently (D27) so the right-aligned columns measure stable width. */
+TranscriptView {
+    height: 1fr;
+    padding: 0 1;
+    scrollbar-size-vertical: 1;
+    scrollbar-gutter: stable;
+    scrollbar-background: $lo-bg;
+    scrollbar-color: $lo-dim;
+    scrollbar-color-hover: $lo-muted;
+}
+
+/* Blocks: zero outer margin, zero padding — no declarations here by design
+ * (the minimalism defense asserts their absence). */
+TranscriptBlock, UserBlock, NoticeBlock, RichBlock, AssistantBlock, ToolCard {
+    width: 1fr;
+    height: auto;
+}
+
+UserBlock {
+    color: $lo-fg;
+}
+
+NoticeBlock {
+    color: $lo-dim;
+}
+
+RichBlock {
+    color: $lo-fg;
+}
+
+/* Assistant markdown renders normal weight in the base ink color. */
+AssistantBlock {
+    color: $lo-fg;
+}
+
+/* ONE LINE PER ACTION — the row is a background-filled card, one elevation
+ * step brighter than the ground (kit surface on bg). */
+ToolCard {
+    height: 1;
+    background: $lo-surface;
+}
+
+/* The status band: full-width, sunken ground, bottom-most (D3/D17). */
+#status-band {
+    dock: bottom;
+    height: 1;
+    background: $lo-sunken;
+    color: $lo-dim;
+    padding: 0 1;
+}
+
+/* Input panel: docks above the band, sits on the surface step, no border
+ * box (D4) — only the thin structural top rule (D11). */
+#input-dock {
+    dock: bottom;
+    height: auto;
+    background: $lo-surface;
+    border-top: tall $lo-dim;
+    padding: 0 1 1 1;
+}
+
+/* Focus moves the accent onto the chevron only — the rule stays dim (D23). */
+#input-dock:focus-within {
+    border-top: tall $lo-dim;
+}
+
+#input-row {
+    height: auto;
+}
+
+#prompt-chevron {
+    width: 2;
+    height: auto;
+    color: $lo-dim;
+}
+
+/* Focus moves the accent onto the chevron only — the rule stays dim (D23). */
+#input-dock:focus-within #prompt-chevron {
+    color: $lo-accent;
+}
+
+Editor {
+    width: 1fr;
+    height: auto;
+    min-height: 1;
+    max-height: 8;
+    border: none;
+    background: $lo-surface;
+    color: $lo-fg;
+}
+
+/* TextArea component styling (theme "css" reads these from the widget). */
+Editor .text-area--cursor {
+    color: $lo-surface;
+    background: $lo-fg;
+}
+
+Editor .text-area--selection {
+    background: $lo-edge;
+}
+
+Editor .text-area--placeholder {
+    color: $lo-dim;
+}
+
+Editor .text-area--gutter {
+    color: $lo-dim;
+    background: $lo-surface;
+}
+
+Editor .text-area--cursor-line {
+    background: $lo-surface;
+}
+
+Editor .text-area--suggestion {
+    color: $lo-dim;
+}

@@ -7,10 +7,6 @@ convention — no separate capability table). ``create_tools`` walks the table
 in a stable order so the provider-visible tool list is deterministic, which
 matters for prompt-cache stability (the tools array rides in the same prefix
 as the system prompt).
-
-Legacy modules in this package (``general.py``, ``google.py``,
-``screen_recorder.py``) belong to the old executed-Python tool system and are
-NOT registered here.
 """
 
 from __future__ import annotations

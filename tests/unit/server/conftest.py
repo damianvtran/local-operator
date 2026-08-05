@@ -18,14 +18,12 @@ from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
-from local_operator.executor import ExecutorInitError
 from local_operator.jobs import JobManager
-from local_operator.mocks import ChatMock
 from local_operator.model.configure import ModelConfiguration
 from local_operator.model.registry import ModelInfo
-from local_operator.operator import OperatorType
 from local_operator.scheduler_service import SchedulerService
 from local_operator.server.app import app
+from local_operator.server.utils.operator import ExecutorInitError
 from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import (
     ActionType,
@@ -33,12 +31,15 @@ from local_operator.types import (
     CodeExecutionResult,
     ConversationRecord,
     ConversationRole,
+    OperatorType,
     ProcessResponseStatus,
     ResponseJsonSchema,
 )
 
 
-# Dummy implementations for the executor dependency
+# Dummy implementations of the session-facade surface the chat routes use.
+# They stand in for ``server.utils.operator.ServerOperator`` /
+# ``ServerExecutor`` so route tests exercise the envelope, not the engine.
 class DummyResponse:
     def __init__(self, content: str):
         self.content = content
@@ -46,10 +47,11 @@ class DummyResponse:
 
 class DummyExecutor:
     def __init__(self):
+        # ``instance`` is None in the rewritten engine — streaming goes
+        # through the provider wire clients, not a chat-model object.
         self.model_configuration = ModelConfiguration(
             hosting="test",
             name="test-model",
-            instance=ChatMock(),
             info=ModelInfo(
                 id="test-model",
                 name="test-model",

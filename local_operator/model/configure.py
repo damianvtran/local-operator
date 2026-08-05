@@ -413,6 +413,12 @@ def configure_model(
             model_info = ModelInfo(id=model_name, name=model_name, description="Unknown model")
 
     spec = build_model_spec(canonical, model_name, model_info)
+    # Sampling rides on the ModelSpec: the loop builds its ChatRequest without
+    # temperature/top_p, so the wire clients fall back to ``request.model.*``.
+    # Without this copy an agent's stored temperature (and the server's
+    # per-request ``options``) would be recorded on the ModelConfiguration and
+    # then silently dropped on the way to the provider.
+    spec = spec.model_copy(update={"temperature": temperature, "top_p": top_p})
     # Radient base URL is env-overridable (legacy EnvConfig behaviour).
     if canonical == "radient" and env_config is not None:
         base_url = getattr(env_config, "radient_api_base_url", None)
