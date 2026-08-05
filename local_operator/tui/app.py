@@ -125,10 +125,12 @@ class OperatorApp(App):
     # -- composition --------------------------------------------------------
     def compose(self) -> ComposeResult:
         yield TranscriptView()
-        # Dock order matters: the band docks bottom-most first, the input
-        # panel stacks above it.
-        yield Static(id="status-band")
+        # The status line IS the input box's top row (omp trick): the band
+        # docks at the top of the input panel and carries the structural rule
+        # styling, so it can never be overdrawn or pushed off-screen by the
+        # editor. One row does double duty — zero extra height (D3/D17).
         with Container(id="input-dock"):
+            yield Static(id="status-band")
             with Horizontal(id="input-row"):
                 yield Static("❯", id="prompt-chevron")
                 yield Editor(commands=SLASH_COMMANDS)

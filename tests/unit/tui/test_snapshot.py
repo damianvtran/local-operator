@@ -137,7 +137,18 @@ def _populate(session: FakeSession) -> None:
     session.emit(_tool_end("t2", "grep", "permission denied while reading the file", is_error=True))
     session.emit(ToolExecutionStartEvent(tool_call_id="t3", tool_name="read", args={"path": "src/parser.py"}))
     session.emit(_tool_end("t3", "read", "ok"))
-    session.emit(TurnEndEvent())
+    # Engine-faithful: the loop always emits turn_end carrying the assistant
+    # message and its tool results; the status line reads usage off it, so a
+    # bare event freezes frames the live app can never show.
+    session.emit(
+        TurnEndEvent(
+            message=Message.assistant(
+                MARKDOWN,
+                usage=Usage(context_tokens=12400, input_tokens=12000, output_tokens=800),
+            ),
+            tool_results=[_tool_end("t1", "bash", "66 passed").result],
+        )
+    )
     session.emit(
         AgentEndEvent(
             messages=[Message.assistant("done", usage=Usage(context_tokens=12400, input_tokens=12000, output_tokens=800))]

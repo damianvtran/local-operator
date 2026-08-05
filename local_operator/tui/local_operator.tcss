@@ -69,17 +69,20 @@ ToolCard {
     background: $lo-surface;
 }
 
-/* The status band: full-width, sunken ground, bottom-most (D3/D17). */
+/* The status band is the input panel's FIRST row: it lives inside the input
+ * dock so the editor can never overdraw it, and the dock's border-top is the
+ * structural rule above it (the ONLY line in the app). One row of text, one
+ * row of rule — the minimalism defense pins both to single rows. */
 #status-band {
-    dock: bottom;
+    dock: top;
     height: 1;
     background: $lo-sunken;
     color: $lo-dim;
     padding: 0 1;
 }
 
-/* Input panel: docks above the band, sits on the surface step, no border
- * box (D4) — only the thin structural top rule (D11). */
+/* Input panel: docks at the bottom, sits on the surface step, no border box
+ * (D4) — only the thin structural top rule (D11). */
 #input-dock {
     dock: bottom;
     height: auto;
@@ -89,9 +92,6 @@ ToolCard {
 }
 
 /* Focus moves the accent onto the chevron only — the rule stays dim (D23). */
-#input-dock:focus-within {
-    border-top: tall $lo-dim;
-}
 
 #input-row {
     height: auto;
