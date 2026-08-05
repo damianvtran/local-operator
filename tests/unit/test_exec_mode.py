@@ -545,6 +545,12 @@ def test_exec_worker_sigterm_yields_130(tmp_path: Path) -> None:
         "    def abort(self, reason):\n"
         "        self._abort.set()\n"
         "    async def prompt(self, text, attachments=None):\n"
+        # READY is printed from inside the turn, which is the only point where
+        # the signal handler is provably installed AND the turn has started.
+        # A fixed sleep here raced under full-suite load: the child took SIGTERM
+        # before installing the handler, died with rc=-15, and both streams came
+        # back empty.
+        "        print('READY', flush=True)\n"
         "        await self._abort.wait()\n"
         "    async def dispose(self):\n"
         "        self.disposed = True\n"
@@ -564,8 +570,21 @@ def test_exec_worker_sigterm_yields_130(tmp_path: Path) -> None:
         cwd=str(tmp_path),
         env=env,
     )
-    # Give the worker time to install its signal handler and start the turn.
-    time.sleep(1.0)
+    # Block until the child says the handler is installed and the turn is live.
+    assert proc.stdout is not None
+    deadline = time.monotonic() + 30.0
+    ready = False
+    while time.monotonic() < deadline:
+        line = proc.stdout.readline()
+        if not line:
+            break  # child exited early
+        if line.strip() == "READY":
+            ready = True
+            break
+    if not ready:
+        proc.kill()
+        remainder, stderr = proc.communicate(timeout=15)
+        raise AssertionError(f"worker never signalled READY: {remainder!r} {stderr!r}")
     proc.terminate()
     stdout, stderr = proc.communicate(timeout=15)
     assert proc.returncode == 130, f"stdout={stdout!r} stderr={stderr!r}"
