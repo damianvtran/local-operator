@@ -56,6 +56,10 @@ class AsyncJob(BaseModel):
     type: JobType
     status: JobStatus = "running"
     start_time: float
+    # Epoch seconds when the job SETTLED (completed/failed/cancelled).
+    # Retention sweeps against this, not start_time, so a long-running job
+    # stays observable for the full window after it finishes.
+    settled_at: float | None = None
     label: str
     result_text: str | None = None
     error_text: str | None = None
@@ -130,6 +134,12 @@ class AsyncJobManager:
         the job (the manager merely tracks it) via ``start_queued`` once its
         gate opens.
         """
+        # Capacity is checked BEFORE any row is inserted: a rejected register
+        # must never leave a phantom job occupying or shadowing a slot.
+        if not queued and self.at_capacity():
+            raise RuntimeError(
+                f"at most {self._max_running} background jobs may run concurrently"
+            )
         job_id = uuid.uuid4().hex[:12]
         job = AsyncJob(
             id=job_id,
@@ -145,10 +155,6 @@ class AsyncJobManager:
         self._signals[job_id] = signal
 
         if not queued:
-            if self.at_capacity():
-                raise RuntimeError(
-                    f"at most {self._max_running} background jobs may run concurrently"
-                )
             progress = self._progress_fn(job_id)
             coro = run(job_id, signal, progress)
             task = asyncio.ensure_future(self._run_job(job, coro))
@@ -207,19 +213,35 @@ class AsyncJobManager:
             task.cancel()
             try:
                 await task
-            except (asyncio.CancelledError, Exception):
-                pass
+            except asyncio.CancelledError:
+                # Two sources of CancelledError here. Awaiting a task we
+                # cancelled that never got to run (cancelled before it
+                # started) raises it as the NORMAL outcome — the job row is
+                # already marked cancelled, so swallow that. But if the
+                # CALLER of cancel() was itself cancelled mid-await, this
+                # task's own cancelling count is nonzero and the error MUST
+                # propagate, never be swallowed into a clean return (HC-16).
+                current = asyncio.current_task()
+                if current is not None and current.cancelling() > 0:
+                    raise
+            except Exception:
+                logger.warning("job %s task raised on cancel", job_id, exc_info=True)
+        self._settle(job)
         self._sweep_due()
         return True
 
     # -- lifecycle ----------------------------------------------------------
 
     async def dispose(self) -> None:
-        """Cancel every running job and clear the registry."""
+        """Cancel every running job and drop runtime state.
+
+        Job ROWS are kept: they are observability records whose eviction is
+        owned by the retention sweep (settled_at based), not by teardown.
+        Callers may still ``get``/``list`` after dispose; nothing runs.
+        """
         job_ids = [job_id for job_id, job in self._jobs.items() if job.status == "running"]
         for job_id in job_ids:
             await self.cancel(job_id)
-        self._jobs.clear()
         self._signals.clear()
         self._tasks.clear()
         self._sinks.clear()
@@ -244,12 +266,14 @@ class AsyncJobManager:
             job.result_text = result if result is not None else ""
         except asyncio.CancelledError:
             job.status = "cancelled"
+            self._settle(job)
             self._sweep_due()
             return
         except Exception as exc:
             job.status = "failed"
             job.error_text = str(exc)
             logger.warning("background job %s failed", job.id, exc_info=True)
+        self._settle(job)
         self._tasks.pop(job.id, None)
         await self._deliver(job)
         self._sweep_due()
@@ -268,13 +292,25 @@ class AsyncJobManager:
         if self._on_job_complete is not None:
             await self._maybe_await(self._on_job_complete(job.id, text, job))
 
+    def _settle(self, job: AsyncJob) -> None:
+        """Record the settle timestamp on the status transition (idempotent)."""
+        if job.settled_at is None:
+            job.settled_at = time.time()
+
     def _sweep_due(self) -> None:
-        """Drop settled jobs older than the retention window."""
+        """Drop settled jobs older than the retention window.
+
+        Retention runs from ``settled_at`` (settle time), never
+        ``start_time``: a job that ran longer than the window must still be
+        observable for the full retention period after it settles.
+        """
         cutoff = time.time() - self._retention_ms / 1000.0
         for job_id in [
             job_id
             for job_id, job in self._jobs.items()
-            if job.status != "running" and job.start_time < cutoff
+            if job.status != "running"
+            and job.settled_at is not None
+            and job.settled_at < cutoff
         ]:
             del self._jobs[job_id]
             self._signals.pop(job_id, None)

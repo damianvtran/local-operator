@@ -21,7 +21,7 @@ import hashlib
 import json
 from typing import TYPE_CHECKING
 
-from local_operator.harness.types import Message, TextContent
+from local_operator.harness.types import Content, Message, TextContent
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -29,23 +29,48 @@ if TYPE_CHECKING:
     from local_operator.harness.loop import LoopContext
 
 
+def _content_block_key(block: Content) -> tuple[object, ...]:
+    """One content block's digest contribution.
+
+    Block ORDER matters (it is serialized positionally), and every block kind
+    a provider may serialize must contribute: text blocks by text, image
+    blocks by (mime_type, sha256(data)[:16]) so an image swap is visible
+    without hashing gigabytes twice.
+    """
+    if isinstance(block, TextContent):
+        return ("text", block.text)
+    image_hash = hashlib.sha256(block.data.encode("utf-8")).hexdigest()[:16]
+    return ("image", block.mime_type, image_hash)
+
+
 def message_digest(message: Message) -> str:
     """Byte-stable digest of every field a provider may serialize.
 
     Missing any of these fields makes an in-place rewrite invisible and
     silently corrupts the cached prefix, so the digest deliberately covers:
-    role, text content, tool-call ids/names/raw arguments, ``tool_call_id``,
-    ``tool_name``, ``is_error`` and the opaque ``provider_payload``.
+    role, content blocks IN ORDER (text by text, images by mime type +
+    truncated sha256 of the payload), tool-call ids/names/raw arguments (or
+    canonical ``arguments`` when the provider gave us no raw string),
+    ``tool_call_id``, ``tool_name``, ``is_error`` and the opaque
+    ``provider_payload``.
     """
+    tool_calls: list[dict[str, object]] = []
+    for call in message.tool_calls:
+        entry: dict[str, object] = {"id": call.id, "name": call.name}
+        if call.raw_arguments is not None:
+            entry["raw_arguments"] = call.raw_arguments
+        else:
+            # Host-constructed calls have no raw string: digest the canonical
+            # form of the parsed arguments instead, so a changed argument is
+            # visible to the prefix reconcile.
+            entry["arguments"] = json.dumps(
+                call.arguments, sort_keys=True, separators=(",", ":"), default=str
+            )
+        tool_calls.append(entry)
     payload: dict[str, object] = {
         "role": message.role,
-        "content": [
-            block.text for block in message.content if isinstance(block, TextContent)
-        ],
-        "tool_calls": [
-            {"id": call.id, "name": call.name, "raw_arguments": call.raw_arguments}
-            for call in message.tool_calls
-        ],
+        "content": [_content_block_key(block) for block in message.content],
+        "tool_calls": tool_calls,
         "tool_call_id": message.tool_call_id,
         "tool_name": message.tool_name,
         "is_error": message.is_error,

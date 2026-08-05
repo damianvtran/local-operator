@@ -57,21 +57,20 @@ class ScriptedStream:
         return gen()
 
 
-def echo_tool(executed: list[str], delay: float = 0.0) -> AgentTool:
+def echo_tool(executed: list[str], delay: float = 0.0, name: str = "echo") -> AgentTool:
     async def execute(tool_call_id, args, signal, on_update, context):
         if delay:
             await asyncio.sleep(delay)
-        executed.append("echo")
+        executed.append(name)
         return ToolResult(
-            tool_call_id=tool_call_id, tool_name="echo", content=[TextContent(text="ok")]
+            tool_call_id=tool_call_id, tool_name=name, content=[TextContent(text="ok")]
         )
 
     return AgentTool(
-        name="echo",
+        name=name,
         parameters={"type": "object", "properties": {"text": {"type": "string"}}},
         execute=execute,
     )
-
 
 def make_session(tmp_path, stream, tools=None, **kwargs) -> Session:
     transcript = Transcript(tmp_path / "sess")
@@ -159,16 +158,32 @@ async def test_subscribe_sync_async_and_exception_isolation(tmp_path):
     broken_calls.clear()
     unsubscribe()
     await session.prompt("again")
-    assert seen_sync == seen_async and "agent_end" in seen_sync
-    assert len(broken_calls) == len(seen_sync)  # remaining handlers still subscribed
+    # Unsubscribed async handler stops receiving; the remaining two still fire.
+    assert seen_async == []
+    assert "agent_end" in seen_sync
+    assert len(broken_calls) == len(seen_sync)
     await session.dispose()
-
 
 @pytest.mark.asyncio
 async def test_steer_interrupts_and_persists(tmp_path):
     """steer() during a tool batch: the steering message reaches the next
     model call and is persisted to the transcript."""
     executed: list[str] = []
+    started = asyncio.Event()
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        started.set()
+        await asyncio.sleep(0.05)
+        executed.append("echo")
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="echo", content=[TextContent(text="ok")]
+        )
+
+    tool = AgentTool(
+        name="echo",
+        parameters={"type": "object", "properties": {"text": {"type": "string"}}},
+        execute=execute,
+    )
     stream = ScriptedStream(
         [
             [
@@ -178,10 +193,10 @@ async def test_steer_interrupts_and_persists(tmp_path):
             [StreamTextDelta(delta="adjusted"), StreamEndEvent(stop_reason="stop")],
         ]
     )
-    session = make_session(tmp_path, stream, tools=[echo_tool(executed, delay=0.05)])
+    session = make_session(tmp_path, stream, tools=[tool])
 
     prompt_task = asyncio.ensure_future(session.prompt("start"))
-    await wait_for(lambda: bool(executed))
+    await started.wait()
     session.steer("change direction")
     await prompt_task
 
@@ -191,11 +206,11 @@ async def test_steer_interrupts_and_persists(tmp_path):
         isinstance(m, Message) and m.text == "change direction"
         for m in stream.requests[1].messages
     )
-    # Persisted as a message entry.
     texts = [
-        entry.payload.get("content", [{}])[0].get("text")
+        block.get("text")
         for entry in session._transcript.entries()
         if entry.type == "message" and entry.payload.get("kind") == "message"
+        for block in entry.payload.get("content", [])
     ]
     assert "change direction" in texts
     await session.dispose()
@@ -500,4 +515,55 @@ async def test_model_label_and_ids(tmp_path):
     assert session.session_id == "sess-42"
     assert session.agent_id == "Sub"
     assert session.model_label == "test/m"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_refresh_tools_takes_effect_next_model_call(tmp_path):
+    """refresh_tools (MCP-20 hook): swapping the inventory is live from the
+    next model call onward — the refreshed set is what the provider sees."""
+    def mk(name: str) -> AgentTool:
+        async def execute(tool_call_id, args, signal, on_update, context):
+            return ToolResult(tool_call_id=tool_call_id, tool_name=name, content=[TextContent(text="x")])
+
+        return AgentTool(name=name, execute=execute)
+
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="first"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="second"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream, tools=[])
+    await session.prompt("one")
+    assert [t.name for t in stream.requests[0].tools] == []
+
+    session.refresh_tools([mk("mcp__late_one"), mk("mcp__late_two")])
+    await session.prompt("two")
+    assert [t.name for t in stream.requests[1].tools] == ["mcp__late_one", "mcp__late_two"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_fallback_tool_resolver_dispatches_deferred_tool(tmp_path):
+    """set_fallback_tool_resolver: a call to a name NOT in the inventory is
+    routed through the resolver and executed (deferred MCP tools)."""
+    executed: list[str] = []
+    deferred = echo_tool(executed, name="deferred_mcp")
+
+    stream = ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(index=0, id="c1", name="deferred_mcp", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream, tools=[])  # inventory empty
+    session.set_fallback_tool_resolver(
+        lambda name: deferred if name == "deferred_mcp" else None
+    )
+    await session.prompt("go")
+    assert executed == ["deferred_mcp"]
     await session.dispose()
