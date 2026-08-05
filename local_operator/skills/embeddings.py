@@ -105,22 +105,29 @@ class LocalEmbedder:
     common-English noise floor that pure 3-gram TF carries, without erasing
     the 3-gram recall on short tokens.
 
-    Calibration (``tests/unit/skills/test_calibration.py`` is the contract).
-    The threshold is the midpoint of the gap between the WORST relevant score
-    and the BEST unrelated score, measured over a real 15-skill corpus with
-    the short phrasings people actually type ("deploy this MR to qa", "roll
-    back prod-2") rather than keyword-stuffed ideal queries:
+    Calibration. The threshold is chosen to sit inside the INTERSECTION of the
+    score gaps of two independent corpora, so it is not tuned to either one.
+    Both are reproducible — the first from the test module, the second with
+    ``scripts/calibrate_skill_threshold.py --skills-dir <dir>``:
 
-        relevant, correct skill : min 0.213, median 0.289
-        unrelated, best of any  : max 0.150, median 0.081
-        max-margin midpoint     : 0.182  ->  shipped 0.18
+        corpus                              unrelated max   relevant min
+        6 skills, pinned in test_calibration      0.1667         0.2606
+        15 skills, external validation run        0.1499         0.2134
+        ---------------------------------------------------------------
+        intersection                              0.1667         0.2134
 
-    At 0.18 recall is 18/18 with zero false positives; the earlier 0.27 was
-    derived from an 8-skill corpus using only "clearly matching" queries that
-    scored >= 0.42, and on realistic input it silently returned NOTHING for
-    44% of queries whose correct skill still ranked first. Selecting nothing
-    is the expensive failure: the agent then works without the playbook it
-    needed, and no warning is emitted because zero matches is a legal result.
+    Shipped 0.19: the midpoint of that intersection, which maximises the
+    SMALLER of the two margins (+0.0233 above the best false match, +0.0234
+    below the worst true match). Recall is 100% and false positives 0% on both
+    corpora. Queries are the short phrasings people actually type ("deploy this
+    MR to qa", "roll back prod-2"), not keyword-stuffed ideal ones.
+
+    The earlier 0.27 came from an 8-skill corpus scored only with "clearly
+    matching" queries that reached >= 0.42. On realistic input it returned
+    NOTHING for 17% of the pinned queries and 44% of the external ones, in
+    every case with the correct skill still ranked FIRST. Selecting nothing is
+    the expensive failure mode: the agent proceeds without the playbook and no
+    warning fires, because zero matches is a legal result.
 
     Empty/short texts map to the zero vector, which scores 0 against
     everything — a skill with an empty routing signal is never injected.
@@ -131,10 +138,12 @@ class LocalEmbedder:
 
     def __init__(self, dim: int = 4096) -> None:
         self.dim = dim
-        # Max-margin midpoint from the 15-skill calibration above; pinned by
-        # test. Raising this trades recall for nothing — false positives are
-        # already zero at 0.18 with a 0.03 margin below the worst true match.
-        self.default_threshold = 0.18
+        # Midpoint of the two-corpus intersection above; pinned by test with a
+        # MINIMUM margin, not just a strict inequality. Do not move this toward
+        # 0.27 on the strength of the RS-03 note below — that measurement came
+        # from a dim-512 vector space whose noise floor was 0.31; at dim 4096
+        # it is 0.05-0.08. Re-measure both ends if the dim changes again.
+        self.default_threshold = 0.19
 
     def _tokens(self, text: str) -> list[str]:
         return [_stem(token) for token in _WORD_RE.findall(text.lower()) if token not in _STOPWORDS]

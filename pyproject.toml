@@ -26,12 +26,21 @@ dependencies = [
     # flows; pydantic is the schema layer the whole harness is typed against.
     "httpx>=0.27",
     "pydantic>=2.7",
+    # PEP 696 TypeVar defaults are used in harness/types.py and only reached
+    # typing in 3.13, while we support 3.12. Declared explicitly rather than
+    # leaned on as a pydantic transitive, because an import in our own module
+    # graph fails at import time if it goes missing.
+    "typing-extensions>=4.6",
     # requests backs the legacy synchronous service clients (Radient, Ollama,
-    # OpenRouter model listings) and model validation. Pure Python with no
-    # compiled wheels, so it costs install size but never a build.
+    # OpenRouter model listings) and model validation. Pure Python itself, but
+    # note it pulls charset-normalizer, which DOES ship a compiled accelerator
+    # (with a pure-Python fallback, so it degrades rather than building).
     "requests>=2.32.0",
     # Configuration and persistence: agent.yml / config.yml, skill front
-    # matter, and .env loading.
+    # matter, and .env loading. pyyaml ships a compiled libyaml accelerator
+    # and publishes no pure-Python wheel, so it is the one remaining package
+    # in the default set that can hit an sdist build on a platform/CPython
+    # combination it has not published for.
     "pyyaml",
     "python-dotenv",
     # Terminal UI. This is the default entry point of the `local-operator`
@@ -50,7 +59,10 @@ requires-python = ">=3.12"
 # owns. fastapi/starlette/uvicorn/websockets/python-multipart are pure Python
 # but total ~10 packages, and none of them are reachable from exec mode or
 # the TUI. dill is here too: only the server's agent-context endpoints pickle
-# execution namespaces.
+# execution namespaces. tiktoken is here because the /v1/chat routes report
+# token stats in their responses: the code degrades to the chars/4 estimate
+# without it, but an HTTP API returning approximate counts is a worse default
+# than paying for one wheel on a host that already opted into a web server.
 server = [
     "fastapi",
     "starlette",
@@ -59,6 +71,7 @@ server = [
     "websockets>=15.0.1",
     "apscheduler",
     "dill",
+    "tiktoken",
 ]
 # Model Context Protocol client support. The SDK's own chain is the single
 # heaviest thing this project can install: a TLS stack (cryptography, via
@@ -86,6 +99,16 @@ dev = [
     # Independent decoder used to verify our own PNG encoder's output.
     "pillow",
 ]
+
+# Explicit package discovery. Without this, setuptools falls back to
+# flat-layout AUTO-discovery, which walks the repo root, finds both
+# `local_operator/` and `static/` (image assets, no __init__.py) and refuses
+# with "Multiple top-level packages discovered in a flat-layout". The deleted
+# setup.py used to supply `packages=find_packages()`, which is what suppressed
+# auto-discovery; pyproject has to say it explicitly now. `pip install .`
+# fails outright without this, so it is load-bearing, not tidiness.
+[tool.setuptools.packages.find]
+include = ["local_operator*"]
 
 [tool.setuptools.package-data]
 local_operator = ["prompts_md/*.md", "tui/*.tcss"]

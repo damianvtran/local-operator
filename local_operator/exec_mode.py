@@ -235,10 +235,10 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
     try:
         resolve_hosting_model_dry(exec_args)
     except ValueError as exc:
-        print(f"\n\033[1;31mError: {exc}\033[0m")
+        print(f"\n\033[1;31mError: {exc}\033[0m", file=sys.stderr)
         return -1
     except Exception as exc:  # noqa: BLE001 — never spawn blind
-        print(f"\n\033[1;31mError: preflight failed: {exc}\033[0m")
+        print(f"\n\033[1;31mError: preflight failed: {exc}\033[0m", file=sys.stderr)
         return -1
 
     _ensure_logs_dir()
@@ -264,8 +264,11 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
         process = subprocess.Popen(argv, stdout=log_handle, **popen_kwargs)
 
     _append_job_record(log_path, command, process.pid, job_id=job_id)
-    print(f"Started background job {job_id}")
-    print(f"Log: {log_path}")
+    # --json and --background are independent flags, so these notices must not
+    # land on stdout: a consumer parsing the event stream would hit two
+    # unparseable lines before any event.
+    print(f"Started background job {job_id}", file=sys.stderr)
+    print(f"Log: {log_path}", file=sys.stderr)
     return 0
 
 

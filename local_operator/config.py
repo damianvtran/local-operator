@@ -5,12 +5,26 @@ It provides default configurations and methods to update them.
 """
 
 import argparse
+import sys
 from datetime import datetime
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Dict
 
 import yaml
+
+
+def _version_tuple(raw: str) -> tuple[int, ...]:
+    """Parse a dotted version into ints for ordering.
+
+    Non-numeric or malformed segments compare as 0 rather than raising: a
+    version warning must never be the thing that stops the CLI from starting.
+    """
+    parts: list[int] = []
+    for chunk in str(raw).split("."):
+        digits = "".join(c for c in chunk if c.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
 
 
 class Config:
@@ -155,11 +169,16 @@ class ConfigManager:
             # Check if config version is older than current version
             config_version = config_dict.get("version", "0.0.0")
             current_version = version("local-operator")
-            if config_version > current_version:
+            # Compare as version TUPLES, not strings: "1.10.0" > "1.9.0" is
+            # False lexicographically, so the warning fired on the wrong set of
+            # versions entirely. stderr because ConfigManager is constructed on
+            # the `exec --json` path, whose stdout is the event stream.
+            if _version_tuple(config_version) > _version_tuple(current_version):
                 print(
                     f"\n\033[1;33mWarning: Your config file version ({config_version}) "
                     f"is newer than the current version ({current_version}). "
-                    "Please upgrade to ensure compatibility.\033[0m"
+                    "Please upgrade to ensure compatibility.\033[0m",
+                    file=sys.stderr,
                 )
 
             # Fill in any missing values with defaults

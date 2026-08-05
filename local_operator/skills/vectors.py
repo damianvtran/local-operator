@@ -158,9 +158,15 @@ def deserialize(blob: bytes) -> tuple[VectorMatrix, str]:
 
     Raises:
         ValueError: If the blob is truncated, has the wrong magic, or its
-            payload length disagrees with the declared shape. Callers treat
-            any failure as a cache miss and rebuild, so this only needs to be
-            reliable, not diagnostic.
+            payload length disagrees with the declared shape.
+        zlib.error: If the compressed payload is itself corrupt — a bit-flipped
+            cache file reaches the decompressor before any length check can
+            catch it, and zlib.error is NOT a ValueError subclass.
+
+    Callers treat any failure as a cache miss and rebuild (see
+    ``skills/index.py``, which catches broadly for this reason), so both are
+    equivalent in practice. Both are documented because a future caller
+    trusting only the ValueError contract would crash on a corrupt file.
     """
     header_end = len(_MAGIC) + _HEADER.size
     if len(blob) < header_end or not blob.startswith(_MAGIC):

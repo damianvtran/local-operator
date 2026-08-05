@@ -654,7 +654,6 @@ async def test_run_tui_forwards_provider_controller(monkeypatch) -> None:
     class _SpyApp(OperatorApp):
         def __init__(self, *a, **kw):
             seen["controller"] = kw.get("provider_controller")
-            seen["handler"] = kw.get("login_handler")
             super().__init__(*a, **kw)
 
         async def run_async(self):
@@ -677,7 +676,6 @@ async def test_run_tui_forwards_provider_controller(monkeypatch) -> None:
 
     await run_tui(factory2, theme_name="dark", provider_controller=fake_controller)
     assert seen["controller"] is fake_controller
-    assert seen["handler"] is None
 
 
 # --- /goal and /loop -------------------------------------------------------

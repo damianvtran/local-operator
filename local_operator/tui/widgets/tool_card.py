@@ -47,6 +47,7 @@ Widths measured through ``rich.cells.cell_len`` only (one width model).
 from __future__ import annotations
 
 import os
+import re
 import time
 from typing import Any
 
@@ -56,6 +57,34 @@ from rich.text import Text
 
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.transcript import TranscriptBlock, TranscriptView
+
+#: Terminal control sequences that must never reach the composed frame. Tool
+#: output is arbitrary bytes from arbitrary programs: `ls --color=always`,
+#: `git diff --color`, or pytest/npm/cargo under FORCE_COLOR all emit CSI
+#: sequences, and a bare `\x1b[2J` from a build tool would ERASE the user's
+#: screen mid-render. Two further reasons beyond the obvious one: cell_len
+#: counts "[31m" as four visible cells while ESC is zero, so the background
+#: fill and the right-aligned status column go ragged; and cell-aware
+#: truncation can cut a sequence in half, emitting a corrupt CSI that the
+#: terminal may interpret against the rest of the line.
+_CONTROL_RE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]"  # CSI: colours, cursor moves, erase
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC: window title, hyperlinks
+    r"|\x1b[@-Z\\-_]"  # two-character escapes
+    r"|[\x00-\x08\x0b-\x1f\x7f]"  # stray C0 controls and DEL
+)
+
+
+def _strip_control_sequences(text: str) -> str:
+    """Remove ANSI/C0 control sequences, keeping the printable text.
+
+    Stripping rather than interpreting is deliberate: honouring tool colour
+    would let a subprocess paint arbitrary colour into our own transcript, and
+    the card's whole contract is that IT owns the styling (dim body, danger
+    tint on failure). Tabs and newlines are handled before this is called.
+    """
+    return _CONTROL_RE.sub("", text)
+
 
 #: Status glyphs (no Nerd fonts; plain unicode).
 ICON_GLYPH = "▸"  # row prefix: one tool-action marker
@@ -222,15 +251,28 @@ def _clamp_runs(runs: list[tuple[str, Style]], limit: int) -> list[tuple[str, St
 
 
 def _row_text() -> Text:
-    """A ``Text`` that can never grow a card by wrapping.
+    """A ``Text`` carrying wrap-suppression flags for the Rich-only paths.
 
-    Every segment this module emits is already truncated by cell width, so
-    wrapping should be unreachable — but "should be" is not a guarantee. A
-    card whose row is built one cell wider than the widget it lands in (the
-    unavoidable gap between guessing a width before layout and being told
-    the real one afterwards) would silently become TWO rows, and the
-    one-line rule would be an arithmetic accident rather than a property.
-    ``no_wrap`` makes the worst case a clipped cell instead of a lost line.
+    IMPORTANT, because the previous docstring claimed a guarantee this does
+    not provide: Textual's ``Content.from_rich_text`` DISCARDS ``no_wrap`` and
+    ``overflow`` when a Rich ``Text`` crosses into a widget, so these flags do
+    nothing for the composed card. They are kept because they DO apply when
+    the same row is measured or exported through Rich directly (tests, SVG
+    export), and dropping them would change those paths.
+
+    What actually holds the one-row rule, in order:
+
+    1. ``ToolCard { height: 1 }`` in the stylesheet — the real enforcement. A
+       collapsed card is one cell tall, so wrapped content is clipped, never
+       reflowed. ``ToolCard.tool-expanded`` relaxes it to ``height: auto``
+       precisely because expansion is the one case that may be taller.
+    2. The status segment is hard-trimmed to ``width - 3`` in ``_build_row``,
+       so no state's label can outgrow its column.
+    3. Diff counters are dropped first when the cap bites, so the outcome
+       glyph and duration always survive.
+
+    Every segment is measured with ``rich.cells.cell_len``, never ``len``, so
+    CJK, emoji and ZWJ sequences account correctly.
     """
     return Text(no_wrap=True, overflow="ellipsis")
 
@@ -261,7 +303,11 @@ class ToolCard(TranscriptBlock):
         self.tool_call_id = tool_call_id
         self.tool_name = tool_name
         self.add_class("tool-card", "tool-running")
-        self._summary = intent or _summary_from_args(tool_name, args or {})
+        # Sanitised at the boundary: args and intent can carry escapes too
+        # (a bash command containing a colour code, an MCP tool's intent).
+        self._summary = _strip_control_sequences(
+            intent or _summary_from_args(tool_name, args or {})
+        )
         self._state: str = "running"
         self._duration: float | None = None
         self._error: str = ""
@@ -298,7 +344,7 @@ class ToolCard(TranscriptBlock):
         """
         self._duration = time.monotonic() - self._started
         self._state = "error"
-        self._error = " ".join(error.split()) or "error"
+        self._error = _strip_control_sequences(" ".join(error.split())) or "error"
         self._absorb_result(result_text or error, details)
         self.remove_class("tool-running")
         self.add_class("tool-error")
@@ -318,7 +364,7 @@ class ToolCard(TranscriptBlock):
         """Replace the running summary with a streaming partial result line."""
         if self._state != "running":
             return
-        cleaned = " ".join(detail.split())
+        cleaned = _strip_control_sequences(" ".join(detail.split()))
         if cleaned:
             self._summary = cleaned
             self._refresh_row()
@@ -337,7 +383,10 @@ class ToolCard(TranscriptBlock):
         """
         if not result_text:
             return []
-        lines = [line.rstrip() for line in result_text.expandtabs(4).splitlines()]
+        lines = [
+            _strip_control_sequences(line.rstrip())
+            for line in result_text.expandtabs(4).splitlines()
+        ]
         while lines and not lines[0]:
             lines.pop(0)
         while lines and not lines[-1]:

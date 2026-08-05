@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config
+from local_operator.optional import missing_extra_error
 
 if TYPE_CHECKING:
     from local_operator.agents import AgentRegistry
@@ -593,9 +594,10 @@ def serve_command(host: str, port: int, reload: bool) -> int:
     try:
         import uvicorn
     except ImportError:
-        from local_operator.optional import missing_extra_error
-
-        print(f"\n\033[1;31m{missing_extra_error('server', 'The HTTP API server')}\033[0m")
+        print(
+            f"\n\033[1;31m{missing_extra_error('server', 'The HTTP API server')}\033[0m",
+            file=sys.stderr,
+        )
         return -1
 
     print(f"Starting server at http://{host}:{port}")
@@ -1019,11 +1021,15 @@ def _preflight_api_key(hosting: str, credential_manager: CredentialManager) -> i
         return None
 
     key_name = definition.env_keys if isinstance(definition.env_keys, str) else "API key"
+    # stderr: this fires on every fresh install and every typo'd --hosting,
+    # i.e. it is the single most common `exec --json` failure, and a coloured
+    # non-JSON line on stdout breaks the consumer it is trying to inform.
     print(
         f"\n\033[1;31mError: {key_name} is required for hosting platform "
         f"'{hosting}' but is not configured. Set it via `local-operator "
         f"credential update {key_name}`, the environment, or `local-operator "
-        f"login {canonical}`.\033[0m"
+        f"login {canonical}`.\033[0m",
+        file=sys.stderr,
     )
     return -1
 
@@ -1071,6 +1077,18 @@ async def _run_with_scheduler(run_fn, *run_args) -> int:
             job_manager=JobManager(),
             websocket_manager=WebSocketManager(),  # required by the constructor, unused in CLI
         )
+    except ModuleNotFoundError:  # the [server] extra is absent
+        # This fires on EVERY startup of a bare install, because it wraps both
+        # front ends — `local-operator` with no arguments is the most-travelled
+        # path in the product. Echoing "No module named 'apscheduler'" told the
+        # user nothing actionable; name the extra like every other optional
+        # feature does.
+        print(
+            f"\033[1;33mWarning: {missing_extra_error('server', 'Scheduled tasks')} "
+            f"Continuing without scheduled tasks.\033[0m",
+            file=sys.stderr,
+        )
+        scheduler_service = None
     except Exception as exc:  # noqa: BLE001 — degrade to no scheduler
         print(
             f"\033[1;33mWarning: scheduler unavailable, continuing without "
@@ -1418,11 +1436,24 @@ def main() -> int:
             )
         )
     except Exception as e:
-        print(f"\n\033[1;31mError: {str(e)}\033[0m")
-        print("\033[1;34m╭─ Stack Trace ────────────────────────────────────\033[0m")
+        # STDERR, always. main() wraps the `exec` dispatch too, so this is the
+        # error presenter for `exec --json` — printing decorated banners to
+        # stdout put four unparseable lines on the event stream at exactly the
+        # moment a consumer most needs to read it.
+        print(f"\n\033[1;31mError: {str(e)}\033[0m", file=sys.stderr)
+        print(
+            "\033[1;34m╭─ Stack Trace ────────────────────────────────────\033[0m",
+            file=sys.stderr,
+        )
         traceback.print_exc()
-        print("\033[1;34m╰──────────────────────────────────────────────────\033[0m")
-        print("\n\033[1;33mPlease review and correct the error to continue.\033[0m")
+        print(
+            "\033[1;34m╰──────────────────────────────────────────────────\033[0m",
+            file=sys.stderr,
+        )
+        print(
+            "\n\033[1;33mPlease review and correct the error to continue.\033[0m",
+            file=sys.stderr,
+        )
         return -1
 
 

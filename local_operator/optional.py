@@ -57,7 +57,12 @@ def missing_extra_error(extra: str, feature: str) -> str:
         install command. The command quotes the requirement because the
         bracket syntax is glob-expanded by zsh and most shells otherwise.
     """
-    assert extra in EXTRAS, f"Unknown extra {extra!r}; declared extras are {sorted(EXTRAS)}"
+    if extra not in EXTRAS:
+        # NOT an assert: `python -O` strips asserts, which would silently remove
+        # the drift guard in exactly the optimized runs where a wrong install
+        # hint is hardest to notice. A typo here ships a message telling the
+        # user to install something that does not exist.
+        raise KeyError(f"Unknown extra {extra!r}; declared extras are {sorted(EXTRAS)}")
     return (
         f'{feature} requires the "{extra}" extra. '
         f'Install it with: pip install "local-operator[{extra}]"'

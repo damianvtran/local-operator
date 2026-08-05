@@ -368,7 +368,9 @@ def test_run_exec_background_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
         assert kwargs.get("start_new_session") is True
 
     # Log path printed and registered; JSONL ledger appended (CL-11).
-    out = capsys.readouterr().out
+    # STDERR: --json and --background are independent flags, so these two
+    # notices must not precede the event stream on stdout.
+    out = capsys.readouterr().err
     assert "Started background job" in out
     log_line = next(line for line in out.splitlines() if line.startswith("Log: "))
     log_path = Path(log_line.removeprefix("Log: "))
@@ -443,7 +445,9 @@ def test_background_preflight_blocks_spawn(
     code = exec_mode.run_exec("doomed", ExecArgs(background=True))
     assert code != 0
     popen_mock.assert_not_called()
-    out = capsys.readouterr().out
+    # stderr: a preflight failure on the --json path must stay off the data
+    # channel, like every other diagnostic.
+    out = capsys.readouterr().err
     assert "Model name is not configured." in out
     assert not logs_dir.exists() or not list(logs_dir.glob("exec-*.log"))
 

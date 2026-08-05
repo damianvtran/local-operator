@@ -43,6 +43,7 @@ import asyncio
 import difflib
 import contextlib
 import fnmatch
+import json
 import os
 import re
 import signal as signal_module
@@ -1665,8 +1666,15 @@ def _browser_state(context: ToolContext | None) -> BrowserSurfaceProtocol:
 
 
 async def _run_cmux(argv: list[str], timeout: float = 30.0) -> tuple[int, str]:
-    """Run a cmux subcommand; returns (exit_code, stdout). Never raises, and
-    on timeout terminates the child so a hung cmux cannot orphan."""
+    """Run a cmux subcommand; returns (exit_code, output). Never raises, and
+    on timeout terminates the child so a hung cmux cannot orphan.
+
+    The returned text is stdout on success and STDERR on failure, because that
+    is where cmux writes its diagnostics — on a socket or permission failure it
+    exits non-zero with stdout completely empty. Returning stdout alone made
+    every real failure surface to the model and the user as the blank message
+    "cmux open failed: ", which is unactionable.
+    """
     proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -1675,8 +1683,15 @@ async def _run_cmux(argv: list[str], timeout: float = 30.0) -> tuple[int, str]:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        return proc.returncode or 0, stdout.decode("utf-8", "replace")
+        raw_out, raw_err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        code = proc.returncode or 0
+        out = raw_out.decode("utf-8", "replace").strip()
+        err = raw_err.decode("utf-8", "replace").strip()
+        if code != 0:
+            # Prefer stderr, fall back to stdout, and never return "" for a
+            # failure — a caller interpolating this must always have something.
+            return code, err or out or f"cmux exited {code} with no output"
+        return code, out
     except asyncio.TimeoutError:
         if proc is not None:
             try:
@@ -1685,6 +1700,8 @@ async def _run_cmux(argv: list[str], timeout: float = 30.0) -> tuple[int, str]:
             except Exception:  # noqa: BLE001 — best-effort cleanup
                 pass
         return 1, f"cmux timed out after {timeout}s"
+    except FileNotFoundError:
+        return 1, "cmux is not on PATH"
     except Exception as exc:  # noqa: BLE001 — surface, never crash
         return 1, str(exc)
 
@@ -1722,21 +1739,24 @@ async def execute_browser(
         code, out = await _run_cmux(_cmux_new_surface(params.url))
         if code != 0:
             return _error(tool_call_id, "browser", f"cmux open failed: {out.strip()}")
-        # Parse the surface id from the JSON result.
         surface_id = _parse_surface_id(out)
-        if surface_id:
-            state.surface_id = surface_id
-            return _text(
+        if not surface_id:
+            # A "success" with no handle is a FAILURE: the next goto/screenshot
+            # can only report "no browser surface open", and the model has been
+            # told the open worked so it has no reason to retry. Fail here, with
+            # the raw output, so the actual shape is visible in the transcript.
+            return _error(
                 tool_call_id,
                 "browser",
-                f"Opened browser surface {surface_id} at {params.url}.",
-                details={"surface_id": surface_id, "url": params.url},
+                "cmux opened a browser but reported no surface handle; cannot "
+                f"drive it. Output was: {out or '(empty)'}",
             )
+        state.surface_id = surface_id
         return _text(
             tool_call_id,
             "browser",
-            f"Opened browser at {params.url}.",
-            details={"url": params.url},
+            f"Opened browser surface {surface_id} at {params.url}.",
+            details={"surface_id": surface_id, "url": params.url},
         )
 
     if not state.surface_id:
@@ -1754,58 +1774,124 @@ async def execute_browser(
     # screenshot — cmux takes the destination as ``--out <path>``; passing it
     # positionally is silently IGNORED (cmux writes into its own temp dir and
     # still exits 0), which would make us report a file that does not exist.
-    target = params.path or ""
-    if not target:
+    if params.path:
+        # Route through the shared resolver like every other file-writing tool
+        # (write/edit/read/grep). Without it `~` was never expanded (creating a
+        # literal "~" directory), relative paths resolved against the operator
+        # process CWD instead of the session's, and the approval prompt showed
+        # the unresolved string the model typed rather than the real target.
+        # The tool already sits in the `write` approval tier, which always
+        # prompts, so an outside-workspace target is surfaced by that prompt
+        # showing the fully resolved absolute path.
+        resolved, _inside = _resolve_workspace_path(params.path, _safe_cwd(context))
+        target = str(resolved)
+    else:
         import tempfile
 
         target = os.path.join(tempfile.gettempdir(), f"lo-browser-{surface}.png")
     code, out = await _run_cmux(["browser", "--surface", surface, "screenshot", "--out", target])
     if code != 0:
-        return _error(tool_call_id, "browser", f"cmux screenshot failed: {out.strip()}")
+        return _error(tool_call_id, "browser", f"cmux screenshot failed: {out}")
     # Exit 0 is not proof of a write: confirm the file landed before telling
     # the model it can read it.
     if not os.path.exists(target):
         return _error(
             tool_call_id,
             "browser",
-            f"cmux reported success but no file at {target}: {out.strip()}",
+            f"cmux reported success but no file at {target}: {out or '(no output)'}",
         )
     return _text(
         tool_call_id, "browser", f"Screenshot saved to {target}.", details={"path": target}
     )
 
 
-#: A cmux surface handle looks like ``surface:73`` — a word, a colon, digits.
-#: Requiring that shape is what stops a status banner or an error message
-#: ("done", "error: could not start") from being adopted as a handle and then
-#: passed to every later --surface call.
-_SURFACE_REF_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:[0-9A-Za-z_-]+$")
+#: A cmux surface handle is exactly ``surface:<n>`` — the PREFIX is part of the
+#: contract, not just the colon shape. Anchoring on it is what stops three
+#: distinct classes of bad handle: a status banner ("done", "error: could not
+#: start"), a sibling ref of the wrong kind (``pane:2``, ``window:1`` — both
+#: real cmux output that the old shape-only regex happily adopted), and an
+#: option-looking value like ``--help`` which would be injected straight into
+#: the next ``cmux browser --surface <x> goto`` argv.
+_SURFACE_REF_RE = re.compile(r"^surface:[0-9A-Za-z_-]+$")
+
+#: JSON keys that may carry the handle, best first. ``id`` is deliberately NOT
+#: here: it is a documented cmux field with an unrelated request-dedupe
+#: meaning, so reading it turned an error payload like
+#: ``{"ok":false,"error":"browser disabled","id":"req-8f21"}`` into a
+#: confidently-reported success on a handle that does not exist.
+_SURFACE_KEYS = ("surface_ref", "surface", "surface_id")
+
+
+def _iter_json_objects(out: str):
+    """Yield every JSON object embedded anywhere in ``out``, in order.
+
+    cmux's real ``--json`` output is a PRETTY-PRINTED multi-line document, but
+    it can also arrive as NDJSON, wrapped in a human preamble, or followed by a
+    trailing status line. Splitting on lines handles NDJSON and breaks
+    pretty-printing; requiring the whole stream to be one document does the
+    reverse. ``raw_decode`` from each ``{`` handles all four, because it stops
+    at the end of the first complete value and tells us where that was.
+    """
+    decoder = json.JSONDecoder()
+    index = 0
+    while True:
+        start = out.find("{", index)
+        if start < 0:
+            return
+        try:
+            parsed, end = decoder.raw_decode(out, start)
+        except ValueError:
+            # Not the start of a complete object — step past this brace rather
+            # than giving up, so a literal "{" in a preamble cannot hide the
+            # real payload behind it.
+            index = start + 1
+            continue
+        if isinstance(parsed, dict):
+            yield parsed
+        index = max(end, start + 1)
+
+
+def _find_surface_ref(payload: object) -> str:
+    """Depth-first search for a ref-shaped handle in a decoded JSON payload.
+
+    Nested is normal (``{"ok":true,"result":{"surface_ref":"surface:73"}}``),
+    so a flat key lookup missed real successes. Every candidate is still
+    validated against :data:`_SURFACE_REF_RE`, so recursing widens what we
+    ACCEPT without widening what we TRUST.
+    """
+    if isinstance(payload, dict):
+        for key in _SURFACE_KEYS:
+            value = payload.get(key)
+            if isinstance(value, str) and _SURFACE_REF_RE.match(value.strip()):
+                return value.strip()
+        for value in payload.values():
+            found = _find_surface_ref(value)
+            if found:
+                return found
+    elif isinstance(payload, list):
+        for item in payload:
+            found = _find_surface_ref(item)
+            if found:
+                return found
+    return ""
 
 
 def _parse_surface_id(out: str) -> str:
     """Extract the surface handle from ``cmux --json new-surface`` output.
 
-    cmux emits ``surface_ref`` (e.g. ``{"surface_ref": "surface:73", ...}``);
-    the other spellings are accepted only as tolerant fallbacks. Returns ""
-    when nothing ref-shaped is found, so ``goto``/``screenshot`` fail with the
-    honest "no browser surface open" rather than a bogus handle.
+    Returns "" when nothing ``surface:<n>``-shaped is found, so callers fail
+    with an honest error instead of poisoning the session with a handle that
+    every later ``--surface`` call will silently misuse.
     """
-    cleaned = out.strip()
-    if cleaned.startswith("{"):
-        import json as _json
-
-        try:
-            data = _json.loads(cleaned)
-        except Exception:  # noqa: BLE001 — unparseable output is just no id
-            return ""
-        for key in ("surface_ref", "surface", "surface_id", "id"):
-            value = data.get(key)
-            if value:
-                return str(value)
-        return ""
-    # Plain-text fallback: only a genuinely ref-shaped trailing token.
-    token = cleaned.split()[-1] if cleaned else ""
-    return token if _SURFACE_REF_RE.match(token) else ""
+    for payload in _iter_json_objects(out):
+        found = _find_surface_ref(payload)
+        if found:
+            return found
+    # Plain-text fallback: a ref-shaped token anywhere in the output.
+    for token in out.split():
+        if _SURFACE_REF_RE.match(token):
+            return token
+    return ""
 
 
 def build_browser_tool(context: ToolContext | None) -> AgentTool | None:

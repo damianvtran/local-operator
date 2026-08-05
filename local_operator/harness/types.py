@@ -41,11 +41,18 @@ from typing import (
     Literal,
     Protocol,
     Sequence,
-    TypeVar,
     runtime_checkable,
 )
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+# TypeVar comes from typing_extensions, NOT typing: the ``default=`` parameter
+# below is PEP 696, which landed in typing only in 3.13, while this package
+# supports 3.12. On 3.12 ``typing.TypeVar(default=...)`` raises TypeError at
+# import time, which surfaces as an undiagnosable "preflight failed" on every
+# command. typing_extensions backports it and is a declared dependency for
+# exactly this reason (it also arrives with pydantic).
+from typing_extensions import TypeVar
 
 # One-way, in-package dependency: ``wake`` is pure schedule data plus a timer
 # and imports nothing else from the harness, so naming its schedule type here
