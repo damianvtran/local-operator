@@ -73,6 +73,14 @@ class FakeSession:
     def set_model(self, model):
         pass
 
+    @property
+    def goal(self) -> str:
+        return getattr(self, "_goal", "")
+
+    def set_goal(self, text: str) -> str:
+        self._goal = (text or "").strip()
+        return self._goal
+
     # driving turns
     async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
         self.prompts.append(text)

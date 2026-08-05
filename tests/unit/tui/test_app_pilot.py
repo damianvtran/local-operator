@@ -669,3 +669,123 @@ async def test_run_tui_forwards_provider_controller(monkeypatch) -> None:
     await run_tui(factory2, theme_name="dark", provider_controller=fake_controller)
     assert seen["controller"] is fake_controller
     assert seen["handler"] is None
+
+
+# --- /goal and /loop -------------------------------------------------------
+
+
+class GoalSession(FakeSession):
+    """FakeSession with the goal surface and a recording prompt()."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._goal = ""
+        self.fail_on_prompt = False
+
+    @property
+    def goal(self) -> str:
+        return self._goal
+
+    def set_goal(self, text: str) -> str:
+        self._goal = (text or "").strip()
+        return self._goal
+
+    async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
+        if self.fail_on_prompt:
+            raise RuntimeError("boom")
+        self.prompts.append(text)
+
+
+async def _type_command(pilot, app, command: str) -> None:
+    app.query_one(Editor).focus()
+    await pilot.press("slash")
+    for ch in command:
+        await pilot.press("space" if ch == " " else ch)
+    await pilot.press("enter")
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_goal_set_show_and_clear() -> None:
+    session = GoalSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _type_command(pilot, app, "goal ship it")
+        assert session.goal == "ship it"
+        await _type_command(pilot, app, "goal")
+        assert "ship it" in _transcript_text(app)
+        await _type_command(pilot, app, "goal clear")
+        assert session.goal == ""
+
+
+@pytest.mark.asyncio
+async def test_loop_requires_a_goal() -> None:
+    session = GoalSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _type_command(pilot, app, "loop")
+        assert "set a goal first" in _transcript_text(app)
+    assert session.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_loop_runs_bounded_iterations() -> None:
+    session = GoalSession()
+    session.set_goal("finish the parser")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _type_command(pilot, app, "loop 2")
+        for _ in range(12):
+            await pilot.pause()
+            if not app._loop_running:
+                break
+        text = _transcript_text(app)
+    assert len(session.prompts) == 2
+    assert "loop finished after 2" in text
+
+
+@pytest.mark.asyncio
+async def test_loop_rejects_out_of_range_and_garbage() -> None:
+    session = GoalSession()
+    session.set_goal("g")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _type_command(pilot, app, "loop 99")
+        await _type_command(pilot, app, "loop abc")
+        text = _transcript_text(app)
+    assert "between 1 and" in text
+    assert "usage: /loop" in text
+    assert session.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_loop_stops_on_turn_error() -> None:
+    session = GoalSession()
+    session.set_goal("g")
+    session.fail_on_prompt = True
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _type_command(pilot, app, "loop 5")
+        for _ in range(12):
+            await pilot.pause()
+            if not app._loop_running:
+                break
+        text = _transcript_text(app)
+    assert "loop stopped" in text  # did not spin through all 5
+
+
+@pytest.mark.asyncio
+async def test_interrupt_cancels_running_loop() -> None:
+    session = GoalSession()
+    session.set_goal("g")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app._loop_running = True
+        app.action_interrupt()
+        assert app._loop_cancelled is True
