@@ -1822,6 +1822,15 @@ _SURFACE_REF_RE = re.compile(r"^surface:[0-9A-Za-z_-]+$")
 _SURFACE_KEYS = ("surface_ref", "surface", "surface_id")
 
 
+#: Bounds on parsing untrusted subprocess output. A real cmux handshake is a
+#: few hundred bytes; these exist so a pathological payload costs a bounded
+#: amount of work and degrades to "no handle" (an outcome the caller already
+#: handles) rather than to seconds of CPU or an unexpected exception.
+_MAX_PARSE_CHARS = 64 * 1024
+_MAX_JSON_NODES = 10_000
+_MAX_DECODE_ATTEMPTS = 256
+
+
 def _iter_json_objects(out: str):
     """Yield every JSON object embedded anywhere in ``out``, in order.
 
@@ -1834,16 +1843,25 @@ def _iter_json_objects(out: str):
     """
     decoder = json.JSONDecoder()
     index = 0
-    while True:
+    attempts = 0
+    while attempts < _MAX_DECODE_ATTEMPTS:
         start = out.find("{", index)
         if start < 0:
             return
+        attempts += 1
         try:
             parsed, end = decoder.raw_decode(out, start)
-        except ValueError:
+        except (ValueError, RecursionError):
+            # RecursionError as well as ValueError: the C JSON decoder recurses
+            # per nesting level and raises it (NOT a ValueError subclass) on a
+            # deeply nested payload. Untrusted subprocess output must degrade to
+            # "no handle", which the caller already handles, never to an
+            # unexpected-exception tool failure.
             # Not the start of a complete object — step past this brace rather
             # than giving up, so a literal "{" in a preamble cannot hide the
-            # real payload behind it.
+            # real payload behind it. Each failed attempt can rescan forward,
+            # so the attempt count is what keeps a run of bare "{" from going
+            # quadratic (60k of them cost seconds before this bound).
             index = start + 1
             continue
         if isinstance(parsed, dict):
@@ -1852,27 +1870,33 @@ def _iter_json_objects(out: str):
 
 
 def _find_surface_ref(payload: object) -> str:
-    """Depth-first search for a ref-shaped handle in a decoded JSON payload.
+    """Breadth-first search for a ref-shaped handle in a decoded JSON payload.
 
     Nested is normal (``{"ok":true,"result":{"surface_ref":"surface:73"}}``),
     so a flat key lookup missed real successes. Every candidate is still
-    validated against :data:`_SURFACE_REF_RE`, so recursing widens what we
+    validated against :data:`_SURFACE_REF_RE`, so searching widens what we
     ACCEPT without widening what we TRUST.
+
+    Iterative with an explicit queue rather than recursive: a recursive walk
+    raised RecursionError at ~2000 levels of nesting, and tool output is
+    untrusted input — a pathological payload must degrade to "no handle", which
+    is already a handled outcome, not to an unexpected-exception tool failure.
+    Breadth-first also finds the SHALLOWEST match, which is the one a sane
+    payload means.
     """
-    if isinstance(payload, dict):
-        for key in _SURFACE_KEYS:
-            value = payload.get(key)
-            if isinstance(value, str) and _SURFACE_REF_RE.match(value.strip()):
-                return value.strip()
-        for value in payload.values():
-            found = _find_surface_ref(value)
-            if found:
-                return found
-    elif isinstance(payload, list):
-        for item in payload:
-            found = _find_surface_ref(item)
-            if found:
-                return found
+    queue: list[object] = [payload]
+    seen = 0
+    while queue and seen < _MAX_JSON_NODES:
+        current = queue.pop(0)
+        seen += 1
+        if isinstance(current, dict):
+            for key in _SURFACE_KEYS:
+                value = current.get(key)
+                if isinstance(value, str) and _SURFACE_REF_RE.match(value.strip()):
+                    return value.strip()
+            queue.extend(current.values())
+        elif isinstance(current, list):
+            queue.extend(current)
     return ""
 
 
@@ -1883,12 +1907,16 @@ def _parse_surface_id(out: str) -> str:
     with an honest error instead of poisoning the session with a handle that
     every later ``--surface`` call will silently misuse.
     """
-    for payload in _iter_json_objects(out):
+    # Only the head of the output is searched. A real handshake is a few hundred
+    # bytes; scanning megabytes of unrelated output for a brace is wasted work,
+    # and `{` * 60000 made the decode-attempt loop take seconds.
+    head = out[:_MAX_PARSE_CHARS]
+    for payload in _iter_json_objects(head):
         found = _find_surface_ref(payload)
         if found:
             return found
     # Plain-text fallback: a ref-shaped token anywhere in the output.
-    for token in out.split():
+    for token in head.split():
         if _SURFACE_REF_RE.match(token):
             return token
     return ""

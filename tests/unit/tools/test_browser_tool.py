@@ -307,3 +307,61 @@ def test_run_cmux_reports_stderr_on_failure() -> None:
     )
     assert code != 0
     assert out.strip(), "a failure must never produce an empty diagnostic"
+
+
+# --- parser bounds on untrusted subprocess output ---------------------------
+#
+# cmux output is untrusted input. A pathological payload must degrade to "no
+# handle" — an outcome the caller already handles with an honest error — never
+# to seconds of CPU or an unexpected-exception tool failure.
+
+
+def test_deeply_nested_payload_degrades_instead_of_raising() -> None:
+    """A recursive walk raised RecursionError at ~2000 levels, and the C JSON
+    decoder raises it too (and RecursionError is NOT a ValueError)."""
+    for depth in (500, 2000, 20_000):
+        blob = '{"a":' * depth + '{"surface_ref":"surface:1"}' + "}" * depth
+        result = builtin._parse_surface_id(blob)  # must not raise
+        assert result in ("surface:1", "")
+
+
+def test_pathological_input_is_bounded() -> None:
+    """A run of bare "{" made the decode-attempt loop quadratic: 60k of them
+    cost over four seconds before the attempt bound."""
+    import time
+
+    for blob in ("{" * 60_000, '{"x":1}' * 20_000, "x" * 1_000_000):
+        started = time.monotonic()
+        builtin._parse_surface_id(blob)
+        assert time.monotonic() - started < 1.0
+
+
+def test_shallowest_handle_wins() -> None:
+    """Breadth-first: the top-level handle is what a sane payload means, and a
+    nested one should not shadow it."""
+    blob = '{"surface_ref":"surface:1","a":{"surface_ref":"surface:99"}}'
+    assert builtin._parse_surface_id(blob) == "surface:1"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"surface_ref":["surface:73"]}',  # list, not a string
+        '{"surface_ref":73}',  # number
+        '{"surface_ref":null,"id":"surface:9"}',  # null, and `id` is not trusted
+        '{"note":"surface:73"}',  # right shape, wrong key
+        '{"surface_ref":"surface:73 extra"}',  # trailing junk in the value
+        '{"surface_ref":"surface:"}',  # empty ref
+    ],
+)
+def test_wrong_shaped_values_are_rejected(payload: str) -> None:
+    assert builtin._parse_surface_id(payload) == ""
+
+
+def test_first_success_across_multiple_objects_is_used() -> None:
+    """cmux may emit an ack or an error object before the payload."""
+    assert (
+        builtin._parse_surface_id('{"ok":false,"error":"x"}\n{"surface_ref":"surface:73"}')
+        == "surface:73"
+    )
+    assert builtin._parse_surface_id('{"surface_ref":"surface:73"}\n{"ok":false}') == "surface:73"
