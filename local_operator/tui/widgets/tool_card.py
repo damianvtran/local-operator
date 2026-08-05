@@ -67,21 +67,45 @@ from local_operator.tui.widgets.transcript import TranscriptBlock, TranscriptVie
 #: fill and the right-aligned status column go ragged; and cell-aware
 #: truncation can cut a sequence in half, emitting a corrupt CSI that the
 #: terminal may interpret against the rest of the line.
+#:
+#: Both the 7-bit (ESC-prefixed) and 8-bit (C1, U+0080-U+009F) forms are
+#: covered. The 8-bit form is easy to forget because it does not look like an
+#: escape in a decoded string, but `\x9b31m` is a live CSI to a terminal that
+#: honours C1 — and it survives a 7-bit-only pattern untouched.
+#:
+#: The STRING controls (DCS/SOS/PM/APC and OSC) are removed WITH their payload
+#: up to the terminator: their content is device data, never display text, so
+#: leaving "tmux;xyz" behind after stripping the introducer just turns a
+#: control sequence into wrong text. An unterminated string is dropped to end
+#: of line, which is the conservative direction.
 _CONTROL_RE = re.compile(
-    r"\x1b\[[0-?]*[ -/]*[@-~]"  # CSI: colours, cursor moves, erase
-    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC: window title, hyperlinks
-    r"|\x1b[@-Z\\-_]"  # two-character escapes
-    r"|[\x00-\x08\x0b-\x1f\x7f]"  # stray C0 controls and DEL
+    # OSC / DCS / SOS / PM / APC, 7- and 8-bit, payload included. BEL or ST
+    # terminates; unterminated runs to the end of the string.
+    r"(?:\x1b[\]PX^_]|[\x9d\x90\x98\x9e\x9f])[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c|$)"
+    # CSI, 7- and 8-bit: parameters, intermediates, final byte.
+    r"|(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"
+    # An incomplete CSI at a truncation boundary: strip the tail rather than
+    # emit a fragment the terminal will try to complete with real content.
+    r"|(?:\x1b\[|\x9b)[0-?]*[ -/]*$"
+    # Remaining two-character escapes, then a lone trailing ESC.
+    r"|\x1b[@-Z\\-_]"
+    r"|\x1b$"
+    # Stray C0 controls, DEL, and any other C1 control.
+    r"|[\x00-\x08\x0b-\x1f\x7f-\x9f]"
 )
 
 
 def _strip_control_sequences(text: str) -> str:
-    """Remove ANSI/C0 control sequences, keeping the printable text.
+    """Remove ANSI/C1/C0 control sequences, keeping the printable text.
 
     Stripping rather than interpreting is deliberate: honouring tool colour
     would let a subprocess paint arbitrary colour into our own transcript, and
     the card's whole contract is that IT owns the styling (dim body, danger
     tint on failure). Tabs and newlines are handled before this is called.
+
+    Printable text is preserved exactly, including box drawing, combining
+    marks, ZWJ emoji sequences, CJK and RTL — none of which live in the
+    control ranges.
     """
     return _CONTROL_RE.sub("", text)
 

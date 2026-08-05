@@ -17,14 +17,34 @@ import yaml
 def _version_tuple(raw: str) -> tuple[int, ...]:
     """Parse a dotted version into ints for ordering.
 
-    Non-numeric or malformed segments compare as 0 rather than raising: a
-    version warning must never be the thing that stops the CLI from starting.
+    Only the LEADING digits of each segment count, and the rest of the segment
+    is discarded: collecting every digit turned "1.2.3rc1" into (1, 2, 31),
+    making a pre-release compare as NEWER than its own release and firing the
+    "your config is newer" warning on the wrong versions. A pre-release sorting
+    equal to its release is the right approximation here — this decides one
+    advisory message, not resolution.
+
+    Non-numeric or empty segments compare as 0 rather than raising: a version
+    warning must never be the thing that stops the CLI from starting.
     """
     parts: list[int] = []
     for chunk in str(raw).split("."):
-        digits = "".join(c for c in chunk if c.isdigit())
-        parts.append(int(digits) if digits else 0)
-    return tuple(parts)
+        chunk = chunk.strip()
+        digits = ""
+        for char in chunk:
+            if not char.isdigit():
+                break
+            digits += char
+        if digits:
+            parts.append(int(digits))
+        if digits != chunk:
+            # This segment was not purely numeric, so the version proper ends
+            # here: "3rc1", "3-beta" and "dev4" all mark a pre-release suffix.
+            # Stopping makes every pre-release form collapse to exactly its
+            # release version instead of sorting above it, which is what the
+            # one advisory message this feeds actually wants.
+            break
+    return tuple(parts) or (0,)
 
 
 class Config:

@@ -243,3 +243,49 @@ def test_config_manager_update_from_args(temp_config_dir):
 
     assert config_manager.get_config_value("hosting") == "cli_host"
     assert config_manager.get_config_value("model_name") == "cli_model"
+
+
+# --- version ordering -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("1.2.3", (1, 2, 3)),
+        ("0.15.10", (0, 15, 10)),
+        # Only LEADING digits per segment: collecting every digit made
+        # "1.2.3rc1" parse as (1, 2, 31), i.e. newer than its own release.
+        ("1.2.3rc1", (1, 2, 3)),
+        ("1.2.3.dev4", (1, 2, 3)),
+        ("1.2.3-beta.1", (1, 2, 3)),
+        # Malformed input compares as zero instead of raising — an advisory
+        # warning must never stop the CLI from starting.
+        ("", (0,)),
+        ("   ", (0,)),
+        ("x.y.z", (0,)),
+    ],
+)
+def test_version_tuple_parsing(raw, expected) -> None:
+    from local_operator.config import _version_tuple
+
+    assert _version_tuple(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "left,right,newer",
+    [
+        # The bug the tuple parse exists to fix: string compare said
+        # "1.10.0" > "1.9.0" was False, so the warning fired on the wrong set.
+        ("1.10.0", "1.9.0", True),
+        ("1.9.0", "1.10.0", False),
+        ("2.0.0", "1.0.0", True),
+        ("1.2.3", "1.2.3", False),
+        # A pre-release must NOT read as newer than its release.
+        ("1.2.3rc1", "1.2.3", False),
+        ("", "1.0.0", False),
+    ],
+)
+def test_version_ordering(left, right, newer) -> None:
+    from local_operator.config import _version_tuple
+
+    assert (_version_tuple(left) > _version_tuple(right)) is newer
