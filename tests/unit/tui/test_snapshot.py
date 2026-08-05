@@ -128,11 +128,19 @@ def _populate(session: FakeSession) -> None:
     session.emit(MessageStartEvent(message=Message.assistant("")))
     session.emit(MessageUpdateEvent(message=Message.assistant(MARKDOWN), delta=MARKDOWN))
     session.emit(MessageEndEvent(message=Message.assistant(MARKDOWN)))
-    session.emit(ToolExecutionStartEvent(tool_call_id="t1", tool_name="bash", args={"command": "pytest tests/unit -q"}))
+    session.emit(
+        ToolExecutionStartEvent(
+            tool_call_id="t1", tool_name="bash", args={"command": "pytest tests/unit -q"}
+        )
+    )
     session.emit(_tool_end("t1", "bash", "66 passed"))
-    session.emit(ToolExecutionStartEvent(tool_call_id="t2", tool_name="grep", args={"pattern": "parse"}))
+    session.emit(
+        ToolExecutionStartEvent(tool_call_id="t2", tool_name="grep", args={"pattern": "parse"})
+    )
     session.emit(_tool_end("t2", "grep", "permission denied while reading the file", is_error=True))
-    session.emit(ToolExecutionStartEvent(tool_call_id="t3", tool_name="read", args={"path": "src/parser.py"}))
+    session.emit(
+        ToolExecutionStartEvent(tool_call_id="t3", tool_name="read", args={"path": "src/parser.py"})
+    )
     session.emit(_tool_end("t3", "read", "ok"))
     # Engine-faithful: the loop always emits turn_end carrying the assistant
     # message and its tool results; the status line reads usage off it, so a
@@ -148,7 +156,11 @@ def _populate(session: FakeSession) -> None:
     )
     session.emit(
         AgentEndEvent(
-            messages=[Message.assistant("done", usage=Usage(context_tokens=12400, input_tokens=12000, output_tokens=800))]
+            messages=[
+                Message.assistant(
+                    "done", usage=Usage(context_tokens=12400, input_tokens=12000, output_tokens=800)
+                )
+            ]
         )
     )
 

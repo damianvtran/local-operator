@@ -154,7 +154,8 @@ async def login_xai(
             if error == "access_denied":
                 return DevicePollResult.failed("xAI authorization was denied.")
             return DevicePollResult.failed(
-                payload.get("error_description") or f"xAI token poll failed ({response.status_code})"
+                payload.get("error_description")
+                or f"xAI token poll failed ({response.status_code})"
             )
 
         token = await poll_device_code_flow(
@@ -196,7 +197,9 @@ async def refresh_xai_token(
         raise LoginError(f"xAI refresh failed ({response.status_code}): {response.text}")
     merged = dict(creds)
     merged.update(
-        _credentials_from_token(response.json(), str(token_endpoint), old_refresh=creds.get("refresh"))
+        _credentials_from_token(
+            response.json(), str(token_endpoint), old_refresh=creds.get("refresh")
+        )
     )
     merged["authorized_at"] = creds.get("authorized_at", merged["authorized_at"])
     return merged

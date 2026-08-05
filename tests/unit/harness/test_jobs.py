@@ -134,8 +134,12 @@ async def test_delivery_sink_scoping():
     manager = AsyncJobManager()
     main_inbox: list[tuple[str, str]] = []
     sub_inbox: list[tuple[str, str]] = []
-    manager.register_delivery_sink("Main", lambda job_id, text, job: main_inbox.append((job_id, text)))
-    manager.register_delivery_sink("Sub", lambda job_id, text, job: sub_inbox.append((job_id, text)))
+    manager.register_delivery_sink(
+        "Main", lambda job_id, text, job: main_inbox.append((job_id, text))
+    )
+    manager.register_delivery_sink(
+        "Sub", lambda job_id, text, job: sub_inbox.append((job_id, text))
+    )
 
     job_id = manager.register("task", "owned", quick_runner, owner_id="Main")
     await wait_for(lambda: manager.get(job_id).status == "completed")

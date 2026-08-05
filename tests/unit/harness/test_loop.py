@@ -303,9 +303,7 @@ async def test_steering_interrupts_between_exclusive_calls():
     async def slow_execute(tool_call_id, args, signal, on_update, context):
         executed.append("a")
         steering_flag["queued"] = True  # steering arrives while batch runs
-        return ToolResult(
-            tool_call_id=tool_call_id, tool_name="a", content=[TextContent(text="a")]
-        )
+        return ToolResult(tool_call_id=tool_call_id, tool_name="a", content=[TextContent(text="a")])
 
     tool_a = AgentTool(
         name="a", parameters={"type": "object"}, concurrency="exclusive", execute=slow_execute
@@ -473,7 +471,9 @@ async def test_approval_denied_returns_error_result():
     context = LoopContext(
         tools=[echo_tool(executed)], tool_context=ToolContext(request_approval=deny)
     )
-    messages = await AgentLoop().run_to_end([Message.user("go")], context, make_config(stream), None)
+    messages = await AgentLoop().run_to_end(
+        [Message.user("go")], context, make_config(stream), None
+    )
     assert executed == []
     tool_result = next(m for m in messages if isinstance(m, Message) and m.role == "tool")
     assert tool_result.is_error and "approval" in tool_result.text.lower()
@@ -508,7 +508,9 @@ async def test_shared_calls_run_in_parallel():
         ]
     )
     context = LoopContext(tools=[tool_x, tool_y])
-    messages = await AgentLoop().run_to_end([Message.user("go")], context, make_config(stream), None)
+    messages = await AgentLoop().run_to_end(
+        [Message.user("go")], context, make_config(stream), None
+    )
 
     results = [m for m in messages if isinstance(m, Message) and m.role == "tool"]
     assert {m.tool_name for m in results} == {"x", "y"}
@@ -559,7 +561,10 @@ async def test_exec_tier_prompts_exactly_once_per_call():
     )
     stream = ScriptedStream(
         [
-            [tool_call_delta(0, id="c1", name="echo", args="{}"), StreamEndEvent(stop_reason="toolUse")],
+            [
+                tool_call_delta(0, id="c1", name="echo", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
             [StreamEndEvent(stop_reason="stop")],
         ]
     )

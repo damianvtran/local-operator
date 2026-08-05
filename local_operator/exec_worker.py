@@ -90,6 +90,7 @@ def _install_sigterm_handler(
         # that cannot schedule into the loop.
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(EXIT_INTERRUPTED))
 
+
 def _default_session_factory(parsed: argparse.Namespace):
     """Build the real session via the shared composition root.
 
@@ -168,6 +169,7 @@ def run(parsed: argparse.Namespace, session_factory: "Callable[[], Any] | None" 
         # surface as RuntimeError) must still read as an interrupt, never as
         # an uncaught crash in the job log.
         return EXIT_INTERRUPTED
+
 
 def main() -> int:
     """Console entry: parse argv, run, flush, exit.

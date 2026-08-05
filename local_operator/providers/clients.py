@@ -157,9 +157,11 @@ def _message_to_openai(message: Message) -> dict[str, Any]:
                 "type": "function",
                 "function": {
                     "name": call.name,
-                    "arguments": call.raw_arguments
-                    if call.raw_arguments is not None
-                    else json.dumps(call.arguments),
+                    "arguments": (
+                        call.raw_arguments
+                        if call.raw_arguments is not None
+                        else json.dumps(call.arguments)
+                    ),
                 },
             }
             for call in message.tool_calls
@@ -281,7 +283,9 @@ class OpenAICompatClient:
         if self._owns_client:
             await self._http.aclose()
 
-    def _headers(self, api_key: str | None, oauth_access: "OAuthAccess | None" = None) -> dict[str, str]:
+    def _headers(
+        self, api_key: str | None, oauth_access: "OAuthAccess | None" = None
+    ) -> dict[str, str]:
         headers = {"Content-Type": "application/json", **self._extra_headers}
         bearer = api_key
         if oauth_access is not None and oauth_access.kind == "oauth" and oauth_access.access_token:
@@ -315,7 +319,9 @@ class OpenAICompatClient:
         max_tokens = request.max_tokens or request.model.max_output_tokens
         if max_tokens and max_tokens > 0:
             body["max_tokens"] = max_tokens
-        temperature = request.temperature if request.temperature is not None else request.model.temperature
+        temperature = (
+            request.temperature if request.temperature is not None else request.model.temperature
+        )
         body["temperature"] = temperature
         top_p = request.top_p if request.top_p is not None else request.model.top_p
         body["top_p"] = top_p
@@ -382,9 +388,7 @@ class OpenAICompatClient:
     def _responses_mode(self, oauth_access: "OAuthAccess | None") -> bool:
         """ChatGPT OAuth ⇒ Responses endpoint; plain API keys stay on completions."""
         return bool(
-            oauth_access is not None
-            and oauth_access.kind == "oauth"
-            and oauth_access.org_id
+            oauth_access is not None and oauth_access.kind == "oauth" and oauth_access.org_id
         )
 
     def _build_responses_body(self, request: ChatRequest) -> dict[str, Any]:
@@ -404,7 +408,9 @@ class OpenAICompatClient:
         max_tokens = request.max_tokens or request.model.max_output_tokens
         if max_tokens and max_tokens > 0:
             body["max_output_tokens"] = max_tokens
-        temperature = request.temperature if request.temperature is not None else request.model.temperature
+        temperature = (
+            request.temperature if request.temperature is not None else request.model.temperature
+        )
         body["temperature"] = temperature
         top_p = request.top_p if request.top_p is not None else request.model.top_p
         body["top_p"] = top_p
@@ -428,7 +434,10 @@ class OpenAICompatClient:
         provider_payload: dict[str, Any] | None = None
 
         async with self._http.stream(
-            "POST", url, json=self._build_body(request), headers=self._headers(api_key, oauth_access)
+            "POST",
+            url,
+            json=self._build_body(request),
+            headers=self._headers(api_key, oauth_access),
         ) as response:
             if response.status_code >= 400:
                 await response.aread()
@@ -446,9 +455,13 @@ class OpenAICompatClient:
                     usage = Usage(
                         input_tokens=int(raw.get("prompt_tokens", 0)),
                         output_tokens=int(raw.get("completion_tokens", 0)),
-                        cache_read_tokens=int(details.get("cached_tokens", 0) if isinstance(details, Mapping) else 0),
+                        cache_read_tokens=int(
+                            details.get("cached_tokens", 0) if isinstance(details, Mapping) else 0
+                        ),
                         cache_write_tokens=int(
-                            details.get("cache_write_tokens", 0) if isinstance(details, Mapping) else 0
+                            details.get("cache_write_tokens", 0)
+                            if isinstance(details, Mapping)
+                            else 0
                         ),
                         # Prompt tokens ARE the context the provider just read:
                         # this is the authoritative context size the compaction
@@ -506,7 +519,10 @@ class OpenAICompatClient:
         call_indexes: dict[str, int] = {}
 
         async with self._http.stream(
-            "POST", url, json=self._build_responses_body(request), headers=self._headers(api_key, oauth_access)
+            "POST",
+            url,
+            json=self._build_responses_body(request),
+            headers=self._headers(api_key, oauth_access),
         ) as response:
             if response.status_code >= 400:
                 await response.aread()
@@ -549,7 +565,9 @@ class OpenAICompatClient:
                             input_tokens=int(raw.get("input_tokens", 0)),
                             output_tokens=int(raw.get("output_tokens", 0)),
                             cache_read_tokens=int(
-                                details.get("cached_tokens", 0) if isinstance(details, Mapping) else 0
+                                details.get("cached_tokens", 0)
+                                if isinstance(details, Mapping)
+                                else 0
                             ),
                             context_tokens=int(raw.get("input_tokens", 0)) or None,
                         )
@@ -595,7 +613,9 @@ class AnthropicClient:
         if self._owns_client:
             await self._http.aclose()
 
-    def _headers(self, api_key: str | None, oauth_access: "OAuthAccess | None" = None) -> dict[str, str]:
+    def _headers(
+        self, api_key: str | None, oauth_access: "OAuthAccess | None" = None
+    ) -> dict[str, str]:
         headers = {"anthropic-version": ANTHROPIC_VERSION, "Content-Type": "application/json"}
         if oauth_access is not None and oauth_access.kind == "oauth" and oauth_access.access_token:
             # Claude Pro/Max OAuth: Bearer + the oauth beta header (the
@@ -717,9 +737,11 @@ class AnthropicClient:
                         "type": "tool_use",
                         "id": call.id,
                         "name": call.name,
-                        "input": call.arguments
-                        if call.raw_arguments is None
-                        else json.loads(call.raw_arguments or "{}"),
+                        "input": (
+                            call.arguments
+                            if call.raw_arguments is None
+                            else json.loads(call.raw_arguments or "{}")
+                        ),
                     }
                     for call in message.tool_calls
                 )
@@ -734,7 +756,11 @@ class AnthropicClient:
                         **({"is_error": True} if message.is_error else {}),
                     }
                 ]
-                if messages and messages[-1]["role"] == "user" and isinstance(messages[-1]["content"], list):
+                if (
+                    messages
+                    and messages[-1]["role"] == "user"
+                    and isinstance(messages[-1]["content"], list)
+                ):
                     messages[-1]["content"].extend(content)
                 else:
                     messages.append({"role": "user", "content": content})
@@ -767,10 +793,14 @@ class AnthropicClient:
                 for tool in request.tools
             ]
             # Safe default: unmapped values fall back to auto (PR-22).
-            body["tool_choice"] = {"auto": {"type": "auto"}, "none": {"type": "none"}, "required": {"type": "any"}}.get(
-                request.tool_choice, {"type": "auto"}
-            )
-        temperature = request.temperature if request.temperature is not None else request.model.temperature
+            body["tool_choice"] = {
+                "auto": {"type": "auto"},
+                "none": {"type": "none"},
+                "required": {"type": "any"},
+            }.get(request.tool_choice, {"type": "auto"})
+        temperature = (
+            request.temperature if request.temperature is not None else request.model.temperature
+        )
         body["temperature"] = temperature
         top_p = request.top_p if request.top_p is not None else request.model.top_p
         body["top_p"] = top_p
@@ -790,7 +820,10 @@ class AnthropicClient:
         block_index_to_call: dict[int, tuple[str, str]] = {}
 
         async with self._http.stream(
-            "POST", url, json=self._build_body(request), headers=self._headers(api_key, oauth_access)
+            "POST",
+            url,
+            json=self._build_body(request),
+            headers=self._headers(api_key, oauth_access),
         ) as response:
             if response.status_code >= 400:
                 await response.aread()
@@ -819,7 +852,9 @@ class AnthropicClient:
                     if block.get("type") == "tool_use":
                         index = int(event.get("index", 0))
                         block_index_to_call[index] = (block.get("id", ""), block.get("name", ""))
-                        yield StreamToolCallDelta(index=index, id=block.get("id"), name=block.get("name"))
+                        yield StreamToolCallDelta(
+                            index=index, id=block.get("id"), name=block.get("name")
+                        )
                 elif event_type == "content_block_delta":
                     delta = event.get("delta") or {}
                     delta_type = delta.get("type")
@@ -843,9 +878,12 @@ class AnthropicClient:
                     error = event.get("error") or {}
                     raise ProviderError(None, str(error.get("message", error)), retryable=True)
 
-        mapped = {"end_turn": "stop", "max_tokens": "length", "tool_use": "toolUse", "stop_sequence": "stop"}.get(
-            stop_reason, stop_reason
-        )
+        mapped = {
+            "end_turn": "stop",
+            "max_tokens": "length",
+            "tool_use": "toolUse",
+            "stop_sequence": "stop",
+        }.get(stop_reason, stop_reason)
         yield StreamUsageEvent(usage=usage)
         yield StreamEndEvent(stop_reason=mapped, usage=usage)
 
@@ -911,7 +949,9 @@ class GoogleClient:
         body: dict[str, Any] = {"contents": contents}
         if request.system_blocks:
             # Gemini's dedicated system slot (not folded into a user turn).
-            body["systemInstruction"] = {"parts": [{"text": block} for block in request.system_blocks]}
+            body["systemInstruction"] = {
+                "parts": [{"text": block} for block in request.system_blocks]
+            }
         generation_config: dict[str, Any] = {}
         max_tokens = request.max_tokens or request.model.max_output_tokens
         if max_tokens and max_tokens > 0:
@@ -919,7 +959,9 @@ class GoogleClient:
         generation_config["temperature"] = (
             request.temperature if request.temperature is not None else request.model.temperature
         )
-        generation_config["topP"] = request.top_p if request.top_p is not None else request.model.top_p
+        generation_config["topP"] = (
+            request.top_p if request.top_p is not None else request.model.top_p
+        )
         if request.stop_sequences:
             generation_config["stopSequences"] = list(request.stop_sequences)
         body["generationConfig"] = generation_config
@@ -1003,7 +1045,9 @@ class GoogleClient:
                             )
                     if candidate.get("finishReason"):
                         reason = str(candidate["finishReason"])
-                        stop_reason = {"MAX_TOKENS": "length", "TOOL_USE": "toolUse"}.get(reason, "stop")
+                        stop_reason = {"MAX_TOKENS": "length", "TOOL_USE": "toolUse"}.get(
+                            reason, "stop"
+                        )
                 raw_usage = chunk.get("usageMetadata")
                 if raw_usage:
                     usage = Usage(
@@ -1042,7 +1086,9 @@ class MockClient:
             yield StreamToolCallDelta(index=0, id="call_mock_1", name="echo")
             yield StreamToolCallDelta(index=0, argument_delta=json.dumps({"text": "hi"}))
             yield StreamUsageEvent(usage=Usage(input_tokens=10, output_tokens=5))
-            yield StreamEndEvent(stop_reason="toolUse", usage=Usage(input_tokens=10, output_tokens=5))
+            yield StreamEndEvent(
+                stop_reason="toolUse", usage=Usage(input_tokens=10, output_tokens=5)
+            )
             return
         yield StreamTextDelta(delta="Hello")
         yield StreamTextDelta(delta=" from the mock provider!")
@@ -1070,7 +1116,11 @@ def client_for_spec(spec: Any, *, http_client: httpx.AsyncClient | None = None) 
     if wire == "google":
         base = spec.base_url or GOOGLE_API_URL
         return GoogleClient(base_url=base, http_client=http_client)
-    base = spec.base_url or (definition.base_url if definition else None) or "http://localhost:11434/v1"
+    base = (
+        spec.base_url
+        or (definition.base_url if definition else None)
+        or "http://localhost:11434/v1"
+    )
     extra_headers = None
     if spec.provider == "openrouter":
         extra_headers = {

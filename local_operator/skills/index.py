@@ -298,9 +298,7 @@ class SkillIndex:
             vectors_path = self._cache_vectors_path()
             # Temp name must END in .npz: np.savez_compressed appends ".npz"
             # to names that don't, which would silently move the file.
-            tmp_vectors = vectors_path.with_name(
-                vectors_path.name.rsplit(".", 1)[0] + ".tmp.npz"
-            )
+            tmp_vectors = vectors_path.with_name(vectors_path.name.rsplit(".", 1)[0] + ".tmp.npz")
             np.savez_compressed(
                 tmp_vectors,
                 vectors=matrix,
@@ -326,9 +324,7 @@ class SkillIndex:
 
     # --- select ------------------------------------------------------------
 
-    async def select(
-        self, query: str, k: int = 8, threshold: float | None = None
-    ) -> list[Skill]:
+    async def select(self, query: str, k: int = 8, threshold: float | None = None) -> list[Skill]:
         """Return the top-k skills whose descriptions match ``query``.
 
         Cosine search over L2-normalized vectors (one faiss ``IndexFlatIP``
@@ -425,9 +421,7 @@ class SkillIndex:
         assert matrix is not None
         q = np.asarray([query_vec], dtype=np.float32)
         if q.shape[1] != matrix.shape[1]:
-            raise RuntimeError(
-                f"Query vector dim {q.shape[1]} != index dim {matrix.shape[1]}"
-            )
+            raise RuntimeError(f"Query vector dim {q.shape[1]} != index dim {matrix.shape[1]}")
         if self._faiss_index is None:
             index = faiss.IndexFlatIP(matrix.shape[1])
             index.add(np.ascontiguousarray(matrix))

@@ -98,7 +98,6 @@ _ROLE_MAP: dict[str, ConversationRole] = {
 }
 
 
-
 def _project_conversation_to_messages(records: Sequence[Any]) -> list[Any]:
     """Legacy ``ConversationRecord`` list → harness ``Message`` list.
 
@@ -118,6 +117,7 @@ def _project_conversation_to_messages(records: Sequence[Any]) -> list[Any]:
             continue
         out.append(Message(role=role.value, content=[TextContent(text=content)]))
     return out
+
 
 def _message_text(message: Any) -> str:
     """Text of a harness ``Message``; empty for entries with no text blocks."""
@@ -377,9 +377,7 @@ class ServerExecutor:
                 is_system_prompt=True,
             )
         ]
-        history.extend(
-            record for record in new_conversation_history if not record.is_system_prompt
-        )
+        history.extend(record for record in new_conversation_history if not record.is_system_prompt)
         self.agent_state.conversation = history
 
     def append_to_history(self, record: ConversationRecord) -> None:
@@ -422,9 +420,7 @@ class ServerExecutor:
                 wire_messages.append(Message.user(content))
 
         settings = (
-            self.config_manager.get_config().values
-            if self.config_manager is not None
-            else None
+            self.config_manager.get_config().values if self.config_manager is not None else None
         )
         auth_store = AuthStore(credential_manager=self.credential_manager)
         try:
@@ -585,7 +581,11 @@ class ServerOperator:
         # The current turn's user record was appended to the projection up
         # front; it is excluded so the prompt is not delivered twice.
         records = list(self.executor.agent_state.conversation)
-        if records and records[-1].role == ConversationRole.USER and records[-1].content == user_input:
+        if (
+            records
+            and records[-1].role == ConversationRole.USER
+            and records[-1].content == user_input
+        ):
             records = records[:-1]
         seeded = _project_conversation_to_messages(records)
 
@@ -641,9 +641,7 @@ class ServerOperator:
             if role is ConversationRole.USER:
                 # The prompt was already recorded before the turn ran.
                 continue
-            state.conversation.append(
-                ConversationRecord(role=role, content=text, timestamp=_now())
-            )
+            state.conversation.append(ConversationRecord(role=role, content=text, timestamp=_now()))
 
         state.execution_history.extend(bridge.execution_records())
 

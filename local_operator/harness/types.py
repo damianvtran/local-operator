@@ -36,7 +36,6 @@ from typing import Any, Awaitable, Callable, Literal, Protocol, runtime_checkabl
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-
 # ---------------------------------------------------------------------------
 # Content blocks
 # ---------------------------------------------------------------------------
@@ -196,8 +195,12 @@ class CustomMessage(BaseModel):
     attribution: Literal["user", "agent", "system"] = "system"
     details: dict[str, Any] = Field(default_factory=dict)
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
-    on_commit: Callable[[], None] | None = Field(default=None, exclude=True, json_schema_extra={'compare': False})
-    on_discard: Callable[[], None] | None = Field(default=None, exclude=True, json_schema_extra={'compare': False})
+    on_commit: Callable[[], None] | None = Field(
+        default=None, exclude=True, json_schema_extra={"compare": False}
+    )
+    on_discard: Callable[[], None] | None = Field(
+        default=None, exclude=True, json_schema_extra={"compare": False}
+    )
 
 
 class StaleAside:
@@ -250,7 +253,13 @@ class ToolContext(BaseModel):
 
 
 ToolExecuteFn = Callable[
-    [str, dict[str, Any], "AbortSignal | None", Callable[[AgentToolUpdate], None] | None, ToolContext],
+    [
+        str,
+        dict[str, Any],
+        "AbortSignal | None",
+        Callable[[AgentToolUpdate], None] | None,
+        ToolContext,
+    ],
     Awaitable[ToolResult],
 ]
 
@@ -506,24 +515,36 @@ class LoopConfig(BaseModel):
     stream_fn: Callable[["ChatRequest", AbortSignal | None], Any] = Field(exclude=True)
 
     # Host context shaping, applied before every provider call.
-    transform_context: Callable[[list[AgentMessage]], Awaitable[list[AgentMessage]] | list[AgentMessage]] | None = (
-        Field(default=None, exclude=True)
-    )
+    transform_context: (
+        Callable[[list[AgentMessage]], Awaitable[list[AgentMessage]] | list[AgentMessage]] | None
+    ) = Field(default=None, exclude=True)
 
     # Steering (CONSUMING) interrupts tool batches; peek (non-consuming) is
     # polled between calls. Asides never interrupt.
-    get_steering_messages: Callable[[], Awaitable[list[AgentMessage]]] | None = Field(default=None, exclude=True)
+    get_steering_messages: Callable[[], Awaitable[list[AgentMessage]]] | None = Field(
+        default=None, exclude=True
+    )
     has_steering_messages: Callable[[], bool] | None = Field(default=None, exclude=True)
-    get_aside_messages: Callable[[], Awaitable[list[Any]]] | None = Field(default=None, exclude=True)
-    get_follow_up_messages: Callable[[], Awaitable[list[AgentMessage]]] | None = Field(default=None, exclude=True)
+    get_aside_messages: Callable[[], Awaitable[list[Any]]] | None = Field(
+        default=None, exclude=True
+    )
+    get_follow_up_messages: Callable[[], Awaitable[list[AgentMessage]]] | None = Field(
+        default=None, exclude=True
+    )
 
     # Gates and hooks.
-    before_model_call: Callable[[], Awaitable[bool] | bool] | None = Field(default=None, exclude=True)
-    on_turn_end: Callable[[list[AgentMessage]], Awaitable[None] | None] | None = Field(default=None, exclude=True)
+    before_model_call: Callable[[], Awaitable[bool] | bool] | None = Field(
+        default=None, exclude=True
+    )
+    on_turn_end: Callable[[list[AgentMessage]], Awaitable[None] | None] | None = Field(
+        default=None, exclude=True
+    )
     on_before_yield: Callable[[], Awaitable[None] | None] | None = Field(default=None, exclude=True)
 
     # Fallback routing for unknown tool names (e.g. deferred MCP tools).
-    resolve_fallback_tool: Callable[[str], AgentTool | None] | None = Field(default=None, exclude=True)
+    resolve_fallback_tool: Callable[[str], AgentTool | None] | None = Field(
+        default=None, exclude=True
+    )
 
     interrupt_mode: Literal["immediate", "wait"] = "wait"
     # Epoch-ms deadline for the whole run, if any.

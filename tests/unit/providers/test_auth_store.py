@@ -36,7 +36,9 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AuthStore:
     auth.close()
 
 
-def _oauth(refresh: str = "r1", access: str = "access-1", expires: int | None = None) -> dict[str, Any]:
+def _oauth(
+    refresh: str = "r1", access: str = "access-1", expires: int | None = None
+) -> dict[str, Any]:
     import time
 
     return {
@@ -46,7 +48,9 @@ def _oauth(refresh: str = "r1", access: str = "access-1", expires: int | None = 
     }
 
 
-async def test_cascade_runtime_override_wins(store: AuthStore, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_cascade_runtime_override_wins(
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "env-key")
     store.set_config_api_key("openai", "config-key")
     store.upsert_credential("openai", _oauth())
@@ -71,7 +75,9 @@ async def test_cascade_oauth_beats_login_key_and_env(
     assert await store.get_api_key("openai") == "access-1"
 
 
-async def test_cascade_login_key_beats_env(store: AuthStore, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_cascade_login_key_beats_env(
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "env-key")
     store.upsert_credential("openai", {"key": "pasted-key", "source": "login", "type": "api_key"})
     assert await store.get_api_key("openai") == "pasted-key"
@@ -85,7 +91,9 @@ async def test_cascade_env_beats_plain_stored_key(
     assert await store.get_api_key("openai") == "env-key"
 
 
-async def test_cascade_stored_key_when_no_env(store: AuthStore, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_cascade_stored_key_when_no_env(
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     store.upsert_credential("openai", {"key": "stored-key", "type": "api_key"})
     assert await store.get_api_key("openai") == "stored-key"
@@ -155,7 +163,9 @@ async def test_oauth_auto_refresh_with_skew(
     assert rows[-1].data["access"] == "access-2"
 
 
-async def test_force_refresh_failure_blocks_and_raises(store: AuthStore, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_force_refresh_failure_blocks_and_raises(
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
     store.upsert_credential("openai", _oauth())
 
     async def bad_refresh(creds: dict[str, Any]) -> dict[str, Any]:
@@ -282,7 +292,9 @@ async def test_upsert_identity_dedupes_oauth_rows(store: AuthStore) -> None:
     assert third.id != first.id
 
 
-async def test_refresh_never_rewrites_org_fields(store: AuthStore, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_refresh_never_rewrites_org_fields(
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """PR-12: a refresh fn that TRIES to clobber org_id/org_name/authorized_at
     cannot — the stored values are restored over the merge."""
     import time
@@ -343,7 +355,9 @@ async def test_force_refresh_without_oauth_falls_through(
     assert await store.get_api_key("openai", force_refresh=True) == "pasted"
 
 
-async def test_get_oauth_access_oauth_vs_api_key(store: AuthStore, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_oauth_access_oauth_vs_api_key(
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """PR-01: get_oauth_access returns the identity-carrying record."""
     creds = _oauth()
     creds.update(org_id="org-1", account_id="acct-1", email="user@example.com")

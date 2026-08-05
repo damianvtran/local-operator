@@ -27,7 +27,6 @@ from local_operator.session_factory import (
     attach_mcp_dispose,
 )
 
-
 # --- Fakes ---------------------------------------------------------------------
 
 
@@ -72,9 +71,7 @@ class FakeRegistry:
 
 
 def _args(**overrides) -> argparse.Namespace:
-    base = dict(
-        hosting=None, model=None, agent_name=None, agent_id=None, yolo=False, train=False
-    )
+    base = dict(hosting=None, model=None, agent_name=None, agent_id=None, yolo=False, train=False)
     base.update(overrides)
     return argparse.Namespace(**base)
 
@@ -240,18 +237,14 @@ async def test_train_gating_end_to_end(tmp_config_dir: Path) -> None:
 
     agent = registry.create_agent(AgentEditFields(name="roster"))
     config_manager = ConfigManager(config_dir)
-    config_manager.update_config(
-        {"hosting": "test", "model_name": "test-model"}, write=False
-    )
+    config_manager.update_config({"hosting": "test", "model_name": "test-model"}, write=False)
     credential_manager = CredentialManager(config_dir)
 
     def make_args(train: bool) -> argparse.Namespace:
         return _args(agent_name="roster", train=train)
 
     # First run WITHOUT train: the agent dir transcript stays empty.
-    session = await create_session(
-        make_args(False), config_manager, credential_manager, registry
-    )
+    session = await create_session(make_args(False), config_manager, credential_manager, registry)
     await session.prompt("secret first run")
     await session.dispose()
     agent_dir = config_dir / "agents" / str(agent.id)
@@ -259,16 +252,12 @@ async def test_train_gating_end_to_end(tmp_config_dir: Path) -> None:
     assert len(agent_transcript.entries()) == 0  # nothing appended
 
     # Second run WITHOUT train: history is NOT replayed from the agent dir.
-    session2 = await create_session(
-        make_args(False), config_manager, credential_manager, registry
-    )
+    session2 = await create_session(make_args(False), config_manager, credential_manager, registry)
     assert len(session2._transcript.entries()) == 0  # fresh start
     await session2.dispose()
 
     # Third run WITH train: the transcript lives in the agent dir.
-    session3 = await create_session(
-        make_args(True), config_manager, credential_manager, registry
-    )
+    session3 = await create_session(make_args(True), config_manager, credential_manager, registry)
     assert session3._transcript.directory == agent_dir
     await session3.prompt("train me")
     await session3.dispose()
@@ -376,6 +365,7 @@ async def test_mcp_merge_on_tools_changed_and_dispose(monkeypatch) -> None:
 
 
 # --- CL-08: dispose closes the auth store ---------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_dispose_closes_auth_store(

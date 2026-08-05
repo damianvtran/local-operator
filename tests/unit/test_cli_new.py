@@ -483,8 +483,8 @@ def test_main_interactive_tty_uses_tui(
 
     def _theme_config_manager(*args, **kwargs):
         manager = MagicMock()
-        manager.get_config_value = (
-            lambda key, default=None: {"theme": "light"} if key == "tui" else False
+        manager.get_config_value = lambda key, default=None: (
+            {"theme": "light"} if key == "tui" else False
         )
         return manager
 
@@ -519,9 +519,7 @@ def test_main_no_tui_flag_uses_headless_repl(
     monkeypatch.setattr("local_operator.cli.CredentialManager", MagicMock())
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
 
-    with patch(
-        "sys.argv", ["program", "--no-tui", "--hosting", "test", "--model", "m"]
-    ):
+    with patch("sys.argv", ["program", "--no-tui", "--hosting", "test", "--model", "m"]):
         assert main() == 0
     assert fake_session.dispose.await_count == 1
 
@@ -708,7 +706,9 @@ def _walk_actions(parser: argparse.ArgumentParser) -> dict[str, dict]:
     for action in parser._actions:
         if action.option_strings and action.option_strings[0] == "-h":
             continue
-        key = ",".join(action.option_strings) if action.option_strings else "POS:" + str(action.dest)
+        key = (
+            ",".join(action.option_strings) if action.option_strings else "POS:" + str(action.dest)
+        )
         out[key] = {
             "dest": action.dest,
             "default": action.default if action.default is not argparse.SUPPRESS else "<SUPPRESS>",
@@ -741,6 +741,7 @@ def _inventory(parser: argparse.ArgumentParser) -> dict[str, dict]:
 
     record(parser, "")
     return inventory
+
 
 def test_golden_legacy_parser_surface() -> None:
     """Every legacy option (option strings, dest, default, choices, required)
@@ -778,7 +779,6 @@ def test_golden_legacy_parser_surface() -> None:
             for field in ("dest", "default", "required", "nargs"):
                 if now[field] != spec[field]:
                     problems.append(
-                        f"{command}: {key} {field} changed: "
-                        f"{spec[field]!r} -> {now[field]!r}"
+                        f"{command}: {key} {field} changed: " f"{spec[field]!r} -> {now[field]!r}"
                     )
     assert not problems, "\n".join(problems)

@@ -189,7 +189,9 @@ class OAuthCallbackFlow(ABC):
                 pass
             self._server = None
 
-    async def _handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    async def _handle_connection(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
         """Minimal HTTP/1.1 request parsing — just enough for GET redirects."""
         try:
             raw = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=10.0)
@@ -207,7 +209,9 @@ class OAuthCallbackFlow(ABC):
             if error:
                 desc = query.get("error_description", "")
                 self._finish_error(f"Authorization failed: {error} {desc}".strip())
-                body = b"<html><body><h1>Login failed</h1><p>You may close this tab.</p></body></html>"
+                body = (
+                    b"<html><body><h1>Login failed</h1><p>You may close this tab.</p></body></html>"
+                )
                 await self._respond(writer, 200, body)
             else:
                 code = query.get("code", "")
@@ -240,7 +244,9 @@ class OAuthCallbackFlow(ABC):
                     await self._respond(writer, 200, body)
         elif path == "/launch" and method == "GET":
             if self._pending_auth_url:
-                await self._respond(writer, 302, b"", extra_headers=[("Location", self._pending_auth_url)])
+                await self._respond(
+                    writer, 302, b"", extra_headers=[("Location", self._pending_auth_url)]
+                )
             else:
                 await self._respond(writer, 404, b"no pending login")
         else:
@@ -316,9 +322,7 @@ class OAuthCallbackFlow(ABC):
             launch_url = self._launch_url()
             if self.callbacks.on_auth_url is not None:
                 instructions = f"Or open: {launch_url}" if launch_url else None
-                await _maybe_await(
-                    self.callbacks.on_auth_url(auth_url, instructions=instructions)
-                )
+                await _maybe_await(self.callbacks.on_auth_url(auth_url, instructions=instructions))
             if not self.options.manual_input_only:
                 try:
                     self._open_browser(auth_url)

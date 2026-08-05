@@ -32,7 +32,6 @@ from local_operator.jobs import JobManager, JobStatus
 from local_operator.scheduler_service import SchedulerService
 from local_operator.types import Schedule, ScheduleUnit
 
-
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
@@ -110,7 +109,9 @@ class FakeSessionFactory:
 class SlowSessionFactory(FakeSessionFactory):
     """Factory whose session's prompt hangs forever (for the timeout test)."""
 
-    async def __call__(self, args, config_manager, credential_manager, agent_registry, *, has_ui=False, cwd=None):
+    async def __call__(
+        self, args, config_manager, credential_manager, agent_registry, *, has_ui=False, cwd=None
+    ):
         session = FakeSession()
 
         async def _hanging_prompt(text: str, attachments=None) -> None:

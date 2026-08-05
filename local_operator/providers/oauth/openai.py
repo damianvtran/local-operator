@@ -111,7 +111,9 @@ def _credentials_from_token(token: dict[str, Any]) -> dict[str, Any]:
     creds: dict[str, Any] = {
         "refresh": refresh,
         "access": access,
-        "expires": int(time.time() * 1000) + int(token.get("expires_in", 3600)) * 1000 - EXPIRY_SKEW_MS,
+        "expires": int(time.time() * 1000)
+        + int(token.get("expires_in", 3600)) * 1000
+        - EXPIRY_SKEW_MS,
         "authorized_at": int(time.time() * 1000),
     }
     # Identity: account_id/org_id are REQUIRED — ChatGPT tokens are routed
@@ -189,7 +191,9 @@ class OpenAIOAuthFlow(OAuthCallbackFlow):
             async with httpx.AsyncClient(timeout=15.0) as http:
                 response = await http.post(TOKEN_URL, data=payload)
         if response.status_code != 200:
-            raise LoginError(f"OpenAI token exchange failed ({response.status_code}): {response.text}")
+            raise LoginError(
+                f"OpenAI token exchange failed ({response.status_code}): {response.text}"
+            )
         return _credentials_from_token(response.json())
 
 
@@ -201,7 +205,9 @@ async def login_openai(
     open_browser: Any = None,
 ) -> dict[str, Any]:
     """Run the browser flow; returns OAuthCredentials dict."""
-    flow = OpenAIOAuthFlow(callbacks, open_browser=open_browser, signal=signal, http_client=http_client)
+    flow = OpenAIOAuthFlow(
+        callbacks, open_browser=open_browser, signal=signal, http_client=http_client
+    )
     return await flow.run()
 
 
@@ -233,9 +239,7 @@ async def login_openai_device(
         interval = max(1.0, float(device.get("interval", 5)))
 
         if callbacks.on_auth_url is not None:
-            result = callbacks.on_auth_url(
-                DEVICE_PAGE_URL, instructions=f"Enter code: {user_code}"
-            )
+            result = callbacks.on_auth_url(DEVICE_PAGE_URL, instructions=f"Enter code: {user_code}")
             if hasattr(result, "__await__"):
                 await result
 
@@ -259,7 +263,8 @@ async def login_openai_device(
             if error == "slow_down":
                 return DevicePollResult.slow_down()
             return DevicePollResult.failed(
-                payload.get("error_description") or f"Device authorization failed ({response.status_code})"
+                payload.get("error_description")
+                or f"Device authorization failed ({response.status_code})"
             )
 
         expires_in = DEVICE_MAX_POLLS * (interval + DEVICE_SAFETY_MARGIN_SECONDS)
@@ -282,7 +287,9 @@ async def login_openai_device(
             },
         )
         if exchange.status_code != 200:
-            raise LoginError(f"OpenAI device token exchange failed ({exchange.status_code}): {exchange.text}")
+            raise LoginError(
+                f"OpenAI device token exchange failed ({exchange.status_code}): {exchange.text}"
+            )
         return _credentials_from_token(exchange.json())
     finally:
         if owns_client:

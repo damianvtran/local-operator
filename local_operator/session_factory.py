@@ -66,6 +66,7 @@ def coerce_compaction_settings(raw: Any) -> Any:
         )
         return CompactionSettings()
 
+
 #: Sampling knobs copied from an agent record onto ``configure_model`` when
 #: the agent sets them. Names match both ``AgentData`` and the committed
 #: ``configure_model`` keyword arguments (stream B).
@@ -140,12 +141,12 @@ def resolve_hosting_model(
     missing, so the CLI's red-banner handler reports it exactly like before.
     """
     hosting: str | None = getattr(agent, "hosting", None) if agent is not None else None
-    hosting = hosting or getattr(args, "hosting", None) or config_manager.get_config_value(
-        "hosting"
+    hosting = (
+        hosting or getattr(args, "hosting", None) or config_manager.get_config_value("hosting")
     )
     model_name: str | None = getattr(agent, "model", None) if agent is not None else None
-    model_name = model_name or getattr(args, "model", None) or config_manager.get_config_value(
-        "model_name"
+    model_name = (
+        model_name or getattr(args, "model", None) or config_manager.get_config_value("model_name")
     )
     if not hosting:
         raise ValueError("Hosting platform is not configured.")
@@ -168,6 +169,7 @@ def default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
     from local_operator.session.session import _default_convert_to_llm
 
     return _default_convert_to_llm(list(messages))
+
 
 def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
     """Build the tool-approval gate.
@@ -580,9 +582,7 @@ async def wire_mcp_into_session(
         return None
 
     try:
-        manager, mcp_tools, errors = await discover_and_load_mcp_tools(
-            cwd, auth_store=auth_store
-        )
+        manager, mcp_tools, errors = await discover_and_load_mcp_tools(cwd, auth_store=auth_store)
     except Exception as exc:  # noqa: BLE001 — degradation is the contract
         print(
             f"\033[1;33mWarning: MCP discovery failed, continuing without MCP tools: "
@@ -684,6 +684,7 @@ def attach_stream_dispose(session: Any, stream_fn: Any) -> None:
 
     session.dispose = dispose_with_stream
 
+
 async def create_session(
     args: argparse.Namespace,
     config_manager: Any,
@@ -711,7 +712,6 @@ async def create_session(
     Raises ``ValueError`` (caught by the CLI's red-banner handler) when the
     hosting/model configuration is missing.
     """
-
 
     from local_operator.session.session import Session
 

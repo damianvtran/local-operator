@@ -212,7 +212,11 @@ class AgentLoop:
                     assistant, stop_reason, stream_error = None, "stop", None
                     async for event in self._model_turn(context, config, signal):
                         if isinstance(event, _ModelTurnResult):
-                            assistant, stop_reason, stream_error = event.message, event.stop_reason, event.error
+                            assistant, stop_reason, stream_error = (
+                                event.message,
+                                event.stop_reason,
+                                event.error,
+                            )
                         else:
                             yield event
                     if assistant is None:
@@ -473,17 +477,20 @@ class AgentLoop:
                 index += 1
             else:
                 end = index
-                while (
-                    end < len(plan)
-                    and (plan[end].tool is None or plan[end].tool.concurrency == "shared")
+                while end < len(plan) and (
+                    plan[end].tool is None or plan[end].tool.concurrency == "shared"
                 ):
                     end += 1
-                async for event in self._execute_batch(plan[index:end], context, config, signal, results):
+                async for event in self._execute_batch(
+                    plan[index:end], context, config, signal, results
+                ):
                     yield event
                 index = end
             first_slot = False
 
-    async def _plan_call(self, call: ToolCall, context: LoopContext, config: LoopConfig) -> _PlannedCall:
+    async def _plan_call(
+        self, call: ToolCall, context: LoopContext, config: LoopConfig
+    ) -> _PlannedCall:
         """Resolve + validate one call. Approval is deliberately NOT here: it
         happens inside the runner after ``tool_execution_start`` so skipped
         calls never prompt (see :meth:`_runner_result`)."""
@@ -501,9 +508,7 @@ class AgentLoop:
             return _PlannedCall(
                 call=call,
                 tool=tool,
-                failure=self._synthetic_result(
-                    call, "Invalid arguments: " + "; ".join(errors)
-                ),
+                failure=self._synthetic_result(call, "Invalid arguments: " + "; ".join(errors)),
             )
         return _PlannedCall(call=call, tool=tool, args=dict(call.arguments))
 
@@ -666,7 +671,11 @@ class AgentLoop:
                     # Duplicate-id and resolution failures never execute: the
                     # synthetic result parks in the slot without a task, so
                     # two slots can never collide on one results entry.
-                    park(slot, item, item.failure or self._synthetic_result(item.call, "Tool not found."))
+                    park(
+                        slot,
+                        item,
+                        item.failure or self._synthetic_result(item.call, "Tool not found."),
+                    )
                     continue
                 interruptible = item.tool.interruptible
                 tasks.append(
@@ -684,9 +693,7 @@ class AgentLoop:
                     continue
                 yield item
             await asyncio.gather(*tasks, return_exceptions=True)
-            results.extend(
-                result for result in results_by_slot if result is not None
-            )
+            results.extend(result for result in results_by_slot if result is not None)
         finally:
             # GeneratorExit / abort: never leave runner tasks behind.
             for task in tasks:
@@ -803,7 +810,9 @@ class AgentLoop:
             deadline_signal.abort("deadline exceeded")
 
         task = asyncio.ensure_future(_trip())
-        combined = AbortSignal.any_of(signal, deadline_signal) if signal is not None else deadline_signal
+        combined = (
+            AbortSignal.any_of(signal, deadline_signal) if signal is not None else deadline_signal
+        )
         return combined, task
 
     @staticmethod
@@ -897,4 +906,3 @@ class _ModelTurnResult:
     message: Message
     stop_reason: str
     error: str | None = None
-

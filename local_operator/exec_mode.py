@@ -115,9 +115,7 @@ def _open_log_file(log_path: Path) -> Any:
     return os.fdopen(os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "ab")
 
 
-def _append_job_record(
-    log_path: Path, prompt: str, pid: int, job_id: str | None = None
-) -> str:
+def _append_job_record(log_path: Path, prompt: str, pid: int, job_id: str | None = None) -> str:
     """Append the detached run as one JSONL record and return the job id.
 
     O_APPEND single-write (CL-11): POSIX guarantees atomicity for small

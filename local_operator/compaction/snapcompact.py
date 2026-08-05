@@ -267,8 +267,7 @@ _FONT_DATA: dict[str, str] = {
 _BOX_GLYPH = "1f11111111111f"
 
 _FONT: dict[str, tuple[int, ...]] = {
-    ch: tuple(int(data[i : i + 2], 16) for i in range(0, 14, 2))
-    for ch, data in _FONT_DATA.items()
+    ch: tuple(int(data[i : i + 2], 16) for i in range(0, 14, 2)) for ch, data in _FONT_DATA.items()
 }
 _BOX: tuple[int, ...] = tuple(int(_BOX_GLYPH[i : i + 2], 16) for i in range(0, 14, 2))
 
@@ -410,7 +409,9 @@ def serialize_for_snapcompact(messages: Sequence[Message]) -> str:
             if text.strip():
                 parts.append(f"[Assistant]\n{text}")
             if calls:
-                parts.append("[Assistant tool calls] " + "; ".join(_render_tool_call(c) for c in calls))
+                parts.append(
+                    "[Assistant tool calls] " + "; ".join(_render_tool_call(c) for c in calls)
+                )
             if parts:
                 blocks.append("\n".join(parts))
         else:  # tool result
@@ -468,9 +469,7 @@ def _paginate(text: str, shape: Shape) -> list[str]:
     current_len = 0
     for line in _wrap_lines(text, cols):
         cost = len(line) + 1  # + newline separator
-        if current and (
-            current_len + cost > capacity or len(current) >= shape.lines_per_frame
-        ):
+        if current and (current_len + cost > capacity or len(current) >= shape.lines_per_frame):
             pages.append("\n".join(current))
             current, current_len = [], 0
         current.append(line)
@@ -478,6 +477,8 @@ def _paginate(text: str, shape: Shape) -> list[str]:
     if current:
         pages.append("\n".join(current))
     return pages
+
+
 def compact_to_archive(
     messages: Sequence[Message],
     provider: str,
@@ -535,14 +536,19 @@ def compact_to_archive(
     # until the replayed archive fits a reserve-adjusted share of the window.
     if context_window and context_window > 0:
         budget = max(FRAME_TOKEN_ESTIMATE, int(context_window * 0.5))
-        while pages and estimate_archive_tokens(
-            Archive(
-                frames=[],
-                text=text_head + "\n".join(pages) + text_tail,
-                text_head=text_head,
-                text_tail=text_tail,
+        while (
+            pages
+            and estimate_archive_tokens(
+                Archive(
+                    frames=[],
+                    text=text_head + "\n".join(pages) + text_tail,
+                    text_head=text_head,
+                    text_tail=text_tail,
+                )
             )
-        ) + len(pages) * FRAME_TOKEN_ESTIMATE > budget:
+            + len(pages) * FRAME_TOKEN_ESTIMATE
+            > budget
+        ):
             truncated_chars += len(pages[0])
             pages = pages[1:]
             text_head += f"\n[... {truncated_chars} chars of oldest history dropped]"
@@ -571,7 +577,9 @@ def _base64_size(frame: bytes) -> int:
     return (len(frame) + 2) // 3 * 4
 
 
-def history_blocks(archive: Archive, max_frame_data_bytes: int = FRAME_DATA_BYTES_BUDGET) -> list[dict[str, Any]]:
+def history_blocks(
+    archive: Archive, max_frame_data_bytes: int = FRAME_DATA_BYTES_BUDGET
+) -> list[dict[str, Any]]:
     """Ordered archive blocks for context rebuild, oldest to newest:
     plain text at the oldest edge → imaged middle → plain text at the newest
     edge (``[{'kind': 'text', ...}, {'kind': 'images', ...}, ...]``).
@@ -604,7 +612,9 @@ def history_blocks(archive: Archive, max_frame_data_bytes: int = FRAME_DATA_BYTE
     if omitted:
         blocks.append({"kind": "text", "text": f"[{omitted} frames elided]"})
     if kept:
-        blocks.append({"kind": "images", "frames": [base64.b64encode(f).decode("ascii") for f in kept]})
+        blocks.append(
+            {"kind": "images", "frames": [base64.b64encode(f).decode("ascii") for f in kept]}
+        )
     if archive.text_tail:
         blocks.append({"kind": "text", "text": archive.text_tail})
     return blocks

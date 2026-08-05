@@ -137,8 +137,10 @@ class OperatorApp(App):
 
     def get_css_variables(self) -> dict[str, str]:
         """Brand tokens as the stylesheet's single source of truth."""
-        return {**theme_mod.tcss_variable_map(theme_mod.current_theme()),
-                **super().get_css_variables()}
+        return {
+            **theme_mod.tcss_variable_map(theme_mod.current_theme()),
+            **super().get_css_variables(),
+        }
 
     # -- lifecycle ----------------------------------------------------------
     async def on_mount(self) -> None:
@@ -231,9 +233,7 @@ class OperatorApp(App):
     def _clear_transcript(self) -> None:
         transcript = self.query_one(TranscriptView)
         transcript.clear_blocks()  # fires the on_clear hook
-        transcript.append_block(
-            NoticeBlock("transcript cleared — history is untouched", "info")
-        )
+        transcript.append_block(NoticeBlock("transcript cleared — history is untouched", "info"))
 
     def _on_transcript_cleared(self) -> None:
         """TUI-009: /clear and Ctrl+L reset the app's block bookkeeping."""
@@ -361,9 +361,7 @@ class OperatorApp(App):
             visible = [skill for skill in skills if not skill.hide]
             if not visible:
                 return None
-            return RichBlock(_tree_listing(
-                [(skill.name, skill.description) for skill in visible]
-            ))
+            return RichBlock(_tree_listing([(skill.name, skill.description) for skill in visible]))
         except Exception:
             return None
 
@@ -564,12 +562,24 @@ def _brand_terminal_theme() -> TerminalTheme:
     """Map the ANSI palette onto the brand ramp (no Monokai in this house)."""
     tokens = theme_mod.BRAND_TOKENS["dark"]
     ansi = [
-        tokens["bg"], tokens["danger"], tokens["accent"], tokens["amber"],
-        tokens["fg"], tokens["muted"], tokens["dim"], tokens["edge"],
+        tokens["bg"],
+        tokens["danger"],
+        tokens["accent"],
+        tokens["amber"],
+        tokens["fg"],
+        tokens["muted"],
+        tokens["dim"],
+        tokens["edge"],
     ]
     bright = [
-        tokens["string"], tokens["danger"], tokens["accent"], tokens["amber"],
-        tokens["fg"], tokens["muted"], tokens["dim"], tokens["surface"],
+        tokens["string"],
+        tokens["danger"],
+        tokens["accent"],
+        tokens["amber"],
+        tokens["fg"],
+        tokens["muted"],
+        tokens["dim"],
+        tokens["surface"],
     ]
     return TerminalTheme(
         _hex_to_rgb(tokens["bg"]),

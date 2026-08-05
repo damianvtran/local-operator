@@ -205,9 +205,7 @@ def build_wake_schedule(
     if in_val is not None:
         duration = parse_wake_duration(str(in_val))
         if duration is None:
-            return {
-                "error": f"invalid duration '{in_val}'; use e.g. 45s, 30m, 2h, 7d, 1w."
-            }
+            return {"error": f"invalid duration '{in_val}'; use e.g. 45s, 30m, 2h, 7d, 1w."}
         next_due_at = now_ms + duration
     elif at_val is not None:
         parsed = parse_wake_at(str(at_val), now_ms)
@@ -233,9 +231,7 @@ def build_wake_schedule(
         if every_ms is None:
             return {"error": f"invalid 'every' duration '{every_val}'."}
         if every_ms < MIN_WAKE_INTERVAL_MS:
-            return {
-                "error": f"wake interval must be at least {MIN_WAKE_INTERVAL_MS // 1000}s."
-            }
+            return {"error": f"wake interval must be at least {MIN_WAKE_INTERVAL_MS // 1000}s."}
 
     until_at: int | None = None
     until_val = request.get("until")
@@ -331,7 +327,7 @@ def format_wake_delivery_text(due: DueWake) -> str:
         envelope = f"(alarm) Scheduled wake {schedule.id} ({meta})."
     else:
         envelope = (
-            f'(alarm) Scheduled wake {schedule.id} ({meta}) — '
+            f"(alarm) Scheduled wake {schedule.id} ({meta}) — "
             f'cancel with wake({{op:"cancel",id:"{schedule.id}"}}) once its goal is met.'
         )
     return f"{envelope}\n\n{schedule.message}"
@@ -463,18 +459,14 @@ class WakeScheduler:
                 except Exception:
                     # A delivery that throws still advances the schedule,
                     # otherwise one broken wake becomes a hot loop.
-                    logger.warning(
-                        "wake delivery failed for %s", schedule.id, exc_info=True
-                    )
+                    logger.warning("wake delivery failed for %s", schedule.id, exc_info=True)
                 fired += 1
                 if "next" in advanced:
                     kept.append(advanced["next"])
                 else:
                     if self._on_retire is not None:
                         try:
-                            await self._maybe_await(
-                                self._on_retire(schedule, advanced["retired"])
-                            )
+                            await self._maybe_await(self._on_retire(schedule, advanced["retired"]))
                         except Exception:
                             logger.warning(
                                 "wake on_retire failed for %s",

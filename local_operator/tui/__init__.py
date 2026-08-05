@@ -28,9 +28,7 @@ async def run_tui(
     """
     from local_operator.tui.app import OperatorApp  # lazy: Textual import
 
-    app = OperatorApp(
-        session_factory, theme_name=theme_name, login_handler=login_handler
-    )
+    app = OperatorApp(session_factory, theme_name=theme_name, login_handler=login_handler)
     try:
         await app.run_async()
         return int(app.return_code or 0)

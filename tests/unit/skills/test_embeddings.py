@@ -137,9 +137,7 @@ class TestApiEmbedder:
     async def test_dim_learned_from_first_response(self) -> None:
         # RS-08: no declared dim → learn the width from the response.
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                200, json={"data": [{"embedding": [0.5] * 768}]}
-            )
+            return httpx.Response(200, json={"data": [{"embedding": [0.5] * 768}]})
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         embedder = ApiEmbedder(base_url="http://x/v1", api_key="k", client=client)
@@ -166,9 +164,7 @@ class TestApiEmbedder:
             return httpx.Response(200, json={"data": [{"embedding": [1.0, 0.0]}]})
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        embedder = ApiEmbedder(
-            base_url="http://x/v1", api_key="k", client=client, dim=1536
-        )
+        embedder = ApiEmbedder(base_url="http://x/v1", api_key="k", client=client, dim=1536)
         with pytest.raises(EmbeddingError, match="declared dim"):
             await embedder.embed(["one"])
 

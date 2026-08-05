@@ -132,9 +132,7 @@ class TestBuildSchedule:
         assert "error" in result
 
     def test_interval_too_small(self):
-        result = build_wake_schedule(
-            {"message": "x", "in": "5m", "every": "30s"}, [], NOW
-        )
+        result = build_wake_schedule({"message": "x", "in": "5m", "every": "30s"}, [], NOW)
         assert "error" in result and "60s" in result["error"]
 
     def test_min_interval_accepted(self):
@@ -163,8 +161,12 @@ class TestBuildSchedule:
         assert result["schedule"].next_due_at == int(datetime(2026, 8, 4, 10).timestamp() * 1000)
 
     def test_bad_every_until_limit(self):
-        assert "error" in build_wake_schedule({"message": "x", "in": "5m", "every": "bogus"}, [], NOW)
-        assert "error" in build_wake_schedule({"message": "x", "in": "5m", "until": "bogus"}, [], NOW)
+        assert "error" in build_wake_schedule(
+            {"message": "x", "in": "5m", "every": "bogus"}, [], NOW
+        )
+        assert "error" in build_wake_schedule(
+            {"message": "x", "in": "5m", "until": "bogus"}, [], NOW
+        )
         assert "error" in build_wake_schedule({"message": "x", "in": "5m", "limit": 0}, [], NOW)
 
 
@@ -208,7 +210,12 @@ class TestAdvance:
 class TestDeliveryText:
     def test_envelope_with_handle_and_cancel_hint(self):
         schedule = WakeSchedule(
-            id="w3", message="check the build", next_due_at=NOW, every_ms=3_600_000, limit=8, created_at=NOW
+            id="w3",
+            message="check the build",
+            next_due_at=NOW,
+            every_ms=3_600_000,
+            limit=8,
+            created_at=NOW,
         )
         due = DueWake(schedule=schedule, occurrence=3, planned_total=8, final=False)
         text = format_wake_delivery_text(due)
@@ -267,7 +274,9 @@ class SchedulerHarness:
         self.retired.append((schedule, reason))
 
     def schedule(self, **kw) -> WakeSchedule:
-        defaults = dict(id="w1", message="m", next_due_at=self.now_ms + 60_000, created_at=self.now_ms)
+        defaults = dict(
+            id="w1", message="m", next_due_at=self.now_ms + 60_000, created_at=self.now_ms
+        )
         defaults.update(kw)
         return WakeSchedule(**defaults)
 

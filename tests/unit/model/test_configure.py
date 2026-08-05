@@ -202,13 +202,17 @@ def mock_openrouter_client():
 
 
 def test_get_model_info_from_openrouter(mock_openrouter_client):
-    model_info = get_model_info_from_openrouter(mock_openrouter_client, "google/gemini-2.0-flash-001")
+    model_info = get_model_info_from_openrouter(
+        mock_openrouter_client, "google/gemini-2.0-flash-001"
+    )
     assert model_info.input_price == 5
     assert model_info.output_price == 10
 
 
 def test_get_model_info_from_openrouter_no_match(mock_openrouter_client):
-    with pytest.raises(ValueError, match="Model not found from openrouter models API: non-existent-model"):
+    with pytest.raises(
+        ValueError, match="Model not found from openrouter models API: non-existent-model"
+    ):
         get_model_info_from_openrouter(mock_openrouter_client, "non-existent-model")
 
 
@@ -460,9 +464,10 @@ class TestInfoFromListing:
             "architecture": {"input_modalities": ["image", "text"]},
         }
         payload.update(overrides)
-        return OpenRouterListModelsResponse(
-            data=[OpenRouterModelData.model_validate(payload)]
-        ), OpenRouterModelPricing
+        return (
+            OpenRouterListModelsResponse(data=[OpenRouterModelData.model_validate(payload)]),
+            OpenRouterModelPricing,
+        )
 
     def test_window_takes_the_routed_provider_not_the_headline(self):
         from local_operator.model.configure import _info_from_listing

@@ -76,7 +76,9 @@ def test_shape_capacity_consistent():
 # ---------------------------------------------------------------------------
 
 
-def _tool_message(call_id: str, text: str, *, useless: bool = False, is_error: bool = False) -> Message:
+def _tool_message(
+    call_id: str, text: str, *, useless: bool = False, is_error: bool = False
+) -> Message:
     """Tool-result message; useless rides in provider_payload per the REWRITE contract."""
     return Message(
         role="tool",
@@ -147,7 +149,9 @@ def test_serialize_drops_useless_result_and_paired_call():
 def test_serialize_error_with_useless_flag_survives():
     """Errors win: a useless-flagged error is never dropped."""
     messages = [
-        Message(role="assistant", content=[], tool_calls=[ToolCall(id="e1", name="bash", arguments={})]),
+        Message(
+            role="assistant", content=[], tool_calls=[ToolCall(id="e1", name="bash", arguments={})]
+        ),
         _tool_message("e1", "boom", useless=True, is_error=True),
     ]
     out = serialize_for_snapcompact(messages)
@@ -319,7 +323,9 @@ def test_history_blocks_foveates_long_middle():
 
 
 def test_history_blocks_text_only_archive():
-    archive = compact_to_archive(_conversation_messages(2, payload=50), "anthropic", "claude-sonnet-4-5")
+    archive = compact_to_archive(
+        _conversation_messages(2, payload=50), "anthropic", "claude-sonnet-4-5"
+    )
     blocks = history_blocks(archive)
     assert [b["kind"] for b in blocks] == ["text"]
     assert blocks[0]["text"] == archive.text_head
@@ -346,7 +352,9 @@ def test_estimate_archive_tokens():
 
 
 def test_archive_created_at_set():
-    archive = compact_to_archive(_conversation_messages(1, payload=50), "anthropic", "claude-sonnet-4-5")
+    archive = compact_to_archive(
+        _conversation_messages(1, payload=50), "anthropic", "claude-sonnet-4-5"
+    )
     assert archive.created_at.tzinfo is not None
     assert archive.created_at <= datetime.now(timezone.utc)
 

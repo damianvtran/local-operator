@@ -40,9 +40,7 @@ class TestDefaultSkillRoots:
         assert (tmp_path / "repo" / _SKILLS_SUBDIR) in roots
         assert (tmp_path / _SKILLS_SUBDIR) in roots
         # Deepest (most project-local) root comes first.
-        assert roots.index(project / _SKILLS_SUBDIR) < roots.index(
-            tmp_path / _SKILLS_SUBDIR
-        )
+        assert roots.index(project / _SKILLS_SUBDIR) < roots.index(tmp_path / _SKILLS_SUBDIR)
 
     def test_home_root_appended_last(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         home = tmp_path / "home"
@@ -106,9 +104,7 @@ class TestMakeSkillResolver:
         assert content is not None
         assert "# alpha" in content
 
-    def test_unknown_name_returns_error_message_as_content(
-        self, tmp_path: Path
-    ) -> None:
+    def test_unknown_name_returns_error_message_as_content(self, tmp_path: Path) -> None:
         # RS-09: the adapter never raises; the available-names list reaches
         # the model as a clean tool result instead of an exception envelope.
         skills = {
@@ -121,9 +117,7 @@ class TestMakeSkillResolver:
         assert "Unknown skill: gamma" in content
         assert "Available: alpha, beta" in content
 
-    def test_unsafe_path_returns_error_message_as_content(
-        self, tmp_path: Path
-    ) -> None:
+    def test_unsafe_path_returns_error_message_as_content(self, tmp_path: Path) -> None:
         resolver = make_skill_resolver({"alpha": _make_skill(tmp_path, "alpha")})
         content = resolver("skill://alpha/../../etc/passwd")
         assert content is not None

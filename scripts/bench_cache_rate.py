@@ -117,9 +117,7 @@ async def run_structural(turns: int) -> float:
 
     def provider() -> list[str]:
         if frozen["block"] is None:
-            frozen["block"] = (
-                "<skills>\nminerva-observability: Datadog playbooks\n</skills>"
-            )
+            frozen["block"] = "<skills>\nminerva-observability: Datadog playbooks\n</skills>"
         return build_system_blocks(tools, frozen["block"], "bench env", "2026-08-04")
 
     transcript = Transcript(Path(tempfile.mkdtemp(prefix="lo-bench-")))

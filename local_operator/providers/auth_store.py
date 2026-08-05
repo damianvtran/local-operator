@@ -219,7 +219,9 @@ class AuthStore:
         else:
             self._config_overrides.pop(provider, None)
 
-    def set_fallback_resolver(self, provider: str, resolver: Callable[[str], str | None] | None) -> None:
+    def set_fallback_resolver(
+        self, provider: str, resolver: Callable[[str], str | None] | None
+    ) -> None:
         """Tier 7: custom-provider hook."""
         if resolver is None:
             self._fallback_resolvers.pop(provider, None)
@@ -241,7 +243,9 @@ class AuthStore:
             updated_at=row[7],
         )
 
-    def list_credentials(self, provider: str | None = None, include_disabled: bool = False) -> list[StoredCredential]:
+    def list_credentials(
+        self, provider: str | None = None, include_disabled: bool = False
+    ) -> list[StoredCredential]:
         """Enabled credentials (all providers or one), oldest first."""
         if provider is not None:
             rows = self._conn.execute(
@@ -265,7 +269,9 @@ class AuthStore:
         Revives soft-deleted rows for the same identity (re-login).
         ``store_credentials_as`` aliasing happens at the caller (login path).
         """
-        credential_type = "oauth" if credential.get("refresh") and credential.get("access") else "api_key"
+        credential_type = (
+            "oauth" if credential.get("refresh") and credential.get("access") else "api_key"
+        )
         identity = _identity_key_for(provider, credential)
         payload = dict(credential)
         payload["type"] = credential_type
@@ -312,11 +318,15 @@ class AuthStore:
 
     def delete_credential(self, credential_id: int) -> None:
         """Remove a row entirely (logout)."""
-        self._conn.execute("DELETE FROM auth_credential_blocks WHERE credential_id = ?", (credential_id,))
+        self._conn.execute(
+            "DELETE FROM auth_credential_blocks WHERE credential_id = ?", (credential_id,)
+        )
         self._conn.execute("DELETE FROM auth_credentials WHERE id = ?", (credential_id,))
         self._conn.commit()
 
-    def delete_credentials_for_provider(self, provider: str, disabled_cause: str = "logged-out") -> int:
+    def delete_credentials_for_provider(
+        self, provider: str, disabled_cause: str = "logged-out"
+    ) -> int:
         """Logout: wipe every credential stored under ``provider``. Returns count."""
         rows = self.list_credentials(provider)
         for row in rows:
@@ -326,7 +336,11 @@ class AuthStore:
     # -- blocking --------------------------------------------------------------
 
     def block_credential(
-        self, credential_id: int, provider: str, block_scope: str = "", block_ms: int = DEFAULT_BLOCK_MS
+        self,
+        credential_id: int,
+        provider: str,
+        block_scope: str = "",
+        block_ms: int = DEFAULT_BLOCK_MS,
     ) -> None:
         """Record a backoff; ``provider_key`` mirrors omp ``provider:type``."""
         credential = self.get_credential(credential_id)
@@ -352,7 +366,9 @@ class AuthStore:
         return bool(row and row[0] > self._now_ms())
 
     def clear_blocks(self, credential_id: int) -> None:
-        self._conn.execute("DELETE FROM auth_credential_blocks WHERE credential_id = ?", (credential_id,))
+        self._conn.execute(
+            "DELETE FROM auth_credential_blocks WHERE credential_id = ?", (credential_id,)
+        )
         self._conn.commit()
 
     # -- OAuth refresh -----------------------------------------------------------
@@ -388,7 +404,9 @@ class AuthStore:
             return False
         return int(expires) <= AuthStore._now_ms() + OAUTH_REFRESH_SKEW_MS
 
-    async def _ensure_oauth_fresh(self, row: StoredCredential, *, force: bool = False) -> dict[str, Any]:
+    async def _ensure_oauth_fresh(
+        self, row: StoredCredential, *, force: bool = False
+    ) -> dict[str, Any]:
         """Return usable OAuth data for ``row``, refreshing single-flight.
 
         Raises :class:`AuthStoreError` when a refresh is required and fails;
@@ -436,13 +454,9 @@ class AuthStore:
             # process won), skip our write — overwriting would clobber the
             # winner's live token with our dead one and soft-delete the row.
             now_row = self.get_credential(row.id)
-            if (
-                now_row is not None
-                and dict(now_row.data).get("refresh") != fresh.get("refresh")
-            ):
+            if now_row is not None and dict(now_row.data).get("refresh") != fresh.get("refresh"):
                 logger.warning(
-                    "refresh race on %s: another process refreshed first; "
-                    "keeping its token",
+                    "refresh race on %s: another process refreshed first; " "keeping its token",
                     row.id,
                 )
                 return dict(now_row.data)
@@ -455,7 +469,9 @@ class AuthStore:
 
     # -- selection: stickiness + round-robin -------------------------------------
 
-    def _selection_order(self, rows: list[StoredCredential], provider: str, session_id: str | None) -> list[StoredCredential]:
+    def _selection_order(
+        self, rows: list[StoredCredential], provider: str, session_id: str | None
+    ) -> list[StoredCredential]:
         if not rows:
             return []
         if session_id:
@@ -480,7 +496,9 @@ class AuthStore:
         else:
             self._sticky[(provider, session_id)] = credential_id
 
-    def _usable_key_rows(self, provider: str, credential_type: str, source: str | None) -> list[StoredCredential]:
+    def _usable_key_rows(
+        self, provider: str, credential_type: str, source: str | None
+    ) -> list[StoredCredential]:
         rows = [
             r
             for r in self.list_credentials(provider)
@@ -656,7 +674,9 @@ class AuthStore:
         if api_key is not None:
             failing = next((r for r in rows if self._row_matches_key(r, api_key)), None)
         elif session_id:
-            failing = next((r for r in rows if r.id == self._sticky.get((provider, session_id))), None)
+            failing = next(
+                (r for r in rows if r.id == self._sticky.get((provider, session_id))), None
+            )
         else:
             failing = None
 
@@ -701,7 +721,9 @@ def _load_legacy_credential_manager() -> Any:
     try:
         from local_operator.credentials import CredentialManager
 
-        config_dir = Path(os.environ.get("LOCAL_OPERATOR_CONFIG_DIR", "~/.local-operator")).expanduser()
+        config_dir = Path(
+            os.environ.get("LOCAL_OPERATOR_CONFIG_DIR", "~/.local-operator")
+        ).expanduser()
         if (config_dir / "credentials.env").exists():
             return CredentialManager(config_dir)
     except Exception:

@@ -132,7 +132,9 @@ class AnthropicOAuthFlow(OAuthCallbackFlow):
                     },
                 )
         if response.status_code != 200:
-            raise LoginError(f"Anthropic token exchange failed ({response.status_code}): {response.text}")
+            raise LoginError(
+                f"Anthropic token exchange failed ({response.status_code}): {response.text}"
+            )
         token = response.json()
         return await _build_credentials(token, http_client=self._http, include_org=True)
 
@@ -157,7 +159,9 @@ async def _fetch_identity(
             await client.aclose()
 
 
-def _extract_identity(payload: dict[str, Any]) -> tuple[str | None, str | None, str | None, str | None]:
+def _extract_identity(
+    payload: dict[str, Any],
+) -> tuple[str | None, str | None, str | None, str | None]:
     """Return ``(email, account_id, org_id, org_name)`` from a bootstrap/token payload."""
     account = payload.get("account") or payload.get("accountInfo") or {}
     org = payload.get("organization") or payload.get("organizationInfo") or {}

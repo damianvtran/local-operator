@@ -74,6 +74,7 @@ def echo_tool(executed: list[str], delay: float = 0.0, name: str = "echo") -> Ag
         execute=execute,
     )
 
+
 def make_session(tmp_path, stream, tools=None, **kwargs) -> Session:
     transcript = Transcript(tmp_path / "sess")
     return Session(
@@ -166,6 +167,7 @@ async def test_subscribe_sync_async_and_exception_isolation(tmp_path):
     assert len(broken_calls) == len(seen_sync)
     await session.dispose()
 
+
 @pytest.mark.asyncio
 async def test_steer_interrupts_and_persists(tmp_path):
     """steer() during a tool batch: the steering message reaches the next
@@ -205,8 +207,7 @@ async def test_steer_interrupts_and_persists(tmp_path):
     # Steering drained mid-turn and reached the second model call.
     assert len(stream.requests) == 2
     assert any(
-        isinstance(m, Message) and m.text == "change direction"
-        for m in stream.requests[1].messages
+        isinstance(m, Message) and m.text == "change direction" for m in stream.requests[1].messages
     )
     texts = [
         block.get("text")
@@ -524,9 +525,12 @@ async def test_model_label_and_ids(tmp_path):
 async def test_refresh_tools_takes_effect_next_model_call(tmp_path):
     """refresh_tools (MCP-20 hook): swapping the inventory is live from the
     next model call onward — the refreshed set is what the provider sees."""
+
     def mk(name: str) -> AgentTool:
         async def execute(tool_call_id, args, signal, on_update, context):
-            return ToolResult(tool_call_id=tool_call_id, tool_name=name, content=[TextContent(text="x")])
+            return ToolResult(
+                tool_call_id=tool_call_id, tool_name=name, content=[TextContent(text="x")]
+            )
 
         return AgentTool(name=name, execute=execute)
 
@@ -563,9 +567,7 @@ async def test_fallback_tool_resolver_dispatches_deferred_tool(tmp_path):
         ]
     )
     session = make_session(tmp_path, stream, tools=[])  # inventory empty
-    session.set_fallback_tool_resolver(
-        lambda name: deferred if name == "deferred_mcp" else None
-    )
+    session.set_fallback_tool_resolver(lambda name: deferred if name == "deferred_mcp" else None)
     await session.prompt("go")
     assert executed == ["deferred_mcp"]
     await session.dispose()

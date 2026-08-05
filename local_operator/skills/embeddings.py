@@ -69,8 +69,7 @@ def _normalize(vec: list[float]) -> list[float]:
 #: (measured: median unrelated-pair cosine 0.31 at dim 512 before removal).
 #: Dropping them from the gram pool is a fixed, corpus-independent stand-in
 #: for IDF — a single query cannot compute document frequencies.
-_STOPWORDS = frozenset(
-    """
+_STOPWORDS = frozenset("""
     a an the and or but if then else of to in on for with without at by from as
     is are was were be been being it its this that these those i you he she we
     they them his her their our your my me us not no so do does did done can
@@ -78,8 +77,7 @@ _STOPWORDS = frozenset(
     who whom what which how why all any both each few more most other some such
     only own same into over under again further once here there about between
     out up down off above below through during before after use using uses used
-    """.split()
-)
+    """.split())
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
@@ -125,11 +123,7 @@ class LocalEmbedder:
         self.default_threshold = 0.27
 
     def _tokens(self, text: str) -> list[str]:
-        return [
-            _stem(token)
-            for token in _WORD_RE.findall(text.lower())
-            if token not in _STOPWORDS
-        ]
+        return [_stem(token) for token in _WORD_RE.findall(text.lower()) if token not in _STOPWORDS]
 
     def _gram_vector(self, tokens: list[str], n: int) -> list[float]:
         counts: dict[str, int] = {}

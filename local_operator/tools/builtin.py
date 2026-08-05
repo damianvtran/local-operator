@@ -96,9 +96,7 @@ GREP_FILE_LIMIT_BYTES = 1 * 1024 * 1024
 
 #: Directory names never worth walking during grep (VCS internals, vendored
 #: trees, build output). Dotdirs are pruned wholesale in addition.
-_GREP_PRUNE_DIRS = frozenset(
-    {"__pycache__", "node_modules", "dist", "build", ".git", ".venv"}
-)
+_GREP_PRUNE_DIRS = frozenset({"__pycache__", "node_modules", "dist", "build", ".git", ".venv"})
 #: Marker prefix on approval descriptions for targets outside the workspace.
 OUTSIDE_WORKSPACE_MARKER = "[outside workspace]"
 
@@ -229,18 +227,14 @@ def _text(
     )
 
 
-def _validation_error(
-    tool_call_id: str, tool_name: str, exc: ValidationError
-) -> ToolResult:
+def _validation_error(tool_call_id: str, tool_name: str, exc: ValidationError) -> ToolResult:
     """One ``invalid arguments:`` line per field — no traceback. The model can
     correct its call from the message; the stack trace could not."""
     lines = [
         f"- {'.'.join(str(part) for part in err['loc']) or '<root>'}: {err['msg']}"
         for err in exc.errors()
     ]
-    return _error(
-        tool_call_id, tool_name, "invalid arguments:\n" + "\n".join(lines)
-    )
+    return _error(tool_call_id, tool_name, "invalid arguments:\n" + "\n".join(lines))
 
 
 def _guard(tool_name: str) -> Callable[..., Any]:
@@ -277,9 +271,7 @@ def _guard(tool_name: str) -> Callable[..., Any]:
     return decorator
 
 
-async def _check_approval(
-    context: ToolContext | None, tier: str, description: str
-) -> bool:
+async def _check_approval(context: ToolContext | None, tier: str, description: str) -> bool:
     """Ask the host for approval; True means proceed.
 
     No approval hook installed -> auto-approved (CLI --yolo and headless tests
@@ -317,9 +309,7 @@ async def _run_with_abort(
         return await coro, False
     waiter = asyncio.create_task(signal.wait())
     work = asyncio.ensure_future(coro)
-    done, _pending = await asyncio.wait(
-        {waiter, work}, return_when=asyncio.FIRST_COMPLETED
-    )
+    done, _pending = await asyncio.wait({waiter, work}, return_when=asyncio.FIRST_COMPLETED)
     if work in done:
         waiter.cancel()
         with contextlib.suppress(BaseException):
@@ -476,9 +466,7 @@ async def execute_bash(
     # Bounded drain: the kill above EOFs both pipes; give the readers 250 ms
     # to consume what is already buffered so partial output survives.
     with contextlib.suppress(TimeoutError):
-        await asyncio.wait_for(
-            asyncio.gather(*readers, return_exceptions=True), timeout=0.25
-        )
+        await asyncio.wait_for(asyncio.gather(*readers, return_exceptions=True), timeout=0.25)
     for task in readers:
         if not task.done():
             task.cancel()
@@ -537,9 +525,7 @@ def build_bash_tool() -> AgentTool:
     return AgentTool(
         name="bash",
         label="Shell",
-        description=(
-            "Run a shell command and return its exit code, stdout and stderr."
-        ),
+        description=("Run a shell command and return its exit code, stdout and stderr."),
         parameters=BashParams.model_json_schema(),
         approval_tier="exec",
         # omp: bash runs shared when non-pty; models batch independent
@@ -579,9 +565,7 @@ _LINE_RANGE_RE = re.compile(r"^(\d+)\s*-\s*(\d+)?$")
 def _parse_line_range(spec: str) -> tuple[int, int | None]:
     match = _LINE_RANGE_RE.match(spec.strip())
     if not match:
-        raise ValueError(
-            f"invalid line range '{spec}' (expected 'start-end' or 'start-')"
-        )
+        raise ValueError(f"invalid line range '{spec}' (expected 'start-end' or 'start-')")
     start = int(match.group(1))
     if start < 1:
         raise ValueError(f"invalid line range '{spec}': start must be >= 1")
@@ -648,8 +632,7 @@ async def execute_read(
         return _text(
             tool_call_id,
             "read",
-            f"Directory listing of {path} ({len(entries)} entries):\n"
-            + "\n".join(entries),
+            f"Directory listing of {path} ({len(entries)} entries):\n" + "\n".join(entries),
             details={"path": str(path)},
         )
 
@@ -971,20 +954,18 @@ class GrepParams(BaseModel):
     include: str | None = Field(
         default=None,
         description=(
-            "Optional glob filter applied to file names/basenames "
-            "(e.g. '*.py', '**/*.ts')."
+            "Optional glob filter applied to file names/basenames " "(e.g. '*.py', '**/*.ts')."
         ),
     )
     case: bool = Field(default=True, description="Case-sensitive matching.")
 
 
-
 def _glob_walk(root: Path, pattern: str) -> list[str]:
     """The walk half of execute_glob, run in a worker thread."""
     return sorted(
-        p.relative_to(root).as_posix() + ("/" if p.is_dir() else "")
-        for p in root.glob(pattern)
+        p.relative_to(root).as_posix() + ("/" if p.is_dir() else "") for p in root.glob(pattern)
     )
+
 
 def _glob_matches(rel_path: str, pattern: str) -> bool:
     """Match ``rel_path`` against ``pattern`` (basename fallback for bare globs)."""
@@ -1016,6 +997,7 @@ def _walk_files(root: Path) -> list[Path]:
 
     _walk(root)
     return files
+
 
 #: Wall-clock cap for one grep scan. Bounds the pathological-regex case
 #: (backtracking patterns on large lines) without classifying regexes; a
@@ -1126,15 +1108,12 @@ async def execute_grep(
 
     if not matches:
         skipped_note = (
-            f" ({files_skipped} file(s) skipped over the 1MB cap)"
-            if files_skipped
-            else ""
+            f" ({files_skipped} file(s) skipped over the 1MB cap)" if files_skipped else ""
         )
         return _text(
             tool_call_id,
             "grep",
-            f"No matches for '{params.pattern}' in {files_searched} "
-            f"file(s){skipped_note}.",
+            f"No matches for '{params.pattern}' in {files_searched} " f"file(s){skipped_note}.",
             useless=True,
             details={"useless": True},
         )
@@ -1219,9 +1198,7 @@ async def execute_todo(
 
     if params.op == "init":
         if not params.items:
-            return _error(
-                tool_call_id, "todo", "'init' requires a non-empty items list"
-            )
+            return _error(tool_call_id, "todo", "'init' requires a non-empty items list")
         store[key] = [{"text": item, "status": "pending"} for item in params.items]
         return _text(
             tool_call_id,
@@ -1232,9 +1209,7 @@ async def execute_todo(
     current = store.get(key, [])
     if params.op == "done":
         if not params.items:
-            return _error(
-                tool_call_id, "todo", "'done' requires items with the item text"
-            )
+            return _error(tool_call_id, "todo", "'done' requires items with the item text")
         target = params.items[0]
         for item in current:
             if item["text"] == target and item["status"] != "done":
@@ -1306,16 +1281,10 @@ class WakeParams(BaseModel):
         default=None,
         description="First fire time: 'HH:MM', '+<duration>', or ISO datetime.",
     )
-    every: str | None = Field(
-        default=None, description="Repeat interval duration, e.g. '1h'."
-    )
-    until: str | None = Field(
-        default=None, description="Retire after this time (ISO datetime)."
-    )
+    every: str | None = Field(default=None, description="Repeat interval duration, e.g. '1h'.")
+    until: str | None = Field(default=None, description="Retire after this time (ISO datetime).")
     limit: int | None = Field(default=None, ge=1, description="Max number of fires.")
-    id: str | None = Field(
-        default=None, description="Schedule id (cancel; from wake list)."
-    )
+    id: str | None = Field(default=None, description="Schedule id (cancel; from wake list).")
 
 
 def _wake_due_label(schedule: Any) -> str:
@@ -1338,9 +1307,7 @@ async def _wake_list(tool_call_id: str, scheduler: Any) -> ToolResult:
             details={"useless": True},
         )
     lines = [f'- {s.id}: "{s.message}" {_wake_due_label(s)}' for s in schedules]
-    return _text(
-        tool_call_id, "wake", f"{len(schedules)} wake schedule(s):\n" + "\n".join(lines)
-    )
+    return _text(tool_call_id, "wake", f"{len(schedules)} wake schedule(s):\n" + "\n".join(lines))
 
 
 async def _wake_create(
@@ -1373,13 +1340,9 @@ async def _wake_create(
     )
 
 
-async def _wake_cancel(
-    tool_call_id: str, params: WakeParams, scheduler: Any
-) -> ToolResult:
+async def _wake_cancel(tool_call_id: str, params: WakeParams, scheduler: Any) -> ToolResult:
     if not params.id:
-        return _error(
-            tool_call_id, "wake", "'cancel' requires the schedule id (see wake list)"
-        )
+        return _error(tool_call_id, "wake", "'cancel' requires the schedule id (see wake list)")
     existing = list(getattr(scheduler, "schedules", []))
     remaining = [s for s in existing if s.id != params.id]
     if len(remaining) == len(existing):

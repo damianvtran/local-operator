@@ -175,12 +175,12 @@ def assert_partition_pair_integrity(to_summarize: list, kept: list) -> None:
         if not isinstance(message, Message) or message.role != "tool":
             continue
         call_id = message.tool_call_id
-        assert call_id in kept_call_ids, (
-            f"tool result {call_id} is kept but its issuing assistant is not"
-        )
-        assert call_id not in summarized_call_ids, (
-            f"tool result {call_id} is kept but its call was summarized away"
-        )
+        assert (
+            call_id in kept_call_ids
+        ), f"tool result {call_id} is kept but its issuing assistant is not"
+        assert (
+            call_id not in summarized_call_ids
+        ), f"tool result {call_id} is kept but its call was summarized away"
 
 
 _CANONICAL = _canonical_sequence()
@@ -211,11 +211,7 @@ def test_canonical_partition_integrity_sweep(keep: int):
     assert candidate.role != "tool"
     if candidate.role == "assistant":
         # Any pending calls of the boundary assistant are answered in kept.
-        answered = {
-            m.tool_call_id
-            for m in kept
-            if isinstance(m, Message) and m.role == "tool"
-        }
+        answered = {m.tool_call_id for m in kept if isinstance(m, Message) and m.role == "tool"}
         assert all(c.id in answered for c in candidate.tool_calls)
     assert_partition_pair_integrity(to_summarize, kept)
 

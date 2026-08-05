@@ -220,9 +220,7 @@ class TestSelect:
     async def test_full_listing_only_when_local_also_fails(self, tmp_path: Path) -> None:
         visible = _make_skill(tmp_path, "alpha", "first")
         hidden = _make_skill(tmp_path, "beta", "second", hide=True)
-        index = SkillIndex(
-            [visible, hidden], BrokenLocalEmbedder(), cache_dir=tmp_path / "cache"
-        )
+        index = SkillIndex([visible, hidden], BrokenLocalEmbedder(), cache_dir=tmp_path / "cache")
         matches = await index.select("anything")
         assert matches == [visible]  # ALL non-hidden, omp-style fallback
         assert index.degraded is True
@@ -330,9 +328,7 @@ class TestBackendIdentity:
     async def test_different_base_url_rebuilds(self, tmp_path: Path) -> None:
         skills = [_make_skill(tmp_path, "alpha", "first skill")]
         cache = tmp_path / "cache"
-        await SkillIndex(
-            skills, ModelBackend(base_url="http://a/v1"), cache_dir=cache
-        ).build()
+        await SkillIndex(skills, ModelBackend(base_url="http://a/v1"), cache_dir=cache).build()
         backend = ModelBackend(base_url="http://b/v1")
         await SkillIndex(skills, backend, cache_dir=cache).build()
         assert backend.embed_calls == 1
@@ -349,9 +345,12 @@ class TestCacheCorruption:
         cache = tmp_path / "cache"
         await SkillIndex(skills, CountingBackend(), cache_dir=cache).build()
         with np.load(_cache_npz(cache)) as data:
-            assert str(data["content_hash"]) == json.loads(
-                next(cache.glob("*.skills.meta.json")).read_text(encoding="utf-8")
-            )["hash"]
+            assert (
+                str(data["content_hash"])
+                == json.loads(next(cache.glob("*.skills.meta.json")).read_text(encoding="utf-8"))[
+                    "hash"
+                ]
+            )
 
     @pytest.mark.asyncio
     async def test_npz_hash_mismatch_rebuilds(self, tmp_path: Path) -> None:

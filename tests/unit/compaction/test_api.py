@@ -84,9 +84,11 @@ def test_previous_summary_present_and_absent_rendering():
 def test_every_template_var_is_supplied():
     """Every ``{{var}}`` referenced by compaction_summary.md is provided by
     build_compaction_prompt — no variable may render empty by accident."""
-    template = importlib.resources.files("local_operator").joinpath(
-        "prompts_md/compaction_summary.md"
-    ).read_text(encoding="utf-8")
+    template = (
+        importlib.resources.files("local_operator")
+        .joinpath("prompts_md/compaction_summary.md")
+        .read_text(encoding="utf-8")
+    )
     names = set(re.findall(r"\{\{(\w+)\}\}", template))
     # Strip the #if block names; they are conditionals, not data slots.
     if_names = set(re.findall(r"\{\{#if (\w+)\}\}", template))
@@ -111,7 +113,6 @@ def test_summarize_messages_uses_fake_complete_fn():
     assert result == "the summary"
     assert captured["system"] == SUMMARIZATION_SYSTEM_PROMPT
     assert "<conversation>" in captured["prompt"]
-
 
 
 def test_files_block_fires_on_auto_extract():
@@ -143,9 +144,10 @@ def test_summary_capped_at_max_summary_tokens():
     assert result.endswith(compaction_api.SUMMARY_TRUNCATED_MARKER)
     from local_operator.compaction.tokens import _encode_len
 
-    assert _encode_len(result) <= MAX_SUMMARY_TOKENS + _encode_len(
-        compaction_api.SUMMARY_TRUNCATED_MARKER
-    ) + 5
+    assert (
+        _encode_len(result)
+        <= MAX_SUMMARY_TOKENS + _encode_len(compaction_api.SUMMARY_TRUNCATED_MARKER) + 5
+    )
 
 
 def _run(coro):
