@@ -35,7 +35,9 @@ class McpToolCache:
     """
 
     def __init__(self, path: str | Path | None = None) -> None:
-        self._path = Path(path) if path is not None else Path.home() / ".local-operator" / "mcp_cache.db"
+        self._path = (
+            Path(path) if path is not None else Path.home() / ".local-operator" / "mcp_cache.db"
+        )
 
     def _connect(self) -> sqlite3.Connection | None:
         """Open the database, creating the parent dir and schema as needed."""

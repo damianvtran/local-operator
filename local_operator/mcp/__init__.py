@@ -17,10 +17,10 @@ from local_operator.mcp.tool_cache import McpToolCache
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "discover_and_load_mcp_tools",
-    "McpManager",
     "McpLoadResult",
+    "McpManager",
     "McpToolCache",
+    "discover_and_load_mcp_tools",
 ]
 
 

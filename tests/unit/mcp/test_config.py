@@ -39,15 +39,16 @@ def _stdio(command: str = "npx", **extra) -> dict:
 
 
 class TestPriorityAndDedupe:
-    def test_project_wins_over_user_and_imports(
-        self, tmp_path: Path, home: Path
-    ) -> None:
+    def test_project_wins_over_user_and_imports(self, tmp_path: Path, home: Path) -> None:
         """First source to define a name wins; later sources never override."""
         cwd = tmp_path / "proj"
         _write(cwd / ".local-operator" / "mcp.json", {"mcpServers": {"srv": _stdio("proj-cmd")}})
         _write(cwd / ".mcp.json", {"mcpServers": {"srv": _stdio("dot-cmd")}})
         _write(home / ".local-operator" / "mcp.json", {"mcpServers": {"srv": _stdio("user-cmd")}})
-        _write(home / ".claude.json", {"mcpServers": {"srv": _stdio("claude-cmd"), "claudeonly": _stdio("cc")}})
+        _write(
+            home / ".claude.json",
+            {"mcpServers": {"srv": _stdio("claude-cmd"), "claudeonly": _stdio("cc")}},
+        )
 
         configs, sources = load_all_mcp_configs(cwd)
         assert configs["srv"].command == "proj-cmd"
@@ -66,7 +67,10 @@ class TestPriorityAndDedupe:
         cwd = tmp_path / "proj"
         _write(home / ".local-operator" / "mcp.json", {"mcpServers": {"srv": _stdio("user-cmd")}})
         _write(home / ".cursor" / "mcp.json", {"mcpServers": {"srv": _stdio("cursor-cmd")}})
-        _write(cwd / ".vscode" / "mcp.json", {"mcp": {"servers": {"srv": _stdio("vscode-cmd"), "vsc": _stdio("v")}}})
+        _write(
+            cwd / ".vscode" / "mcp.json",
+            {"mcp": {"servers": {"srv": _stdio("vscode-cmd"), "vsc": _stdio("v")}}},
+        )
 
         configs, sources = load_all_mcp_configs(cwd)
         assert configs["srv"].command == "user-cmd"
@@ -80,6 +84,47 @@ class TestPriorityAndDedupe:
         configs, sources = load_all_mcp_configs(cwd)
         assert configs["claudy"].command == "cl"
         assert sources["claudy"].endswith(".mcp.json")
+
+    def test_claude_json_project_scope_imported(self, tmp_path: Path, home: Path) -> None:
+        """MCP-18: ~/.claude.json projects.<cwd>.mcpServers is read too."""
+        cwd = tmp_path / "proj"
+        cwd.mkdir(parents=True)
+        _write(
+            home / ".claude.json",
+            {
+                "mcpServers": {"global_srv": _stdio("g-cmd")},
+                "projects": {
+                    str(cwd): {"mcpServers": {"proj_srv": _stdio("p-cmd")}},
+                    "/some/other/path": {"mcpServers": {"other": _stdio("nope")}},
+                },
+            },
+        )
+        configs, sources = load_all_mcp_configs(cwd)
+        assert configs["global_srv"].command == "g-cmd"
+        assert configs["proj_srv"].command == "p-cmd"
+        assert "other" not in configs  # wrong project key ignored
+        assert sources["proj_srv"].endswith(".claude.json")
+
+    def test_claude_project_scope_wins_within_file(self, tmp_path: Path, home: Path) -> None:
+        """Within ~/.claude.json, project scope overrides the global key."""
+        cwd = tmp_path / "proj"
+        cwd.mkdir(parents=True)
+        _write(
+            home / ".claude.json",
+            {
+                "mcpServers": {"srv": _stdio("global-cmd")},
+                "projects": {str(cwd): {"mcpServers": {"srv": _stdio("scoped-cmd")}}},
+            },
+        )
+        configs, _ = load_all_mcp_configs(cwd)
+        assert configs["srv"].command == "scoped-cmd"
+
+    def test_claude_json_malformed_projects_degrades(self, tmp_path: Path, home: Path) -> None:
+        """Best-effort: a misshaped projects key falls back to global only."""
+        cwd = tmp_path / "proj"
+        _write(home / ".claude.json", {"mcpServers": {"g": _stdio("g")}, "projects": 42})
+        configs, _ = load_all_mcp_configs(cwd)
+        assert configs["g"].command == "g"
 
 
 class TestEnableDisable:
@@ -132,7 +177,11 @@ class TestShapesAndImports:
                 "mcpServers": {
                     "inferred_stdio": {"command": "uvx", "args": ["pkg"]},
                     "inferred_http": {"url": "https://example.com/mcp"},
-                    "remote_sse": {"type": "sse", "url": "https://example.com/sse", "headers": {"x": "1"}},
+                    "remote_sse": {
+                        "type": "sse",
+                        "url": "https://example.com/sse",
+                        "headers": {"x": "1"},
+                    },
                 }
             },
         )
@@ -213,7 +262,12 @@ class TestCliHelpers:
     def test_add_remove_roundtrip_project_scope(self, tmp_path: Path, home: Path) -> None:
         cwd = tmp_path / "proj"
         cwd.mkdir()
-        assert add_server("srv", command="npx", args=["-y", "pkg"], env={"K": "V"}, scope="project", cwd=cwd) == 0
+        assert (
+            add_server(
+                "srv", command="npx", args=["-y", "pkg"], env={"K": "V"}, scope="project", cwd=cwd
+            )
+            == 0
+        )
         path = cwd / ".local-operator" / "mcp.json"
         doc = json.loads(path.read_text())
         assert doc["mcpServers"]["srv"] == {
@@ -249,3 +303,20 @@ class TestCliHelpers:
         listed = list_effective_servers(cwd)
         assert set(listed) == {"a"}
         assert listed["a"]["command"] == "a"
+
+    def test_write_json_atomic_leaves_valid_file(self, tmp_path: Path) -> None:
+        """MCP-15: the writer is tempfile + os.replace — no .tmp leftovers,
+        and the target holds exactly the written doc."""
+        from local_operator.mcp.config import _write_json_atomic
+
+        path = tmp_path / "sub" / "mcp.json"
+        doc = {"mcpServers": {"a": _stdio("a")}, "disabledServers": []}
+        _write_json_atomic(path, doc)
+        assert json.loads(path.read_text(encoding="utf-8")) == doc
+        # No temp files survive in the target directory.
+        leftovers = [p for p in path.parent.iterdir() if p.name.endswith(".tmp")]
+        assert leftovers == []
+        # Overwrite replaces content atomically (reader sees whole docs only).
+        doc2 = {"mcpServers": {"b": _stdio("b")}}
+        _write_json_atomic(path, doc2)
+        assert json.loads(path.read_text(encoding="utf-8")) == doc2

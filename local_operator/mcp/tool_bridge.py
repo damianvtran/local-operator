@@ -10,7 +10,8 @@ so this module stays importable anywhere.
 from __future__ import annotations
 
 import re
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from local_operator.harness.types import AgentTool, TextContent, ToolResult
 
@@ -72,8 +73,7 @@ def create_mcp_tool_name(server_name: str, tool_name: str) -> str:
     tool = _sanitize_part(tool_name, "tool")
 
     prefix = f"{server}_"
-    if tool.startswith(prefix):
-        tool = tool[len(prefix):]
+    tool = tool.removeprefix(prefix)
     return f"mcp__{server}_{tool}"
 
 
@@ -107,13 +107,20 @@ def prepare_outbound_args(
 ) -> dict[str, Any]:
     """Clean harness-side arguments before forwarding to ``tools/call``.
 
-    1. Drop keys not declared by the server schema when the schema is strict
-       (``additionalProperties`` is ``false`` or unset): this removes the
-       harness-injected ``i`` intent field and anything else the harness may
-       add later. Keys are kept when the schema declares them or when
-       ``additionalProperties`` is truthy (permissive schema).
-    2. Drop optional (non-required) keys whose value is an empty placeholder
-       (``None``, ``""``, ``{}``).
+    1. Drop the harness-injected ``i`` intent field when the schema does not
+       declare it — unconditionally: strict-schema servers (Linear, anything
+       with ``additionalProperties: false`` or Zod strict) reject every call
+       carrying it, and the MCP boundary is the authoritative guard so no
+       caller has to pre-strip.
+    2. Drop other undeclared keys ONLY when ``additionalProperties`` is
+       explicitly ``False``. An absent ``additionalProperties`` or an empty
+       sub-schema (``{}``) is open per JSON Schema — the schema may be
+       composed via ``$ref``/``allOf``/``oneOf`` or accept anything, so we
+       forward the caller's keys untouched rather than silently running the
+       call with ``{}``.
+    3. Drop optional (non-required) keys whose value is an empty placeholder
+       (``None``, ``""``, ``{}``). Falsy values that are not placeholders
+       (``0``, ``False``, ``[]``) are always kept.
 
     Returns a new dict; the input is never mutated.
     """
@@ -121,13 +128,15 @@ def prepare_outbound_args(
         return {}
     properties = declared_properties if isinstance(declared_properties, dict) else {}
     required_set = set(required or [])
-    strict = not bool(additional_properties)
+    strict = additional_properties is False
 
     cleaned: dict[str, Any] = {}
     for key, value in args.items():
         declared = key in properties
+        if key == INTENT_FIELD and not declared:
+            continue  # harness intent never reaches a server that didn't ask for it
         if strict and not declared:
-            continue  # harness-injected or unknown field the server would reject
+            continue  # schema explicitly forbids unknown fields
         if key not in required_set and _is_unused_optional_placeholder(value):
             continue
         cleaned[key] = value
@@ -163,12 +172,28 @@ def format_mcp_result(
             text = getattr(item, "text", "") if not isinstance(item, dict) else item.get("text", "")
             parts.append(text or "")
         elif item_type == "image":
-            mime = getattr(item, "mime_type", "image") if not isinstance(item, dict) else item.get("mimeType") or item.get("mime_type") or "image"
+            mime = (
+                getattr(item, "mime_type", "image")
+                if not isinstance(item, dict)
+                else item.get("mimeType") or item.get("mime_type") or "image"
+            )
             parts.append(f"[Image: {mime}]")
         elif item_type == "resource":
-            resource = getattr(item, "resource", None) if not isinstance(item, dict) else item.get("resource")
-            uri = getattr(resource, "uri", "") if resource is not None and not isinstance(resource, dict) else (resource or {}).get("uri", "")
-            text = getattr(resource, "text", None) if resource is not None and not isinstance(resource, dict) else (resource or {}).get("text")
+            resource = (
+                getattr(item, "resource", None)
+                if not isinstance(item, dict)
+                else item.get("resource")
+            )
+            uri = (
+                getattr(resource, "uri", "")
+                if resource is not None and not isinstance(resource, dict)
+                else (resource or {}).get("uri", "")
+            )
+            text = (
+                getattr(resource, "text", None)
+                if resource is not None and not isinstance(resource, dict)
+                else (resource or {}).get("text")
+            )
             if text:
                 parts.append(f"[Resource: {uri}]\n{text}")
             else:
@@ -183,9 +208,11 @@ def format_mcp_result(
         content=[TextContent(text=text)],
         is_error=is_error,
         details={
-            "server_result": result
-            if isinstance(result, dict)
-            else getattr(result, "model_dump", lambda: None)(),
+            "server_result": (
+                result
+                if isinstance(result, dict)
+                else getattr(result, "model_dump", lambda: None)()
+            ),
         },
     )
 
@@ -220,7 +247,9 @@ def build_agent_tool(
     else:
         raw_name = getattr(mcp_tool, "name", "") or ""
         description = getattr(mcp_tool, "description", "") or ""
-        input_schema = getattr(mcp_tool, "input_schema", None) or getattr(mcp_tool, "inputSchema", None) or {}
+        input_schema = (
+            getattr(mcp_tool, "input_schema", None) or getattr(mcp_tool, "inputSchema", None) or {}
+        )
 
     async def _execute(
         tool_call_id: str,
