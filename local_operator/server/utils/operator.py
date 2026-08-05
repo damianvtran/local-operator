@@ -98,6 +98,27 @@ _ROLE_MAP: dict[str, ConversationRole] = {
 }
 
 
+
+def _project_conversation_to_messages(records: Sequence[Any]) -> list[Any]:
+    """Legacy ``ConversationRecord`` list → harness ``Message`` list.
+
+    Only user/assistant text records project; system-prompt records, empty
+    content and non-text roles are dropped (the engine's system blocks carry
+    the instructions, and inventing tool history would break pairing).
+    """
+    from local_operator.harness.types import Message, TextContent
+
+    out: list[Any] = []
+    for record in records:
+        role = getattr(record, "role", None)
+        content = getattr(record, "content", "") or ""
+        if role not in (ConversationRole.USER, ConversationRole.ASSISTANT):
+            continue
+        if not content.strip() or getattr(record, "is_system_prompt", False):
+            continue
+        out.append(Message(role=role.value, content=[TextContent(text=content)]))
+    return out
+
 def _message_text(message: Any) -> str:
     """Text of a harness ``Message``; empty for entries with no text blocks."""
     text = getattr(message, "text", None)
@@ -548,8 +569,24 @@ class ServerOperator:
                 end_events.append(event)
             bridge.handle(event)
 
+        # The frozen endpoints hand the engine their history through the
+        # legacy projection: stateless /v1/chat loads the caller's context
+        # array into agent_state.conversation, and non-persist agent chat
+        # loads the registry's stored conversation. The transcript is NOT the
+        # history source on either path, so without seeding the provider sees
+        # the bare prompt while the envelope echoes history it never read.
+        # The persist path replays its transcript and seed_history no-ops.
+        # The current turn's user record was appended to the projection up
+        # front; it is excluded so the prompt is not delivered twice.
+        records = list(self.executor.agent_state.conversation)
+        if records and records[-1].role == ConversationRole.USER and records[-1].content == user_input:
+            records = records[:-1]
+        seeded = _project_conversation_to_messages(records)
+
         unsubscribe = session.subscribe(_capture)
         try:
+            if seeded:
+                await session.seed_history(seeded)
             await session.prompt(prompt)
         finally:
             try:

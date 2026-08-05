@@ -254,6 +254,7 @@ class Session:
         # age, and stamping turn bookkeeping right before the check made the
         # 90-minute flush dead code.
         self._last_provider_request_ms = 0
+        self._seeded = False  # seed_history is once-only, pre-prompt
         self._logical_generation: int | None = None
         self._fallback_tool_resolver: Callable[[str], AgentTool | None] | None = None
 
@@ -368,6 +369,28 @@ class Session:
         finally:
             self._turn_lock.release()
 
+
+    async def seed_history(self, messages: list[Message]) -> None:
+        """Prime the conversation from a host-supplied history.
+
+        The server facade uses this for the two paths where the transcript is
+        not already the history source: stateless ``/v1/chat`` (the caller's
+        ``context`` array) and agent chat with ``persist_conversation=false``
+        (the registry's stored conversation). Without it the provider sees
+        the bare prompt while the response envelope echoes history the model
+        never read.
+
+        Once-only and pre-prompt: a no-op when the context already carries
+        messages (transcript replay populated them) or after the first turn.
+        Messages are persisted as replayed entries so later turns, pruning and
+        compaction treat them like any other history.
+        """
+        if self._seeded or self._context.messages or self._is_streaming:
+            return
+        self._seeded = True
+        for message in messages:
+            await self._transcript.append_message(message)
+            self._context.messages.append(message)
     def steer(self, text: str) -> None:
         """Inject a steering message into the running turn (interrupts tool
         batches at the next boundary)."""

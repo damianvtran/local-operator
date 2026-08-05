@@ -234,16 +234,17 @@ def _latest_user_query(transcript: Any) -> str:
     return "\n".join(part for part in (user_text, summary) if part)
 
 
-def _env_details() -> str:
-    """Volatile environment facts for the last system block (date rides there
-    too, added by ``build_system_blocks``). Kept tiny and byte-stable within
-    a run: no timestamps, no process ids."""
+def _env_details(cwd: str | None = None) -> str:
+    """Volatile environment facts for the env block (date rides there too,
+    added by ``build_system_blocks``). Kept tiny and byte-stable within a
+    run: no timestamps, no process ids. ``cwd`` comes from the session's
+    working directory, never the process-global value at call time."""
     import platform
 
     return (
         f"Platform: {platform.system()} {platform.release()} ({platform.machine()})\n"
         f"Python: {platform.python_version()}\n"
-        f"Working directory: {os.getcwd()}"
+        f"Working directory: {cwd if cwd is not None else os.getcwd()}"
     )
 
 
@@ -385,14 +386,15 @@ def _make_system_blocks_provider(
     tools: list[Any],
     transcript: Any,
     hooks: _SkillsHooks,
+    cwd: str | None = None,
 ) -> Callable[[], Awaitable[list[str]]]:
     """Build the per-turn system-prompt closure.
 
     Session awaits the result (committed tolerance for awaitable providers),
     so the async skill selection can live inside. Block layout comes from
-    ``prompts_api.build_system_blocks``: stable instructions first, then
-    tools+skills, then the volatile date/env block last so providers can put
-    cache breakpoints on the stable prefix.
+    ``prompts_api.build_system_blocks``: stable head (instructions, inventory,
+    env) then the session-frozen skills block last, so the cache prefix stays
+    warm.
     """
 
     async def provider() -> list[str]:
@@ -404,7 +406,7 @@ def _make_system_blocks_provider(
         except Exception:  # noqa: BLE001 — never break the turn
             skills_block = ""
         date_str = datetime.now().strftime("%Y-%m-%d")
-        return build_system_blocks(tools, skills_block, _env_details(), date_str)
+        return build_system_blocks(tools, skills_block, _env_details(cwd), date_str)
 
     return provider
 
@@ -451,10 +453,13 @@ async def _prepare(
     agent_registry: Any,
     *,
     has_ui: bool,
+    cwd: str | None = None,
 ) -> _SessionPlan:
     """Shared wiring core used by :func:`create_session` and
     :func:`build_initial_blocks`. Returns the Session kwargs plus the blocks
-    provider; raises ``ValueError`` when hosting/model config is missing."""
+    provider; raises ``ValueError`` when hosting/model config is missing.
+    ``cwd`` (default: process cwd) is the single working-directory source for
+    the tool context, the session and MCP discovery."""
     agent = resolve_agent(args, agent_registry)
     hosting, model_name = resolve_hosting_model(agent, args, config_manager)
     yolo = bool(getattr(args, "yolo", False))
@@ -497,8 +502,9 @@ async def _prepare(
         print(f"\033[1;33mWarning: {warning}\033[0m", file=sys.stderr)
 
     request_approval = _make_request_approval(yolo)
+    effective_cwd = cwd if cwd is not None else os.getcwd()
     tool_context = ToolContext(
-        cwd=os.getcwd(),
+        cwd=effective_cwd,
         session_id=transcript_dir.name,
         agent_id=agent_id,
         has_ui=has_ui,
@@ -509,7 +515,9 @@ async def _prepare(
     from local_operator.session.transcript import Transcript
 
     transcript = Transcript(transcript_dir)
-    system_blocks_provider = _make_system_blocks_provider(tools, transcript, hooks)
+    system_blocks_provider = _make_system_blocks_provider(
+        tools, transcript, hooks, cwd=effective_cwd
+    )
 
     session_kwargs: dict[str, Any] = dict(
         model=spec,
@@ -524,7 +532,7 @@ async def _prepare(
         ),
         yolo=yolo,
         has_ui=has_ui,
-        cwd=os.getcwd(),
+        cwd=effective_cwd,
         skill_resolver=_make_skill_resolver(hooks),
         request_approval=request_approval,
     )
@@ -650,8 +658,9 @@ async def create_session(
     agent_registry: Any,
     *,
     has_ui: bool = False,
+    cwd: str | None = None,
 ) -> "SessionProtocol":
-    """Build a fully wired harness session from parsed CLI args.
+    """Build a fully-wired harness session from parsed CLI args.
 
     This is THE factory shared by ``cli.py`` (interactive TUI / headless
     REPL), ``exec_mode.run_exec`` (foreground exec) and ``exec_worker``
@@ -660,12 +669,25 @@ async def create_session(
     carrying ``hosting``, ``model``, ``agent_name``/``agent_id``, ``yolo``
     and ``train``.
 
+    ``cwd`` is the session's working directory; ``None`` means the process
+    cwd (legacy behaviour). Hosts that must relocate a session (the
+    scheduler's per-agent directory) pass it explicitly instead of mutating
+    the process-global cwd across awaits — every other session builder in
+    the same process would otherwise read the wrong directory.
+
     Raises ``ValueError`` (caught by the CLI's red-banner handler) when the
     hosting/model configuration is missing.
     """
     from local_operator.session.session import Session
+
+    effective_cwd = cwd if cwd is not None else os.getcwd()
     plan = await _prepare(
-        args, config_manager, credential_manager, agent_registry, has_ui=has_ui
+        args,
+        config_manager,
+        credential_manager,
+        agent_registry,
+        has_ui=has_ui,
+        cwd=effective_cwd,
     )
     session = Session(**plan.session_kwargs)
 
@@ -678,7 +700,7 @@ async def create_session(
     # changes, and fold server teardown into session.dispose. Degrades to
     # zero MCP tools on any failure.
     mcp_manager = await wire_mcp_into_session(
-        session, list(plan.session_kwargs["tools"]), os.getcwd()
+        session, list(plan.session_kwargs["tools"]), effective_cwd
     )
     if mcp_manager is not None:
         attach_mcp_dispose(session, mcp_manager)

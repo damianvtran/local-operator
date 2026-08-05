@@ -134,9 +134,6 @@ class SchedulerService:
 
         self.scheduler = AsyncIOScheduler(timezone="UTC")
         self._run_tasks: set[asyncio.Task[Any]] = set()
-        # Serializes session construction so a per-run cwd override (chdir)
-        # cannot leak into a concurrently constructed session.
-        self._cwd_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -754,21 +751,20 @@ class SchedulerService:
             if getattr(event, "type", None) == "agent_end":
                 captured_events.append(event)
 
+        # The agent's working directory is passed, not chdir'd: os.chdir is
+        # process-global and create_session awaits inside the window (skills,
+        # MCP discovery, transport spawns), so every other session builder in
+        # the same process (server routes, TUI turns) would read the wrong
+        # directory while a scheduled run held the lock.
         cwd_override = self._resolve_agent_cwd(agent_data)
-        async with self._cwd_lock:
-            original_cwd = os.getcwd()
-            try:
-                if cwd_override is not None:
-                    os.chdir(cwd_override)
-                session = await session_factory.create_session(
-                    session_args,
-                    self.config_manager,
-                    self.credential_manager,
-                    self.agent_registry,
-                    has_ui=False,
-                )
-            finally:
-                os.chdir(original_cwd)
+        session = await session_factory.create_session(
+            session_args,
+            self.config_manager,
+            self.credential_manager,
+            self.agent_registry,
+            has_ui=False,
+            cwd=cwd_override,
+        )
 
         unsubscribe = None
         subscribe = getattr(session, "subscribe", None)

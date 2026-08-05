@@ -91,18 +91,26 @@ class FakeSessionFactory:
         self.sessions: list[FakeSession] = []
 
     async def __call__(
-        self, args, config_manager, credential_manager, agent_registry, *, has_ui=False
+        self,
+        args,
+        config_manager,
+        credential_manager,
+        agent_registry,
+        *,
+        has_ui=False,
+        cwd=None,
     ):
         session = FakeSession(fail=self.fail)
         self.calls.append(args)
         self.sessions.append(session)
+        session.cwd = cwd
         return session
 
 
 class SlowSessionFactory(FakeSessionFactory):
     """Factory whose session's prompt hangs forever (for the timeout test)."""
 
-    async def __call__(self, args, config_manager, credential_manager, agent_registry, *, has_ui=False):
+    async def __call__(self, args, config_manager, credential_manager, agent_registry, *, has_ui=False, cwd=None):
         session = FakeSession()
 
         async def _hanging_prompt(text: str, attachments=None) -> None:
