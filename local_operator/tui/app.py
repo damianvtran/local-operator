@@ -22,7 +22,7 @@ error`` status and can be retried with ``/reload`` (TUI-012).
 from __future__ import annotations
 
 import os
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Protocol
 
 from local_operator.tui.widgets.transcript import (
     NoticeBlock,
@@ -113,6 +113,17 @@ LOOP_PROMPT = (
 BOOT_HINT = "type a message, or /help for commands"
 
 
+class NoticeFn(Protocol):
+    """The `notice` callback every slash-command handler is handed.
+
+    Declared as a Protocol rather than ``Callable[[str, str], None]`` because
+    the real closures default ``kind`` — a plain two-positional Callable makes
+    every ``notice("...")`` call site a type error while the code is correct.
+    """
+
+    def __call__(self, body: str, kind: str = "info") -> None: ...
+
+
 class OperatorApp(App[None]):
     """Full-screen TUI over one ``SessionProtocol``."""
 
@@ -128,16 +139,14 @@ class OperatorApp(App[None]):
         self,
         session_factory: Callable[[], Awaitable[SessionProtocol]],
         theme_name: str = "dark",
-        login_handler: Callable[[str], None] | None = None,
         provider_controller: Any | None = None,
     ) -> None:
         super().__init__()
         theme_mod.set_theme(theme_name)  # dark is the product's island night
         self._session_factory = session_factory
-        self._login_handler = login_handler  # TUI-015: injected by the CLI
         # Full provider/model/credential/usage facade behind the slash
         # commands; ``None`` degrades /provider /usage /model-switch to
-        # pointer notices (same contract as login_handler).
+        # pointer notices when it is absent.
         self._providers = provider_controller
         self._session: SessionProtocol | None = None
         self._controller: EventController | None = None
@@ -187,7 +196,7 @@ class OperatorApp(App[None]):
         transcript = self.query_one(TranscriptView)
         transcript.set_on_clear(self._on_transcript_cleared)  # TUI-009 hook
 
-        self._status = StatusLine(self.query_one("#status-band"))
+        self._status = StatusLine(self.query_one("#status-band", Static))
         self._status.update(model_label="connecting…", cwd=os.getcwd())
         self.query_one(Editor).focus()
 
@@ -378,7 +387,7 @@ class OperatorApp(App[None]):
             notice(f"unknown command: {command} — try /help", "warning")
 
     # -- model --------------------------------------------------------------
-    def _cmd_model(self, arg: str, notice: Callable[[str, str], None]) -> None:
+    def _cmd_model(self, arg: str, notice: NoticeFn) -> None:
         """``/model`` — show the current spec, or switch with ``provider/id``."""
         session = self._session
         if not arg:
@@ -396,13 +405,20 @@ class OperatorApp(App[None]):
             )
             return
         provider = provider.lower()  # build_model_spec is case-insensitive
-        try:
-            spec = self._providers.resolve_model(provider, model_id) if self._providers else None
-        except Exception as error:  # unknown provider/hosting
-            notice(f"cannot resolve {provider}: {error}", "error")
-            return
-        if spec is None:
+        if self._providers is None:
             notice("provider controller unavailable — cannot infer model spec", "warning")
+            return
+        # Validate the provider BEFORE switching. resolve_model does not raise
+        # on an unknown provider — it returns a spec with base_url=None — so a
+        # typo would silently reconfigure the session and only fail on the next
+        # turn, reading as a network/auth error instead of a typo.
+        if self._providers.provider(provider) is None:
+            notice(f"unknown provider: {provider} — see /provider", "warning")
+            return
+        try:
+            spec = self._providers.resolve_model(provider, model_id)
+        except Exception as error:  # unresolvable hosting/model pair
+            notice(f"cannot resolve {provider}: {error}", "error")
             return
         old_label = session.model_label
         session.set_model(spec)
@@ -413,7 +429,7 @@ class OperatorApp(App[None]):
             notice("switched provider — make sure you are logged in", "warning")
 
     # -- goal / loop --------------------------------------------------------
-    def _cmd_goal(self, arg: str, notice: Callable[[str, str], None]) -> None:
+    def _cmd_goal(self, arg: str, notice: NoticeFn) -> None:
         """``/goal`` — show; ``/goal <text>`` — set; ``/goal clear`` — unset.
 
         The goal is a standing objective carried in the prompt's volatile
@@ -435,7 +451,7 @@ class OperatorApp(App[None]):
         stored = session.set_goal(arg)
         notice(f"goal set (applies from the next turn): {stored}")
 
-    def _cmd_loop(self, arg: str, notice: Callable[[str, str], None]) -> None:
+    def _cmd_loop(self, arg: str, notice: NoticeFn) -> None:
         """``/loop [n]`` — iterate toward the goal; ``/loop stop`` cancels.
 
         Each iteration is a real turn that asks the agent to advance the
@@ -508,7 +524,7 @@ class OperatorApp(App[None]):
             notice(f"loop finished after {completed} iteration(s)")
 
     # -- providers / accounts / usage --------------------------------------
-    def _cmd_providers(self, notice: Callable[[str, str], None]) -> None:
+    def _cmd_providers(self, notice: NoticeFn) -> None:
         """``/provider`` — list loginable providers and their state."""
         if self._providers is None:
             notice("run: local-operator provider (TUI lacks the provider facade)", "warning")
@@ -540,7 +556,7 @@ class OperatorApp(App[None]):
             if self._providers.has_any_credential(p)
         ]
 
-    def _cmd_accounts(self, notice: Callable[[str, str], None]) -> None:
+    def _cmd_accounts(self, notice: NoticeFn) -> None:
         """``/accounts`` — list stored credentials (OAuth + pasted keys)."""
         if self._providers is None:
             notice("run: local-operator login status (TUI lacks the provider facade)", "warning")
@@ -575,7 +591,7 @@ class OperatorApp(App[None]):
 
         return time.time() * 1000
 
-    def _cmd_usage(self, arg: str, notice: Callable[[str, str], None]) -> None:
+    def _cmd_usage(self, arg: str, notice: NoticeFn) -> None:
         """``/usage [provider]`` — fetch live quota for a provider (or all)."""
         if self._providers is None:
             notice("run: local-operator usage (TUI lacks the provider facade)", "warning")
@@ -659,16 +675,10 @@ class OperatorApp(App[None]):
         return "█" * filled + "░" * (width - filled)
 
     # -- login / logout -----------------------------------------------------
-    def _cmd_login(self, arg: str, notice: Callable[[str, str], None]) -> None:
+    def _cmd_login(self, arg: str, notice: NoticeFn) -> None:
         """``/login [provider]`` — list loginable providers, or run a flow."""
         if self._providers is None:
-            if self._login_handler is not None:
-                try:
-                    self._login_handler("login")
-                except Exception as error:  # never let a handler crash the app
-                    notice(f"login failed: {error}", "error")
-                return
-            notice("run: local-operator login", "warning")
+            notice("provider controller unavailable — run: local-operator login", "warning")
             return
         if not arg:
             items = [(p.id, p.name) for p in self._providers.login_providers()]
@@ -721,16 +731,12 @@ class OperatorApp(App[None]):
         finally:
             self._login_lock.release()
 
-    def _cmd_logout(self, arg: str, notice: Callable[[str, str], None]) -> None:
+    def _cmd_logout(self, arg: str, notice: NoticeFn) -> None:
         """``/logout [provider]`` — remove stored credentials for a provider."""
         if self._providers is None:
-            if self._login_handler is not None:
-                try:
-                    self._login_handler("logout")
-                except Exception as error:  # never let a handler crash the app
-                    notice(f"logout failed: {error}", "error")
-            else:
-                notice("run: local-operator logout <provider>", "warning")
+            notice(
+                "provider controller unavailable — run: local-operator logout <provider>", "warning"
+            )
             return
         if not arg:
             notice("usage: /logout <provider>", "warning")
@@ -812,19 +818,22 @@ class OperatorApp(App[None]):
     def on_turn_ended(self, message: TurnEnded) -> None:
         assert self._status is not None
         self._dismiss_working_block()
-        updates: dict[str, object] = {"streaming": False}
-        if message.context_tokens:
-            updates["context_tokens"] = message.context_tokens
+        # Build the segments as typed locals and make ONE call: a
+        # dict[str, object] splatted into update() erases every parameter type,
+        # so a wrong-typed segment would only surface as a render glitch.
+        # `None` means "leave this segment alone" in update()'s contract.
+        context_tokens: int | None = message.context_tokens or None
+        cost_text: str | None = None
         cost = self._cost_for(message.usage)
         if cost is not None:
             self._total_cost += cost
-            updates["cost"] = format_cost(self._total_cost)
+            cost_text = format_cost(self._total_cost)
         elif message.usage is not None and getattr(message.usage, "input_tokens", 0):
             # D20: the turn billed tokens but pricing is unknown — render an
             # explicit "unavailable" so the segment's absence reads as that,
             # not as "free".
-            updates["cost"] = "$—"
-        self._status.update(**updates)
+            cost_text = "$—"
+        self._status.update(streaming=False, context_tokens=context_tokens, cost=cost_text)
         if message.error:
             self._append_block(NoticeBlock(message.error, "error"))
         elif message.aborted:
@@ -902,10 +911,16 @@ class OperatorApp(App[None]):
         card = self._tool_cards.pop(event.tool_call_id, None)
         if card is None:
             return
+        # Hand the card the FULL result text and details, not just a summary
+        # line: the text backs click-to-expand and the details carry the
+        # write/edit +N/-N counters. Without this the card can only ever show
+        # the headline, so both features stay dark.
+        result_text = event.result.text
+        details = event.result.details
         if event.is_error:
-            card.mark_failed(_first_line(event.result.text))
+            card.mark_failed(_first_line(result_text), result_text, details)
         else:
-            card.mark_done()
+            card.mark_done(result_text, details)
 
     def on_notice_posted(self, message: NoticePosted) -> None:
         self._append_block(NoticeBlock(message.text, message.kind))
@@ -1031,13 +1046,11 @@ def _brand_terminal_theme() -> TerminalTheme:
 async def create_app(
     session_factory: Callable[[], Awaitable[SessionProtocol]],
     theme_name: str = "dark",
-    login_handler: Callable[[str], None] | None = None,
     provider_controller: Any | None = None,
 ) -> OperatorApp:
     """Construct an :class:`OperatorApp` (test/embedding helper)."""
     return OperatorApp(
         session_factory,
         theme_name,
-        login_handler=login_handler,
         provider_controller=provider_controller,
     )

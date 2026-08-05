@@ -318,43 +318,52 @@ async def test_boot_failure_posts_error_and_reload_retries() -> None:
         assert app._session is session
 
 
-# --- login/logout handlers (TUI-015) ---------------------------------------
+# --- login/logout through the provider controller --------------------------
 
 
 @pytest.mark.asyncio
-async def test_login_logout_dispatch_to_handler() -> None:
-    calls: list[str] = []
-    session = FakeSession()
-    app = OperatorApp(lambda: _factory(session), login_handler=calls.append)
+async def test_login_lists_providers_from_the_controller() -> None:
+    """Bare /login lists loginable providers — the controller is the only
+    path now that the CLI login_handler seam is gone."""
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=FakeProviderController())
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         app.query_one(Editor).focus()
         await pilot.pause()
         await pilot.press("slash", "l", "o", "g", "i", "n", "enter")
         await pilot.pause()
-        await pilot.press("slash", "l", "o", "g", "o", "u", "t", "enter")
-        await pilot.pause()
-    assert calls == ["login", "logout"]
+        text = _transcript_text(app)
+    assert "openrouter" in text and "deepseek" in text
 
 
 @pytest.mark.asyncio
-async def test_login_without_handler_notices_cli_command() -> None:
-    session = FakeSession()
-    app = OperatorApp(lambda: _factory(session))  # login_handler None
+async def test_logout_routes_to_the_controller() -> None:
+    controller = FakeProviderController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=controller)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        for ch in "/logout openrouter":
+            await pilot.press("slash" if ch == "/" else ("space" if ch == " " else ch))
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+    assert controller.logouts == ["openrouter"]
+
+
+@pytest.mark.asyncio
+async def test_login_without_controller_points_at_the_cli() -> None:
+    """Degrading to a pointer notice is the contract when the TUI is embedded
+    without a controller — it must never crash or silently do nothing."""
+    app = OperatorApp(lambda: _factory(FakeSession()))  # no controller
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         app.query_one(Editor).focus()
         await pilot.pause()
         await pilot.press("slash", "l", "o", "g", "i", "n", "enter")
         await pilot.pause()
-        transcript = app.query_one(TranscriptView)
-        texts = "\n".join(
-            getattr(getattr(b, "renderable", None), "plain", "") for b in transcript.blocks()
-        )
-        assert "local-operator login" in texts
-
-
-# --- skills/mcp introspection (exception-safe) -----------------------------
+        assert "local-operator login" in _transcript_text(app)
 
 
 @pytest.mark.asyncio

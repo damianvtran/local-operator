@@ -115,6 +115,9 @@ class FakeSession:
     async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
         pass
 
+    async def seed_history(self, messages: list[Any]) -> None:
+        pass
+
     def steer(self, text: str) -> None:
         pass
 

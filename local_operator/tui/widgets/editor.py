@@ -67,8 +67,14 @@ class Editor(TextArea):
         self._commands: list[SlashCommand] = commands or []
 
     # -- public API ---------------------------------------------------------
-    def history(self) -> list[str]:
-        """Recorded prompts, oldest first."""
+    def prompt_history(self) -> list[str]:
+        """Recorded prompts, oldest first.
+
+        Named ``prompt_history`` rather than ``history``: ``TextArea`` already
+        owns a ``history`` attribute for its undo stack, and shadowing it with
+        a method of an unrelated type is a live footgun for anything that
+        reaches for the base class's own edit history.
+        """
         return list(self._history)
 
     def set_commands(self, commands: list[SlashCommand]) -> None:
