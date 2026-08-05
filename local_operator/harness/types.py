@@ -34,7 +34,7 @@ import asyncio
 import uuid
 from typing import Any, Awaitable, Callable, Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -425,11 +425,27 @@ class ToolExecutionUpdateEvent(AgentEvent):
 
 
 class ToolExecutionEndEvent(AgentEvent):
+    """A tool finished. ``is_error`` mirrors ``result.is_error``.
+
+    The flag is kept as a serialized field because UI clients and the JSON
+    exec stream read it directly, but it is NOT an independent input: a
+    producer that sets only ``result.is_error`` (or only the flag) would
+    otherwise ship an event whose two halves disagree, and a UI reading the
+    flag renders a failed tool as a success. The validator ORs them so the
+    two can never drift.
+    """
+
     type: Literal["tool_execution_end"] = "tool_execution_end"
     tool_call_id: str
     tool_name: str
     result: ToolResult
     is_error: bool = False
+
+    @model_validator(mode="after")
+    def _sync_error_flag(self) -> "ToolExecutionEndEvent":
+        if self.result.is_error and not self.is_error:
+            object.__setattr__(self, "is_error", True)
+        return self
 
 
 class NoticeEvent(AgentEvent):
