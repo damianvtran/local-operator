@@ -1,6 +1,6 @@
 """Loopback OAuth callback server shared by all authorization-code flows.
 
-Ported from omp ``registry/oauth/callback-server.ts``. Invariants worth
+OAuth callback server. Invariants worth
 preserving (they are scar tissue from real provider behaviour):
 
 - The HTTP server starts BEFORE the auth URL is generated so the actually

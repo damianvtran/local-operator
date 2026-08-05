@@ -1,6 +1,6 @@
 """Tool registry — the createIf factory table for builtin tools.
 
-Ports omp's registration model (``coding-agent/src/tools/index.ts``): a
+The registration model is a
 ``name -> factory`` table where each factory returns an :class:`AgentTool` or
 ``None`` when the tool cannot exist in this session (the *createIf*
 convention — no separate capability table). ``create_tools`` walks the table
@@ -54,7 +54,7 @@ def create_tools(context: ToolContext, enabled: Sequence[str] | None = None) -> 
     the table in the given order, first occurrence winning — duplicate names
     in host config must not produce duplicate provider tools. Names absent
     from the table are skipped — unknown tool names in host config must not
-    crash session startup (omp resolves availability at creation time, never
+    crash session startup (availability resolves at creation time, never
     at dispatch time).
     """
     if enabled is None:

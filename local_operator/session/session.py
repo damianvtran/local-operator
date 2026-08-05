@@ -82,7 +82,7 @@ _CONTINUATION_PROMPT = (
     "Continue the task from where it left off."
 )
 
-#: Cap on auto-continuation turns within one user turn (mirrors omp's
+#: Cap on auto-continuation turns within one user turn
 #: MAX_PAUSED_TURN_CONTINUATIONS): a compaction pass that keeps clearing the
 #: recovery band must not re-prompt forever.
 _MAX_CONTINUATIONS = 8
@@ -804,7 +804,7 @@ class Session:
             await self._emit(CompactionEndEvent(reason="context-window", success=True))
 
             # (5) Recovery band: only schedule a continuation when the pass
-            # actually created headroom (omp issue #2275 anti-thrash).
+            # actually created headroom (an anti-thrash guard).
             if getattr(settings, "auto_continue", False):
                 threshold = compaction_api.resolve_threshold_tokens(
                     self._model.context_window, settings

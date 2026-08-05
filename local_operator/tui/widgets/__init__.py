@@ -2,7 +2,7 @@
 
 The transcript is the product's centre: assistant markdown, one-line tool
 cards, and notices all stack into a single scrollable column. The widgets in
-this package share two invariants ported from omp:
+this package share two invariants:
 
 - Blocks own NO outer margin; the container owns inter-block gaps (exactly
   one separator behavior, never blank filler rows).

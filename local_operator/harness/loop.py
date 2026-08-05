@@ -1,11 +1,11 @@
 """The agent loop — a provider-agnostic engine with native tool calling.
 
-Port of omp ``packages/agent/src/agent-loop.ts`` (the ``runLoopBody`` core).
+Provider-agnostic engine with native tool calling (the ``runLoopBody`` core).
 The loop knows NOTHING about sessions, persistence, or UI: everything host-side
 arrives through :class:`~local_operator.harness.types.LoopConfig` callbacks,
 and the only boundary outward is the :class:`AgentEvent` stream.
 
-Structure is omp's two nested while loops:
+Structure is two nested while loops:
 
 - **Outer** — re-enters when steering/asides/follow-ups arrive at the yield
   boundary (after the model has stopped asking for tools).
@@ -80,7 +80,7 @@ _TYPE_ADAPTERS: dict[str, TypeAdapter[Any]] = {
 
 ABORTED_RESULT_TEXT = "aborted"
 SKIPPED_RESULT_TEXT = "Tool call skipped: interrupted by steering."
-# Backfill for empty tool results (omp coerceToolResult): Anthropic rejects an
+# Backfill for empty tool results (coerceToolResult): Anthropic rejects an
 # empty ``is_error`` tool_result content with a 400, and other providers
 # serialize "" — one placeholder block keeps the wire legal for every client.
 EMPTY_TOOL_RESULT_TEXT = "[tool returned no output]"
@@ -278,7 +278,7 @@ class AgentLoop:
                 if late:
                     reentries += 1
                     if reentries > config.max_paused_turn_continuations:
-                        # omp MAX_PAUSED_TURN_CONTINUATIONS guard: a producer
+                        # MAX_PAUSED_TURN_CONTINUATIONS guard: a producer
                         # that never stops (follow-ups arriving faster than
                         # they are consumed) must not re-enter forever.
                         logger.warning(
@@ -722,7 +722,7 @@ class AgentLoop:
     ) -> None:
         for result in results:
             content = list(result.content)
-            # omp coerceToolResult: an empty tool result serializes as "" on
+            # coerceToolResult: an empty tool result serializes as "" on
             # most wires and Anthropic REJECTS an empty ``is_error`` content
             # with a 400 — backfill one placeholder block. Image-only results
             # keep their blocks untouched (never text-flatten).

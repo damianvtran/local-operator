@@ -1,6 +1,6 @@
 """Provider registry — one ``ProviderDefinition`` per provider.
 
-Ported from omp ``packages/ai/src/registry``: field presence is the feature
+Field presence is the feature
 flag (``login`` present ⇒ interactive login, ``callback_port`` ⇒ loopback
 flow, ...). Heavy OAuth modules are reached through lazy-import thunks so
 they stay out of the eager startup graph.
@@ -86,7 +86,7 @@ def _oauth_api_key(creds: dict[str, Any]) -> str:
 def create_api_key_login(provider_label: str, auth_url: str, instructions: str = "") -> LoginFn:
     """Paste-an-API-key "login" for providers without real OAuth.
 
-    Mirrors omp ``registry/api-key-login.ts``: open the dashboard URL,
+    Opens the dashboard URL, prompts for a paste, returns the trimmed key:
     prompt for a paste, return the trimmed key (a ``str`` — AuthStore
     stores it as an ``api_key`` credential with ``source="login"``).
     """
@@ -109,7 +109,7 @@ def create_api_key_login(provider_label: str, auth_url: str, instructions: str =
 
 
 def _anthropic_env_key() -> str | None:
-    # OAuth-issued tokens win over raw API keys (omp parity).
+    # OAuth-issued tokens win over raw API keys.
     return os.environ.get("ANTHROPIC_OAUTH_TOKEN") or os.environ.get("ANTHROPIC_API_KEY")
 
 
@@ -270,7 +270,7 @@ def resolve_env_key(provider_id: str) -> str | None:
     """Resolve the provider's API key from the environment.
 
     Handles both forms of ``env_keys``: a plain variable name, or a callable
-    that picks among several (feature-flag style, omp parity).
+    that picks among several (feature-flag style).
     """
     definition = get_provider_definition(provider_id)
     if definition is None or definition.env_keys is None:

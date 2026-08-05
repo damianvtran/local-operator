@@ -1,5 +1,5 @@
-"""Scheduled wakes — a near-verbatim port of omp ``wake/schedule.ts`` +
-``wake/scheduler.ts``.
+"""Scheduled wakes — built around a pure schedule layer plus a live
+``WakeScheduler``.
 
 Splits cleanly into a pure layer (shape, parsing, recurrence math — zero
 timers) and a live layer (:class:`WakeScheduler`, which owns the schedules and
@@ -7,7 +7,7 @@ a single armed timer). Persistence lives in the session transcript as a
 ``wake_schedules`` custom entry, handled by the caller via the ``persist``
 callback; this module never touches disk.
 
-Key semantics carried over from omp:
+Key semantics carried over from the reference scheduler:
 
 - ``parse_wake_duration`` REJECTS bare numbers (``60`` reads as both seconds
   and milliseconds; guessing wrong is a runaway loop).
@@ -341,7 +341,7 @@ def format_wake_delivery_text(due: DueWake) -> str:
 class WakeScheduler:
     """Owns the wake schedules plus a single armed asyncio timer.
 
-    Three load-bearing properties from omp are preserved:
+    Three load-bearing properties are preserved:
 
     1. ``MAX_ARM_MS`` — a wake a week out arms a one-minute re-check tick
        rather than a 604,800,000 ms timeout, so sleep/clock-skew/timezone

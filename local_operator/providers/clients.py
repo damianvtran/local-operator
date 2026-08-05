@@ -261,8 +261,8 @@ class OpenAICompatClient:
     ChatGPT OAuth credentials (``oauth_access`` with ``kind == "oauth"`` and
     an ``org_id``) are routed to ``{base_url}/responses`` instead — ChatGPT
     subscription tokens are rejected by ``chat/completions`` and require the
-    Responses endpoint plus the ``chatgpt-account-id`` header (omp parity:
-    ``openai-codex-responses``). Plain API keys keep ``chat/completions``.
+    Responses endpoint plus the ``chatgpt-account-id`` header
+    (mirrors ``openai-codex-responses``). Plain API keys keep ``chat/completions``.
     """
 
     def __init__(
@@ -591,7 +591,7 @@ class AnthropicClient:
     """``POST {base}/v1/messages`` streaming.
 
     System blocks are sent as an array with ``cache_control: {type:
-    "ephemeral"}`` on every block EXCEPT the last (omp breakpoint policy:
+    "ephemeral"}`` on every block EXCEPT the last (the breakpoint policy:
     the volatile tail stays un-cached). Content arrives as
     ``content_block_start/delta/stop`` events for ``text`` and ``tool_use``
     blocks; tool arguments stream via ``input_json_delta``.

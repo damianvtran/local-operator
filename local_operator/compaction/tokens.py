@@ -4,9 +4,9 @@ Why this module exists
 -----------------------
 Every compaction decision (threshold checks, cut-point search, pruning guards)
 is driven by token counts. Providers only report real usage after a request,
-so between requests we estimate locally with tiktoken's ``cl100k_base`` — the
-same estimator omp uses. Estimation runs on hot paths (per-index suffix sums,
-backwards cut-point walks), so results are memoized.
+so between requests we estimate locally with tiktoken's ``cl100k_base``.
+Estimation runs on hot paths (per-index suffix sums, backwards cut-point
+walks), so results are memoized.
 
 Settle rule / cache contract
 ----------------------------
@@ -41,7 +41,7 @@ from local_operator.harness.types import Message, TextContent
 
 logger = logging.getLogger(__name__)
 
-#: Flat token cost charged per image block. Matches omp's
+#: Flat token cost charged per image block. Matches
 #: ``IMAGE_TOKEN_ESTIMATE``: vision providers bill images in fixed visual-token
 #: chunks, and a flat estimate keeps the estimator deterministic and
 #: independent of base64 payload length.
@@ -150,7 +150,7 @@ def estimate_tokens(message: Message) -> int:
 
 
 def _is_settled(message: Message) -> bool:
-    """Cacheability gate (omp ``isEstimateCacheable``): non-assistant messages
+    """Cacheability gate (``isEstimateCacheable``): non-assistant messages
     are immutable once appended; assistants only count as settled once the
     loop finalization has stored real ``usage`` and a terminal ``stop_reason``
     (not ``None`` / ``"aborted"`` / ``"error"``)."""

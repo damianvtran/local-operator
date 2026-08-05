@@ -1,11 +1,11 @@
 """Synchronous slash-command completion for the input editor.
 
-Purely sync and I/O-free by design (omp's ``trySyncSlashCompletion`` split):
+Purely sync and I/O-free by design (the synchronous slash path):
 the slash path runs on every keystroke and must resolve deterministically
 before Enter is dispatched. File/path completion is async work and lives
 elsewhere (later); only commands complete here.
 
-Scoring ports omp's ``score_command_textMatch``:
+Scoring contract:
 
 - exact match: 1000
 - prefix match: 900, flat — registry order breaks ties
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-#: Exact / prefix tiers, matching omp's registry-order tie-break contract.
+#: Exact / prefix tiers, with registry-order tie-break.
 SCORE_EXACT = 1000
 SCORE_PREFIX = 900
 SCORE_FUZZY_MAX = 40
@@ -83,7 +83,7 @@ def match_commands(
 
     ``text_before_cursor`` is the editor text up to the caret; matching only
     applies to a single token starting with ``/``. Ties keep registration
-    order (the prefix tier is deliberately flat, same as omp).
+    order (the prefix tier is deliberately flat, so registration order breaks ties).
     """
     token = text_before_cursor.strip()
     if not token.startswith("/"):

@@ -1,13 +1,13 @@
 """Skill discovery: scan ``<root>/<child>/SKILL.md`` directories into ``Skill`` records.
 
-On-disk format is identical to the wider Agent Skills ecosystem (same as omp):
+On-disk format is identical to the wider Agent Skills ecosystem:
 a skill is a directory containing a ``SKILL.md`` whose YAML frontmatter
 carries ``name``, ``description``, ``enabled``, ``hide`` and the Agent
 Skills-standard ``disable-model-invocation``. The body is never read here —
 it is fetched on demand through the ``skill://`` protocol, so discovery stays
 cheap regardless of skill size.
 
-Differences from omp that are deliberate (see docs/REWRITE.md §C):
+Deliberate divergences from that ecosystem (see docs/REWRITE.md §C):
 
 - Selection is semantic, done by :mod:`local_operator.skills.index`, so the
   description is the *routing signal* rather than guaranteed context.
@@ -80,7 +80,7 @@ def parse_frontmatter(text: str) -> dict[str, object]:
 def _skill_from_file(skill_md: Path, base_dir: Path, source: str) -> Skill | None:
     """Build one Skill from a SKILL.md, or None when it must be skipped.
 
-    Drop rules (omp parity): ``enabled: false`` skips entirely; a missing or
+    Drop rules: ``enabled: false`` skips entirely; a missing or
     blank description is dropped silently (the description is the whole
     routing signal, an unnamed one cannot be selected). ``hide`` is the OR of
     ``hide`` and ``disable-model-invocation``.
@@ -133,8 +133,8 @@ def scan_skills_dir(
     Dot-prefixed entries are skipped; symlinked child dirs are followed but
     deduped through ``seen`` (a set of realpaths shared across roots by
     :func:`discover_skills`) so one physical file is never loaded twice.
-    ``include_self`` additionally accepts ``<dir>/SKILL.md`` (omp only uses
-    this for Claude-plugin manifests; kept for parity).
+    ``include_self`` additionally accepts ``<dir>/SKILL.md`` (the wider
+    ecosystem only uses this for Claude-plugin manifests; kept for parity).
     """
     skills: list[Skill] = []
     if seen is None:
@@ -179,7 +179,7 @@ def _sort_key(skill: Skill) -> tuple[str, str, str]:
     """Deterministic prompt order: case-insensitive name, exact name, path.
 
     Byte-stable ordering across turns keeps the volatile skills block from
-    churning provider prompt caches (omp ``compareSkillOrder`` parity).
+    churning provider prompt caches (matching the established behavior).
     """
     return (skill.name.lower(), skill.name, str(skill.file_path))
 

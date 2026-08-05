@@ -9,7 +9,7 @@ paper/ink pair for the future light flag.
 Everything downstream (the generated TCSS variables, rich ``Style`` helpers,
 widget colors) reads from :data:`BRAND_TOKENS`; no module hard-codes a hex.
 A ``theme_epoch`` counter is bumped on every switch so render caches keyed on
-theme can be invalidated in one shot (omp's ``getThemeEpoch`` pattern).
+theme can be invalidated in one shot (a ``getThemeEpoch``-style pattern).
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 """Bridge between MCP server tools and harness ``AgentTool``s.
 
-Ports the omp tool bridge (``src/mcp/tool-bridge.ts``): tool-name mangling,
+Implements the MCP tool bridge: tool-name mangling,
 schema normalization, outbound argument hygiene, result flattening, and the
 retriable-connection-error classification that drives the manager's
 reconnect-once + retry-once policy. Pure functions only — no MCP SDK imports,
@@ -22,7 +22,7 @@ INTENT_FIELD = "i"
 # Network-level and stale-session errors that warrant a reconnect + single
 # retry. Conservative: only errors where the server is likely alive but the
 # connection object is stale (dead SSE, expired session, refused after
-# restart). Mirrors omp's RETRIABLE_PATTERNS.
+# restart). Mirrors the established retriable error patterns.
 _RETRIABLE_PATTERNS = (
     "econnrefused",
     "econnreset",
@@ -55,7 +55,7 @@ def _sanitize_part(value: str, fallback: str) -> str:
     """Lowercase, map non ``[a-z_]`` runs to ``_``, collapse runs, trim edges.
 
     An empty result falls back to ``fallback`` so the minted tool name always
-    carries both parts (omp behavior).
+    carries both parts (established behavior).
     """
     sanitized = _RUN_RE.sub("_", _SANITIZE_RE.sub("_", value.lower())).strip("_")
     return sanitized or fallback
@@ -153,7 +153,7 @@ def format_mcp_result(
     Content blocks are joined text with separators: text blocks pass through,
     image blocks become ``[Image: <mime>]`` placeholders, embedded resources
     become ``[Resource: <uri>]`` plus their text when present. ``isError``
-    maps to ``is_error`` (with an ``Error:`` prefix, matching omp).
+    maps to ``is_error`` (with an ``Error:`` prefix, matching the established behavior).
     """
     content_blocks = getattr(result, "content", None)
     if content_blocks is None and isinstance(result, dict):

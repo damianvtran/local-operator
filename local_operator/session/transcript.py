@@ -8,7 +8,7 @@ Entry shape::
 
     {"id": ..., "ts": ..., "type": "message" | "compaction" | "custom", "payload": {...}}
 
-Replay semantics (ported from omp ``session-manager.ts``): the latest
+Replay semantics: the latest
 compaction entry wins; ``build_llm_history`` returns a marker message for that
 summary plus every entry from ``first_kept_entry_id`` onward — never anything
 before it. Custom entries are ignored by replay, so bookkeeping like wake

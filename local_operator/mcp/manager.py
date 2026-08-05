@@ -1,6 +1,6 @@
 """MCP connection manager: fast-startup gate, deferred tools, reconnect breaker.
 
-Ports the omp manager semantics (``src/mcp/manager.ts``) onto the official
+Ports the established MCP manager semantics onto the official
 ``mcp`` Python SDK:
 
 - A 250 ms startup gate (``asyncio.wait(timeout=0.25)``): servers that finish
@@ -64,7 +64,7 @@ logger = logging.getLogger(__name__)
 # Fast-startup gate: how long discovery blocks before deferring slow servers.
 STARTUP_GATE_MS = 250
 
-# Reconnect policy (omp): escalating backoff, sliding-window circuit breaker.
+# Reconnect policy: escalating backoff, sliding-window circuit breaker.
 RECONNECT_BACKOFF_S = (0.5, 1.0, 2.0, 4.0)
 RECONNECT_BURST_WINDOW_S = 30.0
 RECONNECT_BURST_LIMIT = 5
@@ -94,7 +94,7 @@ def resolve_mcp_timeout_s(cfg: MCPServerConfig | None) -> float | None:
     """Resolve the client-side request timeout in seconds (``None`` = off).
 
     Precedence: ``LOCAL_OPERATOR_MCP_TIMEOUT_MS`` env > ``config.timeout`` >
-    30 s default; ``0`` disables the timeout entirely (omp).
+    30 s default; ``0`` disables the timeout entirely (established behavior).
     """
     env_raw = os.environ.get("LOCAL_OPERATOR_MCP_TIMEOUT_MS")
     if env_raw is not None:
@@ -110,10 +110,10 @@ def resolve_mcp_timeout_s(cfg: MCPServerConfig | None) -> float | None:
 
 
 # ---------------------------------------------------------------------------
-# stdio transport with omp's platform spawn rules
+# stdio transport with the established platform spawn rules
 # ---------------------------------------------------------------------------
 
-# Argument bytes cmd.exe delivers unchanged without quoting (omp CMD_SAFE_ARG).
+# Argument bytes cmd.exe delivers unchanged without quoting (CMD_SAFE_ARG).
 _CMD_SAFE_ARG_RE = re.compile(r"^[A-Za-z0-9#$*+\-./:?@\\_]+$")
 _WINDOWS_BATCH_EXTENSIONS = {".cmd", ".bat"}
 
@@ -130,7 +130,7 @@ def escape_cmd_quoted_interior(value: str) -> str:
     Percent becomes ``%%cd:~,%`` (expands to a literal ``%``), quotes are
     doubled, and backslash runs preceding a quote — including the caller's
     closing quote — are doubled so ``CommandLineToArgvW`` delivers them
-    literally. Ported verbatim from omp ``escapeCmdQuotedInterior``.
+    literally. Implements the standard cmd.exe interior-quoting rule.
     """
     out: list[str] = []
     backslashes = 0
@@ -163,8 +163,7 @@ def build_cmd_exe_argv(comspec: str, command: str, args: list[str]) -> list[str]
     """Build the ``cmd.exe /d /e:ON /v:OFF /c "<line>"`` argv for batch shims.
 
     ``/e:ON`` keeps extensions on (required for the ``%%cd:~,%`` percent
-    trick); ``/v:OFF`` disables delayed expansion. Ported from omp
-    ``buildCmdExeArgv``.
+    trick); ``/v:OFF`` disables delayed expansion.
     """
     _assert_cmd_batch_token(command, "command")
     line = f'""{escape_cmd_quoted_interior(command)}"'
@@ -217,7 +216,7 @@ def stdio_start_new_session() -> bool:
     SIGTSTP, background-read SIGTTIN) cannot stop the server and block the
     read loop on silent pipes. macOS: ``False`` — LaunchServices/TCC
     attributes Apple Events automation to the responsible terminal only while
-    the child stays in the inherited session (omp issue #4987). Windows:
+    the child stays in the inherited session (a real macOS automation bug). Windows:
     ``False`` (Job Objects own tree termination there).
     """
     return sys.platform not in ("win32", "darwin")
@@ -250,7 +249,7 @@ async def _stdio_transport(cfg: MCPStdioServerConfig, on_close: Callable[[], Non
         # verbatim: passing a single string bypasses list2cmdline, which
         # would re-quote the BatBadBut escaping in the ``/c`` payload.
         # Deferred: npm cmd-shims whose fallback interpreter is node are not
-        # yet bypassed straight to node (omp does that too).
+        # yet bypassed straight to node.
         target = win32_process_target(argv)
     else:
         kwargs["start_new_session"] = stdio_start_new_session()
@@ -1054,7 +1053,7 @@ class McpManager:
             raise  # abort stays abort (MCP-16): never converted to an error result
         except Exception as exc:
             if is_retriable_connection_error(exc):
-                # One reconnect + one retry at the call site (omp policy).
+                # One reconnect + one retry at the call site (established policy).
                 new_conn = await self._reconnect_for_call(server_name)
                 if new_conn is not None:
                     conn = new_conn

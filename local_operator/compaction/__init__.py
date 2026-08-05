@@ -1,7 +1,7 @@
 """Compaction engine: threshold triggers, cut-point selection, summarization
 prompts, and cache-aware pruning.
 
-Port of omp's context-full compaction strategy — see
+Implements the context-full compaction strategy — see
 ``docs/REWRITE.md`` § C and ``docs/recon/ScoutSkillsCompact.md`` § 5-6 for
 the contract. The stable consumer surface is :mod:`local_operator.compaction.api`;
 the session imports it lazily inside functions so a missing compaction

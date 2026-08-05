@@ -1,6 +1,6 @@
 """Credential rotation, model fallback chains, and failover streaming.
 
-Three independent tiers ported from omp (``docs/recon/ScoutProviders.md`` §5):
+Three independent tiers from the provider-rotation design (§5):
 
 - **Tier 1** — a/b/c credential rotation inside one provider
   (:func:`resolve_next_key`): initial resolve / force-refresh same account /
@@ -148,7 +148,7 @@ ApiKeyResolver = Callable[[ApiKeyResolveContext], Awaitable[str | None] | str | 
 class AuthRetryKeyState:
     """Mutable rotation state shared across attempts for one request.
 
-    ``legacy_auth_switch_used`` ports omp's field of the same name: an
+    ``legacy_auth_switch_used`` carries the legacy auth-switch semantics: an
     ORDINARY 401 gets exactly one refresh-same-account plus one sibling
     switch, then rotation is exhausted. Usage-limit/403 errors skip the
     refresh step and may cycle every distinct sibling instead.
@@ -204,8 +204,8 @@ async def resolve_next_key(
         )
 
     direct_rotation = is_direct_credential_rotation_error(error)
-    # Ordinary 401: one refresh + one sibling switch, then stop (omp
-    # legacyAuthSwitchUsed). Usage-limit/403 may keep cycling siblings.
+    # Ordinary 401: one refresh + one sibling switch, then stop
+    # (legacyAuthSwitchUsed). Usage-limit/403 may keep cycling siblings.
     if not direct_rotation and state.legacy_auth_switch_used:
         return None
 
@@ -307,7 +307,7 @@ def backoff_delay_ms(base_delay_ms: int, attempt: int, *, rng: random.Random | N
 
 @dataclasses.dataclass(frozen=True)
 class RetrySettings:
-    """The ``values.retry.*`` config surface (defaults from omp)."""
+    """The ``values.retry.*`` config surface (defaults from the established harness)."""
 
     enabled: bool = True
     max_retries: int = 10

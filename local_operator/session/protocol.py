@@ -6,7 +6,7 @@ server facade (integration). Keeping the surface as a Protocol lets the UI
 and headless modes build and test against a fake session before the real one
 lands.
 
-Event delivery semantics (ported from omp): ``subscribe`` handlers receive
+Event delivery semantics: ``subscribe`` handlers receive
 ``AgentEvent`` instances in emission order; a handler may be sync or async.
 ``agent_end`` may arrive AFTER a subsequent ``agent_start`` when a turn was
 superseded — UIs must handle that (see docs/REWRITE.md, stream D).
@@ -36,6 +36,21 @@ class SessionProtocol(Protocol):
     @property
     def model_label(self) -> str:
         """Human-readable ``provider/model`` for status lines."""
+        ...
+
+    @property
+    def model(self) -> Any:
+        """The active ModelSpec (provider/model_id/base_url/context_window)."""
+        ...
+
+    def set_model(self, model: Any) -> None:
+        """Swap the model spec; takes effect from the next turn onward.
+
+        The TUI's ``/model <provider>/<id>`` path calls this after building a
+        new spec — the loop reads the spec fresh on every turn, so no session
+        teardown is required. Also changes compaction thresholds for the new
+        context window.
+        """
         ...
 
     # --- driving turns ----------------------------------------------------

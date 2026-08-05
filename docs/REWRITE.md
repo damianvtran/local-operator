@@ -5,8 +5,8 @@ parallel work streams. When this doc and memory disagree, this doc wins.
 
 ## Goals
 
-Rewrite the agent experience of local-operator, porting the architecture of
-oh-my-pi (omp) to Python:
+Rewrite the agent experience of local-operator around a modern,
+provider-agnostic Python architecture:
 
 1. **Harness** — a provider-agnostic agent loop with native tool calling,
    streaming, steering/asides, scheduled wakes, background jobs. Replaces the
@@ -15,13 +15,13 @@ oh-my-pi (omp) to Python:
    only relevant descriptions per turn; `skill://<name>` progressive reads.
 3. **Compaction** — append-only compaction entries, cache-aware pruning,
    auto/mid-turn/idle triggers.
-4. **Providers** — OAuth login (OpenAI/ChatGPT, Anthropic, Kimi, xAI) ported
-   from omp, API-key support, SQLite credential store, credential rotation +
-   model fallback chains. Backward compatible with existing `credentials.env`,
+4. **Providers** — OAuth login (OpenAI/ChatGPT, Anthropic, Kimi, xAI),
+   API-key support, SQLite credential store, credential rotation + model
+   fallback chains. Backward compatible with existing `credentials.env`,
    `config.yml`, and `--hosting` names.
 5. **TUI** — full-screen Textual app themed with the local-operator brand kit
    (island-dark palette, one green accent, minimal one-line-per-action).
-6. **MCP** — official Python SDK + omp manager semantics (fast-startup gate,
+6. **MCP** — official Python SDK + manager semantics (fast-startup gate,
    deferred tools, reconnect breaker, multi-source config discovery).
 7. **Headless** — `local-operator exec` runs a task and exits; `--background`
    detaches it with a log file.
@@ -68,8 +68,8 @@ go through `harness/types.py` only by flagging it in the task result.
   `turn_start`, `turn_end`, `message_start`, `message_update`, `message_end`,
   `tool_execution_start`, `tool_execution_update`, `tool_execution_end`,
   `notice`, `compaction_start`, `compaction_end`, `retry_start`, `retry_end`.
-- `LoopConfig` — callback bundle injected into the loop (omp
-  AgentLoopConfig shape). The loop never imports session/providers code.
+- `LoopConfig` — callback bundle injected into the loop. The loop never
+  imports session/providers code.
 - `ModelSpec` — provider/model descriptor consumed by wire clients.
 - `stream_chat(request) -> AsyncIterator[StreamEvent]` — provider client
   protocol implemented by `providers/clients.py`.
@@ -78,7 +78,7 @@ go through `harness/types.py` only by flagging it in the task result.
 
 ### A — harness core
 
-Port omp `packages/agent` semantics:
+Harness core contract:
 
 - `loop.py`: two nested while loops (outer re-entry for asides/follow-ups,
   inner tool loop). Steering interrupts tool batches
@@ -95,7 +95,7 @@ Port omp `packages/agent` semantics:
   An earlier `AppendOnlyContextManager`/`StablePrefix` prototype was deleted
   (2026-08-05) because nothing constructed it — the doc must not claim a
   mechanism that is not in the request path.
-- `wake.py`: near-verbatim port of omp wake/schedule.ts — `WakeSchedule`
+- `wake.py`: scheduled wakes — `WakeSchedule`
   dataclass, `parse_wake_duration` (bare numbers REJECTED), `parse_wake_at`
   (+duration / HH:MM / ISO), `build_wake_schedule` returning errors as
   strings, `advance_wake_schedule` skipping missed occurrences,
@@ -114,7 +114,7 @@ Port omp `packages/agent` semantics:
   (`message`, `compaction`, `custom`), `build_context(replay start at latest
   compaction)`.
 - `tools/`: builtin tools — `bash` (asyncio subprocess with
-  NON_INTERACTIVE_ENV table ported from omp exec/non-interactive-env.ts),
+  NON_INTERACTIVE_ENV table),
   `read`, `write`, `edit` (simple line-replace), `glob`, `grep`, `todo`,
   `wake`. Tool approval tiers read/write/exec; CLI auto-approves read,
   prompts for write/exec unless `--yolo`.
@@ -131,7 +131,7 @@ Port omp `packages/agent` semantics:
   feature flag. Registry entries for: openai (+chatgpt oauth), anthropic,
   kimi, xai (+oauth), deepseek, google, mistral, ollama, openrouter,
   radient, alibaba — the existing 11 hosting names MUST resolve.
-- OAuth ports from omp (same endpoints/client ids/logic):
+- OAuth flows (endpoints/client ids/logic):
   - `anthropic`: code+PKCE loopback, port 54545 `/callback`, paste fallback,
     refresh with `anthropic-beta: oauth-2025-04-20`, 30-day grant note,
     expiry skew 5 min, never rewrite org fields on refresh.
@@ -168,7 +168,7 @@ Port omp `packages/agent` semantics:
 
 ### C — skills & compaction
 
-Skills (differences from omp are deliberate, user-requested):
+Skills (deliberate design choices, user-requested):
 
 - On-disk format identical to the ecosystem: `<skills-root>/<name>/SKILL.md`
   + YAML frontmatter (`name`, `description`, `enabled`, `hide` /
@@ -209,7 +209,7 @@ Skills (differences from omp are deliberate, user-requested):
     strategy (auto), reserve_tokens (16384), keep_recent_tokens (20000),
     threshold_percent (-1), threshold_tokens (-1), auto_continue (true),
     mid_turn_enabled (true).
-  - `should_compact`/`resolve_threshold_tokens` math as in omp;
+  - `should_compact`/`resolve_threshold_tokens` math;
     `COMPACTION_RECOVERY_BAND = 0.8`.
   - `find_cut_point`: walk backwards accumulating estimated tokens, never cut
     at a tool result (assert), snap forward to valid cut roles.
@@ -219,7 +219,7 @@ Skills (differences from omp are deliberate, user-requested):
   - `CompactionEntry` appended to transcript (`summary`,
     `first_kept_entry_id`, `tokens_before`, `preserve_data`); replay =
     summary message + entries from first_kept onward.
-  - **snapcompact** (vision-model archival, ported from omp snapcompact):
+  - **snapcompact** (vision-model archival):
     discarded history serialized, whitespace-collapsed, rendered onto PNG
     bitmap frames of pixel-font text (Pillow `ImageDraw.text`, monospace
     bitmap rendering) that vision models read back. `Archive { frames, text,
@@ -249,20 +249,18 @@ Skills (differences from omp are deliberate, user-requested):
 
 **Style direction (user mandate, supersedes earlier border plans):**
 borderless chrome everywhere — NO bordered boxes. Structure comes from
-symbols, text treatment, color, and spacing, the way the omp TUI does it
-(see ~/oss/oh-my-pi docs/tui.md + packages/coding-agent/src/modes for
-reference: status segments, tree glyphs, icon-prefixed one-liners). One
+symbols, text treatment, color, and spacing (status segments, tree glyphs,
+icon-prefixed one-liners). One
 space of padding at the screen edges (left/right/bottom) but NOT along the
 top while scrolling — content meets the top edge. Sophisticated, slick,
 minimal: prefer unicode symbols + dim/accent text over any rule lines;
 lines only where truly necessary (e.g. the single input top border carrying
-the status line). Add omp-style shimmer/strobe animations: animated spinner
+the status line). Add animated shimmer/strobe effects: animated spinner
 frames on running indicators and a subtle shimmer repaint on the active
-streaming block (omp's `activity` spinner ~30fps, status spinner ~12.5fps).
+streaming block (`activity` spinner ~30fps, status spinner ~12.5fps).
 
 **Character refinement (user feedback, supersedes "too simplistic"):**
-borderless does NOT mean bare. The omp TUI is the reference for character
-(user's own screenshot): tool calls render as subtle BACKGROUND-FILLED cards
+borderless does NOT mean bare. Tool calls render as subtle BACKGROUND-FILLED cards
 (one step brighter than the ground — the kit's `surface` #1e1a14; elevation
 is a background step, never a border), with a per-tool icon, the tool name
 in a tinted label color, the command/summary dim, and a right-aligned dim
@@ -271,12 +269,12 @@ sections use tree glyphs (├─ └─) and tinted labels. The status line is a
 full-width band on the kit's `sunken` ground with icon-led segments
 (model · effort · cwd left; tokens/cost/jobs right) separated by `·`, not a
 thin rule. The input sits on a `surface` panel with the `❯` chevron, no
-border. Shimmer rides the working text (green crest over dim), exactly like
-omp. Keep the island palette — omp's violet becomes our green/string tint;
-the STRUCTURE is what we borrow, not the hue.
+border. Shimmer rides the working text (green crest over dim). Keep the
+island palette — violet accents become our green/string tint; the STRUCTURE
+is what we emphasize, not the hue.
 
 - Layout (top→bottom): transcript scroll area; status line rendered as the
-  TOP BORDER of the input box (zero extra rows, omp trick); multiline input.
+  TOP BORDER of the input box (zero extra rows); multiline input.
 - **Minimalism rules**: one line per action. Tool executions render as a
   single row `icon name summary … status/duration` (collapsible expand later,
   default collapsed). Assistant markdown rendered with rich; streaming uses
@@ -309,7 +307,7 @@ the STRUCTURE is what we borrow, not the hue.
 - `mcp/config.py`: configs at `~/.local-operator/mcp.json` and
   `<cwd>/.local-operator/mcp.json`; also import `~/.claude.json` /
   `.claude/.mcp.json` / `~/.cursor/mcp.json` / `.vscode/mcp.json` (best
-  effort). `mcpServers` shape identical to omp; `disabledServers` wins over
+  effort). `mcpServers` shape; `disabledServers` wins over
   `enabledServers`.
 - `mcp/tool_bridge.py`: `mcp__<server>_<tool>` naming (sanitize lowercase
   `[a-z_]`, strip redundant server prefix), outbound arg hygiene (drop
@@ -317,14 +315,14 @@ the STRUCTURE is what we borrow, not the hue.
 ## Performance contract (user requirements, binding)
 
 - **Start-of-session context budget**: a fresh conversation with the full
-  installed skill set (the user's omp skills at `~/.omp/agent/skills` as the
+  installed skill set (the user's skills at `~/.omp/agent/skills` as the
   benchmark corpus) MUST start at ≤ 30,000 context tokens. Semantic skill
   selection is what makes this possible — only matched skill descriptions
   are injected. A benchmark script (`scripts/bench_context_budget.py`)
   measures it and fails CI if the budget is blown; optimize the system
   prompt if so.
 - **Cache rate target**: ≥ 90% prompt-cache hit rate on multi-turn E2E
-  tasks (omp achieves ~95%). Requirements that serve this: byte-stable
+  tasks (targeting a ~95% hit rate). Requirements that serve this: byte-stable
   system blocks (date not timestamp; deterministic skill ordering; volatile
   content isolated in the last block), append-only history, pruning gated on
   the warm-suffix guard, one compaction boundary instead of drip edits.

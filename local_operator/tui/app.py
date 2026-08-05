@@ -22,7 +22,7 @@ error`` status and can be retried with ``/reload`` (TUI-012).
 from __future__ import annotations
 
 import os
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from local_operator.tui.widgets.transcript import (
     NoticeBlock,
@@ -73,14 +73,17 @@ from local_operator.tui.widgets.editor import (
 from local_operator.tui.widgets.status_line import StatusLine, format_cost
 from local_operator.tui.widgets.tool_card import ToolCard
 
-#: Slash commands handled synchronously before any prompt is sent (TUI-014:
-#: ``/quit`` is an alias of ``/exit`` — one command, one registry entry).
+#: Slash commands handled synchronously before any prompt is sent. One
+#: registry entry per command; aliases live on the entry (TUI-014).
 SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("help", "Show available commands"),
     SlashCommand("exit", "Quit the app", aliases=("quit",)),
     SlashCommand("clear", "Clear the transcript (history is untouched)"),
     SlashCommand("reload", "Retry starting the session"),
-    SlashCommand("model", "Show the current model"),
+    SlashCommand("model", "Show or switch model (provider/id)", aliases=("models",)),
+    SlashCommand("provider", "List providers and their login/usage state"),
+    SlashCommand("accounts", "List stored credentials"),
+    SlashCommand("usage", "Show provider usage quota"),
     SlashCommand("compact", "About context compaction"),
     SlashCommand("skills", "List loaded skills"),
     SlashCommand("mcp", "List MCP servers"),
@@ -108,11 +111,16 @@ class OperatorApp(App[None]):
         session_factory: Callable[[], Awaitable[SessionProtocol]],
         theme_name: str = "dark",
         login_handler: Callable[[str], None] | None = None,
+        provider_controller: Any | None = None,
     ) -> None:
         super().__init__()
         theme_mod.set_theme(theme_name)  # dark is the product's island night
         self._session_factory = session_factory
         self._login_handler = login_handler  # TUI-015: injected by the CLI
+        # Full provider/model/credential/usage facade behind the slash
+        # commands; ``None`` degrades /provider /usage /model-switch to
+        # pointer notices (same contract as login_handler).
+        self._providers = provider_controller
         self._session: SessionProtocol | None = None
         self._controller: EventController | None = None
         self._status: StatusLine | None = None
@@ -121,11 +129,14 @@ class OperatorApp(App[None]):
         self._boot_hint: NoticeBlock | None = None
         self._working_block: WorkingBlock | None = None
         self._total_cost: float = 0.0
+        # Serializes interactive login flows so two /login commands can never
+        # race the one suspended terminal.
+        self._login_lock: Any | None = None
 
     # -- composition --------------------------------------------------------
     def compose(self) -> ComposeResult:
         yield TranscriptView()
-        # The status line IS the input box's top row (omp trick): the band
+        # The status line IS the input box's top row: the band
         # docks at the top of the input panel and carries the structural rule
         # styling, so it can never be overdrawn or pushed off-screen by the
         # editor. One row does double duty — zero extra height (D3/D17).
@@ -284,8 +295,10 @@ class OperatorApp(App[None]):
 
     # -- slash commands -----------------------------------------------------
     def _run_slash_command(self, text: str) -> None:
+        """Dispatch a typed slash command (with arguments) to its handler."""
         parts = text.split(maxsplit=1)
         command = parts[0].lower()
+        arg = parts[1].strip() if len(parts) > 1 else ""
 
         def notice(body: str, kind: str = "info") -> None:
             self._append_block(NoticeBlock(body, kind))
@@ -300,8 +313,13 @@ class OperatorApp(App[None]):
             notice("reloading session…")
             self.run_worker(self._reload_session(), thread=False, group="session")
         elif command == "/model":
-            label = self._session.model_label if self._session else "no session"
-            notice(f"model: {label}")
+            self._cmd_model(arg, notice)
+        elif command == "/provider":
+            self._cmd_providers(notice)
+        elif command == "/accounts":
+            self._cmd_accounts(notice)
+        elif command == "/usage":
+            self._cmd_usage(arg, notice)
         elif command == "/compact":
             notice("compaction runs automatically when the context fills up.")
         elif command == "/skills":
@@ -317,23 +335,270 @@ class OperatorApp(App[None]):
             else:
                 notice("no MCP servers configured.")
         elif command == "/login":
-            if self._login_handler is not None:
-                try:
-                    self._login_handler("login")
-                except Exception as error:
-                    notice(f"login failed: {error}", "error")
-            else:
-                notice("run: local-operator login")
+            self._cmd_login(arg, notice)
         elif command == "/logout":
-            if self._login_handler is not None:
-                try:
-                    self._login_handler("logout")
-                except Exception as error:
-                    notice(f"logout failed: {error}", "error")
-            else:
-                notice("run: local-operator logout")
+            self._cmd_logout(arg, notice)
         else:
             notice(f"unknown command: {command} — try /help", "warning")
+
+    # -- model --------------------------------------------------------------
+    def _cmd_model(self, arg: str, notice: Callable[[str, str], None]) -> None:
+        """``/model`` — show the current spec, or switch with ``provider/id``."""
+        session = self._session
+        if not arg:
+            label = session.model_label if session else "no session"
+            notice(f"model: {label}")
+            return
+        if session is None or not hasattr(session, "set_model"):
+            notice("session is still starting…", "warning")
+            return
+        provider, sep, model_id = arg.partition("/")
+        if not sep or not model_id:
+            notice(
+                "usage: /model <provider>/<model-id> (e.g. openrouter/deepseek/deepseek-chat)",
+                "warning",
+            )
+            return
+        try:
+            spec = self._providers.resolve_model(provider, model_id) if self._providers else None
+        except Exception as error:  # unknown provider/hosting
+            notice(f"cannot resolve {provider}: {error}", "error")
+            return
+        if spec is None:
+            notice("provider controller unavailable — cannot infer model spec", "warning")
+            return
+        old_label = session.model_label
+        session.set_model(spec)
+        if self._status is not None:
+            self._status.update(model_label=session.model_label)
+        notice(f"model: {old_label} → {session.model_label} (next turn)")
+        if old_label.partition("/")[0] != provider:
+            notice("switched provider — make sure you are logged in", "warning")
+
+    # -- providers / accounts / usage --------------------------------------
+    def _cmd_providers(self, notice: Callable[[str, str], None]) -> None:
+        """``/provider`` — list loginable providers and their state."""
+        if self._providers is None:
+            notice("run: local-operator provider (TUI lacks the provider facade)", "warning")
+            return
+        try:
+            items: list[tuple[str, str]] = []
+            for definition in self._providers.login_providers():
+                state = "logged in" if self._providers.has_any_credential(definition.id) else "—"
+                marker = "*" if definition.store_credentials_as else " "
+                items.append((f"{marker}{definition.id}", f"{definition.name} · {state}"))
+            use = self._provider_usage_state()
+            if use:
+                items.append(("usage", ", ".join(use) + " report quota"))
+            block = RichBlock(_tree_listing(items)) if items else None
+            if block is not None:
+                self._append_block(block)
+            else:
+                notice("no login providers.")
+        except Exception as error:  # never crash the app on a provider read
+            notice(f"provider list failed: {error}", "error")
+
+    def _provider_usage_state(self) -> list[str]:
+        """Provider ids that can report usage, readable by credential state."""
+        if self._providers is None:
+            return []
+        return [
+            p
+            for p in self._providers.usage_enabled_providers()
+            if self._providers.has_any_credential(p)
+        ]
+
+    def _cmd_accounts(self, notice: Callable[[str, str], None]) -> None:
+        """``/accounts`` — list stored credentials (OAuth + pasted keys)."""
+        if self._providers is None:
+            notice("run: local-operator login status (TUI lacks the provider facade)", "warning")
+            return
+        try:
+            rows = self._providers.credentials()
+            if not rows:
+                notice("no stored credentials.")
+                return
+            now_ms = int(self._clock_ms())
+            items: list[tuple[str, str]] = []
+            for row in rows:
+                identity = (
+                    row.identity_key or row.data.get("email") or row.data.get("account_id") or "-"
+                )
+                if row.credential_type == "oauth":
+                    expires = row.data.get("expires")
+                    state = "expired" if expires is not None and int(expires) < now_ms else "active"
+                    detail = f"oauth · {state} · {identity}"
+                else:
+                    source = row.data.get("source") or "stored"
+                    detail = f"api_key ({source}) · {identity}"
+                items.append((f"[{row.id}] {row.provider}", detail))
+            block = RichBlock(_tree_listing(items)) if items else None
+            if block is not None:
+                self._append_block(block)
+        except Exception as error:
+            notice(f"accounts failed: {error}", "error")
+
+    def _clock_ms(self) -> float:
+        import time
+
+        return time.time() * 1000
+
+    def _cmd_usage(self, arg: str, notice: Callable[[str, str], None]) -> None:
+        """``/usage [provider]`` — fetch live quota for a provider (or all)."""
+        if self._providers is None:
+            notice("run: local-operator usage (TUI lacks the provider facade)", "warning")
+            return
+        target = arg.lower() if arg else ""
+        if target and not self._providers.provider(target):
+            notice(f"unknown provider: {target}", "warning")
+            return
+        notice("fetching usage…")
+        self.run_worker(self._fetch_usage_worker(target or None), thread=False, group="usage")
+
+    async def _fetch_usage_worker(self, provider: str | None) -> None:
+        """Worker that fetches usage and posts the result as a block."""
+
+        def notice(body: str, kind: str = "info") -> None:
+            self._append_block(NoticeBlock(body, kind))
+
+        try:
+            assert self._providers is not None
+            reports = await self._providers.fetch_usage([provider] if provider else None)
+        except Exception as error:
+            notice(f"usage fetch failed: {error}", "error")
+            return
+        self._append_block(self._usage_block(reports, provider))
+
+    def _usage_block(self, reports, requested: str | None) -> RichBlock:
+        """Render one or more usage reports as a compact table."""
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        muted = Style(color=theme_mod.semantic_color("muted"))
+        accent = Style(color=theme_mod.semantic_color("accent"))
+        lines: list[Text] = []
+        if not reports:
+            lines.append(
+                Text(
+                    "no usage data — this provider has no quota endpoint or no credential",
+                    style=dim,
+                )
+            )
+        for report in reports:
+            head = Text()
+            head.append(report.provider, style=accent)
+            if report.identity:
+                head.append(f"  ({report.identity})", style=muted)
+            head.append(" —", style=dim)
+            lines.append(head)
+            if report.notes:
+                lines.append(Text(f"  {report.notes}", style=dim))
+            for limit in report.limits:
+                a = limit.amount
+                bar = self._usage_bar(a.fraction())
+                status_tint = {
+                    "ok": theme_mod.semantic_color("success"),
+                    "warning": theme_mod.semantic_color("warning"),
+                    "exhausted": theme_mod.semantic_color("danger"),
+                    "unknown": dim,
+                }.get(limit.effective_status(), dim)
+                left = Text()
+                left.append(bar, style=status_tint)
+                label = f" {limit.label}"
+                if limit.window:
+                    label += f" ({limit.window})"
+                if a.unit != "unknown" and a.used is not None:
+                    unit = a.unit
+                    used = f"{a.used:.2f}" if unit == "usd" else f"{a.used:g}"
+                    label += f" — {used} {unit}"
+                left.append(label, style=dim)
+                lines.append(left)
+        return RichBlock(Group(*lines))
+
+    def _usage_bar(self, fraction: float | None, width: int = 12) -> str:
+        """A minimal filled/empty bar; unknown fraction renders all-dots."""
+        if fraction is None:
+            return "·" * width
+        fraction = max(0.0, min(1.0, fraction))
+        filled = round(fraction * width)
+        return "█" * filled + "░" * (width - filled)
+
+    # -- login / logout -----------------------------------------------------
+    def _cmd_login(self, arg: str, notice: Callable[[str, str], None]) -> None:
+        """``/login [provider]`` — list loginable providers, or run a flow."""
+        if self._providers is None:
+            if self._login_handler is not None:
+                self._login_handler("login")
+                return
+            notice("run: local-operator login", "warning")
+            return
+        if not arg:
+            items = [(p.id, p.name) for p in self._providers.login_providers()]
+            self._append_block(RichBlock(_tree_listing(items)))
+            return
+        provider = arg.lower()
+        if self._providers.provider(provider) is None:
+            notice(f"unknown provider: {provider}", "warning")
+            return
+        definition = self._providers.provider(provider)
+        if getattr(definition, "login", None) is None:
+            notice(f"provider '{provider}' has no interactive login.", "warning")
+            return
+        notice(f"logging in to {provider}…")
+        self.run_worker(self._login_flow(provider), thread=False, group="login")
+
+    async def _login_flow(self, provider: str) -> None:
+        """Yield the terminal to the interactive login flow, then report back.
+
+        The flow prints the authorization URL and reads the pasted code/code
+        against the real terminal; ``App.suspend()`` hands control back for
+        the duration. A lock serializes concurrent /login commands.
+        """
+
+        async def notice(body: str, kind: str = "info") -> None:
+            self._append_block(NoticeBlock(body, kind))
+
+        assert self._providers is not None
+        if self._login_lock is None:
+            self._login_lock = _LoginLock()
+        if self._login_lock.locked():
+            await notice("a login is already in progress.", "warning")
+            return
+        self._login_lock.acquire()
+        try:
+            async with self.suspend():
+                # Inside the suspended terminal, plain print()/input() on the
+                # CLI callbacks are safe; the flow drives the loopback server
+                # and/or paste prompt entirely on the event loop.
+                message = await self._providers.login(provider)
+            await notice(message)
+        except Exception as error:
+            await notice(f"login failed: {error}", "error")
+        finally:
+            self._login_lock.release()
+
+    def _cmd_logout(self, arg: str, notice: Callable[[str, str], None]) -> None:
+        """``/logout [provider]`` — remove stored credentials for a provider."""
+        if self._providers is None:
+            if self._login_handler is not None:
+                self._login_handler("logout")
+            else:
+                notice("run: local-operator logout <provider>", "warning")
+            return
+        if not arg:
+            notice("usage: /logout <provider>", "warning")
+            return
+        provider = arg.lower()
+        self.run_worker(self._logout_worker(provider), thread=False, group="login")
+
+    async def _logout_worker(self, provider: str) -> None:
+        def notice(body: str, kind: str = "info") -> None:
+            self._append_block(NoticeBlock(body, kind))
+
+        try:
+            assert self._providers is not None
+            message = await self._providers.logout(provider)
+            notice(message)
+        except Exception as error:
+            notice(f"logout failed: {error}", "error")
 
     def _help_block(self) -> RichBlock:
         """Two-column help: command muted padded 10, description dim (D16)."""
@@ -550,7 +815,30 @@ def _tree_listing(items: list[tuple[str, str]]) -> Group:
         if detail:
             line.append("  " + detail, style=dim)
         lines.append(line)
-    return Group(*lines)
+        return Group(*lines)
+
+
+class _LoginLock:
+    """A tiny async-free reentrancy guard for interactive login flows.
+
+    ``App.suspend()`` plus the login callbacks must not be entered twice; a
+    boolean plus an acquire/release pair is all the serialization needed
+    (the lock is only ever touched from the app's event loop).
+    """
+
+    __slots__ = ("_held",)
+
+    def __init__(self) -> None:
+        self._held = False
+
+    def acquire(self) -> None:
+        self._held = True
+
+    def release(self) -> None:
+        self._held = False
+
+    def locked(self) -> bool:
+        return self._held
 
 
 def _hex_to_rgb(value: str) -> tuple[int, int, int]:
@@ -593,6 +881,12 @@ async def create_app(
     session_factory: Callable[[], Awaitable[SessionProtocol]],
     theme_name: str = "dark",
     login_handler: Callable[[str], None] | None = None,
+    provider_controller: Any | None = None,
 ) -> OperatorApp:
     """Construct an :class:`OperatorApp` (test/embedding helper)."""
-    return OperatorApp(session_factory, theme_name, login_handler=login_handler)
+    return OperatorApp(
+        session_factory,
+        theme_name,
+        login_handler=login_handler,
+        provider_controller=provider_controller,
+    )

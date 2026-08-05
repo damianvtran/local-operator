@@ -1,6 +1,6 @@
 """RFC 8628 device-authorization polling, shared by Kimi and xAI logins.
 
-Ported from omp ``registry/oauth/device-code.ts``. Semantics: minimum poll
+Device-code flow. Semantics: minimum poll
 interval 1 s; every ``slow_down`` adds 5 s to the interval; ``expired`` and
 ``denied`` are terminal; a dedicated timeout message calls out WSL/VM clock
 drift because that is the most common real cause.

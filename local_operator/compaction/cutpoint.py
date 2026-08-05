@@ -5,9 +5,9 @@ never cut at an assistant message whose tool-call results would follow the
 cut.** Either mistake orphans a tool call/result pair and every provider
 rejects (or silently corrupts) the conversation. The rule is enforced both by
 the candidate predicate and by a final assertion — as an assertion, not a
-comment, per the omp porting notes.
+comment, so the invariant is enforced in code rather than documented.
 
-Algorithm (omp ``findCutPoint``): walk **backwards** from the newest message
+Algorithm (``findCutPoint``): walk **backwards** from the newest message
 accumulating estimated tokens until the kept region reaches
 ``keep_recent_tokens``, then snap **forward** to the first valid cut message
 at or after that index. Valid cut messages are ``user`` messages, assistant

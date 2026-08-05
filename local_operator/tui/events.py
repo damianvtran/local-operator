@@ -5,7 +5,7 @@ whatever loop/task they originate from. The TUI must only mutate widgets on
 the Textual thread, so the controller converts each engine event into a
 Textual :class:`~textual.message.Message` and ``app.post_message``s it. All
 widget mutation then happens in the app's message handlers, on the right
-thread. This keeps the engine → UI boundary exactly as omp has it: the agent
+thread. This keeps the engine → UI boundary clean: the agent
 never imports the TUI.
 
 Threading: ``post_message`` is safe only from the app's own asyncio loop.
@@ -15,7 +15,7 @@ here runs on the right loop. Cross-thread producers must use
 :class:`StartFlushTimer` message instead of calling ``set_interval`` from an
 event callback (TUI-024).
 
-Ordering hazards ported from omp's ``EventController``:
+Ordering hazards handled by the controller:
 
 - A **superseded ``agent_end``** can arrive AFTER the next ``agent_start``
   (dispatch crosses an async hop). Running teardown then would kill the live
@@ -57,7 +57,7 @@ from local_operator.harness.types import (
     TurnStartEvent,
 )
 
-#: Streaming updates flush at ~30 fps (omp's coalesced cadence).
+#: Streaming updates flush at ~30 fps (the coalesced cadence).
 FLUSH_INTERVAL_S = 1.0 / 30.0
 
 
@@ -268,7 +268,7 @@ class EventController:
         self._post(TurnStarted())
 
     def _handle_agent_end(self, event: AgentEvent) -> None:
-        # Superseded hazard (omp event-controller): an agent_end can arrive
+        # Superseded hazard: an agent_end can arrive
         # AFTER the next agent_start when dispatch crosses an async hop.
         # Drop ends stamped with a generation OLDER than the current one;
         # unstamped ends (older producers) belong to the current turn.
@@ -367,7 +367,7 @@ class EventController:
         self._post(ToolUpdated(event))
 
     def _handle_tool_end(self, event: ToolExecutionEndEvent) -> None:
-        # Orphaned-end hazard (omp): an end with no matching start card must
+        # Orphaned-end hazard: an end with no matching start card must
         # be BUFFERED, not crash — it attaches when the start arrives, and is
         # dropped at agent_end if the start never comes.
         if event.tool_call_id in self._started_tools:
