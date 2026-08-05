@@ -257,7 +257,7 @@ def test_compact_caps_frames_at_max():
 
 
 def test_compact_frames_are_valid_pngs():
-    messages = _conversation_messages(60)
+    messages = _conversation_messages(60, payload=2000)
     archive = compact_to_archive(messages, "anthropic", "claude-sonnet-4-5")
     assert archive.frames
     for frame in archive.frames:
