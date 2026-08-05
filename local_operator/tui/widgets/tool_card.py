@@ -191,7 +191,12 @@ class ToolCard(TranscriptBlock):
 
     def _build_row(self, width: int) -> Text:
         dim = Style(color=theme_mod.semantic_color("dim"))
-        name_style = Style(color=theme_mod.semantic_color("string"))
+        # The name stays the green only while the tool is live; a settled
+        # row fades to dim so the running row is the brightest thing on
+        # screen (the single-green discipline applies to the name too).
+        name_style = (
+            Style(color=theme_mod.semantic_color("string")) if self._state == "running" else dim
+        )
         width = max(width - 2, 10)  # 1-cell inner padding each side (kit rule)
 
         # Status segment (right-aligned), capped at width // 3 (D8).

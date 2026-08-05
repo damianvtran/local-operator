@@ -23,31 +23,43 @@ BRAND_TOKENS: dict[str, dict[str, str]] = {
     "dark": {
         "bg": "#14110c",  # island ground
         "surface": "#1e1a14",  # one elevation step: filled cards, input panel
+        "raised": "#272219",  # hover rows / selected fills (depth step two)
+        "overlay": "#302a20",  # dialogs, active selection
         "sunken": "#0f0c08",  # one step down: the status band ground
         "fg": "#e9e5db",  # island text
         "muted": "#b5afa2",  # secondary text
         "dim": "#837c6d",  # micro-labels, tool rows, separators
+        "faint": "#4a4539",  # meta separators, inert hints
         "edge": "#3b3527",  # hairline borders
-        "accent": "#38c96a",  # the one green: active indicator, links, focus
+        "edge-hi": "#4a4231",  # active rail / focused edge
+        "accent": "#38c96a",  # the one green: live indicator, focus
         "string": "#57c785",  # string/success green
         "success": "#57c785",
         "amber": "#e0b04b",  # warnings
         "danger": "#ef8078",  # errors
+        "signal": "#6ea8d8",  # cool counterweight: links, file paths (NOT green)
+        "label": "#b48cd6",  # violet meta: tips, skill labels
     },
     # Warm paper ramp (D22: real kit semantics; danger is NEVER the green).
     "light": {
         "paper": "#f7f4ee",
         "surface": "#efeae0",
+        "raised": "#e4ded0",
+        "overlay": "#d8d1c0",
         "sunken": "#e5e0d5",
         "ink": "#211e18",
         "muted": "#565147",
         "dim": "#837c6d",
+        "faint": "#b3ab98",
         "hairline": "#e5e0d5",
+        "edge-hi": "#c9c0a8",
         "accent": "#177b45",
         "string": "#1e7b4e",
         "success": "#1e7b4e",
         "warning": "#8a5800",
         "danger": "#b23a31",
+        "signal": "#2b6ea8",
+        "label": "#7c5a9e",
     },
 }
 
@@ -58,30 +70,42 @@ _SEMANTIC_ALIASES: dict[str, dict[str, str]] = {
     "dark": {
         "bg": "bg",
         "surface": "surface",
+        "raised": "raised",
+        "overlay": "overlay",
         "sunken": "sunken",
         "fg": "fg",
         "muted": "muted",
         "dim": "dim",
+        "faint": "faint",
         "edge": "edge",
+        "edge-hi": "edge-hi",
         "accent": "accent",
         "success": "success",
         "warning": "amber",
         "danger": "danger",
         "string": "string",
+        "signal": "signal",
+        "label": "label",
     },
     "light": {
         "bg": "paper",
         "surface": "surface",
+        "raised": "raised",
+        "overlay": "overlay",
         "sunken": "sunken",
         "fg": "ink",
         "muted": "muted",
         "dim": "dim",
+        "faint": "faint",
         "edge": "hairline",
+        "edge-hi": "edge-hi",
         "accent": "accent",
         "success": "success",
         "warning": "warning",
         "danger": "danger",
         "string": "string",
+        "signal": "signal",
+        "label": "label",
     },
 }
 

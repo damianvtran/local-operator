@@ -112,8 +112,8 @@ def brand_markdown_theme() -> Theme:
             "markdown.h4": Style(color=_C("muted"), bold=True),
             "markdown.h5": Style(color=_C("muted")),
             "markdown.h6": Style(color=_C("muted")),
-            "markdown.link": Style(color=_C("accent")),
-            "markdown.link_url": Style(color=_C("accent"), underline=True),
+            "markdown.link": Style(color=_C("signal")),
+            "markdown.link_url": Style(color=_C("signal"), underline=True),
         },
         inherit=True,
     )
