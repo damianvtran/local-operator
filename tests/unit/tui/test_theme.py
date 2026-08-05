@@ -12,16 +12,22 @@ def test_dark_tokens_exact_hexes() -> None:
     assert theme.BRAND_TOKENS["dark"] == {
         "bg": "#14110c",
         "surface": "#1e1a14",
+        "raised": "#272219",
+        "overlay": "#302a20",
         "sunken": "#0f0c08",
         "fg": "#e9e5db",
         "muted": "#b5afa2",
         "dim": "#837c6d",
+        "faint": "#4a4539",
         "edge": "#3b3527",
+        "edge-hi": "#4a4231",
         "accent": "#38c96a",
         "string": "#57c785",
         "success": "#57c785",
         "amber": "#e0b04b",
         "danger": "#ef8078",
+        "signal": "#6ea8d8",
+        "label": "#b48cd6",
     }
 
 
@@ -31,16 +37,22 @@ def test_light_tokens_exact_hexes() -> None:
     assert theme.BRAND_TOKENS["light"] == {
         "paper": "#f7f4ee",
         "surface": "#efeae0",
+        "raised": "#e4ded0",
+        "overlay": "#d8d1c0",
         "sunken": "#e5e0d5",
         "ink": "#211e18",
         "muted": "#565147",
         "dim": "#837c6d",
+        "faint": "#b3ab98",
         "hairline": "#e5e0d5",
+        "edge-hi": "#c9c0a8",
         "accent": "#177b45",
         "string": "#1e7b4e",
         "success": "#1e7b4e",
         "warning": "#8a5800",
         "danger": "#b23a31",
+        "signal": "#2b6ea8",
+        "label": "#7c5a9e",
     }
 
 
