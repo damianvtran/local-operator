@@ -404,7 +404,8 @@ def test_main_exec_dispatch(
     tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """exec routes to exec_mode.run_exec with the parsed ExecArgs, and its
-    exit code passes through (README contract)."""
+    exit code passes through (README contract). ``--hosting test`` keeps the
+    CL-06 startup preflight green (the test provider needs no key)."""
     captured: dict = {}
 
     def fake_run_exec(command: str, exec_args) -> int:
@@ -413,9 +414,26 @@ def test_main_exec_dispatch(
         return 7
 
     monkeypatch.setattr("local_operator.exec_mode.run_exec", fake_run_exec)
+    # The CL-06 foreground preflight shares the worker's resolution path;
+    # stub it green so this test stays focused on the dispatch wiring.
+    monkeypatch.setattr(
+        "local_operator.exec_mode.resolve_hosting_model_dry", lambda args: ("test", "m")
+    )
     monkeypatch.setattr(
         "sys.argv",
-        ["program", "--yolo", "exec", "do the thing", "--json", "--agent-id", "a1"],
+        [
+            "program",
+            "--yolo",
+            "--hosting",
+            "test",
+            "--model",
+            "m",
+            "exec",
+            "do the thing",
+            "--json",
+            "--agent-id",
+            "a1",
+        ],
     )
     assert main() == 7
     assert captured["command"] == "do the thing"
@@ -425,6 +443,7 @@ def test_main_exec_dispatch(
     assert exec_args.yolo is True
     assert exec_args.background is False
     assert exec_args.agent_name is None
+    assert exec_args.train is False
 
 
 def test_main_exception_banner(tmp_home: Path, quiet_env: None, capsys) -> None:
@@ -440,8 +459,9 @@ def test_main_exception_banner(tmp_home: Path, quiet_env: None, capsys) -> None:
 def test_main_interactive_tty_uses_tui(
     tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """tty stdout + importable TUI -> asyncio.run(run_tui(session_factory));
-    the factory hands the TUI the wired session (TUI-003 contract)."""
+    """tty stdout + importable TUI -> run_tui(session_factory); the factory
+    hands the TUI the wired session (TUI-003 contract), and ``values.tui.theme``
+    reaches run_tui (CL-13)."""
     sentinel_session = object()
     seen: dict = {}
 
@@ -461,15 +481,23 @@ def test_main_interactive_tty_uses_tui(
     fake_tui.run_tui = fake_run_tui
     monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
-    monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
+
+    def _theme_config_manager(*args, **kwargs):
+        manager = MagicMock()
+        manager.get_config_value = (
+            lambda key, default=None: {"theme": "light"} if key == "tui" else False
+        )
+        return manager
+
+    monkeypatch.setattr("local_operator.cli.ConfigManager", _theme_config_manager)
     monkeypatch.setattr("local_operator.cli.CredentialManager", MagicMock())
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
 
-    with patch("sys.argv", ["program", "--hosting", "openai", "--model", "gpt-4o"]):
+    with patch("sys.argv", ["program", "--hosting", "test", "--model", "m"]):
         assert main() == 0
     assert seen["factory_called"] is True
     assert seen["session"] is sentinel_session
-    assert seen["theme"] == "dark"
+    assert seen["theme"] == "light"
 
 
 def test_main_no_tui_flag_uses_headless_repl(
@@ -492,10 +520,266 @@ def test_main_no_tui_flag_uses_headless_repl(
     monkeypatch.setattr("local_operator.cli.CredentialManager", MagicMock())
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
 
-    with patch("sys.argv", ["program", "--no-tui", "--hosting", "openai", "--model", "m"]):
+    with patch(
+        "sys.argv", ["program", "--no-tui", "--hosting", "test", "--model", "m"]
+    ):
         assert main() == 0
     assert fake_session.dispose.await_count == 1
 
 
 def _raise_eof(prompt: str = "") -> str:
     raise EOFError
+
+
+def _bare_credential_manager(*args, **kwargs) -> MagicMock:
+    """CredentialManager stand-in with no resolvable secrets: get_credential
+    returns None and the credentials.env view is empty — preflight must see
+    exactly the same view a keyless install has."""
+    manager = MagicMock()
+    manager.get_credential.return_value = None
+    manager.get_credentials.return_value = {}
+    return manager
+
+
+# --- CL-04: --yolo reachable from subcommands ----------------------------------
+
+
+def test_yolo_parses_on_exec(parser: argparse.ArgumentParser) -> None:
+    """`exec "task" --yolo` parses (not exit 2) and reaches args.yolo."""
+    args = parser.parse_args(["exec", "task", "--yolo"])
+    assert args.subcommand == "exec"
+    assert args.yolo is True
+    # root-position still works (additive, both orderings documented)
+    assert parser.parse_args(["--yolo", "exec", "task"]).yolo is True
+    assert parser.parse_args(["exec", "task"]).yolo is False
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["serve", "--yolo"],
+        ["config", "list", "--yolo"],
+        ["agents", "list", "--yolo"],
+        ["mcp", "add", "srv", "--yolo"],
+        ["credential", "update", "K", "--yolo"],
+    ],
+)
+def test_yolo_parses_on_every_subcommand(parser: argparse.ArgumentParser, argv: list[str]) -> None:
+    assert parser.parse_args(argv).yolo is True
+
+
+# --- CL-06: startup preflight ---------------------------------------------------
+
+
+def test_main_preflight_missing_hosting(
+    tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """Interactive startup with no hosting configured prints the legacy
+    message shape and exits -1 BEFORE any turn (no session factory call)."""
+    called: dict = {"factory": False}
+
+    async def fake_create_session(*args, **kwargs):
+        called["factory"] = True
+        return MagicMock()
+
+    monkeypatch.setattr("local_operator.cli.create_session", fake_create_session)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
+    monkeypatch.setattr("local_operator.cli.CredentialManager", MagicMock())
+    monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
+
+    with patch("sys.argv", ["program"]):
+        assert main() == -1
+    out = capsys.readouterr().out
+    assert "Hosting platform is not configured." in out
+    assert called["factory"] is False
+
+
+def test_main_preflight_missing_api_key(
+    tmp_home: Path,
+    quiet_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    """A keyed provider with NO resolvable key fails preflight (-1) before the
+    turn; keyless providers (test) pass through."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    called: dict = {"factory": False}
+
+    async def fake_create_session(*args, **kwargs):
+        called["factory"] = True
+        return MagicMock()
+
+    monkeypatch.setattr("local_operator.cli.create_session", fake_create_session)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
+    monkeypatch.setattr("local_operator.cli.CredentialManager", _bare_credential_manager)
+    monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
+
+    with patch("sys.argv", ["program", "--hosting", "openai", "--model", "gpt-4o"]):
+        assert main() == -1
+    out = capsys.readouterr().out
+    assert "OPENAI_API_KEY" in out and "Error" in out
+    assert called["factory"] is False
+
+
+def test_main_preflight_env_key_passes(
+    tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the env key present the preflight lets the session through."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    seen: dict = {}
+
+    async def fake_create_session(*args, **kwargs):
+        seen["built"] = True
+        return MagicMock()
+
+    fake_tui = types.ModuleType("local_operator.tui")
+
+    async def fake_run_tui(session_factory, theme_name="dark") -> int:
+        await session_factory()
+        return 0
+
+    fake_tui.run_tui = fake_run_tui
+    monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
+    monkeypatch.setattr("local_operator.cli.create_session", fake_create_session)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
+    monkeypatch.setattr("local_operator.cli.CredentialManager", MagicMock())
+    monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
+
+    with patch("sys.argv", ["program", "--hosting", "openai", "--model", "gpt-4o"]):
+        assert main() == 0
+    assert seen.get("built") is True
+
+
+# --- CL-13: --tui forces the TUI ------------------------------------------------
+
+
+def test_tui_flag_forces_tui_on_non_tty(
+    tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict = {}
+
+    async def fake_create_session(*args, **kwargs):
+        return MagicMock()
+
+    fake_tui = types.ModuleType("local_operator.tui")
+
+    async def fake_run_tui(session_factory, theme_name="dark") -> int:
+        seen["ran"] = True
+        return 0
+
+    fake_tui.run_tui = fake_run_tui
+    monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
+    monkeypatch.setattr("local_operator.cli.create_session", fake_create_session)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)  # NOT a tty
+    monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
+    monkeypatch.setattr("local_operator.cli.CredentialManager", MagicMock())
+    monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
+
+    with patch("sys.argv", ["program", "--tui", "--hosting", "test", "--model", "m"]):
+        assert main() == 0
+    assert seen.get("ran") is True
+
+
+def test_tui_flag_default_off(parser: argparse.ArgumentParser) -> None:
+    assert parser.parse_args([]).tui is False
+    assert parser.parse_args(["--tui"]).tui is True
+
+
+# --- CL-16: deprecated config keys -----------------------------------------------
+
+
+def test_config_list_marks_deprecated_keys(tmp_home: Path, capsys) -> None:
+    from local_operator.cli import config_list_command
+
+    assert config_list_command() == 0
+    out = capsys.readouterr().out
+    for key in ("conversation_length", "detail_length", "max_learnings_history"):
+        block = out[out.index(f"│ {key}:") :]
+        assert "[DEPRECATED" in block.split("╰")[0]
+
+
+# --- CL-17: golden legacy parser inventory ----------------------------------------
+
+
+def _walk_actions(parser: argparse.ArgumentParser) -> dict[str, dict]:
+    out = {}
+    for action in parser._actions:
+        if action.option_strings and action.option_strings[0] == "-h":
+            continue
+        key = ",".join(action.option_strings) if action.option_strings else "POS:" + str(action.dest)
+        out[key] = {
+            "dest": action.dest,
+            "default": action.default if action.default is not argparse.SUPPRESS else "<SUPPRESS>",
+            "choices": sorted(action.choices) if action.choices else None,
+            "required": bool(action.required),
+            "nargs": action.nargs,
+        }
+    return out
+
+
+def _inventory(parser: argparse.ArgumentParser) -> dict[str, dict]:
+    seen: set[int] = set()
+    inventory = {"$": _walk_actions(parser)}
+    seen.add(id(parser))
+
+    def record(p: argparse.ArgumentParser, path: str) -> None:
+        subparsers_group = getattr(p, "_subparsers", None)
+        if subparsers_group is None:
+            return
+        for action in subparsers_group._actions:
+            if not isinstance(action, argparse._SubParsersAction):
+                continue
+            for name, sub in action.choices.items():
+                if not isinstance(name, str) or id(sub) in seen:
+                    continue
+                seen.add(id(sub))
+                full = (path + " " + name).strip()
+                inventory[full] = _walk_actions(sub)
+                record(sub, full)
+
+    record(parser, "")
+    return inventory
+
+def test_golden_legacy_parser_surface() -> None:
+    """Every legacy option (option strings, dest, default, choices, required)
+    present in the ``main``-branch parser survives in the rewritten parser;
+    additive options are allowed, removals or shape changes fail."""
+    import json
+
+    golden_path = Path(__file__).parent / "golden_legacy_parser.json"
+    golden = json.loads(golden_path.read_text(encoding="utf-8"))
+    current = _inventory(build_cli_parser())
+
+    problems: list[str] = []
+    for command, options in golden.items():
+        if command not in current:
+            problems.append(f"missing subcommand path: {command}")
+            continue
+        current_options = current[command]
+        for key, spec in options.items():
+            if key not in current_options:
+                problems.append(f"{command}: removed option {key}")
+                continue
+            now = current_options[key]
+            if spec["choices"] is not None:
+                # Additive surface: NEW choices (new subcommands, new hosting
+                # values) are allowed; removing a legacy choice fails.
+                removed = set(spec["choices"]) - set(now["choices"] or [])
+                if now["dest"] != spec["dest"] or now["required"] != spec["required"]:
+                    problems.append(
+                        f"{command}: {key} dest/required changed: "
+                        f"{(spec['dest'], spec['required'])} -> {(now['dest'], now['required'])}"
+                    )
+                if removed:
+                    problems.append(f"{command}: {key} lost choices: {sorted(removed)}")
+                continue
+            for field in ("dest", "default", "required", "nargs"):
+                if now[field] != spec[field]:
+                    problems.append(
+                        f"{command}: {key} {field} changed: "
+                        f"{spec[field]!r} -> {now[field]!r}"
+                    )
+    assert not problems, "\n".join(problems)

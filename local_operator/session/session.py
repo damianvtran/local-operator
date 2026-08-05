@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import inspect
 import logging
 import time
@@ -53,6 +54,8 @@ from local_operator.harness.types import (
     LoopConfig,
     Message,
     ModelSpec,
+    NoticeEvent,
+    StaleAside,
     StreamEvent,
     StreamTextDelta,
     TextContent,
@@ -77,6 +80,29 @@ _CONTINUATION_PROMPT = (
     "The conversation context was just compacted into a summary. "
     "Continue the task from where it left off."
 )
+
+#: Cap on auto-continuation turns within one user turn (mirrors omp's
+#: MAX_PAUSED_TURN_CONTINUATIONS): a compaction pass that keeps clearing the
+#: recovery band must not re-prompt forever.
+_MAX_CONTINUATIONS = 8
+
+
+def _coerce_compaction_settings(settings: Any) -> Any:
+    """Defensive coercion (CL-01 belt): a dict-shaped ``compaction_settings``
+    is validated into ``CompactionSettings``; already-typed or ``None`` pass
+    through. The factory coerces too — this keeps direct constructors (the
+    server facade, benchmarks, tests feeding a raw config dict) safe."""
+    if settings is None or not isinstance(settings, dict):
+        return settings
+    try:
+        from local_operator.compaction.api import CompactionSettings
+    except ImportError:
+        return None
+    try:
+        return CompactionSettings.model_validate(settings)
+    except Exception as exc:  # noqa: BLE001 — degrade, never break the session
+        logger.warning("Invalid compaction settings dict, using defaults: %s", exc)
+        return CompactionSettings()
 
 
 def _archive_to_json(archive: Any) -> dict[str, Any]:
@@ -109,16 +135,25 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
         if isinstance(message, Message):
             out.append(message)
         elif message.custom_type == "compaction_summary":
-            out.append(_render_compaction_marker(message))
+            # Pass the ORIGINAL entry id through the render: the transcript
+            # persists custom entries with their CustomMessage.id, so a
+            # compaction cut landing on a rendered marker can still locate
+            # ``first_kept_entry_id`` on replay.
+            out.append(_render_compaction_marker(message, entry_id=message.id))
         elif message.custom_type == WAKE_PROMPT_MESSAGE_TYPE:
             out.append(
-                Message(role="user", content=[TextContent(text=message.details.get("text", ""))])
+                Message(
+                    role="user",
+                    content=[TextContent(text=message.details.get("text", ""))],
+                    id=message.id,
+                )
             )
     return out
 
 
-def _render_compaction_marker(marker: CustomMessage) -> Message:
-    """Render one compaction marker into an LLM-visible message.
+def _render_compaction_marker(marker: CustomMessage, entry_id: str | None = None) -> Message:
+    """Render one compaction marker into an LLM-visible message. ``entry_id``
+    (the marker's transcript entry id) rides onto the rendered message.
 
     Snapcompact archives replay via ``history_blocks`` (lazy import; any
     failure degrades to the plain-text summary so a malformed archive never
@@ -140,7 +175,11 @@ def _render_compaction_marker(marker: CustomMessage) -> Message:
                     for frame_b64 in block["frames"]:
                         content.append(ImageContent(data=frame_b64, mime_type="image/png"))
             if content:
-                return Message(role="user", content=content)
+                return Message(
+                    role="user",
+                    content=content,
+                    **({"id": entry_id} if entry_id else {}),
+                )
         except Exception:
             logger.warning("snapcompact replay failed; falling back to text summary", exc_info=True)
     return Message(
@@ -150,6 +189,7 @@ def _render_compaction_marker(marker: CustomMessage) -> Message:
                 text="<previous-context-summary>\n" f"{summary}\n" "</previous-context-summary>"
             )
         ],
+        **({"id": entry_id} if entry_id else {}),
     )
 
 
@@ -182,7 +222,7 @@ class Session:
         self._agent_id = agent_id
         self._system_blocks_provider = system_blocks_provider
         self._convert_to_llm = convert_to_llm or _default_convert_to_llm
-        self._compaction_settings = compaction_settings
+        self._compaction_settings = _coerce_compaction_settings(compaction_settings)
         self._yolo = yolo
         self._has_ui = has_ui
         self._cwd = cwd or "."
@@ -197,15 +237,27 @@ class Session:
         )
         self._handlers: list[EventHandler] = []
         self._steering_queue: asyncio.Queue[AgentMessage] = asyncio.Queue()
-        self._aside_thunks: list[Callable[[], AgentMessage | None]] = []
+        self._aside_thunks: list[Callable[[], Any]] = []
         self._continuation_queue: list[AgentMessage] = []
         self._last_usage: Usage | None = None  # latest provider-reported usage
         self._last_activity_ms: int = 0  # epoch ms; drives idle-flush pruning
         self._generation = 0  # monotonic turn counter for agent_start/end
+        self._fallback_tool_resolver: Callable[[str], AgentTool | None] | None = None
+
+        self._disposed = False
+        # Session-scoped task group (HC-11): wake deliveries and aside
+        # persistence are routed through it so dispose() cancels them
+        # deterministically and a delivery after dispose never raises into an
+        # unobserved task. A TaskGroup must be ENTERED inside a running loop,
+        # so construction only allocates the slot — :meth:`async_init` opens
+        # it (code that skips async_init degrades to ensure_future).
+        self._tg_stack: contextlib.AsyncExitStack | None = None
+        self._task_group: asyncio.TaskGroup | None = None
+        self._background_tasks: set[asyncio.Task[Any]] = set()
         self._signal: AbortSignal | None = None
         self._is_streaming = False
         self._turn_lock = asyncio.Lock()  # serializes prompt() and wake deliveries
-        self._disposed = False
+        self._turn_task: asyncio.Task[None] | None = None  # in-flight turn (wake deliveries)
 
         self.jobs = AsyncJobManager()
         self._wake = WakeScheduler(
@@ -215,8 +267,28 @@ class Session:
         )
         self._load_wake_schedules()
 
-    # -- identity / state (SessionProtocol) ----------------------------------
+    async def async_init(self) -> None:
+        """Async second half of construction.
 
+        Opens the session-scoped task group and re-arms the wake scheduler:
+        a scheduler armed during sync ``__init__`` (no running loop yet)
+        could not create its timer — one ``pump()`` here fires overdue wakes
+        and arms properly (see ``WakeScheduler.needs_rearm``). Safe to call
+        more than once; sessions that skip it degrade to ``ensure_future``
+        for background work.
+        """
+        if self._tg_stack is None and not self._disposed:
+            stack = contextlib.AsyncExitStack()
+            await stack.__aenter__()
+            try:
+                self._task_group = await stack.enter_async_context(asyncio.TaskGroup())
+            except BaseException:
+                await stack.aclose()
+                raise
+            self._tg_stack = stack
+        await self._wake.pump()
+
+    # -- identity / state (SessionProtocol) ----------------------------------
     @property
     def session_id(self) -> str:
         return self._session_id
@@ -239,16 +311,31 @@ class Session:
         return self._wake
 
     # -- driving turns --------------------------------------------------------
-
     async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
         """Run one user turn to completion (awaitable) or raise.
 
         ``attachments`` is reserved for the wire clients (image blocks); this
         engine turn carries text only.
+
+        Reentrancy: ``_turn_lock`` is consulted FIRST — if a live turn (user
+        prompt or wake delivery) holds it, a concurrent ``prompt`` is
+        rejected outright instead of queueing behind it. ``_is_streaming`` is
+        then re-checked under the lock to close the race where streaming was
+        set between the lock probe and the acquire.
         """
-        if self._is_streaming:
+        if self._disposed:
+            raise RuntimeError("session is disposed")
+        if self._turn_lock.locked():
             raise RuntimeError("session is already streaming; use steer() to inject mid-turn")
-        await self._prompt_messages([Message.user(text)])
+        await self._turn_lock.acquire()
+        try:
+            if self._is_streaming:
+                raise RuntimeError(
+                    "session is already streaming; use steer() to inject mid-turn"
+                )
+            await self._run_turn_pipeline([Message.user(text)])
+        finally:
+            self._turn_lock.release()
 
     def steer(self, text: str) -> None:
         """Inject a steering message into the running turn (interrupts tool
@@ -259,6 +346,30 @@ class Session:
         """Abort the running turn; the engine emits an aborted agent_end."""
         if self._signal is not None:
             self._signal.abort(reason)
+
+    # -- live tool refresh (MCP late-connect / reconnect) ---------------------
+
+    def refresh_tools(self, tools: Sequence[AgentTool]) -> None:
+        """Replace the full tool inventory mid-session.
+
+        THE committed hook for MCP ``set_on_tools_changed`` (orchestrator
+        MCP-20): the caller passes the merged set (builtins + all currently
+        loaded MCP tools) and this swaps it in. The loop reads
+        ``context.tools`` fresh on every model call and every tool resolution,
+        so the new set is effective from the NEXT model call onward — and even
+        mid-turn at the next tool batch — with no restart.
+        """
+        self._tools = list(tools)
+        self._context.tools = self._tools
+
+    def set_fallback_tool_resolver(
+        self, resolver: Callable[[str], AgentTool | None] | None
+    ) -> None:
+        """Install a resolver for tool names NOT in the inventory (deferred /
+        lazy MCP tools). Wired to ``LoopConfig.resolve_fallback_tool`` so the
+        loop can dispatch calls to tools not yet materialized. ``None`` clears
+        it."""
+        self._fallback_tool_resolver = resolver
 
     # -- events ---------------------------------------------------------------
 
@@ -288,15 +399,28 @@ class Session:
     # -- turn machinery --------------------------------------------------------
 
     async def _prompt_messages(self, initial: list[AgentMessage]) -> None:
-        """Shared turn runner for user prompts and wake deliveries."""
+        """Shared turn runner for wake deliveries (prompt() owns its own lock
+        handling so it can REJECT reentrants instead of queueing)."""
         if self._disposed:
             raise RuntimeError("session is disposed")
         async with self._turn_lock:
+            await self._run_turn_pipeline(initial)
+
+    async def _run_turn_pipeline(self, initial: list[AgentMessage]) -> None:
+        """One turn + its auto-continuations. Caller holds ``_turn_lock``."""
+        self._turn_task = asyncio.current_task()
+        try:
             await self._run_turn(initial)
             await self._drain_continuation()
+        finally:
+            self._turn_task = None
 
     async def _run_turn(self, initial: list[AgentMessage]) -> None:
         """One loop run + persistence. Caller holds ``_turn_lock``."""
+        if self._wake.needs_rearm:
+            # HC-20: the scheduler could not arm without a running loop at
+            # construction; the first turn (with a loop) re-arms via pump().
+            await self._wake.pump()
         self._is_streaming = True
         self._generation += 1  # monotonic; stamped on start AND end events
         self._last_activity_ms = int(time.time() * 1000)
@@ -319,7 +443,7 @@ class Session:
                 get_steering_messages=self._drain_steering,
                 has_steering_messages=lambda: not self._steering_queue.empty(),
                 get_aside_messages=self._drain_asides,
-                resolve_fallback_tool=None,
+                resolve_fallback_tool=self._fallback_tool_resolver,
                 interrupt_mode="immediate",
             )
 
@@ -352,12 +476,65 @@ class Session:
 
     async def _drain_continuation(self) -> None:
         """Run queued auto-continuation prompts (post-compaction resume) as
-        sequential turns inside the same lock hold."""
+        sequential turns inside the same lock hold, capped at
+        ``_MAX_CONTINUATIONS`` — the remainder is dropped with a warning
+        notice so a thrashing recovery band cannot re-prompt forever."""
+        continuations = 0
         while self._continuation_queue and not self._disposed:
+            if continuations >= _MAX_CONTINUATIONS:
+                dropped = len(self._continuation_queue)
+                self._continuation_queue.clear()
+                logger.warning(
+                    "auto-continuation cap (%d) reached; dropping %d queued continuation(s)",
+                    _MAX_CONTINUATIONS,
+                    dropped,
+                )
+                await self._emit(
+                    NoticeEvent(
+                        text=(
+                            f"Auto-continuation limit ({_MAX_CONTINUATIONS}) reached; "
+                            "stopping."
+                        ),
+                        kind="warning",
+                    )
+                )
+                return
             message = self._continuation_queue.pop(0)
             await self._run_turn([message])
+            continuations += 1
+
+    def _spawn_background(self, coro: Any) -> None:
+        """Route a fire-and-forget coroutine through the session task group
+        when one is open (wake deliveries, aside persistence); otherwise fall
+        back to ``ensure_future``. Every spawned task is tracked so
+        :meth:`dispose` can cancel and await it. After dispose nothing is
+        spawned, so a late wake delivery cannot raise into an unobserved task.
+
+        The coroutine is wrapped so its failure is logged, never raised: an
+        exception escaping into a TaskGroup would cancel every sibling task.
+        """
+        if self._disposed:
+            return
+
+        async def _guarded() -> None:
+            try:
+                await coro
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("background session task failed", exc_info=True)
+
+        if self._task_group is not None:
+            task = self._task_group.create_task(_guarded())
+        else:
+            task = asyncio.ensure_future(_guarded())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     def _build_tool_context(self) -> ToolContext:
+        # ``wake_scheduler`` rides as an extra field (ToolContext allows
+        # extras); the wake tool's createIf check and executor read it off the
+        # context — a session without a scheduler must not advertise the tool.
         return ToolContext(
             cwd=self._cwd,
             session_id=self._session_id,
@@ -365,6 +542,7 @@ class Session:
             has_ui=self._has_ui,
             resolve_internal_url=self._skill_resolver,
             request_approval=None if self._yolo else self._request_approval,
+            wake_scheduler=self._wake,
         )
 
     async def _drain_steering(self) -> list[AgentMessage]:
@@ -379,19 +557,23 @@ class Session:
         return messages
 
     async def _drain_asides(self) -> list[Any]:
+        """Drain queued aside thunks (the loop materializes them at the
+        injection boundary and fires commit/discard hooks)."""
         thunks = self._aside_thunks
         self._aside_thunks = []
         return list(thunks)
 
-    def queue_aside(self, thunk: Callable[[], AgentMessage | None]) -> None:
+    def queue_aside(self, thunk: Callable[[], Any]) -> None:
         """Queue a lazy aside message for the next injection boundary. The thunk
-        is wrapped so a materialized (non-None) message is persisted exactly
-        once, at the moment it actually reaches the model."""
+        is wrapped so a materialized (non-None, non-stale) message is
+        persisted exactly once, at the moment it actually reaches the model.
+        A :class:`StaleAside` result passes through unpersisted; the loop
+        fires its ``on_discard``."""
 
-        def _wrapped() -> AgentMessage | None:
+        def _wrapped() -> Any:
             message = thunk()
-            if message is not None:
-                asyncio.ensure_future(self._transcript.append_message(message))
+            if message is not None and not isinstance(message, StaleAside):
+                self._spawn_background(self._transcript.append_message(message))
             return message
 
         self._aside_thunks.append(_wrapped)
@@ -439,8 +621,8 @@ class Session:
         now_ms = int(time.time() * 1000)
         try:
             compaction_api.prune_tool_outputs(llm_history, now_ms, self._last_activity_ms)
-        except TypeError:
-            pass  # signature in flux; degrade to no pruning
+        except (ImportError, AttributeError):
+            pass  # optional pruning hook absent; degrade to no pruning
 
         # (2) Trigger math: prefer the provider's ground-truth context size.
         local_estimate = compaction_api.estimate_messages_tokens(llm_history)
@@ -606,15 +788,44 @@ class Session:
             # Busy: ride the next steering boundary instead of racing the turn.
             self._steering_queue.put_nowait(wake_message)
             return
-        asyncio.ensure_future(self._prompt_messages([wake_message]))
+        self._spawn_background(self._prompt_messages([wake_message]))
 
     # -- lifecycle ----------------------------------------------------------------
 
     async def dispose(self) -> None:
-        """Cancel jobs, dispose the wake scheduler, flush the transcript."""
+        """Abort any in-flight turn, cancel background work, dispose jobs and
+        the wake scheduler, then flush the transcript.
+
+        Order matters: the running turn is aborted and AWAITED (bounded)
+        before anything is torn down, so its persistence and event emission
+        complete against live objects; background wake deliveries and aside
+        writes are cancelled next; the task group is closed last.
+        """
         if self._disposed:
             return
         self._disposed = True
+        # HC-14: abort the in-flight turn and await its completion (bounded)
+        # before flushing — its persistence must land on a live transcript.
+        turn = self._turn_task
+        if turn is not None and not turn.done() and self._signal is not None:
+            self.abort("session disposed")
+            try:
+                await asyncio.wait_for(asyncio.shield(turn), timeout=5.0)
+            except BaseException:  # noqa: BLE001 — dispose must always proceed
+                pass
+        # HC-11: cancel tracked background tasks (wake deliveries, aside
+        # persistence), then close the session task group.
+        for task in list(self._background_tasks):
+            if not task.done():
+                task.cancel()
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+        self._background_tasks.clear()
+        if self._tg_stack is not None:
+            with contextlib.suppress(Exception):
+                await self._tg_stack.aclose()
+            self._tg_stack = None
+        self._task_group = None
         await self.jobs.dispose()
         self._wake.dispose()
         self._transcript.flush()

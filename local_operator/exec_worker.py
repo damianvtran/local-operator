@@ -40,19 +40,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit one JSON line per agent event",
     )
     parser.add_argument("--yolo", action="store_true", help="Auto-approve all tool tiers")
+    parser.add_argument(
+        "--train",
+        action="store_true",
+        help="Training mode: append the transcript to the agent directory (legacy --train)",
+    )
     parser.add_argument("--agent", type=str, default=None, help="Agent name selector")
     parser.add_argument("--agent-id", type=str, default=None, dest="agent_id", help="Agent id")
+    parser.add_argument(
+        "--job-id",
+        type=str,
+        default=None,
+        dest="job_id",
+        help="Ledger job id; when set, the worker appends a terminal record"
+        " (finished_at + exit_code) to the JSONL ledger on exit",
+    )
     parser.add_argument("--hosting", type=str, default=None, help="Hosting platform override")
     parser.add_argument("--model", type=str, default=None, help="Model override")
     return parser
 
 
-def _install_sigterm_handler(loop: asyncio.AbstractEventLoop, session_box: list) -> None:
-    """SIGTERM -> abort the running turn; the run loop then disposes cleanly.
+def _install_sigterm_handler(
+    loop: asyncio.AbstractEventLoop, session_box: list, interrupted: asyncio.Event
+) -> None:
+    """SIGTERM -> signal ``interrupted``; async_main returns 130 (CL-03).
 
     ``session_box`` holds the live session once constructed (a list because
-    the handler is installed before the session exists). Best-effort: a
-    platform without loop signal support falls back to default handling.
+    the handler is installed before the session exists). The handler aborts
+    the running turn (best effort) and sets the event; ``async_main`` races
+    the turn against the event and owns the exit code — the handler never
+    stops the loop itself, so disposal and flushing stay in normal flow.
+    Best-effort: a platform without loop signal support falls back to
+    default handling.
     """
 
     def handler() -> None:
@@ -62,9 +81,7 @@ def _install_sigterm_handler(loop: asyncio.AbstractEventLoop, session_box: list)
                 session.abort("terminated")
             except Exception:  # noqa: BLE001 — must never raise in a handler
                 pass
-        # Give the turn a bounded window to settle and flush; then hard-exit
-        # the loop. The finally block in ``run`` disposes the session.
-        loop.call_later(5.0, loop.stop)
+        interrupted.set()
 
     try:
         loop.add_signal_handler(signal.SIGTERM, handler)
@@ -72,7 +89,6 @@ def _install_sigterm_handler(loop: asyncio.AbstractEventLoop, session_box: list)
         # Non-POSIX or pre-loop environments: fall back to a plain handler
         # that cannot schedule into the loop.
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(EXIT_INTERRUPTED))
-
 
 def _default_session_factory(parsed: argparse.Namespace):
     """Build the real session via the shared composition root.
@@ -90,7 +106,7 @@ def _default_session_factory(parsed: argparse.Namespace):
         agent_name=parsed.agent,
         agent_id=parsed.agent_id,
         yolo=parsed.yolo,
-        train=False,
+        train=bool(getattr(parsed, "train", False)),
     )
     config_dir = Path.home() / ".local-operator"
     config_manager = ConfigManager(config_dir)
@@ -118,32 +134,61 @@ def run(parsed: argparse.Namespace, session_factory: "Callable[[], Any] | None" 
 
     async def async_main() -> int:
         loop = asyncio.get_running_loop()
+        interrupted = asyncio.Event()
         session_box: list = []
-        _install_sigterm_handler(loop, session_box)
+        _install_sigterm_handler(loop, session_box, interrupted)
 
         session = factory()
         if asyncio.iscoroutine(session):
             session = await session
         session_box.append(session)
-        try:
-            return await run_print_mode(session, [parsed.prompt], json_mode=parsed.json_mode)
-        except asyncio.CancelledError:
+
+        prompt_task = asyncio.ensure_future(
+            run_print_mode(session, [parsed.prompt], json_mode=parsed.json_mode)
+        )
+        interrupt_task = asyncio.ensure_future(interrupted.wait())
+        await asyncio.wait({prompt_task, interrupt_task}, return_when=asyncio.FIRST_COMPLETED)
+        if interrupted.is_set():
+            # Give the turn a bounded window to settle (flush renderer output,
+            # dispose the session) before reporting the interrupt.
+            try:
+                await asyncio.wait_for(prompt_task, timeout=5.0)
+            except Exception:  # noqa: BLE001 — interrupt wins regardless
+                pass
             return EXIT_INTERRUPTED
+        interrupt_task.cancel()
+        return prompt_task.result()
 
     try:
         return asyncio.run(async_main())
     except KeyboardInterrupt:
         return EXIT_INTERRUPTED
-
+    except RuntimeError:
+        # Belt (CL-03): loop-level failures (e.g. signal handling races that
+        # surface as RuntimeError) must still read as an interrupt, never as
+        # an uncaught crash in the job log.
+        return EXIT_INTERRUPTED
 
 def main() -> int:
-    """Console entry: parse argv, run, flush, exit."""
+    """Console entry: parse argv, run, flush, exit.
+
+    When the spawner passed ``--job-id`` (CL-09), the worker appends the
+    terminal ledger record (``finished_at`` + ``exit_code``) before exiting —
+    best effort; ledger bookkeeping must never change the exit code.
+    """
     parsed = build_parser().parse_args()
     try:
         code = run(parsed)
     except Exception as exc:  # noqa: BLE001 — a log file is the only surface
         sys.stderr.write(f"exec_worker error: {exc}\n")
         code = 1
+    if getattr(parsed, "job_id", None):
+        try:
+            from local_operator.exec_mode import update_job_exit
+
+            update_job_exit(parsed.job_id, code)
+        except Exception:  # noqa: BLE001 — best-effort ledger
+            pass
     # Flush before returning: the spawner owns this file's lifetime and the
     # process may be reaped right after exit.
     sys.stdout.flush()
