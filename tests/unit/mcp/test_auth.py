@@ -277,6 +277,10 @@ class TestCallbackInputParsing:
 
         redirect = "http://127.0.0.1:3000/callback?code=the-code&state=the-state"
         monkeypatch.setattr("builtins.input", lambda _prompt="": redirect)
+        # The handler gates on a real TTY; the suite is not one.
+        import sys
+
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
 
         result = await _default_callback_handler()()
         assert result.code == "the-code"
@@ -298,6 +302,9 @@ class TestCallbackInputParsing:
 
         monkeypatch = pytest.MonkeyPatch()
         monkeypatch.setattr(builtins, "input", capturing_input)
+        import sys
+
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
         try:
             result = await auth_mod._default_callback_handler()()
         finally:

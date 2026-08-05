@@ -160,6 +160,10 @@ class AgentEventBridge:
         self._job_id = job_id
         self._streams: dict[str, CodeExecutionResult] = {}
         self._tools: dict[str, CodeExecutionResult] = {}
+        # Creation-ordered record list: execution_records used to concatenate
+        # the two dicts (all assistant records, then all tool records), so a
+        # turn's persisted activity log no longer reflected what happened.
+        self._ordered: list[CodeExecutionResult] = []
         #: Text of the last completed assistant message — the value the HTTP
         #: envelope reports as ``response``.
         self.final_response: str = ""
@@ -225,6 +229,7 @@ class AgentEventBridge:
                 timestamp=_now(),
             )
             self._streams[message_id] = record
+            self._ordered.append(record)
 
         record.message = _message_text(message)
         if kind == "message_end":
@@ -250,6 +255,7 @@ class AgentEventBridge:
             timestamp=_now(),
         )
         self._tools[call_id] = record
+        self._ordered.append(record)
         self._broadcast(record)
         self._execution(record)
 
@@ -287,7 +293,7 @@ class AgentEventBridge:
 
     def execution_records(self) -> list[CodeExecutionResult]:
         """Every record produced by the turn, in creation order."""
-        return list(self._streams.values()) + list(self._tools.values())
+        return list(self._ordered)
 
 
 def _render_tool_args(tool_name: str, args: dict[str, Any]) -> str:

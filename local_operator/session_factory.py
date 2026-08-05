@@ -489,7 +489,11 @@ async def _prepare(
     from local_operator.providers.auth_store import AuthStore
 
     auth_store = AuthStore(credential_manager=credential_manager)
-    stream_fn = create_stream_fn(auth_store, settings=config_manager.get_config().values)
+    stream_fn = create_stream_fn(
+        auth_store,
+        settings=config_manager.get_config().values,
+        session_id=transcript_dir.name,
+    )
 
     # --- tools + skills (streams A and C) ---------------------------------
     from local_operator.harness.types import ToolContext
@@ -544,7 +548,10 @@ async def _prepare(
 
 
 async def wire_mcp_into_session(
-    session: Any, builtin_tools: list[Any], cwd: str
+    session: Any,
+    builtin_tools: list[Any],
+    cwd: str,
+    auth_store: Any = None,
 ) -> Any | None:
     """Load MCP tools and merge them into a constructed session (MCP-20).
 
@@ -573,7 +580,9 @@ async def wire_mcp_into_session(
         return None
 
     try:
-        manager, mcp_tools, errors = await discover_and_load_mcp_tools(cwd)
+        manager, mcp_tools, errors = await discover_and_load_mcp_tools(
+            cwd, auth_store=auth_store
+        )
     except Exception as exc:  # noqa: BLE001 — degradation is the contract
         print(
             f"\033[1;33mWarning: MCP discovery failed, continuing without MCP tools: "
@@ -651,6 +660,30 @@ def attach_auth_dispose(session: Any, auth_store: Any) -> None:
     session.dispose = dispose_with_auth
 
 
+def attach_stream_dispose(session: Any, stream_fn: Any) -> None:
+    """Fold the session's shared ``httpx.AsyncClient`` close into dispose.
+
+    ``create_stream_fn`` builds one client per session and parks its
+    ``close`` coroutine factory on the returned callable; without this seam
+    the pool leaks for the process lifetime (one per turn on the server
+    facade). Composes with the auth/MCP dispose wrappers.
+    """
+    close = getattr(stream_fn, "close", None)
+    if close is None:
+        return
+    original_dispose = session.dispose
+
+    async def dispose_with_stream() -> None:
+        try:
+            await original_dispose()
+        finally:
+            try:
+                await close()
+            except Exception:  # noqa: BLE001 — teardown must not mask dispose
+                pass
+
+    session.dispose = dispose_with_stream
+
 async def create_session(
     args: argparse.Namespace,
     config_manager: Any,
@@ -678,6 +711,8 @@ async def create_session(
     Raises ``ValueError`` (caught by the CLI's red-banner handler) when the
     hosting/model configuration is missing.
     """
+
+
     from local_operator.session.session import Session
 
     effective_cwd = cwd if cwd is not None else os.getcwd()
@@ -695,12 +730,18 @@ async def create_session(
     # session; fold its close into dispose so every front end releases the
     # file lock on the single ``session.dispose()`` call.
     attach_auth_dispose(session, plan.auth_store)
+    # Stream seam: release the session's shared httpx connection pool on
+    # dispose (one leaked pool per turn on the server facade otherwise).
+    attach_stream_dispose(session, plan.session_kwargs["stream_fn"])
 
     # MCP seam (MCP-20): merge discovered MCP tools in, subscribe to live
     # changes, and fold server teardown into session.dispose. Degrades to
     # zero MCP tools on any failure.
     mcp_manager = await wire_mcp_into_session(
-        session, list(plan.session_kwargs["tools"]), effective_cwd
+        session,
+        list(plan.session_kwargs["tools"]),
+        effective_cwd,
+        auth_store=plan.auth_store,
     )
     if mcp_manager is not None:
         attach_mcp_dispose(session, mcp_manager)

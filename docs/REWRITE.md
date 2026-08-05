@@ -379,6 +379,12 @@ the STRUCTURE is what we borrow, not the hue.
   chat routes run on the new engine through an `Operator` facade exposing
   `handle_user_input(user_input, user_message_id, attachments,
   additional_instructions)` with the same return shape.
+- Scheduling: the legacy executor exposed agent tools (`schedule_task` /
+  `stop_schedule`) that created durable schedules from inside a turn. The
+  rewritten tool table has none; `/v1/schedules` (and the CLI) is the only
+  creation path. This is a deliberate user-visible capability drop, not an
+  oversight — autonomous schedule creation from model output is a larger
+  trust surface than the frozen HTTP contract requires.
 
 ## Verification plan
 

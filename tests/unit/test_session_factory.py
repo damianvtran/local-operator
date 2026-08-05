@@ -352,7 +352,7 @@ async def test_mcp_merge_on_tools_changed_and_dispose(monkeypatch) -> None:
     manager = FakeMcpManager()
     mcp_tool = MagicMock(name="mcp_tool")
 
-    async def fake_discover(cwd):
+    async def fake_discover(cwd, auth_store=None):
         return manager, [mcp_tool], []
 
     monkeypatch.setattr("local_operator.mcp.discover_and_load_mcp_tools", fake_discover)

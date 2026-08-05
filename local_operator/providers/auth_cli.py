@@ -8,6 +8,7 @@ from an interactive terminal (exec/headless mode never calls them).
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from typing import Any
 
@@ -117,6 +118,22 @@ def run_logout(provider_id: str, auth_store: Any) -> int:
         print(f"No stored credentials for '{provider_id}'.")
         return 1
     print(f"Removed {removed} credential(s) for '{provider_id}'.")
+    # The cascade has two tiers below the stored rows: the process
+    # environment and the legacy credentials.env. Deleting the rows does not
+    # clear them, so the very next turn would authenticate again with no
+    # indication the logout was partial. Name the variable, never its value.
+    definition_env = definition.env_keys
+    env_var: str | None = None
+    if isinstance(definition_env, str) and os.environ.get(definition_env):
+        env_var = definition_env
+    elif callable(definition_env) and definition_env():
+        env_var = "the provider's environment"
+    if env_var:
+        print(
+            f"Warning: {provider_id} still authenticates from {env_var}. "
+            "Unset it or remove the credentials.env entry to complete the "
+            "logout."
+        )
     return 0
 
 

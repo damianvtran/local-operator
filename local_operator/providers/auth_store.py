@@ -116,13 +116,23 @@ def default_db_path() -> Path:
 
 
 def _identity_key_for(provider: str, credential: dict[str, Any]) -> str | None:
-    """Dedupe key so one account holds one row (org scope ⇒ separate rows)."""
+    """Dedupe key so one account holds one row (org scope ⇒ separate rows).
+
+    API keys and CLI-stored credentials never dedupe (each key is its own
+    row). OAuth payloads dedupe on the account identity when the IdP returns
+    one; when it does not (Kimi returns none, xAI/Anthropic only with an
+    id_token), a deterministic per-provider constant keeps re-login on ONE
+    row — otherwise two logins leave two rows and the older one carries a
+    dead rotated refresh token that the cascade keeps selecting.
+    """
     if credential.get("type") == "api_key" or credential.get("source") == "login":
         return None
     for field in ("org_id", "account_id", "email", "project_id"):
         value = credential.get(field)
         if value:
             return str(value)
+    if credential.get("refresh") and credential.get("access"):
+        return f"oauth:{provider}"
     return None
 
 
@@ -418,6 +428,24 @@ class AuthStore:
                     merged[field] = fresh[field]
                 else:
                     merged.pop(field, None)
+            # Cross-process guard: the server's job processes each build their
+            # own AuthStore, so the per-process refresh lock does not cover
+            # them. Two processes racing a rotating refresh token both POST
+            # the same token; the IdP rotates and the loser's new token is
+            # dead. If the stored refresh token changed under us (another
+            # process won), skip our write — overwriting would clobber the
+            # winner's live token with our dead one and soft-delete the row.
+            now_row = self.get_credential(row.id)
+            if (
+                now_row is not None
+                and dict(now_row.data).get("refresh") != fresh.get("refresh")
+            ):
+                logger.warning(
+                    "refresh race on %s: another process refreshed first; "
+                    "keeping its token",
+                    row.id,
+                )
+                return dict(now_row.data)
             self._conn.execute(
                 "UPDATE auth_credentials SET data = ?, updated_at = ? WHERE id = ?",
                 (json.dumps(merged), self._now_ms(), row.id),

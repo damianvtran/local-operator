@@ -1077,4 +1077,11 @@ def client_for_spec(spec: Any, *, http_client: httpx.AsyncClient | None = None) 
             "HTTP-Referer": "https://local-operator.com",
             "X-Title": "Local Operator",
         }
+    elif spec.provider == "kimi":
+        # The OAuth grant is minted against a device fingerprint; every
+        # inference call must present the same X-Msh-* headers or the provider
+        # can reject the session as an unknown device (kimi.py invariant).
+        from local_operator.providers.oauth.kimi import kimi_common_headers
+
+        extra_headers = kimi_common_headers()
     return OpenAICompatClient(base_url=base, http_client=http_client, extra_headers=extra_headers)
