@@ -472,7 +472,7 @@ def test_main_interactive_tty_uses_tui(
 
     fake_tui = types.ModuleType("local_operator.tui")
 
-    async def fake_run_tui(session_factory, theme_name: str = "dark") -> int:
+    async def fake_run_tui(session_factory, theme_name: str = "dark", login_handler=None) -> int:
         seen["theme"] = theme_name
         seen["session"] = await session_factory()
         return 0
@@ -635,7 +635,7 @@ def test_main_preflight_env_key_passes(
 
     fake_tui = types.ModuleType("local_operator.tui")
 
-    async def fake_run_tui(session_factory, theme_name="dark") -> int:
+    async def fake_run_tui(session_factory, theme_name="dark", login_handler=None) -> int:
         await session_factory()
         return 0
 
@@ -665,7 +665,7 @@ def test_tui_flag_forces_tui_on_non_tty(
 
     fake_tui = types.ModuleType("local_operator.tui")
 
-    async def fake_run_tui(session_factory, theme_name="dark") -> int:
+    async def fake_run_tui(session_factory, theme_name="dark", login_handler=None) -> int:
         seen["ran"] = True
         return 0
 
