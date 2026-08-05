@@ -299,7 +299,7 @@ class OpenAICompatClient:
             "stream": True,
             "stream_options": {"include_usage": True},
             "messages": [
-                *[({"role": "system", "content": block}) for block in request.system_blocks],
+                *self._system_messages(request),
                 *[_message_to_openai(m) for m in request.messages],
             ],
         }
@@ -319,6 +319,31 @@ class OpenAICompatClient:
         if request.stop_sequences:
             body["stop"] = list(request.stop_sequences)
         return body
+
+    def _system_messages(self, request: ChatRequest) -> list[dict[str, Any]]:
+        """System blocks → messages; stable blocks carry ``cache_control``.
+
+        Mirrors the Anthropic client's all-but-last-two breakpoint policy so
+        OpenRouter BYOK / OpenAI-compatible pools that honor ephemeral markers
+        get the same warm prefix. Providers that ignore the field are
+        unaffected; gated on ``supports_prompt_cache``.
+        """
+        blocks = request.system_blocks
+        out: list[dict[str, Any]] = []
+        stable_cutoff = max(len(blocks) - 2, 0)
+        for i, block in enumerate(blocks):
+            if request.model.supports_prompt_cache and i < stable_cutoff:
+                out.append(
+                    {
+                        "role": "system",
+                        "content": [
+                            {"type": "text", "text": block, "cache_control": {"type": "ephemeral"}}
+                        ],
+                    }
+                )
+            else:
+                out.append({"role": "system", "content": block})
+        return out
 
     def _responses_mode(self, oauth_access: "OAuthAccess | None") -> bool:
         """ChatGPT OAuth ⇒ Responses endpoint; plain API keys stay on completions."""
