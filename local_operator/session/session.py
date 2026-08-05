@@ -44,6 +44,7 @@ from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
     AgentMessage,
+    AgentStartEvent,
     AgentTool,
     ChatRequest,
     CompactionEndEvent,
@@ -242,6 +243,12 @@ class Session:
         self._last_usage: Usage | None = None  # latest provider-reported usage
         self._last_activity_ms: int = 0  # epoch ms; drives idle-flush pruning
         self._generation = 0  # monotonic turn counter for agent_start/end
+        # Boundary-event suppression across a post-compaction continuation:
+        # `_held_end` parks the loop's agent_end until compaction has decided
+        # whether the run continues, `_logical_generation` remembers which
+        # agent_start the eventual end belongs to. Both are None outside a run.
+        self._held_end: AgentEndEvent | None = None
+        self._logical_generation: int | None = None
         self._fallback_tool_resolver: Callable[[str], AgentTool | None] | None = None
 
         self._disposed = False
@@ -304,6 +311,22 @@ class Session:
     @property
     def model_label(self) -> str:
         return f"{self._model.provider}/{self._model.model_id}"
+
+    @property
+    def model(self) -> ModelSpec:
+        """The spec every provider call is built from."""
+        return self._model
+
+    def set_model(self, model: ModelSpec) -> None:
+        """Swap the model spec mid-session.
+
+        The loop reads ``config.model`` fresh on every turn, so the new spec
+        takes effect from the next turn onward. Hosts use this for per-request
+        overrides that are not part of the agent record — the FastAPI server
+        applies ``ChatRequest.options`` (temperature / top_p) this way, since
+        sampling rides on the spec (see ``model/configure.build_model_spec``).
+        """
+        self._model = model
 
     @property
     def wake_scheduler(self) -> WakeScheduler:
@@ -407,13 +430,37 @@ class Session:
             await self._run_turn_pipeline(initial)
 
     async def _run_turn_pipeline(self, initial: list[AgentMessage]) -> None:
-        """One turn + its auto-continuations. Caller holds ``_turn_lock``."""
+        """One turn + its auto-continuations. Caller holds ``_turn_lock``.
+
+        A post-compaction continuation is a CONTINUATION of the same logical
+        run, not a new one: compaction happens after the loop has already
+        yielded its ``agent_end``, so forwarding that end (and the next run's
+        ``agent_start``) would tell every UI the task finished and then started
+        again. The pipeline therefore holds the boundary events and emits
+        exactly one ``agent_start`` / ``agent_end`` pair per user prompt, with
+        ``compaction_start`` / ``compaction_end`` and further turns in between.
+        The generation stamp on the emitted end is the one from the start that
+        opened the run, so the TUI's supersede guard still pairs them.
+        """
         self._turn_task = asyncio.current_task()
         try:
             await self._run_turn(initial)
             await self._drain_continuation()
         finally:
             self._turn_task = None
+            await self._flush_held_end()
+
+    async def _flush_held_end(self) -> None:
+        """Emit the boundary event the pipeline was holding, if any."""
+        held = self._held_end
+        self._held_end = None
+        if held is None:
+            return
+        generation = self._logical_generation or held.generation
+        self._logical_generation = None
+        await self._emit(
+            held if held.generation == generation else held.model_copy(update={"generation": generation})
+        )
 
     async def _run_turn(self, initial: list[AgentMessage]) -> None:
         """One loop run + persistence. Caller holds ``_turn_lock``."""
@@ -451,8 +498,27 @@ class Session:
             async for event in self._loop.run(
                 initial, self._context, config, signal, generation=self._generation
             ):
+                if isinstance(event, AgentStartEvent):
+                    if self._logical_generation is None:
+                        # First run of the pipeline: this start opens the run
+                        # the UI sees, and its generation stamps the eventual
+                        # end. Continuation runs re-enter here and are silent.
+                        self._logical_generation = event.generation
+                        await self._emit(event)
+                    continue
                 if isinstance(event, AgentEndEvent):
                     new_messages = list(event.messages)
+                    if event.aborted or event.error:
+                        # A failed or interrupted run is a real boundary: never
+                        # hold it behind a compaction that may not happen.
+                        self._held_end = None
+                        self._logical_generation = None
+                        await self._emit(event)
+                    else:
+                        # Held until _maybe_compact has had its say; the
+                        # pipeline flushes it if no continuation is queued.
+                        self._held_end = event
+                    continue
                 await self._emit(event)
 
             # Track the latest provider usage for compaction trigger math.

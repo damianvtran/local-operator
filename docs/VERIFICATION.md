@@ -125,3 +125,30 @@ compaction trigger fell back to its local estimate and the TUI status line had
 nothing to report. Provider semantics differ (OpenAI/Google include cached
 blocks in the prompt count, Anthropic excludes them) and are normalized in the
 wire clients.
+
+## 6. Auto-compaction (live, threshold forced to 3,000)
+
+`~/.local-operator/config.yml` with `compaction.threshold_tokens: 3000`,
+`keep_recent_tokens: 1200`, then the five-file writing task:
+
+```
+ctx per turn: 2078 2268 2452 2638 2826 3026 3226 3421 3617 3855 4101 4301
+              -> compaction ->  2904 3301 3904
+```
+
+Compaction fired at 4,301 tokens, dropped the context to 2,904, and the task
+still finished (all five `utils*.py` plus `summary.md` written and verified on
+disk). Event stream:
+
+```
+boundary order: agent_start, compaction_start, compaction_end, agent_end
+agent_start: 1   agent_end: 1   compaction pairs: 1/1
+```
+
+That single-boundary shape is a **binding streaming contract**: this run
+originally emitted `agent_end -> compaction -> agent_start -> ... -> agent_end`,
+which tells any UI keying off `agent_end` that the task finished and then
+restarted. The session now holds the loop's `agent_end` until compaction has
+decided whether the run continues, and stamps the emitted end with the
+generation of the `agent_start` that opened the run. Aborted or errored runs are
+never held.

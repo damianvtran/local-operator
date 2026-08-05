@@ -15,6 +15,8 @@ from local_operator.harness.types import (
     AgentEvent,
     AgentTool,
     ChatRequest,
+    CompactionEndEvent,
+    CompactionStartEvent,
     CustomMessage,
     Message,
     ModelSpec,
@@ -566,4 +568,74 @@ async def test_fallback_tool_resolver_dispatches_deferred_tool(tmp_path):
     )
     await session.prompt("go")
     assert executed == ["deferred_mcp"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_compaction_continuation_emits_one_run_boundary(tmp_path, monkeypatch):
+    """A post-compaction continuation is the SAME logical run.
+
+    Compaction runs after the loop has already yielded agent_end, so forwarding
+    that end plus the continuation run's agent_start would tell every UI the
+    task finished and immediately restarted. The session holds the boundary
+    events: exactly one agent_start and one agent_end per prompt, with the
+    compaction events and the continuation's turns in between.
+    """
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="first"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="resumed"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+
+    # Force exactly one compaction that schedules exactly one continuation.
+    calls = {"n": 0}
+    original = session._maybe_compact
+
+    async def fake_compact() -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            await session._emit(CompactionStartEvent(reason="context-window"))
+            await session._emit(CompactionEndEvent(reason="context-window", success=True))
+            session._continuation_queue.append(Message.user("continue"))
+
+    monkeypatch.setattr(session, "_maybe_compact", fake_compact)
+    assert original is not None  # sanity: we replaced a real method
+
+    seen: list[str] = []
+    session.subscribe(lambda event: seen.append(type(event).__name__))
+    await session.prompt("do the thing")
+
+    assert seen.count("AgentStartEvent") == 1
+    assert seen.count("AgentEndEvent") == 1
+    # Ordering: the single end lands after the compaction pair, and the
+    # continuation's turns sit between them.
+    end_at = seen.index("AgentEndEvent")
+    assert seen.index("CompactionEndEvent") < end_at
+    assert seen.index("AgentStartEvent") < seen.index("CompactionStartEvent")
+    assert seen.count("TurnStartEvent") == 2  # original turn + continuation
+    assert len(stream.requests) == 2
+
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_aborted_run_end_is_never_held(tmp_path, monkeypatch):
+    """An aborted run is a real boundary: it must surface immediately rather
+    than waiting on a compaction pass that may never queue a continuation."""
+    stream = ScriptedStream([[StreamTextDelta(delta="x"), StreamEndEvent(stop_reason="aborted")]])
+    session = make_session(tmp_path, stream)
+
+    async def no_compact() -> None:
+        return None
+
+    monkeypatch.setattr(session, "_maybe_compact", no_compact)
+    ends: list[object] = []
+    session.subscribe(
+        lambda event: ends.append(event) if isinstance(event, AgentEndEvent) else None
+    )
+    await session.prompt("go")
+    assert len(ends) == 1
+    assert ends[0].aborted is True
     await session.dispose()
