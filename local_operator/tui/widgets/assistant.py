@@ -208,8 +208,12 @@ class AssistantBlock(TranscriptBlock):
         self._frozen_epoch: int = -1
         # Render cache (TUI-011b): identical tail text reuses the cached
         # Group verbatim, so the frozen prefix is never re-lexed and the
-        # tail is not re-parsed on no-change appends.
-        self._render_cache: dict[tuple[str, str], object] = {}
+        # tail is not re-parsed on no-change appends. Named away from
+        # ``_render_cache`` on purpose: textual.widgets._static/Widget owns
+        # that attribute and reassigns it on size changes, which would
+        # silently turn our dict into its _RenderCache mid-stream (live-run
+        # crash 2026-08-05).
+        self._tail_render_cache: dict[tuple[str, str], object] = {}
         # Incremental fence tracking (TUI-011a): state as of the last scan.
         self._scanned_len: int = 0
         self._in_fence: bool = False
@@ -250,19 +254,19 @@ class AssistantBlock(TranscriptBlock):
                 self._frozen_text = prefix
                 self._frozen_rendered = Markdown(prefix)
                 self._frozen_epoch = epoch
-                self._render_cache.clear()  # a new prefix invalidates tails
+                self._tail_render_cache.clear()  # a new prefix invalidates tails
             assert self._frozen_rendered is not None
             key = (prefix, tail)
-            renderable = self._render_cache.get(key)
+            renderable = self._tail_render_cache.get(key)
             if renderable is None:
                 renderable = Group(self._frozen_rendered, Markdown(tail))
-                self._render_cache[key] = renderable
+                self._tail_render_cache[key] = renderable
         else:
             key = ("", text)
-            renderable = self._render_cache.get(key)
+            renderable = self._tail_render_cache.get(key)
             if renderable is None:
                 renderable = Markdown(text)
-                self._render_cache[key] = renderable
+                self._tail_render_cache[key] = renderable
         self.set_content(renderable)
 
     @property
