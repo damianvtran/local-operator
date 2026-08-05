@@ -163,22 +163,6 @@ async def _get_json(
     return payload if isinstance(payload, dict) else None
 
 
-async def _post_json(
-    client: httpx.AsyncClient, url: str, headers: dict[str, str], body: dict[str, Any] | None = None
-) -> dict[str, Any] | None:
-    try:
-        resp = await client.post(url, headers=headers, json=body, timeout=10.0)
-    except httpx.HTTPError:
-        return None
-    if resp.status_code != 200:
-        return None
-    try:
-        payload = resp.json()
-    except ValueError:
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
 async def fetch_openrouter(client: httpx.AsyncClient, api_key: str) -> UsageReport | None:
     """OpenRouter credit statement from ``/api/v1/auth/key``.
 
@@ -246,9 +230,9 @@ async def fetch_zai(client: httpx.AsyncClient, token: str) -> UsageReport | None
         try:
             used = float(item.get("usage") or item.get("currentValue") or 0.0)
             remaining = float(item.get("remaining") or 0.0)
+            limit = float(item.get("number") or 0.0) or (used + remaining)
         except (TypeError, ValueError):
             continue
-        limit = float(item.get("number") or 0.0) or (used + remaining)
         pct = item.get("percentage")
         used_fraction: float | None = None
         if pct is not None:
@@ -273,7 +257,7 @@ async def fetch_zai(client: httpx.AsyncClient, token: str) -> UsageReport | None
                 resets_at=str(resets) if resets else None,
             )
         )
-    return UsageReport(provider="zai", limits=limits)
+    return UsageReport(provider="zai", limits=limits) if limits else None
 
 
 async def fetch_anthropic_oauth(client: httpx.AsyncClient, access_token: str) -> UsageReport | None:
@@ -324,7 +308,7 @@ async def fetch_anthropic_oauth(client: httpx.AsyncClient, access_token: str) ->
                     window=label,
                 )
             )
-    return UsageReport(provider="anthropic", limits=limits)
+    return UsageReport(provider="anthropic", limits=limits) if limits else None
 
 
 async def fetch_openai_oauth(
@@ -357,7 +341,7 @@ async def fetch_openai_oauth(
                 resets_at=str(resets) if resets else None,
             )
         )
-    return UsageReport(provider="openai", limits=limits)
+    return UsageReport(provider="openai", limits=limits) if limits else None
 
 
 async def fetch_kimi_oauth(client: httpx.AsyncClient, access_token: str) -> UsageReport | None:
@@ -388,7 +372,7 @@ async def fetch_kimi_oauth(client: httpx.AsyncClient, access_token: str) -> Usag
                 resets_at=str(resets) if resets else None,
             )
         )
-    return UsageReport(provider="kimi", limits=limits)
+    return UsageReport(provider="kimi", limits=limits) if limits else None
 
 
 async def fetch_xai_oauth(client: httpx.AsyncClient, access_token: str) -> UsageReport | None:
@@ -411,13 +395,13 @@ async def fetch_xai_oauth(client: httpx.AsyncClient, access_token: str) -> Usage
         return None
     limits: list[UsageLimit] = []
     # Weekly credits.
-    weekly = config.get("creditUsagePercent")
+    weekly = _num(config.get("creditUsagePercent"))
     if weekly is not None:
         limits.append(
             UsageLimit(
                 id="xai:credits:1w",
                 label="Weekly credits",
-                amount=UsageAmount(used_fraction=_num(weekly) / 100.0, unit="percent"),
+                amount=UsageAmount(used_fraction=weekly / 100.0, unit="percent"),
                 window="1 week",
             )
         )

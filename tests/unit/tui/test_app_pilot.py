@@ -630,3 +630,42 @@ async def test_usage_command_renders_report() -> None:
         texts = _transcript_text(app)
     assert "openrouter" in texts
     assert "Credits" in texts
+
+
+@pytest.mark.asyncio
+async def test_run_tui_forwards_provider_controller(monkeypatch) -> None:
+    """F3 regression: run_tui must pass provider_controller to OperatorApp so
+    the slash-command surface is live (not a pointer, not a crash)."""
+    import local_operator.tui.app as app_mod
+    from local_operator.tui.app import OperatorApp
+
+    seen: dict = {}
+    fake_controller = object()
+
+    class _SpyApp(OperatorApp):
+        def __init__(self, *a, **kw):
+            seen["controller"] = kw.get("provider_controller")
+            seen["handler"] = kw.get("login_handler")
+            super().__init__(*a, **kw)
+
+        async def run_async(self):
+            return None
+
+    # run_tui lazy-imports OperatorApp from local_operator.tui.app at call
+    # time, so patching that module attribute is what routes the spy in.
+    monkeypatch.setattr(app_mod, "OperatorApp", _SpyApp)
+    called = []
+
+    async def factory():
+        called.append(1)
+        return _SpyApp()  # type: ignore[return-value]
+
+    # Await run_tui with a fake session factory that must not await forever.
+    async def factory2():
+        return object()
+
+    from local_operator.tui import run_tui
+
+    await run_tui(factory2, theme_name="dark", provider_controller=fake_controller)
+    assert seen["controller"] is fake_controller
+    assert seen["handler"] is None

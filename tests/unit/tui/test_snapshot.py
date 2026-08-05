@@ -74,6 +74,13 @@ class FakeSession:
     def model_label(self) -> str:
         return "test/model"
 
+    @property
+    def model(self):
+        return None
+
+    def set_model(self, model):
+        pass
+
     async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
         self.prompts.append(text)
 

@@ -1,8 +1,7 @@
 """SQLite credential store + the API-key resolution cascade.
 
-Credential store and cascade. The SQLite
-``docs/recon/ScoutProviders.md`` §3). No OS keychain: credentials live in
-``~/.local-operator/auth.db`` (0600, WAL, busy timeout).
+Credentials live in ``~/.local-operator/auth.db`` (0600, WAL, busy
+timeout); no OS keychain is used.
 
 The resolution cascade (``get_api_key``) is the no-auth-mode-switch design
 First match wins:

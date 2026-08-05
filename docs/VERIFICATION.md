@@ -11,7 +11,7 @@ unit test. Reproduce with the commands quoted in each section.
 
 | Contract | Target | Measured | How |
 |---|---|---|---|
-| Fresh conversation start context | ≤ 30,000 tokens | **1,998** (15-skill corpus) | `scripts/bench_context_budget.py --skills-dir ~/.omp/agent/skills` |
+| Fresh conversation start context | ≤ 30,000 tokens | **1,998** (15-skill corpus) | `scripts/bench_context_budget.py` (15-skill corpus) |
 | Structural prefix stability | ≥ 90% | **93.4%** | `scripts/bench_cache_rate.py` |
 | Live cache rate | ≥ 90% | **94.2%** | 30-turn agentic run, §3 below |
 
@@ -86,7 +86,7 @@ trajectory.
 
 Workspace seeded with 5 real skills under `.local-operator/skills/`
 (minerva-credentials, minerva-observability, minerva-usage-metrics,
-cmux-browser, scheduled-wakeups-omp), then:
+cmux-browser, scheduled-wakeups), then:
 
 ```
 local-operator ... exec "I need to check production log volume for a Minerva

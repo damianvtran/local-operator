@@ -359,6 +359,7 @@ class OperatorApp(App[None]):
                 "warning",
             )
             return
+        provider = provider.lower()  # build_model_spec is case-insensitive
         try:
             spec = self._providers.resolve_model(provider, model_id) if self._providers else None
         except Exception as error:  # unknown provider/hosting
@@ -450,8 +451,13 @@ class OperatorApp(App[None]):
             return
         target = arg.lower() if arg else ""
         if target and not self._providers.provider(target):
-            notice(f"unknown provider: {target}", "warning")
-            return
+            # A usage-only provider (e.g. zai) has a quota fetcher but no
+            # registry login entry — accept it when usage_supported says so.
+            from local_operator.providers.usage import usage_supported
+
+            if not usage_supported(target):
+                notice(f"unknown provider: {target}", "warning")
+                return
         notice("fetching usage…")
         self.run_worker(self._fetch_usage_worker(target or None), thread=False, group="usage")
 
@@ -526,7 +532,10 @@ class OperatorApp(App[None]):
         """``/login [provider]`` — list loginable providers, or run a flow."""
         if self._providers is None:
             if self._login_handler is not None:
-                self._login_handler("login")
+                try:
+                    self._login_handler("login")
+                except Exception as error:  # never let a handler crash the app
+                    notice(f"login failed: {error}", "error")
                 return
             notice("run: local-operator login", "warning")
             return
@@ -564,7 +573,13 @@ class OperatorApp(App[None]):
             return
         self._login_lock.acquire()
         try:
-            async with self.suspend():
+            # ``App.suspend`` is a synchronous context manager (Textual 8.x):
+            # it yields the terminal synchronously, so it must be entered with
+            # a plain ``with`` even though the body awaits (we are already on
+            # the event loop inside run_worker). ``async with`` here is a
+            # TypeError caught and swallowed by the except below — keep them
+            # matched.
+            with self.suspend():
                 # Inside the suspended terminal, plain print()/input() on the
                 # CLI callbacks are safe; the flow drives the loopback server
                 # and/or paste prompt entirely on the event loop.
@@ -579,7 +594,10 @@ class OperatorApp(App[None]):
         """``/logout [provider]`` — remove stored credentials for a provider."""
         if self._providers is None:
             if self._login_handler is not None:
-                self._login_handler("logout")
+                try:
+                    self._login_handler("logout")
+                except Exception as error:  # never let a handler crash the app
+                    notice(f"logout failed: {error}", "error")
             else:
                 notice("run: local-operator logout <provider>", "warning")
             return
@@ -803,6 +821,8 @@ def _partial_text(partial_result) -> str:
 
 def _tree_listing(items: list[tuple[str, str]]) -> Group:
     """Tree-glyph section: ├─ / └─, name in the string tint, detail dim (D4)."""
+    if not items:
+        return Group()
     name_style = Style(color=theme_mod.semantic_color("string"))
     dim = Style(color=theme_mod.semantic_color("dim"))
     lines = []
@@ -815,7 +835,7 @@ def _tree_listing(items: list[tuple[str, str]]) -> Group:
         if detail:
             line.append("  " + detail, style=dim)
         lines.append(line)
-        return Group(*lines)
+    return Group(*lines)
 
 
 class _LoginLock:
