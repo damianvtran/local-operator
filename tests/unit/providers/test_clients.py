@@ -358,3 +358,190 @@ async def test_mock_client_tool_branch() -> None:
     arguments = "".join(e.argument_delta for e in tool_events if e.argument_delta)
     assert json.loads(arguments) == {"text": "hi"}
     assert events[-1].stop_reason == "toolUse"
+
+
+# ---------------------------------------------------------------------------
+# OAuth inference routing (PR-01 blockers)
+# ---------------------------------------------------------------------------
+
+
+from local_operator.providers.auth_store import OAuthAccess
+from local_operator.providers.clients import GoogleClient
+
+
+async def test_anthropic_oauth_sends_bearer_and_beta_header() -> None:
+    """Anthropic OAuth: Authorization: Bearer + anthropic-beta oauth header,
+    NOT x-api-key (which 401s OAuth-issued tokens)."""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["headers"] = dict(request.headers)
+        return httpx.Response(200, content=_anthropic_sse(), headers={"content-type": "text/event-stream"})
+
+    client = AnthropicClient(http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    access = OAuthAccess(access_token="oauth-token-1", credential_id=1, org_id="org-1", kind="oauth")
+    await _collect(client.stream(ChatRequest(model=_spec("anthropic", "claude"), messages=[Message.user("hi")]), "oauth-token-1", oauth_access=access))
+    assert captured["headers"]["authorization"] == "Bearer oauth-token-1"
+    assert captured["headers"]["anthropic-beta"] == "oauth-2025-04-20"
+    assert "x-api-key" not in captured["headers"]
+
+
+async def test_anthropic_api_key_still_uses_x_api_key() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["headers"] = dict(request.headers)
+        return httpx.Response(200, content=_anthropic_sse(), headers={"content-type": "text/event-stream"})
+
+    client = AnthropicClient(http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    await _collect(client.stream(ChatRequest(model=_spec("anthropic", "claude"), messages=[Message.user("hi")]), "sk-ant-1"))
+    assert captured["headers"]["x-api-key"] == "sk-ant-1"
+    assert "authorization" not in captured["headers"]
+    assert "anthropic-beta" not in captured["headers"]
+
+
+def _responses_sse() -> bytes:
+    events = [
+        {
+            "type": "response.output_item.added",
+            "item": {"type": "message", "id": "m1"},
+        },
+        {"type": "response.output_text.delta", "delta": "Hello"},
+        {"type": "response.output_text.delta", "delta": " ChatGPT"},
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_1",
+                "usage": {
+                    "input_tokens": 12,
+                    "output_tokens": 4,
+                    "input_tokens_details": {"cached_tokens": 3},
+                },
+            },
+        },
+    ]
+    return _sse(events)
+
+
+async def test_openai_oauth_routes_to_responses_with_account_header() -> None:
+    """ChatGPT OAuth: /responses endpoint + chatgpt-account-id header."""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, content=_responses_sse(), headers={"content-type": "text/event-stream"})
+
+    client = OpenAICompatClient(
+        base_url="https://api.openai.com/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    access = OAuthAccess(access_token="chatgpt-token", credential_id=2, org_id="acct-42", kind="oauth")
+    events = await _collect(client.stream(ChatRequest(model=_spec("openai", "gpt-5"), messages=[Message.user("hi")]), "chatgpt-token", oauth_access=access))
+    assert captured["url"] == "https://api.openai.com/v1/responses"
+    assert captured["headers"]["chatgpt-account-id"] == "acct-42"
+    assert captured["headers"]["authorization"] == "Bearer chatgpt-token"
+    assert "input" in captured["body"] and "messages" not in captured["body"]
+    texts = [e.delta for e in events if isinstance(e, StreamTextDelta)]
+    assert texts == ["Hello", " ChatGPT"]
+    usage = events[-1].usage
+    assert usage.input_tokens == 12 and usage.output_tokens == 4 and usage.cache_read_tokens == 3
+
+
+async def test_openai_api_key_stays_on_completions() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
+        return httpx.Response(
+            200,
+            content=_sse([{"choices": [{"delta": {"content": "x"}, "finish_reason": "stop"}]}]),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = OpenAICompatClient(
+        base_url="https://api.openai.com/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    await _collect(client.stream(ChatRequest(model=_spec("openai", "gpt-4o"), messages=[Message.user("hi")]), "sk-test"))
+    assert captured["url"] == "https://api.openai.com/v1/chat/completions"
+    assert "chatgpt-account-id" not in captured["headers"]
+
+
+async def test_google_system_instruction_and_tool_result_blocks() -> None:
+    """PR-17: system blocks use systemInstruction; tool results render from
+    content blocks with empty-backfill."""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"candidates": [{"content": {"parts": [{"text": "ok"}]}, '
+                b'"finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 3, '
+                b'"candidatesTokenCount": 1}}\n\n'
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = GoogleClient(http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    assistant = Message(role="assistant", tool_calls=[ToolCall(id="c1", name="t", arguments={})])
+    result = Message(role="tool", tool_call_id="c1", tool_name="t", content=[TextContent(text="tool says hi")])
+    empty_result = Message(role="tool", tool_call_id="c2", tool_name="u", content=[])
+    request = ChatRequest(
+        model=_spec("google", "gemini-2.5-pro"),
+        system_blocks=["instructions"],
+        messages=[assistant, result, empty_result],
+    )
+    events = await _collect(client.stream(request, "goog-key"))
+    body = captured["body"]
+    assert body["systemInstruction"]["parts"] == [{"text": "instructions"}]
+    # No system block folded into contents.
+    assert all(c["parts"] != [{"text": "instructions"}] for c in body["contents"])
+    responses = [
+        p["functionResponse"]
+        for c in body["contents"]
+        for p in c["parts"]
+        if "functionResponse" in p
+    ]
+    by_name = {r["name"]: r["response"]["content"] for r in responses}
+    assert by_name["t"] == "tool says hi"
+    assert by_name["u"] == "[tool returned no output]"
+    assert events[-1].stop_reason == "stop"
+
+
+def test_anthropic_cache_breakpoints_capped_at_four() -> None:
+    """PR-18: many system blocks must not exceed the 4-marker cap; the
+    stable head stays breakpointed, nothing beyond the cap."""
+    blocks = [f"block-{i}" for i in range(9)]
+    rendered = AnthropicClient._system_blocks(blocks)
+    marked = [b for b in rendered if "cache_control" in b]
+    assert len(marked) == 4  # capped at MAX_CACHE_BREAKPOINTS
+    assert all(rendered[i]["cache_control"] == {"type": "ephemeral"} for i in range(4))
+    assert all("cache_control" not in rendered[i] for i in range(4, 9))
+
+
+def test_retry_after_http_date_parsed() -> None:
+    """PR-22: Retry-After in HTTP-date form is converted to milliseconds."""
+    import email.utils
+    import time as _time
+
+    from local_operator.providers.clients import _parse_retry_after
+
+    future = _time.time() + 10
+    header = email.utils.formatdate(future, usegmt=True)
+    response = httpx.Response(429, headers={"retry-after": header})
+    parsed = _parse_retry_after(response)
+    assert parsed is not None and 8000 <= parsed <= 12000
+
+
+def test_unknown_provider_raises_value_error() -> None:
+    """PR-22: client_for_spec rejects unknown providers instead of silently
+    defaulting to the ollama endpoint."""
+    from local_operator.providers.clients import client_for_spec
+
+    with pytest.raises(ValueError, match="Unknown provider"):
+        client_for_spec(ModelSpec(provider="not-a-provider", model_id="x"))

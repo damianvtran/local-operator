@@ -18,9 +18,12 @@ retryable/auth flags for the failover layer.
 
 from __future__ import annotations
 
+import email.utils
 import json
+import time
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
-from typing import Any, Protocol, runtime_checkable
+from datetime import timezone
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import httpx
 
@@ -39,15 +42,26 @@ from local_operator.harness.types import (
 )
 from local_operator.providers.failover import ProviderError
 
+if TYPE_CHECKING:
+    from local_operator.providers.auth_store import OAuthAccess
+
 
 @runtime_checkable
 class WireClient(Protocol):
     """The one method the harness needs from a provider client."""
 
-    async def stream(self, request: ChatRequest, api_key: str | None) -> AsyncIterator[StreamEvent]:
+    async def stream(
+        self,
+        request: ChatRequest,
+        api_key: str | None,
+        oauth_access: "OAuthAccess | None" = None,
+    ) -> AsyncIterator[StreamEvent]:
         """Stream one completion. Raises :class:`ProviderError` on failure.
 
-        Must be an async generator (``stream(...)`` called then iterated).
+        ``oauth_access`` carries the resolved credential record (kind,
+        account/org identity) so OAuth bearers can take provider-specific
+        headers/routes that a bare API key must not. Must be an async
+        generator (``stream(...)`` called then iterated).
         """
         ...  # pragma: no cover
 
@@ -58,13 +72,24 @@ class WireClient(Protocol):
 
 
 def _parse_retry_after(response: httpx.Response) -> int | None:
+    """``Retry-After`` as milliseconds; supports seconds AND HTTP-date form."""
     header = response.headers.get("retry-after")
     if header is None:
         return None
     try:
         return int(float(header) * 1000)
     except ValueError:
+        pass
+    try:
+        when = email.utils.parsedate_to_datetime(header)
+    except (TypeError, ValueError):
         return None
+    if when.tzinfo is None:
+        # HTTP dates are GMT; parsedate yields a naive datetime when the
+        # zone is absent.
+        when = when.replace(tzinfo=timezone.utc)
+    delta_ms = int(when.timestamp() * 1000) - int(time.time() * 1000)
+    return max(0, delta_ms)
 
 
 def _extract_error_message(response: httpx.Response) -> str:
@@ -231,6 +256,12 @@ class OpenAICompatClient:
     chunk, arguments stream in pieces). Usage comes from the final chunk
     (``stream_options={"include_usage": true}``), including
     ``prompt_tokens_details.cached_tokens``.
+
+    ChatGPT OAuth credentials (``oauth_access`` with ``kind == "oauth"`` and
+    an ``org_id``) are routed to ``{base_url}/responses`` instead — ChatGPT
+    subscription tokens are rejected by ``chat/completions`` and require the
+    Responses endpoint plus the ``chatgpt-account-id`` header (omp parity:
+    ``openai-codex-responses``). Plain API keys keep ``chat/completions``.
     """
 
     def __init__(
@@ -250,10 +281,16 @@ class OpenAICompatClient:
         if self._owns_client:
             await self._http.aclose()
 
-    def _headers(self, api_key: str | None) -> dict[str, str]:
+    def _headers(self, api_key: str | None, oauth_access: "OAuthAccess | None" = None) -> dict[str, str]:
         headers = {"Content-Type": "application/json", **self._extra_headers}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
+        bearer = api_key
+        if oauth_access is not None and oauth_access.kind == "oauth" and oauth_access.access_token:
+            bearer = oauth_access.access_token
+            if oauth_access.org_id:
+                # ChatGPT subscription scope: which account pays for this call.
+                headers["chatgpt-account-id"] = oauth_access.org_id
+        if bearer:
+            headers["Authorization"] = f"Bearer {bearer}"
         return headers
 
     def _build_body(self, request: ChatRequest) -> dict[str, Any]:
@@ -268,9 +305,10 @@ class OpenAICompatClient:
         }
         if request.tools:
             body["tools"] = _tools_to_openai(request.tools)
-            body["tool_choice"] = {"auto": "auto", "none": "none", "required": "required"}[
-                request.tool_choice
-            ]
+            # Safe default: unmapped values fall back to "auto" instead of KeyError.
+            body["tool_choice"] = {"auto": "auto", "none": "none", "required": "required"}.get(
+                request.tool_choice, "auto"
+            )
         max_tokens = request.max_tokens or request.model.max_output_tokens
         if max_tokens and max_tokens > 0:
             body["max_tokens"] = max_tokens
@@ -282,17 +320,56 @@ class OpenAICompatClient:
             body["stop"] = list(request.stop_sequences)
         return body
 
-    async def stream(self, request: ChatRequest, api_key: str | None) -> AsyncIterator[StreamEvent]:
+    def _responses_mode(self, oauth_access: "OAuthAccess | None") -> bool:
+        """ChatGPT OAuth ⇒ Responses endpoint; plain API keys stay on completions."""
+        return bool(
+            oauth_access is not None
+            and oauth_access.kind == "oauth"
+            and oauth_access.org_id
+        )
+
+    def _build_responses_body(self, request: ChatRequest) -> dict[str, Any]:
+        """Responses-API body; ``input`` accepts chat-completions-shaped messages."""
+        body: dict[str, Any] = {
+            "model": request.model.model_id,
+            "stream": True,
+            "input": [_message_to_openai(m) for m in request.messages],
+        }
+        if request.system_blocks:
+            body["instructions"] = "\n\n".join(request.system_blocks)
+        if request.tools:
+            body["tools"] = _tools_to_openai(request.tools)
+            body["tool_choice"] = {"auto": "auto", "none": "none", "required": "required"}.get(
+                request.tool_choice, "auto"
+            )
+        max_tokens = request.max_tokens or request.model.max_output_tokens
+        if max_tokens and max_tokens > 0:
+            body["max_output_tokens"] = max_tokens
+        temperature = request.temperature if request.temperature is not None else request.model.temperature
+        body["temperature"] = temperature
+        top_p = request.top_p if request.top_p is not None else request.model.top_p
+        body["top_p"] = top_p
+        if request.stop_sequences:
+            body["stop"] = list(request.stop_sequences)
+        return body
+
+    async def stream(
+        self,
+        request: ChatRequest,
+        api_key: str | None,
+        oauth_access: "OAuthAccess | None" = None,
+    ) -> AsyncIterator[StreamEvent]:
+        if self._responses_mode(oauth_access):
+            async for event in self._stream_responses(request, api_key, oauth_access):
+                yield event
+            return
         url = f"{self._base_url}/chat/completions"
         finish_reason: str | None = None
         usage: Usage | None = None
         provider_payload: dict[str, Any] | None = None
-        # index -> (id, name); arguments stream as deltas keyed by index.
-        call_ids: dict[int, str] = {}
-        call_names: dict[int, str] = {}
 
         async with self._http.stream(
-            "POST", url, json=self._build_body(request), headers=self._headers(api_key)
+            "POST", url, json=self._build_body(request), headers=self._headers(api_key, oauth_access)
         ) as response:
             if response.status_code >= 400:
                 await response.aread()
@@ -327,10 +404,8 @@ class OpenAICompatClient:
                     call_id = tool_delta.get("id")
                     name = function.get("name")
                     if call_id:
-                        call_ids[index] = call_id
                         yield StreamToolCallDelta(index=index, id=call_id)
                     if name:
-                        call_names[index] = name
                         yield StreamToolCallDelta(index=index, name=name)
                     argument_delta = function.get("arguments")
                     if argument_delta:
@@ -345,6 +420,75 @@ class OpenAICompatClient:
 
         yield StreamEndEvent(
             stop_reason=_FINISH_TO_STOP_REASON.get(finish_reason or "", finish_reason or "stop"),
+            usage=usage,
+            provider_payload=provider_payload,
+        )
+
+    async def _stream_responses(
+        self,
+        request: ChatRequest,
+        api_key: str | None,
+        oauth_access: "OAuthAccess | None",
+    ) -> AsyncIterator[StreamEvent]:
+        """SSE parse for ``POST {base}/responses`` (ChatGPT OAuth route)."""
+        url = f"{self._base_url}/responses"
+        usage: Usage | None = None
+        provider_payload: dict[str, Any] | None = None
+        tool_call_count = 0
+        # output-item index -> tool-call index (function_call items only).
+        call_indexes: dict[str, int] = {}
+
+        async with self._http.stream(
+            "POST", url, json=self._build_responses_body(request), headers=self._headers(api_key, oauth_access)
+        ) as response:
+            if response.status_code >= 400:
+                await response.aread()
+                _raise_for_status(response)
+            async for data in _iter_sse_lines(response):
+                if data == "[DONE]":
+                    break
+                try:
+                    payload = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                event_type = payload.get("type", "")
+                if event_type == "response.output_item.added":
+                    item = payload.get("item") or {}
+                    if item.get("type") == "function_call":
+                        index = tool_call_count
+                        tool_call_count += 1
+                        call_id = item.get("call_id") or item.get("id") or ""
+                        call_indexes[call_id] = index
+                        yield StreamToolCallDelta(index=index, id=call_id, name=item.get("name"))
+                elif event_type == "response.function_call_arguments.delta":
+                    call_id = payload.get("call_id") or ""
+                    delta = payload.get("delta")
+                    if delta:
+                        yield StreamToolCallDelta(
+                            index=call_indexes.get(call_id, 0), argument_delta=delta
+                        )
+                elif event_type == "response.output_text.delta":
+                    delta = payload.get("delta")
+                    if delta:
+                        yield StreamTextDelta(delta=delta)
+                elif event_type == "response.completed":
+                    response_obj = payload.get("response") or {}
+                    if response_obj.get("id"):
+                        provider_payload = {"id": response_obj["id"]}
+                    raw = response_obj.get("usage") or {}
+                    if raw:
+                        details = raw.get("input_tokens_details") or {}
+                        usage = Usage(
+                            input_tokens=int(raw.get("input_tokens", 0)),
+                            output_tokens=int(raw.get("output_tokens", 0)),
+                            cache_read_tokens=int(
+                                details.get("cached_tokens", 0) if isinstance(details, Mapping) else 0
+                            ),
+                        )
+                        yield StreamUsageEvent(usage=usage)
+
+        yield StreamEndEvent(
+            stop_reason="toolUse" if tool_call_count else "stop",
             usage=usage,
             provider_payload=provider_payload,
         )
@@ -383,24 +527,36 @@ class AnthropicClient:
         if self._owns_client:
             await self._http.aclose()
 
-    def _headers(self, api_key: str | None) -> dict[str, str]:
+    def _headers(self, api_key: str | None, oauth_access: "OAuthAccess | None" = None) -> dict[str, str]:
         headers = {"anthropic-version": ANTHROPIC_VERSION, "Content-Type": "application/json"}
-        if api_key:
+        if oauth_access is not None and oauth_access.kind == "oauth" and oauth_access.access_token:
+            # Claude Pro/Max OAuth: Bearer + the oauth beta header (the
+            # ``x-api-key`` scheme 401s OAuth-issued access tokens).
+            headers["Authorization"] = f"Bearer {oauth_access.access_token}"
+            headers["anthropic-beta"] = "oauth-2025-04-20"
+        elif api_key:
             headers["x-api-key"] = api_key
         return headers
 
-    @staticmethod
-    def _system_blocks(blocks: Sequence[str]) -> list[dict[str, Any]]:
+    # Anthropic caps cache_control markers per request; the harness keeps the
+    # first 3 stable system blocks breakpointed and never exceeds the cap.
+    MAX_CACHE_BREAKPOINTS = 4
+
+    @classmethod
+    def _system_blocks(cls, blocks: Sequence[str]) -> list[dict[str, Any]]:
         """System blocks → Anthropic ``system`` array with cache breakpoints.
 
         The harness sends [instructions, tool inventory, skills, env/date];
         the trailing blocks are VOLATILE (skills change per turn, env/date
         changes per day) and must stay breakpoint-free so the prompt-cache
         prefix covers only the stable head. Generic for any block count:
-        every block except the last two gets an ephemeral breakpoint.
+        every block except the last two gets an ephemeral breakpoint, CAPPED
+        at ``MAX_CACHE_BREAKPOINTS`` — Anthropic rejects requests carrying
+        more than 4 ``cache_control`` markers, so surplus stable blocks keep
+        the cache prefix intact without adding markers.
         """
         rendered: list[dict[str, Any]] = []
-        stable_count = max(0, len(blocks) - 2)
+        stable_count = min(cls.MAX_CACHE_BREAKPOINTS, max(0, len(blocks) - 2))
         for index, block in enumerate(blocks):
             entry: dict[str, Any] = {"type": "text", "text": block}
             if index < stable_count:
@@ -491,9 +647,10 @@ class AnthropicClient:
                 }
                 for tool in request.tools
             ]
-            body["tool_choice"] = {"auto": {"type": "auto"}, "none": {"type": "none"}, "required": {"type": "any"}}[
-                request.tool_choice
-            ]
+            # Safe default: unmapped values fall back to auto (PR-22).
+            body["tool_choice"] = {"auto": {"type": "auto"}, "none": {"type": "none"}, "required": {"type": "any"}}.get(
+                request.tool_choice, {"type": "auto"}
+            )
         temperature = request.temperature if request.temperature is not None else request.model.temperature
         body["temperature"] = temperature
         top_p = request.top_p if request.top_p is not None else request.model.top_p
@@ -502,14 +659,19 @@ class AnthropicClient:
             body["stop_sequences"] = list(request.stop_sequences)
         return body
 
-    async def stream(self, request: ChatRequest, api_key: str | None) -> AsyncIterator[StreamEvent]:
+    async def stream(
+        self,
+        request: ChatRequest,
+        api_key: str | None,
+        oauth_access: "OAuthAccess | None" = None,
+    ) -> AsyncIterator[StreamEvent]:
         url = f"{self._base_url}/v1/messages"
         stop_reason = "stop"
         usage = Usage()
         block_index_to_call: dict[int, tuple[str, str]] = {}
 
         async with self._http.stream(
-            "POST", url, json=self._build_body(request), headers=self._headers(api_key)
+            "POST", url, json=self._build_body(request), headers=self._headers(api_key, oauth_access)
         ) as response:
             if response.status_code >= 400:
                 await response.aread()
@@ -588,10 +750,6 @@ class GoogleClient:
 
     def _build_body(self, request: ChatRequest) -> dict[str, Any]:
         contents: list[dict[str, Any]] = []
-        if request.system_blocks:
-            contents.append(
-                {"role": "user", "parts": [{"text": "\n\n".join(request.system_blocks)}]}
-            )
         for message in request.messages:
             role = "user" if message.role == "user" else "model"
             parts: list[dict[str, Any]] = [{"text": message.text}] if message.text else []
@@ -613,7 +771,7 @@ class GoogleClient:
                             {
                                 "functionResponse": {
                                     "name": message.tool_name or "",
-                                    "response": {"content": message.text},
+                                    "response": {"content": self._tool_response_content(message)},
                                 }
                             }
                         ],
@@ -624,6 +782,9 @@ class GoogleClient:
                 contents.append({"role": role, "parts": parts or [{"text": ""}]})
 
         body: dict[str, Any] = {"contents": contents}
+        if request.system_blocks:
+            # Gemini's dedicated system slot (not folded into a user turn).
+            body["systemInstruction"] = {"parts": [{"text": block} for block in request.system_blocks]}
         generation_config: dict[str, Any] = {}
         max_tokens = request.max_tokens or request.model.max_output_tokens
         if max_tokens and max_tokens > 0:
@@ -650,7 +811,36 @@ class GoogleClient:
             ]
         return body
 
-    async def stream(self, request: ChatRequest, api_key: str | None) -> AsyncIterator[StreamEvent]:
+    @staticmethod
+    def _tool_response_content(message: Message) -> str:
+        """Render a tool result from its content blocks — never ``message.text``.
+
+        Same policy as the other two clients: text blocks concatenated,
+        image-only results summarized, empty results backfilled so the
+        provider never receives an empty ``functionResponse``.
+        """
+        texts: list[str] = []
+        has_image = False
+        for block in message.content:
+            if isinstance(block, TextContent):
+                if block.text:
+                    texts.append(block.text)
+            elif isinstance(block, ImageContent):
+                has_image = True
+        if texts and not has_image:
+            return "".join(texts)
+        if texts:
+            return "".join(texts) + "\n[attached image content omitted]"
+        if has_image:
+            return "[tool returned image content]"
+        return EMPTY_TOOL_RESULT_TEXT
+
+    async def stream(
+        self,
+        request: ChatRequest,
+        api_key: str | None,
+        oauth_access: "OAuthAccess | None" = None,
+    ) -> AsyncIterator[StreamEvent]:
         url = (
             f"{self._base_url}/v1beta/models/{request.model.model_id}:streamGenerateContent?alt=sse"
         )
@@ -713,7 +903,12 @@ class MockClient:
     stops with ``toolUse`` instead.
     """
 
-    async def stream(self, request: ChatRequest, api_key: str | None) -> AsyncIterator[StreamEvent]:
+    async def stream(
+        self,
+        request: ChatRequest,
+        api_key: str | None,
+        oauth_access: "OAuthAccess | None" = None,
+    ) -> AsyncIterator[StreamEvent]:
         wants_tool = any("[tool]" in message.text for message in request.messages)
         if wants_tool:
             yield StreamToolCallDelta(index=0, id="call_mock_1", name="echo")
@@ -728,11 +923,17 @@ class MockClient:
 
 
 def client_for_spec(spec: Any, *, http_client: httpx.AsyncClient | None = None) -> WireClient:
-    """Build the wire client for a ``ModelSpec`` via the provider registry."""
+    """Build the wire client for a ``ModelSpec`` via the provider registry.
+
+    Unknown providers raise :class:`ValueError` — the legacy fallback to the
+    local ollama endpoint silently served the wrong wire shape.
+    """
     from local_operator.providers.registry import get_provider_definition
 
     definition = get_provider_definition(spec.provider)
-    wire = definition.wire if definition else "openai-compat"
+    if definition is None:
+        raise ValueError(f"Unknown provider: {spec.provider!r}")
+    wire = definition.wire
     if wire == "mock":
         return MockClient()
     if wire == "anthropic":

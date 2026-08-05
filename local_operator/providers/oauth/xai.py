@@ -25,7 +25,6 @@ SCOPES = "openid profile email offline_access grok-cli:access api:access"
 
 DISCOVERY_URL = "https://auth.x.ai/.well-known/openid-configuration"
 DEVICE_CODE_URL = "https://auth.x.ai/oauth2/device/code"
-USERINFO_URL = "https://auth.x.ai/oauth2/userinfo"
 
 DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 EXPIRY_SKEW_SECONDS = 5 * 60
@@ -59,10 +58,12 @@ async def discover_token_endpoint(http: httpx.AsyncClient) -> str:
 
 
 def _credentials_from_token(
-    token: dict[str, Any], token_endpoint: str, http: httpx.AsyncClient | None = None
+    token: dict[str, Any], token_endpoint: str, old_refresh: str | None = None
 ) -> dict[str, Any]:
     access = token.get("access_token")
-    refresh = token.get("refresh_token")
+    # IdPs that do not rotate refresh tokens omit one on refresh; keep the
+    # old one (kimi pattern; PR-09).
+    refresh = token.get("refresh_token") or old_refresh
     if not access or not refresh:
         raise LoginError("xAI token response is missing access/refresh tokens")
     expires_in = int(token.get("expires_in", 3600))
@@ -194,6 +195,8 @@ async def refresh_xai_token(
     if response.status_code != 200:
         raise LoginError(f"xAI refresh failed ({response.status_code}): {response.text}")
     merged = dict(creds)
-    merged.update(_credentials_from_token(response.json(), str(token_endpoint)))
+    merged.update(
+        _credentials_from_token(response.json(), str(token_endpoint), old_refresh=creds.get("refresh"))
+    )
     merged["authorized_at"] = creds.get("authorized_at", merged["authorized_at"])
     return merged

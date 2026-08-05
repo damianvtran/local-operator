@@ -16,8 +16,15 @@ from omp §4.1 — first match wins:
 6. stored API key without ``source="login"``
 7. fallback resolver (custom providers)
 
-Side effect preserved: when the env tier wins, session stickiness for that
-provider is cleared so identity lookups stop attributing OAuth accounts.
+Side effect preserved: session stickiness for a provider is cleared as soon
+as resolution LEAVES the OAuth tier (before the env tier), so identity
+lookups stop attributing OAuth accounts.
+
+Single-process limitation (PR-24): refresh single-flight is a per-process
+``asyncio.Lock``. Two local-operator processes racing a rotating OAuth
+refresh token can invalidate each other's new token; omp guards this with a
+cross-process ``auth_credential_refresh_leases`` table, which is deliberately
+deferred here.
 """
 
 from __future__ import annotations
@@ -83,6 +90,25 @@ class StoredCredential:
     updated_at: int = 0
 
 
+@dataclasses.dataclass(frozen=True)
+class OAuthAccess:
+    """The identity-carrying credential record handed to wire clients.
+
+    omp's ``getOAuthAccess()``: everything a provider-specific request
+    shaper needs beyond the bare bearer — which account/org pays, and
+    whether the token is OAuth (needs provider-specific auth headers/routes)
+    or a plain API key.
+    """
+
+    access_token: str
+    credential_id: int
+    account_id: str | None = None
+    email: str | None = None
+    org_id: str | None = None
+    api_endpoint: str | None = None
+    kind: str = "oauth"  # 'oauth' | 'api_key'
+
+
 def default_db_path() -> Path:
     override = os.environ.get("LOCAL_OPERATOR_CONFIG_DIR")
     base = Path(override) if override else Path.home() / ".local-operator"
@@ -107,6 +133,10 @@ class AuthStore:
     from ``credentials.env``. ``config_overrides`` seeds the config-override
     tier. All DB access is local and synchronous; async methods only exist
     where refresh/network happens.
+
+    .. note::
+        Single-process (PR-24): the refresh lock is a per-process
+        ``asyncio.Lock``; cross-process refresh leases are not implemented.
     """
 
     def __init__(
@@ -132,16 +162,27 @@ class AuthStore:
 
     def _connect(self) -> sqlite3.Connection:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        # Create the file 0600 BEFORE sqlite opens it: the plain
+        # connect-then-chmod leaves a window where secrets sit 0644 (PR-11).
+        if not self._db_path.exists():
+            fd = os.open(self._db_path, os.O_CREAT | os.O_WRONLY, 0o600)
+            os.close(fd)
         conn = sqlite3.connect(str(self._db_path), timeout=5.0)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
         conn.executescript(_SCHEMA)
         conn.commit()
-        try:
-            os.chmod(self._db_path, 0o600)
-        except OSError:
-            pass
+        for path in (
+            self._db_path,
+            self._db_path.with_suffix(self._db_path.suffix + "-wal"),
+            self._db_path.with_suffix(self._db_path.suffix + "-shm"),
+        ):
+            # WAL sidecars hold the same plaintext; keep them 0600 too.
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
         return conn
 
     def close(self) -> None:
@@ -214,7 +255,6 @@ class AuthStore:
         Revives soft-deleted rows for the same identity (re-login).
         ``store_credentials_as`` aliasing happens at the caller (login path).
         """
-        definition = get_provider_definition(provider)
         credential_type = "oauth" if credential.get("refresh") and credential.get("access") else "api_key"
         identity = _identity_key_for(provider, credential)
         payload = dict(credential)
@@ -260,7 +300,7 @@ class AuthStore:
         )
         self._conn.commit()
 
-    def delete_credential(self, credential_id: int, disabled_cause: str = "deleted") -> None:
+    def delete_credential(self, credential_id: int) -> None:
         """Remove a row entirely (logout)."""
         self._conn.execute("DELETE FROM auth_credential_blocks WHERE credential_id = ?", (credential_id,))
         self._conn.execute("DELETE FROM auth_credentials WHERE id = ?", (credential_id,))
@@ -270,7 +310,7 @@ class AuthStore:
         """Logout: wipe every credential stored under ``provider``. Returns count."""
         rows = self.list_credentials(provider)
         for row in rows:
-            self.delete_credential(row.id, disabled_cause)
+            self.delete_credential(row.id)
         return len(rows)
 
     # -- blocking --------------------------------------------------------------
@@ -343,6 +383,10 @@ class AuthStore:
 
         Raises :class:`AuthStoreError` when a refresh is required and fails;
         callers treat that row as unusable and rotate.
+
+        Org fields are restored from the stored row AFTER the merge (PR-12):
+        a refresh function that (mistakenly) returns org_id/org_name/
+        authorized_at can never rewrite them — identity is fixed at login.
         """
         creds = dict(row.data)
         if not self._needs_refresh(creds, force=force):
@@ -366,7 +410,14 @@ class AuthStore:
             except Exception as exc:
                 raise AuthStoreError(f"OAuth refresh failed for '{row.provider}': {exc}") from exc
             merged = dict(fresh)
-            merged.update(refreshed)  # refresh results never rewrite org fields upstream
+            merged.update(refreshed)
+            # Restore identity fields from the stored credential — NEVER
+            # rewritten by refresh, whatever the refresh fn returns.
+            for field in ("org_id", "org_name", "authorized_at"):
+                if field in fresh:
+                    merged[field] = fresh[field]
+                else:
+                    merged.pop(field, None)
             self._conn.execute(
                 "UPDATE auth_credentials SET data = ?, updated_at = ? WHERE id = ?",
                 (json.dumps(merged), self._now_ms(), row.id),
@@ -417,17 +468,55 @@ class AuthStore:
         self, provider: str, session_id: str | None = None, *, force_refresh: bool = False
     ) -> str | None:
         """Resolve the API key for ``provider`` via the 7-step cascade."""
+        key, _row = await self._resolve(provider, session_id, force_refresh=force_refresh)
+        return key
+
+    async def get_oauth_access(
+        self, provider: str, session_id: str | None = None, *, force_refresh: bool = False
+    ) -> OAuthAccess | None:
+        """The identity-carrying record for wire clients (omp ``getOAuthAccess``).
+
+        Returns :class:`OAuthAccess` for whichever credential the cascade
+        picks — ``kind == "oauth"`` with account/org identity when an OAuth
+        row wins, ``kind == "api_key"`` otherwise. Runtime/config overrides
+        deliberately short-circuit to ``None`` (they aim at gateways where
+        stored identity does not apply).
+        """
+        if self._runtime_overrides.get(provider) or self._config_overrides.get(provider):
+            return None
+        key, row = await self._resolve(provider, session_id, force_refresh=force_refresh)
+        if key is None:
+            return None
+        if row is not None and row.credential_type == "oauth":
+            data = row.data
+            return OAuthAccess(
+                access_token=key,
+                credential_id=row.id,
+                account_id=data.get("account_id"),
+                email=data.get("email"),
+                org_id=data.get("org_id"),
+                api_endpoint=data.get("api_endpoint"),
+                kind="oauth",
+            )
+        return OAuthAccess(
+            access_token=key, credential_id=row.id if row is not None else 0, kind="api_key"
+        )
+
+    async def _resolve(
+        self, provider: str, session_id: str | None, *, force_refresh: bool = False
+    ) -> tuple[str | None, StoredCredential | None]:
+        """The 7-step cascade; returns ``(key, winning row or None)``."""
         definition: ProviderDefinition | None = get_provider_definition(provider)
 
         # 1. Runtime override
         runtime = self._runtime_overrides.get(provider)
         if runtime:
-            return runtime
+            return runtime, None
 
         # 2. Config override
         config = self._config_overrides.get(provider)
         if config:
-            return config
+            return config, None
 
         # 3. OAuth credential
         oauth_rows = self._usable_key_rows(provider, "oauth", source=None)
@@ -441,11 +530,13 @@ class AuthStore:
             key = key_fn(creds) if key_fn else creds.get("access")
             if key:
                 self._set_sticky(provider, session_id, row.id)
-                return key
+                refreshed = self.get_credential(row.id)
+                return key, refreshed or row
         if oauth_rows and force_refresh:
             # Every sibling failed its refresh — surface the failure so the
             # failover layer can block/back off instead of silently looping.
             raise AuthStoreError(f"All OAuth credentials for '{provider}' failed to refresh")
+        # PR-15: with NO oauth rows, force_refresh falls through to tiers 4-7.
 
         # 4. API key persisted by interactive login
         login_rows = self._usable_key_rows(provider, "api_key", source="login")
@@ -453,15 +544,17 @@ class AuthStore:
             key = row.data.get("key")
             if key:
                 self._set_sticky(provider, session_id, row.id)
-                return key
+                return key, row
+
+        # Leaving the OAuth tier: clear session stickiness so identity
+        # attribution stops for non-OAuth requests (PR-16; omp clears before
+        # step 5, regardless of which later tier ends up winning).
+        self._set_sticky(provider, session_id, None)
 
         # 5. Env var tier (process env, then legacy credentials.env).
-        # Side effect from omp: the sticky entry is cleared before this tier
-        # returns so identity attribution stops for non-OAuth requests.
         env_key = self._env_api_key(provider)
         if env_key:
-            self._set_sticky(provider, session_id, None)
-            return env_key
+            return env_key, None
 
         # 6. Stored api_key without source="login" (e.g. broker migration)
         stored_rows = [
@@ -473,16 +566,13 @@ class AuthStore:
             key = row.data.get("key")
             if key:
                 self._set_sticky(provider, session_id, row.id)
-                return key
-
+                return key, row
         # 7. Fallback resolver
         resolver = self._fallback_resolvers.get(provider)
         if resolver is not None:
-            return resolver(provider)
+            return resolver(provider), None
 
-        if definition is not None and definition.allows_missing_api_key:
-            return None
-        return None
+        return None, None
 
     def _env_api_key(self, provider: str) -> str | None:
         definition = get_provider_definition(provider)

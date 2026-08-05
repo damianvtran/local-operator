@@ -70,12 +70,16 @@ async def poll_device_code_flow(
     expires_in_seconds: float = 900.0,
     signal: AbortSignal | None = None,
     on_progress: Callable[[str], Awaitable[None] | None] | None = None,
+    interval_holder: list[float] | None = None,
 ) -> T:
     """Poll ``poll_fn`` until it completes, fails, expires, or is aborted.
 
     ``poll_fn`` must classify provider errors itself (authorization_pending →
     ``pending``, slow_down → ``slow_down``, expired_token/access_denied →
     ``failed``) and return :class:`DevicePollResult`.
+    ``interval_holder`` is a mutable list the poller reads on every loop
+    (PR-10): providers whose slow_down payload carries a larger interval
+    append to it, and the poller honours the latest value as a floor.
     """
     interval = max(MIN_INTERVAL_SECONDS, float(interval_seconds))
     deadline = time.monotonic() + float(expires_in_seconds)
@@ -86,6 +90,9 @@ async def poll_device_code_flow(
             raise LoginCancelledError(signal.reason or "Login cancelled")
 
         if not first:
+            # Providers may demand a larger poll interval via the holder.
+            if interval_holder:
+                interval = max(interval, float(interval_holder[-1]))
             # Sleep in small slices so abort/expiry stay responsive.
             wait_until = time.monotonic() + interval
             while True:

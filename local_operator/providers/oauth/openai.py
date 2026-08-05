@@ -41,6 +41,8 @@ DEVICE_PAGE_URL = "https://auth.openai.com/codex/device"
 DEVICE_REDIRECT_URI = "https://auth.openai.com/deviceauth/callback"
 
 SCOPES = "openid profile email offline_access api.connectors.read api.connectors.invoke"
+# Our product's originator for the IdP's telemetry; intentionally not the
+# omp value — local-operator identifies itself (PR-23).
 ORIGINATOR = "local-operator"
 
 CALLBACK_PORT = 1455
@@ -96,6 +98,11 @@ def identity_from_id_token(id_token: str) -> dict[str, Any]:
     return identity
 
 
+# 5-minute mint skew so a fresh token never dies mid-request (parity with
+# the anthropic/kimi/xai flows; PR-08).
+EXPIRY_SKEW_MS = 5 * 60 * 1000
+
+
 def _credentials_from_token(token: dict[str, Any]) -> dict[str, Any]:
     access = token.get("access_token")
     refresh = token.get("refresh_token")
@@ -104,12 +111,22 @@ def _credentials_from_token(token: dict[str, Any]) -> dict[str, Any]:
     creds: dict[str, Any] = {
         "refresh": refresh,
         "access": access,
-        "expires": int(time.time() * 1000) + int(token.get("expires_in", 3600)) * 1000,
+        "expires": int(time.time() * 1000) + int(token.get("expires_in", 3600)) * 1000 - EXPIRY_SKEW_MS,
         "authorized_at": int(time.time() * 1000),
     }
+    # Identity: account_id/org_id are REQUIRED — ChatGPT tokens are routed
+    # by account id (chatgpt-account-id), so a row without them cannot
+    # stream. Fail hard at login even when the IdP omitted the id_token
+    # entirely (PR-08).
     id_token = token.get("id_token")
     if id_token:
-        creds.update(identity_from_id_token(id_token))
+        identity = identity_from_id_token(id_token)
+    else:
+        raise LoginError(
+            "OpenAI token response carried no id_token; cannot determine the "
+            "ChatGPT account required for inference. Try the device-code login."
+        )
+    creds.update(identity)
     return creds
 
 
@@ -162,6 +179,7 @@ class OpenAIOAuthFlow(OAuthCallbackFlow):
             "grant_type": "authorization_code",
             "client_id": CLIENT_ID,
             "code": code,
+            "state": state,  # PR-13: echo the verified state on exchange
             "redirect_uri": redirect_uri,
             "code_verifier": self._verifier,
         }

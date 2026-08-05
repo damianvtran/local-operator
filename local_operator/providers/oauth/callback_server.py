@@ -123,6 +123,7 @@ class OAuthCallbackFlow(ABC):
         self._pending_auth_url: str | None = None
         self._captured: asyncio.Future[tuple[str, str]] | None = None
         self._capture_error: asyncio.Future[str] | None = None
+        self._sent_state: str | None = None
 
     # -- subclass hooks ----------------------------------------------------
 
@@ -212,9 +213,31 @@ class OAuthCallbackFlow(ABC):
                 code = query.get("code", "")
                 state = query.get("state", "")
                 if code:
-                    self._finish(code, state)
-                body = b"<html><body><h1>Login complete</h1><p>You may close this tab.</p></body></html>"
-                await self._respond(writer, 200, body)
+                    # PR-13: a pinned loopback port accepts any local
+                    # connection — verify the state we sent before trusting
+                    # the code.
+                    if self._sent_state is not None and not secrets.compare_digest(
+                        state, self._sent_state
+                    ):
+                        self._finish_error(
+                            "Authorization callback state mismatch — stale tab or forged "
+                            "redirect. Restart the login."
+                        )
+                        body = b"<html><body><h1>Login failed</h1><p>You may close this tab.</p></body></html>"
+                        await self._respond(writer, 200, body)
+                    else:
+                        self._finish(code, state)
+                        body = b"<html><body><h1>Login complete</h1><p>You may close this tab.</p></body></html>"
+                        await self._respond(writer, 200, body)
+                else:
+                    # PR-14: no code AND no error — fail the login promptly
+                    # instead of hanging out the 300 s timeout.
+                    self._finish_error(
+                        "Authorization callback arrived with neither a code nor an error "
+                        "parameter. Restart the login."
+                    )
+                    body = b"<html><body><h1>Login failed</h1><p>You may close this tab.</p></body></html>"
+                    await self._respond(writer, 200, body)
         elif path == "/launch" and method == "GET":
             if self._pending_auth_url:
                 await self._respond(writer, 302, b"", extra_headers=[("Location", self._pending_auth_url)])
@@ -282,6 +305,7 @@ class OAuthCallbackFlow(ABC):
         self._captured = loop.create_future()
         self._capture_error = loop.create_future()
         state = secrets.token_hex(16)
+        self._sent_state = state
         try:
             if not self.options.manual_input_only:
                 await self._start_server()

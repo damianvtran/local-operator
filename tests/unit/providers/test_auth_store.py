@@ -217,15 +217,53 @@ async def test_rotate_sibling_usage_limit_preserves_sticky(store: AuthStore) -> 
 
 
 async def test_invalidated_token_soft_deletes_row(store: AuthStore) -> None:
+    """Only TRUE invalidation signals soft-delete (PR-03): an explicit
+    revocation marker, never a generic expired/unauthorized 401."""
     store.upsert_credential("openai", {"key": "k1", "type": "api_key"})
     from local_operator.providers.failover import ProviderError
 
-    invalidated = ProviderError(401, "invalid api key", auth_error=True)
-    store.rotate_sibling("openai", None, invalidated, api_key="k1")
+    revoked = ProviderError(401, "Your OAuth token has been revoked", auth_error=True)
+    store.rotate_sibling("openai", None, revoked, api_key="k1")
     rows = store.list_credentials("openai")
     assert rows == []
     all_rows = store.list_credentials("openai", include_disabled=True)
     assert all_rows[0].disabled_cause == "invalidated-token"
+
+
+async def test_expired_token_401_is_not_invalidated(store: AuthStore) -> None:
+    """An ordinary expired-token 401 must NOT soft-delete — the row stays
+    enabled so the a/b/c refresh step (b) can recover it (PR-03)."""
+    store.upsert_credential("openai", {"key": "k1", "type": "api_key"})
+    from local_operator.providers.failover import ProviderError
+
+    expired = ProviderError(401, "invalid_request_error: token expired", auth_error=True)
+    store.rotate_sibling("openai", None, expired, api_key="k1")
+    # Blocked (backoff) but NOT soft-deleted.
+    all_rows = store.list_credentials("openai", include_disabled=True)
+    assert all_rows[0].disabled_cause is None
+    store.clear_blocks(all_rows[0].id)
+    assert await store.get_api_key("openai") == "k1"
+
+
+async def test_refresh_recovers_expired_token_row_stays_enabled(
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: an expired-token 401 goes through refresh; the credential
+    row survives enabled and serves the refreshed bearer (PR-03)."""
+    import time
+
+    expired = _oauth(expires=int(time.time() * 1000) - 60_000)
+    expired["org_id"] = "org-1"
+    store.upsert_credential("openai", expired)
+
+    async def fake_refresh(creds: dict[str, Any]) -> dict[str, Any]:
+        return {"access": "access-fresh", "expires": int(time.time() * 1000) + 3600_000}
+
+    monkeypatch.setattr(store, "_refresh_fn", lambda provider: fake_refresh)
+    key = await store.get_api_key("openai", force_refresh=True)
+    assert key == "access-fresh"
+    rows = store.list_credentials("openai")
+    assert len(rows) == 1 and rows[0].disabled_cause is None
 
 
 async def test_upsert_identity_dedupes_oauth_rows(store: AuthStore) -> None:
@@ -242,3 +280,108 @@ async def test_upsert_identity_dedupes_oauth_rows(store: AuthStore) -> None:
     other["org_id"] = "org-2"
     third = store.upsert_credential("openai", other)
     assert third.id != first.id
+
+
+async def test_refresh_never_rewrites_org_fields(store: AuthStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR-12: a refresh fn that TRIES to clobber org_id/org_name/authorized_at
+    cannot — the stored values are restored over the merge."""
+    import time
+
+    expired = _oauth(expires=int(time.time() * 1000) + 1000)
+    expired.update(org_id="org-original", org_name="Original Org", authorized_at=12345)
+    store.upsert_credential("openai", expired)
+
+    async def clobbering_refresh(creds: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "access": "access-2",
+            "expires": int(time.time() * 1000) + 3600_000,
+            "org_id": "org-HIJACKED",
+            "org_name": "Hijacked Org",
+            "authorized_at": 999999,
+        }
+
+    monkeypatch.setattr(store, "_refresh_fn", lambda provider: clobbering_refresh)
+    key = await store.get_api_key("openai")
+    assert key == "access-2"
+    row = store.list_credentials("openai")[0]
+    assert row.data["org_id"] == "org-original"
+    assert row.data["org_name"] == "Original Org"
+    assert row.data["authorized_at"] == 12345
+
+
+async def test_sticky_cleared_when_leaving_oauth_tier(
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR-16: once resolution leaves the OAuth tier, the session sticky no
+    longer attributes the OAuth account — cleared before the env tier runs,
+    whatever later tier wins."""
+    store.upsert_credential("openai", _oauth())
+    await store.get_api_key("openai", session_id="s1")
+    oauth_row_id = store._sticky.get(("openai", "s1"))
+    assert oauth_row_id is not None
+
+    # Block the only OAuth credential so resolution falls through.
+    store.block_credential(oauth_row_id, "openai", block_ms=60_000)
+    store.upsert_credential("openai", {"key": "stored", "type": "api_key"})
+    key = await store.get_api_key("openai", session_id="s1")
+    assert key == "stored"
+    # Sticky must NOT still attribute the blocked OAuth row.
+    assert store._sticky.get(("openai", "s1")) != oauth_row_id
+
+    # Env tier winning also leaves sticky cleared (the original side effect).
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+    assert await store.get_api_key("openai", session_id="s1") == "env-key"
+    assert ("openai", "s1") not in store._sticky
+
+
+async def test_force_refresh_without_oauth_falls_through(
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR-15: force_refresh=True with NO oauth credential must reach tiers
+    4-7 instead of raising."""
+    store.upsert_credential("openai", {"key": "pasted", "source": "login", "type": "api_key"})
+    assert await store.get_api_key("openai", force_refresh=True) == "pasted"
+
+
+async def test_get_oauth_access_oauth_vs_api_key(store: AuthStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR-01: get_oauth_access returns the identity-carrying record."""
+    creds = _oauth()
+    creds.update(org_id="org-1", account_id="acct-1", email="user@example.com")
+    store.upsert_credential("openai", creds)
+    access = await store.get_oauth_access("openai")
+    assert access is not None
+    assert access.kind == "oauth"
+    assert access.access_token == "access-1"
+    assert access.org_id == "org-1" and access.account_id == "acct-1"
+    assert access.email == "user@example.com"
+    assert access.credential_id > 0
+
+    # Overrides short-circuit to None (gateway-targeted keys carry no identity).
+    store.set_runtime_api_key("openai", "cli-key")
+    assert await store.get_oauth_access("openai") is None
+    store.set_runtime_api_key("openai", None)
+
+    # api_key tier → kind api_key.
+    store.upsert_credential("mistral", {"key": "pasted", "source": "login", "type": "api_key"})
+    mistral_access = await store.get_oauth_access("mistral")
+    assert mistral_access is not None and mistral_access.kind == "api_key"
+    assert mistral_access.access_token == "pasted"
+
+
+def test_db_and_sidecars_created_0600(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR-11: the DB file AND its WAL sidecars are 0600."""
+    import os
+    import stat
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "empty-config"))
+    db_path = tmp_path / "auth.db"
+    auth = AuthStore(db_path=db_path)
+    try:
+        auth.upsert_credential("openai", {"key": "k1", "type": "api_key"})
+        mode = stat.S_IMODE(os.stat(db_path).st_mode)
+        assert mode == 0o600
+        for sidecar in (db_path.with_name("auth.db-wal"), db_path.with_name("auth.db-shm")):
+            if sidecar.exists():
+                assert stat.S_IMODE(os.stat(sidecar).st_mode) == 0o600, sidecar.name
+    finally:
+        auth.close()

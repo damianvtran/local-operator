@@ -56,21 +56,26 @@ def _config_dir() -> Path:
 
 
 def get_or_create_device_id(config_dir: Path | None = None) -> str:
-    """Persist a stable device id (0600); ephemeral UUID if unwritable."""
+    """Persist a stable device id (0600); ephemeral UUID if unwritable.
+
+    The file is created with mode 0600 BEFORE the first write (os.open),
+    never written world-readable then chmod'd (PR-11).
+    """
     directory = config_dir or _config_dir()
     path = directory / DEVICE_ID_FILENAME
     try:
         if path.exists():
             stored = path.read_text().strip()
             if stored:
+                os.chmod(path, 0o600)
                 return stored
         device_id = str(uuid.uuid4())
         directory.mkdir(parents=True, exist_ok=True)
-        path.write_text(device_id + "\n")
+        fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
         try:
-            path.chmod(0o600)
-        except OSError:
-            pass
+            os.write(fd, (device_id + "\n").encode())
+        finally:
+            os.close(fd)
         return device_id
     except OSError:
         # Best-effort persistence: a per-process ephemeral id still works.
@@ -147,8 +152,10 @@ async def login_kimi(
         interval = float(authz.get("interval", DEFAULT_INTERVAL_SECONDS))
         expires_in = float(authz.get("expires_in", DEFAULT_TTL_SECONDS))
 
-        # Mutable holder lets slow_down communicate a provider-requested interval.
+        # Mutable holder lets slow_down communicate a provider-requested
+        # interval into the shared poller (PR-10).
         poll_interval_holder: list[float] = []
+
         async def _poll() -> DevicePollResult[dict[str, Any]]:
             response = await http.post(
                 f"{host}{TOKEN_PATH}",
@@ -188,9 +195,8 @@ async def login_kimi(
             expires_in_seconds=expires_in,
             signal=signal,
             on_progress=callbacks.on_progress,
+            interval_holder=poll_interval_holder,
         )
-        if poll_interval_holder:
-            token.setdefault("_interval", poll_interval_holder[-1])
         return _credentials_from_token(token, old_refresh=None)
     finally:
         if owns_client:
