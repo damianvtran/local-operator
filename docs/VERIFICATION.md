@@ -158,7 +158,6 @@ never held.
 After the engine review remediation (compaction blockers, cache layout,
 abort/continuation contract, message breakpoints):
 
-- Wait, this doc lives at the bottom; appending:
 - Full unit suite: **1391 passed, 3 skipped, 0 failed** (encompasses the TUI,
   server, providers, skills, compaction, harness, scheduler).
 - `scripts/bench_cache_rate.py --turns 4`: **93.5%** structural stability

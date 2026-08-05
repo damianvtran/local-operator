@@ -61,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _install_sigterm_handler(
-    loop: asyncio.AbstractEventLoop, session_box: list, interrupted: asyncio.Event
+    loop: asyncio.AbstractEventLoop, session_box: list[object], interrupted: asyncio.Event
 ) -> None:
     """SIGTERM -> signal ``interrupted``; async_main returns 130 (CL-03).
 
@@ -136,7 +136,7 @@ def run(parsed: argparse.Namespace, session_factory: "Callable[[], Any] | None" 
     async def async_main() -> int:
         loop = asyncio.get_running_loop()
         interrupted = asyncio.Event()
-        session_box: list = []
+        session_box: list[object] = []
         _install_sigterm_handler(loop, session_box, interrupted)
 
         session = factory()

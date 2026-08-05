@@ -92,7 +92,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
 BOOT_HINT = "type a message, or /help for commands"
 
 
-class OperatorApp(App):
+class OperatorApp(App[None]):
     """Full-screen TUI over one ``SessionProtocol``."""
 
     TITLE = "Local Operator"
@@ -398,7 +398,7 @@ class OperatorApp(App):
     def on_turn_ended(self, message: TurnEnded) -> None:
         assert self._status is not None
         self._dismiss_working_block()
-        updates: dict = {"streaming": False}
+        updates: dict[str, object] = {"streaming": False}
         if message.context_tokens:
             updates["context_tokens"] = message.context_tokens
         cost = self._cost_for(message.usage)

@@ -738,7 +738,7 @@ def agents_delete_command(
 # --- Additive subcommand handlers (rewrite) --------------------------------
 
 
-def _build_auth_stack(config_dir: Path) -> tuple:
+def _build_auth_stack(config_dir: Path) -> tuple[Any, Any]:
     """(auth_store, credential_manager) for the login handlers.
 
     Lazy import of the providers stream's AuthStore — the CLI module top
