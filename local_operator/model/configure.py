@@ -318,7 +318,10 @@ def _info_from_listing(listing: Any, model_name: str, template: ModelInfo, sourc
         pricing_extra = getattr(model.pricing, "model_extra", None) or {}
         cache_read = pricing_extra.get("input_cache_read")
         cache_write = pricing_extra.get("input_cache_write")
-        if cache_read is not None:
+        # OpenRouter quotes "input_cache_read": "0" for models with no prompt
+        # caching; presence alone would flip the flag and change request shape
+        # for no benefit. Require a positive price.
+        if cache_read is not None and float(cache_read) > 0:
             info.supports_prompt_cache = True
             info.cache_reads_price = float(cache_read) * 1_000_000
             # Providers with implicit caching quote no write price; the read
@@ -449,26 +452,51 @@ def configure_model(
 
 
 def create_stream_fn(
-    auth_store: Any, settings: Mapping[str, Any] | None = None
+    auth_store: Any,
+    settings: Mapping[str, Any] | None = None,
+    *,
+    session_id: str | None = None,
 ) -> Callable[[ChatRequest, AbortSignal | None], AsyncIterator[StreamEvent]]:
     """Build the ``LoopConfig.stream_fn`` for a session.
 
     Resolves the API key through ``auth_store`` (7-step cascade + OAuth
     refresh), picks the wire client from the request's ``ModelSpec``, and
     wraps the call in credential-rotation + model-fallback failover.
+
+    One ``httpx.AsyncClient`` per session: every wire client shares it, and
+    ``close`` releases the connection pool on session dispose — a fresh
+    client per LLM round trip leaked one pool per turn for the process
+    lifetime. ``session_id`` rides into the failover layer so the auth store
+    keeps credential selection STICKY per session; without it the store
+    round-robins on every resolve and multi-credential providers alternate
+    accounts mid-conversation (cold cache prefix, alternating identity
+    headers).
     """
+    import httpx
+
     from local_operator.providers.clients import client_for_spec
     from local_operator.providers.failover import stream_with_failover
 
+    shared = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))
+
     def client_for(spec: ModelSpec) -> Any:
-        return client_for_spec(spec)
+        return client_for_spec(spec, http_client=shared)
 
     async def stream_fn(request: ChatRequest, signal: AbortSignal | None) -> AsyncIterator[StreamEvent]:
         async for event in stream_with_failover(
-            request, auth_store, settings, client_for, signal=signal
+            request,
+            auth_store,
+            settings,
+            client_for,
+            signal=signal,
+            session_id=session_id,
         ):
             yield event
 
+    async def close() -> None:
+        await shared.aclose()
+
+    stream_fn.close = close  # type: ignore[attr-defined]
     return stream_fn
 
 

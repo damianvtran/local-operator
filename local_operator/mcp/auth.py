@@ -247,25 +247,48 @@ def parse_oauth_callback_input(raw: str) -> tuple[str, str | None, str | None]:
     return code, state, iss
 
 
+#: The paste read is bounded: a connect that reaches the paste path on a
+#: non-interactive host must fail fast, not park the connect task forever.
+PASTE_INPUT_TIMEOUT_S = 300.0
+
+
 def _default_callback_handler() -> Any:
     """Build the callback handler: accept the pasted FULL redirect URL.
 
-    Headless fallback: the SDK hands us control between redirect and token
-    exchange, so we read the input from stdin in a worker thread (never
-    blocks the event loop). The user pastes the complete redirect URL (or a
-    ``code state`` pair); state and iss are parsed out and returned so the
-    SDK can complete its state validation (MCP-02).
+    The SDK hands us control between redirect and token exchange; we read the
+    input from stdin in a worker thread (never blocks the event loop). The
+    user pastes the complete redirect URL (or a ``code state`` pair); state
+    and iss are parsed out and returned so the SDK can complete its state
+    validation (MCP-02).
+
+    Gated on a real terminal: under the TUI (raw mode), the server (stdin
+    DEVNULL) and ``exec --background`` a bare ``input()`` scribbles over the
+    screen, raises EOFError, or parks forever — so without an interactive
+    stdin the handler fails fast with an actionable error, and the read is
+    bounded by :data:`PASTE_INPUT_TIMEOUT_S`.
     """
 
     async def callback_handler() -> Any:
         from mcp.shared.auth import AuthorizationCodeResult
+
+        if not sys.stdin.isatty():
+            raise RuntimeError(
+                "MCP OAuth requires an interactive terminal to paste the "
+                "redirect URL; run the login from a TTY (local-operator mcp "
+                "login <server>) or configure the server with a token."
+            )
 
         def _read_input() -> str:
             return input(
                 "Paste the full redirect URL (or 'code state' separated by a space): "
             ).strip()
 
-        raw = await asyncio.to_thread(_read_input)
+        try:
+            raw = await asyncio.wait_for(
+                asyncio.to_thread(_read_input), timeout=PASTE_INPUT_TIMEOUT_S
+            )
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("Timed out waiting for the pasted redirect URL") from exc
         code, state, iss = parse_oauth_callback_input(raw)
         return AuthorizationCodeResult(code=code, state=state, iss=iss)
 

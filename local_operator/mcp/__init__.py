@@ -25,7 +25,9 @@ __all__ = [
 
 
 async def discover_and_load_mcp_tools(
-    cwd: str, tool_cache: McpToolCache | None = None
+    cwd: str,
+    tool_cache: McpToolCache | None = None,
+    auth_store: Any = None,
 ) -> tuple[McpManager, list[Any], list[dict[str, str]]]:
     """Convenience loader mirroring omp's ``discoverAndLoadMCPTools``.
 
@@ -40,7 +42,7 @@ async def discover_and_load_mcp_tools(
     A hard discovery failure never raises: it yields the manager, an empty
     tool list, and one synthetic error entry (omp behavior).
     """
-    manager = McpManager(cwd, tool_cache)
+    manager = McpManager(cwd, tool_cache, auth_store=auth_store)
     try:
         result = await manager.discover_and_connect()
     except Exception as exc:

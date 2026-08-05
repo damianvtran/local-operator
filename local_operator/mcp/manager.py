@@ -403,9 +403,21 @@ class McpManager:
     ``disconnect_all`` on dispose; borrowers (future subagents) must not.
     """
 
-    def __init__(self, cwd: str | os.PathLike[str], tool_cache: McpToolCache | None = None) -> None:
+    def __init__(
+        self,
+        cwd: str | os.PathLike[str],
+        tool_cache: McpToolCache | None = None,
+        auth_store: Any = None,
+    ) -> None:
         self.cwd = str(cwd)
         self.tool_cache = tool_cache
+        # The session's AuthStore, when injected: every OAuth MCP server's
+        # token storage shares it instead of opening its own SQLite
+        # connection (which nothing closed — one leaked WAL handle per
+        # reconnect). None means the manager constructs and owns one, closed
+        # in disconnect_all.
+        self.auth_store = auth_store
+        self._owns_auth_store = auth_store is None
         self._configs: dict[str, MCPServerConfig] = {}
         self._sources: dict[str, str] = {}
         self._connections: dict[str, ServerConnection] = {}
@@ -694,6 +706,12 @@ class McpManager:
         self._watchers.clear()
         self._tools_by_server.clear()
         self._connections.clear()
+        if self._owns_auth_store and self.auth_store is not None:
+            try:
+                self.auth_store.close()
+            except Exception:  # noqa: BLE001 — teardown must not raise
+                logger.debug("closing manager-owned auth store failed", exc_info=True)
+            self.auth_store = None
 
     # --- connection lifecycle ----------------------------------------------
 
@@ -778,6 +796,20 @@ class McpManager:
         conn.session = session
         return conn
 
+    def _effective_auth_store(self) -> Any:
+        """The injected session store, or one this manager owns and closes."""
+        if self.auth_store is not None:
+            return self.auth_store
+        try:
+            from local_operator.providers.auth_store import AuthStore
+
+            self.auth_store = AuthStore()
+            self._owns_auth_store = True
+            return self.auth_store
+        except Exception:  # pragma: no cover - environment dependent
+            logger.debug("providers.auth_store unavailable", exc_info=True)
+            return None
+
     def _build_oauth_auth(self, url: str, cfg: MCPServerConfig) -> Any | None:
         """Build an ``OAuthClientProvider`` for configs with ``auth.type=oauth``."""
         auth = getattr(cfg, "auth", None)
@@ -788,7 +820,9 @@ class McpManager:
 
             from local_operator.mcp.auth import wire_oauth_auth
 
-            return OAuthClientProvider(**wire_oauth_auth(url, cfg))
+            return OAuthClientProvider(
+                **wire_oauth_auth(url, cfg, store=self._effective_auth_store())
+            )
         except Exception:
             logger.warning(
                 "OAuth wiring unavailable for %r; connecting unauthenticated", url, exc_info=True

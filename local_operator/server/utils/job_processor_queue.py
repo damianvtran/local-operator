@@ -11,7 +11,7 @@ import logging
 import multiprocessing
 from multiprocessing import Process, Queue
 from typing import TYPE_CHECKING, Callable, List, Optional  # Added TYPE_CHECKING
-from uuid import UUID
+
 
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
@@ -22,7 +22,7 @@ from local_operator.jobs import JobContext, JobContextRecord, JobManager, JobSta
 # from local_operator.scheduler_service import SchedulerService # Moved to TYPE_CHECKING
 from local_operator.server.utils.operator import ExecutorInitError, create_operator
 from local_operator.server.utils.websocket_manager import WebSocketManager
-from local_operator.types import ConversationRecord, Schedule
+from local_operator.types import ConversationRecord
 
 if TYPE_CHECKING:
     from local_operator.scheduler_service import SchedulerService
@@ -345,44 +345,11 @@ def create_and_start_job_process_with_queue(
                                 _, received_job_id, message = message
 
                                 await websocket_manager.broadcast_update(received_job_id, message)
-                            elif msg_type == "schedule_add" and len(message) == 2:
-                                # Schedule add message: (type, schedule)
-                                _, schedule = message
-
-                                if schedule is not None and isinstance(schedule, Schedule):
-                                    try:
-                                        scheduler_service.add_or_update_job(schedule)
-                                    except Exception as e:
-                                        logger.error(
-                                            f"Failed to add schedule via status_queue: {e}"
-                                        )
-                                else:
-                                    logger.error(
-                                        "schedule_add message did not contain a valid"
-                                        f"Schedule object: {schedule}"
-                                    )
-                            elif msg_type == "schedule_remove" and len(message) == 2:
-                                # Schedule remove message: (type, schedule_id)
-                                _, schedule_id = message
-
-                                if schedule_id is not None and (
-                                    isinstance(schedule_id, UUID) or isinstance(schedule_id, str)
-                                ):
-                                    try:
-                                        if isinstance(schedule_id, str):
-                                            schedule_id_uuid = UUID(schedule_id)
-                                        else:
-                                            schedule_id_uuid = schedule_id
-                                        scheduler_service.remove_job(schedule_id_uuid)
-                                    except Exception as e:
-                                        logger.error(
-                                            f"Failed to remove schedule via status_queue: {e}"
-                                        )
-                                else:
-                                    logger.error(
-                                        "schedule_remove message did not contain a valid"
-                                        f"schedule_id: {schedule_id}"
-                                    )
+                            # schedule_add / schedule_remove frames were
+                            # produced by the legacy executor's agent
+                            # scheduling tools; the rewritten tool table has
+                            # none and /v1/schedules is the only creation
+                            # path, so the branches are dead and deleted.
                         elif len(message) == 3:
                             # Legacy format: (job_id, status, result)
                             received_job_id, status, result = message

@@ -285,6 +285,13 @@ def load_all_mcp_configs(
     sources: dict[str, str] = {}
 
     claude_path = home / ".claude.json"
+    # First pass: collect every candidate per name (priority order) and the
+    # enable/disable lists. Suppression is evaluated in a SECOND pass over the
+    # full candidate lists: collapsing first-seen-wins before suppression
+    # (the old shape) let a project entry with ``enabled: false`` claim the
+    # name slot, block the user-level entry of the same name, and then get
+    # deleted — leaving the server absent instead of falling back.
+    per_name: dict[str, list[tuple[MCPServerConfig, str]]] = {}
     for path, key_path in candidates:
         doc = _read_json(path)
         if doc is None:
@@ -298,21 +305,22 @@ def load_all_mcp_configs(
         else:
             server_entries = _imported_servers(doc, key_path)
         for name, raw in server_entries.items():
-            if name in configs:
-                continue  # first-seen wins; later sources never override
             cfg = _coerce_server_config(raw)
             if cfg is None:
                 continue  # unparsable entry; validation flags it if referenced
-            configs[name] = cfg
-            sources[name] = str(path)
+            per_name.setdefault(name, []).append((cfg, str(path)))
 
-    # Resolution: denylist beats allowlist beats `enabled: false`.
-    for name in list(configs):
-        cfg = configs[name]
-        suppressed = name in disabled or (cfg.enabled is False and name not in enabled)
-        if suppressed:
-            del configs[name]
-            del sources[name]
+    # Resolution: denylist beats allowlist beats ``enabled: false``; the first
+    # NON-suppressed candidate in priority order wins the name.
+    configs: dict[str, MCPServerConfig] = {}
+    sources: dict[str, str] = {}
+    for name, entries in per_name.items():
+        for cfg, source in entries:
+            suppressed = name in disabled or (cfg.enabled is False and name not in enabled)
+            if not suppressed:
+                configs[name] = cfg
+                sources[name] = source
+                break
 
     return configs, sources
 
