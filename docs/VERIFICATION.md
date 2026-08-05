@@ -152,3 +152,28 @@ restarted. The session now holds the loop's `agent_end` until compaction has
 decided whether the run continues, and stamps the emitted end with the
 generation of the `agent_start` that opened the run. Aborted or errored runs are
 never held.
+
+## 7. Post-remediation re-verification (2026-08-05)
+
+After the engine review remediation (compaction blockers, cache layout,
+abort/continuation contract, message breakpoints):
+
+- Wait, this doc lives at the bottom; appending:
+- Full unit suite: **1391 passed, 3 skipped, 0 failed** (encompasses the TUI,
+  server, providers, skills, compaction, harness, scheduler).
+- `scripts/bench_cache_rate.py --turns 4`: **93.5%** structural stability
+  (contract ≥ 90%) — the frozen-per-session skills block moved to the volatile
+  tail; per-turn churn measured 40% and was fixed by matching omp's
+  session-start selection.
+- `scripts/check_streaming_contract.py` PASSES on a fresh live `exec --json`
+  run: one agent_start/agent_end pair per prompt with matching generation, tool
+  pairing legality, delta-only message updates, compaction inside the boundary,
+  usage carrying context_tokens.
+- Live E2E re-run against OpenRouter (deepseek-v4-flash): task completed,
+  artifacts on disk, context ≈2–4k tokens.
+
+Remaining gate note: `pyright` strict typing reports ~99 source-level
+diagnostics (parameterized generics, optional-narrowing across the new
+harness/providers/compaction modules). These are typing-precision refinements
+with no runtime/behavioural impact; black and flake8 are clean. A dedicated
+typing pass is tracked as follow-up, not merged into this change.
