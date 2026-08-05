@@ -581,14 +581,33 @@ class AgentLoop:
         synthetic skipped result so tool_use/tool_result pairing stays legal.
         On generator cancellation (GeneratorExit) every runner task is
         cancelled before this generator returns.
+
+        Results are keyed by BATCH SLOT, not call id: a model can emit two
+        calls with the same id in one batch, and keying by id made the two
+        slots collide into one result (duplicate tool_result ids on the wire,
+        which Anthropic rejects). A slot whose call failed planning never
+        runs; its synthetic result is parked in its slot up front.
         """
         queue: asyncio.Queue[Any] = asyncio.Queue()
-        results_by_id: dict[str, ToolResult] = {}
+        results_by_slot: list[ToolResult | None] = [None] * len(batch)
         tasks: list[asyncio.Task[ToolResult]] = []
         poll_interruptible = (
             config.interrupt_mode == "immediate" and config.has_steering_messages is not None
         )
-        async def runner(item: _PlannedCall) -> None:
+
+        def park(slot: int, item: _PlannedCall, result: ToolResult) -> None:
+            results_by_slot[slot] = result
+            queue.put_nowait(
+                ToolExecutionEndEvent(
+                    tool_call_id=item.call.id,
+                    tool_name=item.tool.name if item.tool is not None else item.call.name,
+                    result=result,
+                    is_error=result.is_error,
+                )
+            )
+            queue.put_nowait(_TOOL_DONE)
+
+        async def runner(slot: int, item: _PlannedCall) -> None:
             tool_name = item.tool.name if item.tool is not None else item.call.name
             await queue.put(
                 ToolExecutionStartEvent(
@@ -601,30 +620,11 @@ class AgentLoop:
                 # Cancelled (abort/GeneratorExit): pair the call with a
                 # synthetic aborted result so tool_use/tool_result pairing
                 # stays legal, then propagate the cancellation.
-                result = self._synthetic_result(item.call, ABORTED_RESULT_TEXT)
-                results_by_id[item.call.id] = result
-                queue.put_nowait(
-                    ToolExecutionEndEvent(
-                        tool_call_id=item.call.id,
-                        tool_name=tool_name,
-                        result=result,
-                        is_error=result.is_error,
-                    )
-                )
-                queue.put_nowait(_TOOL_DONE)
+                park(slot, item, self._synthetic_result(item.call, ABORTED_RESULT_TEXT))
                 raise
-            results_by_id[item.call.id] = result
-            await queue.put(
-                ToolExecutionEndEvent(
-                    tool_call_id=item.call.id,
-                    tool_name=tool_name,
-                    result=result,
-                    is_error=result.is_error,
-                )
-            )
-            await queue.put(_TOOL_DONE)
+            park(slot, item, result)
 
-        async def interruptible_runner(item: _PlannedCall) -> None:
+        async def interruptible_runner(slot: int, item: _PlannedCall) -> None:
             tool_name = item.tool.name if item.tool is not None else item.call.name
             await queue.put(
                 ToolExecutionStartEvent(
@@ -658,23 +658,22 @@ class AgentLoop:
                     else ABORTED_RESULT_TEXT
                 )
                 result = self._synthetic_result(item.call, text)
-            results_by_id[item.call.id] = result
-            await queue.put(
-                ToolExecutionEndEvent(
-                    tool_call_id=item.call.id,
-                    tool_name=tool_name,
-                    result=result,
-                    is_error=result.is_error,
-                )
-            )
-            await queue.put(_TOOL_DONE)
+            park(slot, item, result)
 
         try:
-            for item in batch:
-                interruptible = item.tool is not None and item.tool.interruptible
+            for slot, item in enumerate(batch):
+                if item.failure is not None or item.tool is None:
+                    # Duplicate-id and resolution failures never execute: the
+                    # synthetic result parks in the slot without a task, so
+                    # two slots can never collide on one results entry.
+                    park(slot, item, item.failure or self._synthetic_result(item.call, "Tool not found."))
+                    continue
+                interruptible = item.tool.interruptible
                 tasks.append(
                     asyncio.ensure_future(
-                        interruptible_runner(item) if interruptible and poll_interruptible else runner(item)
+                        interruptible_runner(slot, item)
+                        if interruptible and poll_interruptible
+                        else runner(slot, item)
                     )
                 )
             finished = 0
@@ -685,7 +684,9 @@ class AgentLoop:
                     continue
                 yield item
             await asyncio.gather(*tasks, return_exceptions=True)
-            results.extend(results_by_id[item.call.id] for item in batch)
+            results.extend(
+                result for result in results_by_slot if result is not None
+            )
         finally:
             # GeneratorExit / abort: never leave runner tasks behind.
             for task in tasks:

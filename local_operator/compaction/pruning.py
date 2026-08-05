@@ -142,16 +142,30 @@ def _is_prunable(message: Message) -> bool:
 def _supersede_key(message: Message) -> str | None:
     """Group key for supersede detection.
 
-    ``(tool_name, details['path'])`` when a path is present: a later result
-    for the same tool reading the same file supersedes the earlier one.
-    Results without a path are exempt — grouping them by bare tool name would
-    blank legitimately distinct outputs (two different bash runs, two
-    searches). Mirrors omp, where only path-carrying read results supersede.
+    ``(tool_name, details['path'], details['range'])`` when a path is present:
+    a later result for the same tool reading the same file supersedes the
+    earlier one. Results without a path are exempt — grouping them by bare
+    tool name would blank legitimately distinct outputs (two different bash
+    runs, two searches). Mirrors omp, where only path-carrying read results
+    supersede.
+
+    The range rides in the key: a ranged read must NOT supersede a different
+    range of the same file (they share not one line), while a full-file read
+    supersedes every earlier range — handled in the pass below.
     """
     details = _details_of(message)
     path = details.get("path")
     if isinstance(path, str) and path and message.tool_name:
-        return f"{message.tool_name}:{path}"
+        return f"{message.tool_name}:{path}:{details.get('range') or 'full'}"
+    return None
+
+
+def _supersede_path_range(message: Message) -> tuple[str, str | None] | None:
+    """(path, range-or-None) for the supersede pass."""
+    details = _details_of(message)
+    path = details.get("path")
+    if isinstance(path, str) and path and message.tool_name:
+        return path, details.get("range")
     return None
 
 
@@ -198,8 +212,10 @@ def prune_tool_outputs(
     suffix_tokens = compute_suffix_tokens(messages)
 
     # Pass (a): superseded reads. Walk newest-to-oldest; a seen key marks any
-    # earlier result with the same key superseded.
+    # earlier result with the same key superseded, and a seen FULL read marks
+    # any earlier RANGED read of the same path superseded (never the reverse).
     seen_keys: set[str] = set()
+    seen_full_paths: set[str] = set()
     superseded: list[int] = []
     for i in range(len(messages) - 1, -1, -1):
         message = messages[i]
@@ -212,9 +228,17 @@ def prune_tool_outputs(
         key = _supersede_key(message)
         if key is None:
             continue
-        if key in seen_keys:
+        path_range = _supersede_path_range(message)
+        is_superseded = key in seen_keys or (
+            path_range is not None
+            and path_range[1] is not None
+            and path_range[0] in seen_full_paths
+        )
+        if is_superseded:
             superseded.append(i)
         seen_keys.add(key)
+        if path_range is not None and path_range[1] is None:
+            seen_full_paths.add(path_range[0])
 
     # Pass (b): useless-flagged results (excluding supersede victims).
     superseded_set = set(superseded)

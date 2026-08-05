@@ -379,8 +379,11 @@ async def execute_bash(
         return _validation_error(tool_call_id, "bash", exc)
     if not params.command.strip():
         return _error(tool_call_id, "bash", "command must be a non-empty string")
-    if not await _check_approval(context, "exec", f"bash: {params.command}"):
-        return _error(tool_call_id, "bash", "User declined to run this command.")
+    # Approval for write/exec tiers is the LOOP's gate (it fires after
+    # tool_execution_start so the UI shows the pending call). A second gate
+    # here made the user answer twice per action, with the tier name rendered
+    # as the tool. Read-tier outside-workspace escalations still use
+    # _check_approval in execute_read/execute_grep.
 
     # Pre-aborted signal: never spawn a child there is no intention to run.
     if signal is not None and signal.aborted:
@@ -690,7 +693,10 @@ async def execute_read(
             tool_call_id,
             "read",
             _number_lines(selected, start),
-            details={"path": str(path)},
+            # The range rides in details: compaction's supersede key must
+            # distinguish ranged reads of the same file, or a read of lines
+            # 900-1000 blanks an unrelated 1-100 read as "superseded".
+            details={"path": str(path), "range": params.range},
         )
 
     if len(lines) > READ_LINE_CAP:
@@ -751,11 +757,8 @@ async def execute_write(
         return _validation_error(tool_call_id, "write", exc)
     if not params.path.strip():
         return _error(tool_call_id, "write", "path must be a non-empty string")
-
+    # Write-tier approval is the loop's gate; see execute_bash.
     path, inside = _resolve_workspace_path(params.path, _safe_cwd(context))
-    description = _approval_description(path, inside, "write")
-    if not await _check_approval(context, "write", description):
-        return _error(tool_call_id, "write", "User declined to write this file.")
 
     existed = path.exists()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -844,9 +847,7 @@ async def execute_edit(
             f"old_text matches {occurrences} places; include more surrounding "
             "context to make it unique, or set replace_all=true.",
         )
-    description = _approval_description(path, inside, "edit")
-    if not await _check_approval(context, "write", description):
-        return _error(tool_call_id, "edit", "User declined to edit this file.")
+    # Write-tier approval is the loop's gate; see execute_bash.
 
     if params.replace_all:
         updated = content.replace(params.old_text, params.new_text)
@@ -915,10 +916,15 @@ async def execute_glob(
         )
 
     root = Path(_safe_cwd(context))
-    matches = sorted(
-        p.relative_to(root).as_posix() + ("/" if p.is_dir() else "")
-        for p in root.glob(pattern)
+    # An unbounded ``**`` walk is filesystem work that can freeze the session;
+    # off the event loop and raced against abort like the grep scan.
+    matches, aborted = await _run_with_abort(
+        asyncio.to_thread(_glob_walk, root, pattern),
+        signal,
+        lambda: None,
     )
+    if aborted:
+        return _error(tool_call_id, "glob", "Glob aborted.")
     if not matches:
         return _text(
             tool_call_id,
@@ -972,6 +978,14 @@ class GrepParams(BaseModel):
     case: bool = Field(default=True, description="Case-sensitive matching.")
 
 
+
+def _glob_walk(root: Path, pattern: str) -> list[str]:
+    """The walk half of execute_glob, run in a worker thread."""
+    return sorted(
+        p.relative_to(root).as_posix() + ("/" if p.is_dir() else "")
+        for p in root.glob(pattern)
+    )
+
 def _glob_matches(rel_path: str, pattern: str) -> bool:
     """Match ``rel_path`` against ``pattern`` (basename fallback for bare globs)."""
     if fnmatch.fnmatch(rel_path, pattern):
@@ -1002,6 +1016,61 @@ def _walk_files(root: Path) -> list[Path]:
 
     _walk(root)
     return files
+
+#: Wall-clock cap for one grep scan. Bounds the pathological-regex case
+#: (backtracking patterns on large lines) without classifying regexes; a
+#: scan that hits it returns what it has so far.
+GREP_SCAN_DEADLINE_S = 30.0
+
+
+def _grep_scan(
+    files: list[Path],
+    base: Path,
+    regex: re.Pattern[str],
+    include: str | None,
+) -> tuple[list[str], int, int]:
+    """The filesystem+regex half of execute_grep, run in a worker thread.
+
+    Returns ``(matches, files_searched, files_skipped)``. Kept synchronous and
+    self-contained so ``asyncio.to_thread`` can carry it off the event loop;
+    the deadline bounds a backtracking pattern without touching the loop.
+    """
+    deadline = time.monotonic() + GREP_SCAN_DEADLINE_S
+    matches: list[str] = []
+    files_searched = 0
+    files_skipped = 0
+    for file_path in files:
+        if time.monotonic() > deadline:
+            break
+        rel = (
+            file_path.relative_to(base).as_posix()
+            if base in file_path.parents or file_path == base
+            else file_path.as_posix()
+        )
+        if include and not _glob_matches(rel, include):
+            continue
+        try:
+            if file_path.stat().st_size > GREP_FILE_LIMIT_BYTES:
+                files_skipped += 1
+                continue
+            data = file_path.read_bytes()
+        except OSError:
+            continue
+        if b"\x00" in data[:8000]:
+            continue  # binary file
+        files_searched += 1
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            text = data.decode("utf-8", errors="replace")
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if regex.search(line):
+                matches.append(f"{rel}:{lineno}:{line}")
+                if len(matches) >= GREP_MATCH_LIMIT:
+                    break
+        if len(matches) >= GREP_MATCH_LIMIT:
+            break
+    return matches, files_searched, files_skipped
 
 
 @_guard("grep")
@@ -1041,38 +1110,19 @@ async def execute_grep(
         base = target
         files = _walk_files(target)
 
-    matches: list[str] = []
-    files_searched = 0
-    files_skipped = 0
-    for file_path in files:
-        rel = (
-            file_path.relative_to(base).as_posix()
-            if base in file_path.parents or file_path == base
-            else file_path.as_posix()
-        )
-        if params.include and not _glob_matches(rel, params.include):
-            continue
-        try:
-            if file_path.stat().st_size > GREP_FILE_LIMIT_BYTES:
-                files_skipped += 1
-                continue
-            data = file_path.read_bytes()
-        except OSError:
-            continue
-        if b"\x00" in data[:8000]:
-            continue  # binary file
-        files_searched += 1
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError:
-            text = data.decode("utf-8", errors="replace")
-        for lineno, line in enumerate(text.splitlines(), start=1):
-            if regex.search(line):
-                matches.append(f"{rel}:{lineno}:{line}")
-                if len(matches) >= GREP_MATCH_LIMIT:
-                    break
-        if len(matches) >= GREP_MATCH_LIMIT:
-            break
+    # The scan is FILESYSTEM + REGEX work on model-controlled input; running
+    # it on the event loop would pin the CPU on a backtracking pattern or a
+    # large tree and make Ctrl+C unprocessable. It runs in a worker thread
+    # raced against the abort signal, with a wall-clock cap bounding the
+    # pathological-regex case (regexes are not classified).
+    scan_result, aborted = await _run_with_abort(
+        asyncio.to_thread(_grep_scan, files, base, regex, params.include),
+        signal,
+        lambda: None,
+    )
+    if aborted:
+        return _error(tool_call_id, "grep", "Search aborted.")
+    matches, files_searched, files_skipped = scan_result
 
     if not matches:
         skipped_note = (
@@ -1221,6 +1271,8 @@ def build_todo_tool() -> AgentTool:
         label="Todo",
         description="Track a visible task list (init / done / view).",
         parameters=TodoParams.model_json_schema(),
+        # read tier exemption: todo mutates only session-local bookkeeping
+        # (no files, no autonomous turns), so it stays auto-approved.
         approval_tier="read",
         # omp: init rewrites the whole list; concurrent calls would lose one,
         # so the tool runs exclusive despite being cheap.
@@ -1352,7 +1404,10 @@ def build_wake_tool(context: ToolContext) -> AgentTool | None:
         label="Wake",
         description="Schedule a future wake (create/list/cancel), e.g. 'in 30m'.",
         parameters=WakeParams.model_json_schema(),
-        approval_tier="read",
+        # write tier: wake create persists schedules and arms unattended
+        # future agent turns — the only tool that creates autonomous
+        # execution, so it prompts like a mutation (the loop gates write/exec).
+        approval_tier="write",
         # omp: create/cancel rewrite the whole schedule list; two concurrent
         # calls would lose one, so the tool runs exclusive.
         concurrency="exclusive",
