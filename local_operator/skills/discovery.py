@@ -77,9 +77,7 @@ def parse_frontmatter(text: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _skill_from_file(
-    skill_md: Path, base_dir: Path, source: str
-) -> Skill | None:
+def _skill_from_file(skill_md: Path, base_dir: Path, source: str) -> Skill | None:
     """Build one Skill from a SKILL.md, or None when it must be skipped.
 
     Drop rules (omp parity): ``enabled: false`` skips entirely; a missing or

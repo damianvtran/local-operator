@@ -102,9 +102,7 @@ def check(path: Path) -> list[str]:
 
     # SC-6
     turn_ends = [e for e in events if e.get("type") == "turn_end"]
-    with_usage = [
-        e for e in turn_ends if (e.get("message") or {}).get("usage") is not None
-    ]
+    with_usage = [e for e in turn_ends if (e.get("message") or {}).get("usage") is not None]
     if turn_ends and not with_usage:
         problems.append("SC-6: no turn_end carries usage")
     for e in with_usage:

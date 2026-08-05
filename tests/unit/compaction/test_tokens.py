@@ -102,7 +102,6 @@ def test_fallback_estimator_on_tiktoken_failure(monkeypatch):
     assert estimate_tokens(message) == 100
 
 
-
 def test_settle_gate_unsettled_assistants_never_cached():
     """RC-20: assistants with provisional usage/stop_reason are computed but
     never cached, so a growing stream never serves a stale frozen count."""

@@ -36,7 +36,6 @@ from local_operator.harness.types import Message
 from local_operator.harness.types import ToolResult
 from local_operator.headless_print import PrintRenderer, printable_event, run_print_mode
 
-
 # --- Fakes ---------------------------------------------------------------------
 
 
@@ -341,8 +340,13 @@ def test_run_exec_background_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     # Detached argv, one new session on POSIX.
     popen_mock.assert_called_once()
     argv = popen_mock.call_args[0][0]
-    assert argv[:5] == [sys.executable, "-m", "local_operator.exec_worker", "--prompt",
-                        "write a long report about penguins"]
+    assert argv[:5] == [
+        sys.executable,
+        "-m",
+        "local_operator.exec_worker",
+        "--prompt",
+        "write a long report about penguins",
+    ]
     assert "--json" in argv and "--yolo" in argv
     assert "--job-id" in argv  # CL-09 terminal-record wiring
     kwargs = popen_mock.call_args[1]
@@ -383,7 +387,9 @@ def test_ledger_reader_tolerates_partial_line(tmp_path: Path, monkeypatch) -> No
     logs_dir.mkdir()
     monkeypatch.setattr(exec_mode, "LOGS_DIR", logs_dir)
     good = json.dumps({"id": "abc", "prompt": "ok"})
-    (logs_dir / exec_mode.JOBS_FILE).write_text(good + "\n" + '{"id": "de", "prom', encoding="utf-8")
+    (logs_dir / exec_mode.JOBS_FILE).write_text(
+        good + "\n" + '{"id": "de", "prom', encoding="utf-8"
+    )
     records = exec_mode.read_job_records()
     assert len(records) == 1
     assert records[0]["id"] == "abc"
@@ -439,9 +445,7 @@ def test_worker_records_exit_in_ledger(monkeypatch, tmp_path: Path, capsys) -> N
 
     assert exec_worker.main() == 0
     records = exec_mode.read_job_records()
-    assert any(
-        r["id"] == "job1" and r["exit_code"] == 0 and r["finished_at"] for r in records
-    )
+    assert any(r["id"] == "job1" and r["exit_code"] == 0 and r["finished_at"] for r in records)
 
 
 def test_headless_approval_denial_notice(fake_factory, monkeypatch, capsys) -> None:

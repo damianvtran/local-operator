@@ -47,9 +47,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
 ]
 
 
-def create_tools(
-    context: ToolContext, enabled: Sequence[str] | None = None
-) -> list[AgentTool]:
+def create_tools(context: ToolContext, enabled: Sequence[str] | None = None) -> list[AgentTool]:
     """Build the tool list for one session.
 
     ``enabled=None`` builds the default set; an explicit sequence selects from

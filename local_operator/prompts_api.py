@@ -165,11 +165,7 @@ def _read_template_text(name: str) -> str:
     may not ship ``*.md`` through ``importlib.resources``.
     """
     try:
-        return (
-            files("local_operator.prompts_md")
-            .joinpath(name)
-            .read_text(encoding="utf-8")
-        )
+        return files("local_operator.prompts_md").joinpath(name).read_text(encoding="utf-8")
     except (FileNotFoundError, ModuleNotFoundError, OSError):
         from pathlib import Path
 

@@ -13,7 +13,6 @@ from markdown_it import MarkdownIt
 
 from local_operator.tui.widgets.assistant import AssistantBlock, find_stable_boundary
 
-
 # --- fence awareness -------------------------------------------------------
 
 

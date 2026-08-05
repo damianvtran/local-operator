@@ -167,9 +167,7 @@ def resolve_threshold_tokens(window_tokens: int, settings: CompactionSettings) -
     return max(1, min(default_threshold, window_tokens - 1))
 
 
-def should_compact(
-    context_tokens: int, window_tokens: int, settings: CompactionSettings
-) -> bool:
+def should_compact(context_tokens: int, window_tokens: int, settings: CompactionSettings) -> bool:
     """Whether the current context exceeds the compaction threshold.
 
     Strictly greater-than so a context exactly on the threshold is stable;

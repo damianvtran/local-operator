@@ -119,7 +119,9 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         name="OpenAI (ChatGPT Plus/Pro)",
         env_keys="OPENAI_API_KEY",
         login=_lazy_login("local_operator.providers.oauth.openai", "login_openai"),
-        refresh_token=_lazy_refresh("local_operator.providers.oauth.openai", "refresh_openai_token"),
+        refresh_token=_lazy_refresh(
+            "local_operator.providers.oauth.openai", "refresh_openai_token"
+        ),
         get_api_key=_oauth_api_key,
         callback_port=1455,
         base_url="https://api.openai.com/v1",
@@ -129,7 +131,9 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         name="OpenAI (ChatGPT device code)",
         env_keys="OPENAI_API_KEY",
         login=_lazy_login("local_operator.providers.oauth.openai", "login_openai_device"),
-        refresh_token=_lazy_refresh("local_operator.providers.oauth.openai", "refresh_openai_token"),
+        refresh_token=_lazy_refresh(
+            "local_operator.providers.oauth.openai", "refresh_openai_token"
+        ),
         get_api_key=_oauth_api_key,
         store_credentials_as="openai",
         base_url="https://api.openai.com/v1",
@@ -139,7 +143,9 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         name="Anthropic (Claude Pro/Max)",
         env_keys=_anthropic_env_key,
         login=_lazy_login("local_operator.providers.oauth.anthropic", "login_anthropic"),
-        refresh_token=_lazy_refresh("local_operator.providers.oauth.anthropic", "refresh_anthropic_token"),
+        refresh_token=_lazy_refresh(
+            "local_operator.providers.oauth.anthropic", "refresh_anthropic_token"
+        ),
         get_api_key=_oauth_api_key,
         callback_port=54545,
         paste_code_flow=True,
@@ -175,7 +181,9 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         id="deepseek",
         name="DeepSeek",
         env_keys="DEEPSEEK_API_KEY",
-        login=create_api_key_login("DeepSeek", "https://platform.deepseek.com/api_keys", "Paste your DeepSeek API key"),
+        login=create_api_key_login(
+            "DeepSeek", "https://platform.deepseek.com/api_keys", "Paste your DeepSeek API key"
+        ),
         base_url="https://api.deepseek.com/v1",
     ),
     ProviderDefinition(
@@ -183,7 +191,9 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         name="Google (Gemini)",
         env_keys="GOOGLE_AI_STUDIO_API_KEY",
         login=create_api_key_login(
-            "Google AI Studio", "https://aistudio.google.com/apikey", "Paste your Google AI Studio API key"
+            "Google AI Studio",
+            "https://aistudio.google.com/apikey",
+            "Paste your Google AI Studio API key",
         ),
         base_url="https://generativelanguage.googleapis.com",
         wire="google",
@@ -192,7 +202,9 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         id="mistral",
         name="Mistral AI",
         env_keys="MISTRAL_API_KEY",
-        login=create_api_key_login("Mistral", "https://console.mistral.ai/api-keys", "Paste your Mistral API key"),
+        login=create_api_key_login(
+            "Mistral", "https://console.mistral.ai/api-keys", "Paste your Mistral API key"
+        ),
         base_url="https://api.mistral.ai/v1",
     ),
     ProviderDefinition(
@@ -205,14 +217,18 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         id="openrouter",
         name="OpenRouter",
         env_keys="OPENROUTER_API_KEY",
-        login=create_api_key_login("OpenRouter", "https://openrouter.ai/keys", "Paste your OpenRouter API key"),
+        login=create_api_key_login(
+            "OpenRouter", "https://openrouter.ai/keys", "Paste your OpenRouter API key"
+        ),
         base_url="https://openrouter.ai/api/v1",
     ),
     ProviderDefinition(
         id="radient",
         name="Radient",
         env_keys="RADIENT_API_KEY",
-        login=create_api_key_login("Radient", "https://radienthq.com/", "Paste your Radient Pass key"),
+        login=create_api_key_login(
+            "Radient", "https://radienthq.com/", "Paste your Radient Pass key"
+        ),
         base_url="https://api.radienthq.com/v1",
     ),
     ProviderDefinition(
@@ -220,7 +236,9 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         name="Alibaba Cloud (Qwen)",
         env_keys="ALIBABA_CLOUD_API_KEY",
         login=create_api_key_login(
-            "Alibaba Cloud", "https://dashscope-intl.console.aliyun.com/", "Paste your DashScope API key"
+            "Alibaba Cloud",
+            "https://dashscope-intl.console.aliyun.com/",
+            "Paste your DashScope API key",
         ),
         base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
     ),

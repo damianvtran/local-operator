@@ -53,9 +53,7 @@ class RecordingApproval:
 
 def _context_with_approval(tmp_path: Path, approve: bool = True) -> ToolContext:
     approval = RecordingApproval(approve)
-    context = ToolContext(
-        cwd=str(tmp_path), session_id="unit-test", request_approval=approval
-    )
+    context = ToolContext(cwd=str(tmp_path), session_id="unit-test", request_approval=approval)
     # Stash the recorder on the context object for the tests.
     context.recorder = approval  # type: ignore[attr-defined]
     return context
@@ -68,9 +66,7 @@ def _context_with_approval(tmp_path: Path, approve: bool = True) -> ToolContext:
 
 @pytest.mark.asyncio
 async def test_bash_echo_and_streams(tools, context) -> None:
-    result = await _call(
-        tools, "bash", {"command": "echo hello && echo bad 1>&2"}, context
-    )
+    result = await _call(tools, "bash", {"command": "echo hello && echo bad 1>&2"}, context)
     assert result.is_error is False
     assert "hello" in result.text
     assert "bad" in result.text
@@ -85,9 +81,7 @@ async def test_bash_nonzero_exit_reported(tools, context) -> None:
 
 @pytest.mark.asyncio
 async def test_bash_non_interactive_env_applied(tools, context) -> None:
-    result = await _call(
-        tools, "bash", {"command": 'echo "$CI:$NO_COLOR:$TERM"'}, context
-    )
+    result = await _call(tools, "bash", {"command": 'echo "$CI:$NO_COLOR:$TERM"'}, context)
     assert "1:1:dumb" in result.text
 
 
@@ -113,9 +107,7 @@ async def test_bash_timeout_kills_descendants_and_keeps_partial_output(tools, co
     # RT-27: the timeout must kill the whole process group (the background
     # child included) and still return the output produced before the kill.
     marker = context.cwd + "/timeout-child.pid"
-    cmd = (
-        f"(sleep 30 & echo $! > {marker}; echo started; sleep 30) & wait"
-    )
+    cmd = f"(sleep 30 & echo $! > {marker}; echo started; sleep 30) & wait"
     result = await _call(tools, "bash", {"command": cmd, "timeout": 0.6}, context)
     assert "TIMEOUT" in result.text
     assert "started" in result.text  # partial output preserved
@@ -173,14 +165,10 @@ async def test_bash_streams_updates_while_running(tools, context) -> None:
     def on_update(update) -> None:
         from local_operator.harness.types import TextContent
 
-        updates.append(
-            "".join(b.text for b in update.content if isinstance(b, TextContent))
-        )
+        updates.append("".join(b.text for b in update.content if isinstance(b, TextContent)))
 
     cmd = "echo part-one; sleep 0.7; echo part-two; sleep 0.7"
-    result = await tools["bash"].execute(
-        "c", {"command": cmd}, None, on_update, context
-    )
+    result = await tools["bash"].execute("c", {"command": cmd}, None, on_update, context)
     assert result.is_error is False
     assert updates, "expected at least one tool_execution_update payload"
     assert any("part-one" in u for u in updates)
@@ -194,9 +182,7 @@ async def test_bash_large_output_truncated(tools, context) -> None:
     result = await _call(tools, "bash", {"command": cmd}, context)
     assert "truncated" in result.text.lower()
     assert builtin.BASH_TRUNCATION_MARKER.strip() in result.text
-    stdout_section = result.text.split("--- stdout ---\n", 1)[1].split(
-        "\n--- stderr ---"
-    )[0]
+    stdout_section = result.text.split("--- stdout ---\n", 1)[1].split("\n--- stderr ---")[0]
     assert stdout_section.startswith("A" * 1000)  # head prefix survives
     assert stdout_section.rstrip().endswith("A" * 1000)  # tail suffix survives
     assert result.text.count("A") < 60000
@@ -309,9 +295,7 @@ async def test_read_line_range(tools, context) -> None:
 async def test_read_range_beyond_eof_is_useless(tools, context) -> None:
     # RT-32: a range past the last line is useless, not an error.
     await _call(tools, "write", {"path": "short.txt", "content": "a\nb\n"}, context)
-    result = await _call(
-        tools, "read", {"path": "short.txt", "range": "50-60"}, context
-    )
+    result = await _call(tools, "read", {"path": "short.txt", "range": "50-60"}, context)
     assert result.useless is True
     assert result.is_error is False
     assert result.details.get("useless") is True
@@ -370,20 +354,14 @@ async def test_read_skill_url_via_resolver(tmp_path) -> None:
             return "SKILL MARKDOWN BODY"
         return None
 
-    context = ToolContext(
-        cwd=str(tmp_path), session_id="s", resolve_internal_url=resolver
-    )
+    context = ToolContext(cwd=str(tmp_path), session_id="s", resolve_internal_url=resolver)
     tools = {t.name: t for t in create_tools(context)}
 
-    hit = await tools["read"].execute(
-        "c", {"path": "skill://demo"}, None, None, context
-    )
+    hit = await tools["read"].execute("c", {"path": "skill://demo"}, None, None, context)
     assert hit.is_error is False
     assert "SKILL MARKDOWN BODY" in hit.text
 
-    miss = await tools["read"].execute(
-        "c", {"path": "skill://nope"}, None, None, context
-    )
+    miss = await tools["read"].execute("c", {"path": "skill://nope"}, None, None, context)
     assert miss.is_error is True
 
 
@@ -391,9 +369,7 @@ async def test_read_skill_url_via_resolver(tmp_path) -> None:
 async def test_read_skill_url_without_resolver(tmp_path) -> None:
     context = ToolContext(cwd=str(tmp_path), session_id="s")  # no resolver installed
     tools = {t.name: t for t in create_tools(context)}
-    result = await tools["read"].execute(
-        "c", {"path": "skill://x"}, None, None, context
-    )
+    result = await tools["read"].execute("c", {"path": "skill://x"}, None, None, context)
     assert result.is_error is True
 
 
@@ -437,9 +413,7 @@ async def test_read_outside_workspace_still_escalates(tmp_path) -> None:
 
     deny = _context_with_approval(workspace, approve=False)
     tools = {t.name: t for t in create_tools(deny)}
-    result = await tools["read"].execute(
-        "c", {"path": "../outside/secret.txt"}, None, None, deny
-    )
+    result = await tools["read"].execute("c", {"path": "../outside/secret.txt"}, None, None, deny)
     assert result.is_error is True
 
 
@@ -484,9 +458,7 @@ async def test_read_outside_workspace_requires_approval(tmp_path) -> None:
 
     approved = _context_with_approval(workspace, approve=True)
     tools = {t.name: t for t in create_tools(approved)}
-    ok = await tools["read"].execute(
-        "c", {"path": str(secret)}, None, None, approved
-    )
+    ok = await tools["read"].execute("c", {"path": str(secret)}, None, None, approved)
     assert ok.is_error is False
     tier, description = approved.recorder.requests[0]
     assert tier == "read"
@@ -494,9 +466,7 @@ async def test_read_outside_workspace_requires_approval(tmp_path) -> None:
 
     denied = _context_with_approval(workspace, approve=False)
     tools = {t.name: t for t in create_tools(denied)}
-    blocked = await tools["read"].execute(
-        "c", {"path": str(secret)}, None, None, denied
-    )
+    blocked = await tools["read"].execute("c", {"path": str(secret)}, None, None, denied)
     assert blocked.is_error is True
 
 
@@ -515,9 +485,7 @@ async def test_glob_matches_and_sorts(tools, context, tmp_path) -> None:
     result = await _call(tools, "glob", {"pattern": "**/*.txt"}, context)
     assert result.is_error is False
     assert result.useless is False
-    assert (
-        "a.txt" in result.text and "b.txt" in result.text and "sub/c.txt" in result.text
-    )
+    assert "a.txt" in result.text and "b.txt" in result.text and "sub/c.txt" in result.text
 
 
 @pytest.mark.asyncio
@@ -563,9 +531,7 @@ async def test_grep_finds_matches(tools, context, tmp_path) -> None:
 async def test_grep_include_filter(tools, context, tmp_path) -> None:
     (tmp_path / "code.py").write_text("needle\n")
     (tmp_path / "notes.md").write_text("needle\n")
-    result = await _call(
-        tools, "grep", {"pattern": "needle", "include": "*.py"}, context
-    )
+    result = await _call(tools, "grep", {"pattern": "needle", "include": "*.py"}, context)
     assert "code.py:1:needle" in result.text
     assert "notes.md" not in result.text
 
@@ -677,13 +643,9 @@ class _FakeScheduler:
 def test_wake_builder_returns_none_without_scheduler(tmp_path) -> None:
     # RT-17: createIf — no scheduler on the context, no wake tool at all.
     assert builtin.build_wake_tool(ToolContext(cwd=str(tmp_path))) is None
-    assert "wake" not in {
-        t.name for t in create_tools(ToolContext(cwd=str(tmp_path)))
-    }
+    assert "wake" not in {t.name for t in create_tools(ToolContext(cwd=str(tmp_path)))}
 
-    with_scheduler = ToolContext(
-        cwd=str(tmp_path), session_id="s", wake_scheduler=_FakeScheduler()
-    )
+    with_scheduler = ToolContext(cwd=str(tmp_path), session_id="s", wake_scheduler=_FakeScheduler())
     tool = builtin.build_wake_tool(with_scheduler)
     assert tool is not None and tool.name == "wake"
 
@@ -765,9 +727,7 @@ async def test_pydantic_validation_errors_are_clean(tools, context) -> None:
 
 
 @pytest.mark.asyncio
-async def test_unexpected_exception_becomes_error_result(
-    tools, context, monkeypatch
-) -> None:
+async def test_unexpected_exception_becomes_error_result(tools, context, monkeypatch) -> None:
     # RT-31: force a genuine internal RuntimeError; the guard converts it.
     monkeypatch.setattr(Path, "exists", lambda self: (_ for _ in ()).throw(RuntimeError("boom")))
     result = await _call(tools, "read", {"path": "ghost.txt"}, context)
@@ -805,9 +765,7 @@ async def test_tool_result_invariants(tmp_path, tool_name, args) -> None:
     # RT-28: useless XOR is_error on every result a tool can produce, and
     # useless always carries details['useless'].
     scheduler = _FakeScheduler()
-    context = ToolContext(
-        cwd=str(tmp_path), session_id="sweep", wake_scheduler=scheduler
-    )
+    context = ToolContext(cwd=str(tmp_path), session_id="sweep", wake_scheduler=scheduler)
     tools = {t.name: t for t in create_tools(context)}
     (tmp_path / "sweep.txt").write_text("a\nb\nsweep-me\n")
 
@@ -817,9 +775,9 @@ async def test_tool_result_invariants(tmp_path, tool_name, args) -> None:
     assert result.tool_call_id == "c"
     assert result.tool_name == tool_name
     assert result.text  # never an empty block (providers reject those)
-    assert not (result.useless and result.is_error), (
-        f"{tool_name}: useless and is_error are mutually exclusive"
-    )
+    assert not (
+        result.useless and result.is_error
+    ), f"{tool_name}: useless and is_error are mutually exclusive"
     if result.useless:
         assert isinstance(result.details, dict)
         assert result.details.get("useless") is True

@@ -92,9 +92,7 @@ class TestChildPaths:
         (base / "notes.txt").write_text("x", encoding="utf-8")
 
         # A dir with no visible files renders the empty marker.
-        assert "(empty directory)" in resolve_skill_url(
-            "skill://alpha/references", skills
-        )
+        assert "(empty directory)" in resolve_skill_url("skill://alpha/references", skills)
 
         # skill://alpha (no path) returns SKILL.md text, so probe '.' to list
         # the base dir: dirs get the ' (dir)' suffix, files list bare.
@@ -157,9 +155,7 @@ class TestTraversal:
         with pytest.raises(ValueError, match=r"\.\."):
             resolve_skill_url("skill://alpha/%2e%2e%2fsecret", skills)
 
-    def test_percent_encoded_absolute_path_rejected(
-        self, skills: dict[str, Skill]
-    ) -> None:
+    def test_percent_encoded_absolute_path_rejected(self, skills: dict[str, Skill]) -> None:
         # RS-10: %2F decodes to '/', producing an absolute path after the
         # leading URL separator is stripped.
         with pytest.raises(ValueError):

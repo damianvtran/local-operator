@@ -214,8 +214,7 @@ class Transcript:
                         break
                 else:
                     logger.error(
-                        "first_kept_entry_id %s not found in transcript; "
-                        "replaying full history",
+                        "first_kept_entry_id %s not found in transcript; " "replaying full history",
                         first_kept_id,
                     )
 

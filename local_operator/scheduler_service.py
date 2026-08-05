@@ -465,8 +465,10 @@ class SchedulerService:
                                 elif schedule_item.start_time_utc:
                                     expected_run_time = schedule_item.start_time_utc
 
-                                if expected_run_time is not None and now_utc > expected_run_time and now_utc <= (  # noqa: E501
-                                    expected_run_time + grace_delta
+                                if (
+                                    expected_run_time is not None
+                                    and now_utc > expected_run_time
+                                    and now_utc <= (expected_run_time + grace_delta)  # noqa: E501
                                 ):
                                     logger.debug(
                                         f"Missed recurring schedule {job_id_str} for "
@@ -580,9 +582,7 @@ class SchedulerService:
             try:
                 self.agent_registry.save_agent_state(agent_id_str, agent_state)
             except Exception:
-                logger.exception(
-                    f"Failed to persist deactivated schedule {schedule_id_str}"
-                )
+                logger.exception(f"Failed to persist deactivated schedule {schedule_id_str}")
             self.remove_job(schedule_id_uuid)
             return
 
@@ -596,9 +596,7 @@ class SchedulerService:
             self.remove_job(schedule_id_uuid)
             return
 
-        logger.info(
-            f"Running scheduled task: agent {agent_id_str}, schedule {schedule_id_str}"
-        )
+        logger.info(f"Running scheduled task: agent {agent_id_str}, schedule {schedule_id_str}")
 
         # Job ledger entry; job_id is the schedule id (legacy contract).
         try:
@@ -611,8 +609,7 @@ class SchedulerService:
             )
         except Exception as e:
             logger.error(
-                f"Failed to create job ledger entry for schedule {schedule_id_str}: "
-                f"{str(e)}",
+                f"Failed to create job ledger entry for schedule {schedule_id_str}: " f"{str(e)}",
                 exc_info=True,
             )
             return
@@ -644,8 +641,7 @@ class SchedulerService:
             return
         except Exception as e:
             logger.error(
-                f"Scheduled task {schedule_id_str} for agent {agent_id_str} failed: "
-                f"{str(e)}",
+                f"Scheduled task {schedule_id_str} for agent {agent_id_str} failed: " f"{str(e)}",
                 exc_info=True,
             )
             await self._push_job_status(
@@ -664,9 +660,7 @@ class SchedulerService:
         try:
             self._record_successful_run(agent_id_str, schedule_id_uuid)
         except Exception:
-            logger.exception(
-                f"Failed to record successful run for schedule {schedule_id_str}"
-            )
+            logger.exception(f"Failed to record successful run for schedule {schedule_id_str}")
 
         await self._push_job_status(
             job_id,
@@ -842,8 +836,7 @@ class SchedulerService:
             state_modified = True
             if sched.one_time:
                 logger.debug(
-                    f"One-time schedule {schedule_id_uuid} executed. "
-                    "Removing from agent state."
+                    f"One-time schedule {schedule_id_uuid} executed. " "Removing from agent state."
                 )
                 agent_state.schedules.pop(idx)
                 remove_from_scheduler = True
@@ -905,6 +898,4 @@ class SchedulerService:
             if inspect.isawaitable(outcome):
                 await outcome
         except Exception:
-            logger.debug(
-                f"WebSocket broadcast for job {job_id} failed (degraded).", exc_info=True
-            )
+            logger.debug(f"WebSocket broadcast for job {job_id} failed (degraded).", exc_info=True)

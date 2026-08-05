@@ -222,9 +222,7 @@ def test_paired_tool_end_posts_immediately() -> None:
 def test_message_update_coalesces_and_guards_equality() -> None:
     controller, session, app = _controller()
     session.emit(AgentStartEvent())
-    session.emit(
-        MessageStartEvent(message=Message.assistant(""))
-    )
+    session.emit(MessageStartEvent(message=Message.assistant("")))
     session.emit(MessageUpdateEvent(message=Message.assistant("He"), delta="He"))
     session.emit(MessageUpdateEvent(message=Message.assistant("Hello"), delta="llo"))
     # Nothing flushed yet — the 30 Hz timer owns the flush.

@@ -82,7 +82,9 @@ class AsyncJobManager:
         *,
         max_running: int = DEFAULT_MAX_RUNNING_JOBS,
         retention_ms: int = DEFAULT_RETENTION_MS,
-        on_job_complete: Callable[[str, str, "AsyncJob | None"], Awaitable[None] | None] | None = None,
+        on_job_complete: (
+            Callable[[str, str, "AsyncJob | None"], Awaitable[None] | None] | None
+        ) = None,
     ) -> None:
         self._max_running = max_running
         self._retention_ms = retention_ms
@@ -137,9 +139,7 @@ class AsyncJobManager:
         # Capacity is checked BEFORE any row is inserted: a rejected register
         # must never leave a phantom job occupying or shadowing a slot.
         if not queued and self.at_capacity():
-            raise RuntimeError(
-                f"at most {self._max_running} background jobs may run concurrently"
-            )
+            raise RuntimeError(f"at most {self._max_running} background jobs may run concurrently")
         job_id = uuid.uuid4().hex[:12]
         job = AsyncJob(
             id=job_id,
@@ -288,6 +288,7 @@ class AsyncJobManager:
             logger.warning("delivery sink raised for job %s", job.id, exc_info=True)
         finally:
             self._sweep_due()
+
     async def _deliver(self, job: AsyncJob) -> None:
         text = job.result_text if job.status == "completed" else (job.error_text or "")
         if job.owner_id is not None:
@@ -295,7 +296,9 @@ class AsyncJobManager:
             if sink is None:
                 # Dead-letter: never route an owned job to the fallback sink,
                 # that would leak one agent's result into another's session.
-                logger.warning("dead-lettering job %s: no live sink for owner %s", job.id, job.owner_id)
+                logger.warning(
+                    "dead-lettering job %s: no live sink for owner %s", job.id, job.owner_id
+                )
                 return
             await self._maybe_await(sink(job.id, text, job))
             return
@@ -318,9 +321,7 @@ class AsyncJobManager:
         for job_id in [
             job_id
             for job_id, job in self._jobs.items()
-            if job.status != "running"
-            and job.settled_at is not None
-            and job.settled_at < cutoff
+            if job.status != "running" and job.settled_at is not None and job.settled_at < cutoff
         ]:
             del self._jobs[job_id]
             self._signals.pop(job_id, None)

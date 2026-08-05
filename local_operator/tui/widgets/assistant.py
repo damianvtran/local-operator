@@ -102,8 +102,9 @@ def _line_offsets(lines: list[str]) -> list[int]:
     return offsets
 
 
-def _candidate_boundaries(lines: list[str], offsets: list[int], covered: set[int],
-                          text_len: int) -> list[tuple[int, int]]:
+def _candidate_boundaries(
+    lines: list[str], offsets: list[int], covered: set[int], text_len: int
+) -> list[tuple[int, int]]:
     """``(boundary_offset, blank_line_index)`` for every settled blank line.
 
     A settled boundary is a blank line outside any fence whose NEXT line

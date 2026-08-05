@@ -84,11 +84,7 @@ class TestCalibration:
         threshold — the median must leave headroom, not just dip under."""
         embedder = LocalEmbedder()
         vecs = [embedder.embed_one(f"{name}: {desc}") for name, desc in CORPUS.items()]
-        pairs = [
-            _cos(vecs[i], vecs[j])
-            for i in range(len(vecs))
-            for j in range(i + 1, len(vecs))
-        ]
+        pairs = [_cos(vecs[i], vecs[j]) for i in range(len(vecs)) for j in range(i + 1, len(vecs))]
         assert len(pairs) == 28
         assert median(pairs) < MAX_UNRELATED_PAIR_MEDIAN, (
             f"median unrelated cosine {median(pairs):.4f} >= "
@@ -107,15 +103,10 @@ class TestCalibration:
             for name, desc in CORPUS.items()
         }
         match_score = scores[expected_name]
-        unrelated_max = max(
-            score for name, score in scores.items() if name != expected_name
-        )
-        assert match_score >= MIN_MATCH_SCORE, (
-            f"match score {match_score:.4f} < {MIN_MATCH_SCORE}"
-        )
+        unrelated_max = max(score for name, score in scores.items() if name != expected_name)
+        assert match_score >= MIN_MATCH_SCORE, f"match score {match_score:.4f} < {MIN_MATCH_SCORE}"
         assert unrelated_max < MAX_UNRELATED_QUERY_SCORE, (
-            f"max unrelated score {unrelated_max:.4f} >= "
-            f"{MAX_UNRELATED_QUERY_SCORE}"
+            f"max unrelated score {unrelated_max:.4f} >= " f"{MAX_UNRELATED_QUERY_SCORE}"
         )
 
     def test_shipped_threshold_is_the_measured_gap_midpoint(self) -> None:
@@ -129,13 +120,10 @@ class TestCalibration:
             for name, desc in CORPUS.items()
         }
         match_score = scores[expected_name]
-        unrelated_max = max(
-            score for name, score in scores.items() if name != expected_name
-        )
+        unrelated_max = max(score for name, score in scores.items() if name != expected_name)
         threshold = embedder.default_threshold
         assert unrelated_max < threshold < match_score, (
-            f"threshold {threshold} outside gap ({unrelated_max:.4f}, "
-            f"{match_score:.4f})"
+            f"threshold {threshold} outside gap ({unrelated_max:.4f}, " f"{match_score:.4f})"
         )
 
     @pytest.mark.asyncio
@@ -186,12 +174,10 @@ class TestCalibration:
             for query_text, expected_name in cases:
                 matches = await index.select(query_text)
                 names = {skill.name for skill in matches}
-                assert expected_name in names, (
-                    f"query {query_text!r} did not select {expected_name}"
-                )
-                assert len(matches) == 1, (
-                    f"query {query_text!r} selected unrelated skills: {names}"
-                )
+                assert (
+                    expected_name in names
+                ), f"query {query_text!r} did not select {expected_name}"
+                assert len(matches) == 1, f"query {query_text!r} selected unrelated skills: {names}"
                 # Absolute score shape: match clears the bar, unrelated don't.
                 query_vec = embedder.embed_one(query_text)
                 score_map = {
@@ -201,10 +187,6 @@ class TestCalibration:
                     for skill in skills
                 }
                 assert score_map[expected_name] >= MIN_MATCH_SCORE
-                unrelated = [
-                    score
-                    for name, score in score_map.items()
-                    if name != expected_name
-                ]
+                unrelated = [score for name, score in score_map.items() if name != expected_name]
                 assert max(unrelated) < MAX_UNRELATED_QUERY_SCORE
                 assert embedder.default_threshold > max(unrelated)

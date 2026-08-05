@@ -118,8 +118,10 @@ class Editor(TextArea):
             event.stop()
             event.prevent_default()
             return
-        if key == "down" and self._caret_at_bottom_edge() and (
-            self._history_index is not None or self._history
+        if (
+            key == "down"
+            and self._caret_at_bottom_edge()
+            and (self._history_index is not None or self._history)
         ):
             self._navigate_history(+1)
             event.stop()

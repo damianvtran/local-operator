@@ -362,13 +362,10 @@ class Session:
             # A fresh user prompt supersedes any earlier interrupt request.
             self._abort_requested = False
             if self._is_streaming:
-                raise RuntimeError(
-                    "session is already streaming; use steer() to inject mid-turn"
-                )
+                raise RuntimeError("session is already streaming; use steer() to inject mid-turn")
             await self._run_turn_pipeline([Message.user(text)])
         finally:
             self._turn_lock.release()
-
 
     async def seed_history(self, messages: list[Message]) -> None:
         """Prime the conversation from a host-supplied history.
@@ -391,6 +388,7 @@ class Session:
         for message in messages:
             await self._transcript.append_message(message)
             self._context.messages.append(message)
+
     def steer(self, text: str) -> None:
         """Inject a steering message into the running turn (interrupts tool
         batches at the next boundary)."""
@@ -498,7 +496,9 @@ class Session:
         generation = self._logical_generation or held.generation
         self._logical_generation = None
         await self._emit(
-            held if held.generation == generation else held.model_copy(update={"generation": generation})
+            held
+            if held.generation == generation
+            else held.model_copy(update={"generation": generation})
         )
 
     async def _run_turn(self, initial: list[AgentMessage]) -> None:
@@ -623,8 +623,7 @@ class Session:
                 await self._emit(
                     NoticeEvent(
                         text=(
-                            f"Auto-continuation limit ({_MAX_CONTINUATIONS}) reached; "
-                            "stopping."
+                            f"Auto-continuation limit ({_MAX_CONTINUATIONS}) reached; " "stopping."
                         ),
                         kind="warning",
                     )
@@ -753,9 +752,7 @@ class Session:
         # bookkeeping, so a genuinely idle session reclaims the warm region.
         now_ms = int(time.time() * 1000)
         try:
-            compaction_api.prune_tool_outputs(
-                llm_history, now_ms, self._last_provider_request_ms
-            )
+            compaction_api.prune_tool_outputs(llm_history, now_ms, self._last_provider_request_ms)
         except (ImportError, AttributeError):
             pass  # optional pruning hook absent; degrade to no pruning
 

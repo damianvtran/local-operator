@@ -45,7 +45,11 @@ DEVICE_ID_FILENAME = "kimi-device-id"
 
 def auth_host() -> str:
     """OAuth host with omp-compatible env overrides."""
-    return os.environ.get("KIMI_CODE_OAUTH_HOST") or os.environ.get("KIMI_OAUTH_HOST") or DEFAULT_AUTH_HOST
+    return (
+        os.environ.get("KIMI_CODE_OAUTH_HOST")
+        or os.environ.get("KIMI_OAUTH_HOST")
+        or DEFAULT_AUTH_HOST
+    )
 
 
 def _config_dir() -> Path:
@@ -134,7 +138,9 @@ async def login_kimi(
             headers=headers,
         )
         if start.status_code != 200:
-            raise LoginError(f"Kimi device authorization failed ({start.status_code}): {start.text}")
+            raise LoginError(
+                f"Kimi device authorization failed ({start.status_code}): {start.text}"
+            )
         authz = start.json()
         device_code = authz.get("device_code")
         if not device_code:
@@ -186,7 +192,8 @@ async def login_kimi(
             if error == "access_denied":
                 return DevicePollResult.failed("Kimi authorization was denied.")
             return DevicePollResult.failed(
-                payload.get("error_description") or f"Kimi token poll failed ({response.status_code})"
+                payload.get("error_description")
+                or f"Kimi token poll failed ({response.status_code})"
             )
 
         token = await poll_device_code_flow(

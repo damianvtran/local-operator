@@ -378,9 +378,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
 
     # --- Additive MCP subcommands (rewrite) --------------------------------
-    mcp_parser = subparsers.add_parser(
-        "mcp", help="Manage MCP servers", parents=[parent_parser]
-    )
+    mcp_parser = subparsers.add_parser("mcp", help="Manage MCP servers", parents=[parent_parser])
     mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command")
     mcp_subparsers.add_parser(
         "list", help="List configured MCP servers (all sources merged)", parents=[parent_parser]
@@ -463,7 +461,6 @@ def _propagate_yolo(parser: argparse.ArgumentParser) -> None:
                 " without prompting",
             )
             _propagate_yolo(subparser)
-
 
 
 def credential_update_command(args: argparse.Namespace) -> int:
@@ -934,6 +931,7 @@ async def _run_headless_repl(
         await session.dispose()
     return 0
 
+
 def _preflight_hosting_model(
     config_manager: ConfigManager,
     credential_manager: CredentialManager,
@@ -1049,9 +1047,11 @@ async def _run_with_scheduler(run_fn, *run_args) -> int:
             credential_manager=credential_manager,
             env_config=get_env_config(),
             operator_type=OperatorType.CLI,
-            verbosity_level=VerbosityLevel.DEBUG
-            if os.environ.get("LOCAL_OPERATOR_DEBUG", "false") == "true"
-            else VerbosityLevel.VERBOSE,
+            verbosity_level=(
+                VerbosityLevel.DEBUG
+                if os.environ.get("LOCAL_OPERATOR_DEBUG", "false") == "true"
+                else VerbosityLevel.VERBOSE
+            ),
             job_manager=JobManager(),
             websocket_manager=WebSocketManager(),  # required by the constructor, unused in CLI
         )
@@ -1245,9 +1245,7 @@ def main() -> int:
                 except Exception as exc:  # noqa: BLE001
                     print(f"\n\033[1;31mError: preflight failed: {exc}\033[0m")
                     return -1
-                key_result = _preflight_api_key(
-                    hosting, CredentialManager(config_dir)
-                )
+                key_result = _preflight_api_key(hosting, CredentialManager(config_dir))
                 if key_result is not None:
                     return key_result
             return run_exec(args.command, exec_args)
@@ -1352,9 +1350,7 @@ def main() -> int:
 
         if use_tui and run_tui is not None:
             tui_config = config_manager.get_config_value("tui", None)
-            theme_name = (
-                tui_config.get("theme", "dark") if isinstance(tui_config, dict) else "dark"
-            )
+            theme_name = tui_config.get("theme", "dark") if isinstance(tui_config, dict) else "dark"
 
             async def session_factory():
                 return await create_session(
@@ -1379,9 +1375,7 @@ def main() -> int:
                     print("usage: local-operator logout <provider>")
 
             return asyncio.run(
-                _run_with_scheduler(
-                    run_tui, session_factory, theme_name, tui_login_handler
-                )
+                _run_with_scheduler(run_tui, session_factory, theme_name, tui_login_handler)
             )
 
         return asyncio.run(

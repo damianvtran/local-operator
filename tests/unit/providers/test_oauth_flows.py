@@ -62,7 +62,9 @@ def test_pkce_pair_verifier_shape() -> None:
 class _EchoFlow(OAuthCallbackFlow):
     """Test flow: captures state/redirect_uri, returns the code verbatim."""
 
-    def __init__(self, options: CallbackFlowOptions, callbacks: LoginCallbacks, **kwargs: Any) -> None:
+    def __init__(
+        self, options: CallbackFlowOptions, callbacks: LoginCallbacks, **kwargs: Any
+    ) -> None:
         kwargs.setdefault("open_browser", lambda url: None)
         super().__init__(options, callbacks, **kwargs)
         self.generated: dict[str, str] = {}
@@ -138,9 +140,7 @@ async def test_manual_input_only_pastes_code_without_server() -> None:
         return "manual-code#manual-state"  # fragment splits into code#state
 
     callbacks = LoginCallbacks(on_manual_code_input=paste)
-    flow = _EchoFlow(
-        CallbackFlowOptions(preferred_port=0, manual_input_only=True), callbacks
-    )
+    flow = _EchoFlow(CallbackFlowOptions(preferred_port=0, manual_input_only=True), callbacks)
     result = await asyncio.wait_for(flow.run(), timeout=10)
     assert result["code"] == "manual-code"
     assert result["state"] == "manual-state"
@@ -170,7 +170,10 @@ async def test_port_fallback_when_allowed() -> None:
     blocker = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
     busy_port = int(blocker.sockets[0].getsockname()[1])
     try:
-        flow = _EchoFlow(CallbackFlowOptions(preferred_port=busy_port, allow_port_fallback=True), LoginCallbacks())
+        flow = _EchoFlow(
+            CallbackFlowOptions(preferred_port=busy_port, allow_port_fallback=True),
+            LoginCallbacks(),
+        )
 
         async def drive() -> dict[str, Any]:
             task = asyncio.create_task(flow.run())
@@ -269,7 +272,9 @@ async def test_device_poll_abort() -> None:
 
     task = asyncio.create_task(abort_soon())
     with pytest.raises(LoginCancelledError):
-        await poll_device_code_flow(pending_forever, interval_seconds=5, expires_in_seconds=60, signal=signal)
+        await poll_device_code_flow(
+            pending_forever, interval_seconds=5, expires_in_seconds=60, signal=signal
+        )
     await task
 
 
@@ -320,7 +325,9 @@ def test_openai_identity_requires_account_id() -> None:
 
 
 def test_validate_xai_endpoint_accepts_x_ai_hosts() -> None:
-    assert validate_xai_endpoint("https://auth.x.ai/oauth2/token") == "https://auth.x.ai/oauth2/token"
+    assert (
+        validate_xai_endpoint("https://auth.x.ai/oauth2/token") == "https://auth.x.ai/oauth2/token"
+    )
     assert validate_xai_endpoint("https://sso.x.ai/token").startswith("https://")
 
 
@@ -394,6 +401,7 @@ async def test_callback_server_rejects_state_mismatch() -> None:
 
     await asyncio.wait_for(drive(), timeout=10)
 
+
 async def test_openai_exchange_sends_state() -> None:
     """PR-13: the token exchange echoes the verified state."""
     from local_operator.providers.oauth.openai import OpenAIOAuthFlow, TOKEN_URL, REDIRECT_URI
@@ -422,7 +430,11 @@ async def test_openai_exchange_sends_state() -> None:
         )
 
     transport = httpx.MockTransport(handler)
-    flow = OpenAIOAuthFlow(LoginCallbacks(), open_browser=lambda url: None, http_client=httpx.AsyncClient(transport=transport))
+    flow = OpenAIOAuthFlow(
+        LoginCallbacks(),
+        open_browser=lambda url: None,
+        http_client=httpx.AsyncClient(transport=transport),
+    )
     result = await flow.exchange_token("code-1", "state-xyz", REDIRECT_URI)
     assert captured["body"]["state"] == "state-xyz"
     assert captured["url"] == TOKEN_URL
@@ -432,9 +444,7 @@ async def test_openai_exchange_sends_state() -> None:
 async def test_callback_missing_code_fails_promptly() -> None:
     """PR-14: a redirect carrying neither code nor error fails the login
     immediately — no 300 s hang."""
-    flow = _EchoFlow(
-        CallbackFlowOptions(preferred_port=0, timeout_seconds=120), LoginCallbacks()
-    )
+    flow = _EchoFlow(CallbackFlowOptions(preferred_port=0, timeout_seconds=120), LoginCallbacks())
 
     async def drive() -> None:
         task = asyncio.create_task(flow.run())
@@ -478,9 +488,7 @@ def test_openai_login_fails_hard_without_identity() -> None:
     from local_operator.providers.oauth.openai import _credentials_from_token
 
     with pytest.raises(LoginError, match="id_token"):
-        _credentials_from_token(
-            {"access_token": "a", "refresh_token": "r", "expires_in": 3600}
-        )
+        _credentials_from_token({"access_token": "a", "refresh_token": "r", "expires_in": 3600})
 
 
 def test_kimi_device_id_created_0600(tmp_path: Any) -> None:
@@ -631,9 +639,7 @@ async def test_anthropic_login_via_browser_redirect_without_paste(
     from local_operator.providers.oauth.anthropic import AnthropicOAuthFlow
 
     flow = AnthropicOAuthFlow(
-        LoginCallbacks(
-            on_auth_url=lambda url, instructions=None: auth_urls.append(url)
-        ),
+        LoginCallbacks(on_auth_url=lambda url, instructions=None: auth_urls.append(url)),
         open_browser=opened.append,
         http_client=http,
     )

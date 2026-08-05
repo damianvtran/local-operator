@@ -78,7 +78,14 @@ def is_usage_limit_error(error: BaseException) -> bool:
     lowered = error.message.lower()
     return any(
         marker in lowered
-        for marker in ("usage", "quota", "rate limit", "rate_limit", "limit reached", "insufficient")
+        for marker in (
+            "usage",
+            "quota",
+            "rate limit",
+            "rate_limit",
+            "limit reached",
+            "insufficient",
+        )
     )
 
 
@@ -109,7 +116,6 @@ def is_direct_credential_rotation_error(error: BaseException) -> bool:
     """Skip the refresh-same-account step for these: refreshing a
     valid-but-denied token cannot help, so rotate through the pool."""
     return is_usage_limit_error(error) or (isinstance(error, ProviderError) and error.status == 403)
-
 
 
 def retry_after_ms_from_error(error: BaseException) -> int | None:
@@ -193,7 +199,9 @@ async def resolve_next_key(
         return key
 
     if error is None:
-        return await _accept(await _call_resolver(resolver, ApiKeyResolveContext(last_chance=False)))
+        return await _accept(
+            await _call_resolver(resolver, ApiKeyResolveContext(last_chance=False))
+        )
 
     direct_rotation = is_direct_credential_rotation_error(error)
     # Ordinary 401: one refresh + one sibling switch, then stop (omp
@@ -206,7 +214,8 @@ async def resolve_next_key(
         state.refreshed_current = True
         key = await _accept(
             await _call_resolver(
-                resolver, ApiKeyResolveContext(last_chance=False, error=error, previous_key=state.last_key)
+                resolver,
+                ApiKeyResolveContext(last_chance=False, error=error, previous_key=state.last_key),
             )
         )
         if key is not None:
@@ -217,7 +226,8 @@ async def resolve_next_key(
         state.legacy_auth_switch_used = True
     return await _accept(
         await _call_resolver(
-            resolver, ApiKeyResolveContext(last_chance=True, error=error, previous_key=state.last_key)
+            resolver,
+            ApiKeyResolveContext(last_chance=True, error=error, previous_key=state.last_key),
         )
     )
 
@@ -356,7 +366,9 @@ async def _abortable_sleep(delay_ms: int, signal: AbortSignal | None) -> None:
     sleeper = loop.create_task(asyncio.sleep(delay_ms / 1000))
     abort_waiter = loop.create_task(signal.wait())
     try:
-        done, _pending = await asyncio.wait({sleeper, abort_waiter}, return_when=asyncio.FIRST_COMPLETED)
+        done, _pending = await asyncio.wait(
+            {sleeper, abort_waiter}, return_when=asyncio.FIRST_COMPLETED
+        )
     finally:
         sleeper.cancel()
         abort_waiter.cancel()
@@ -408,7 +420,11 @@ async def stream_with_failover(
             raise ProviderError(None, signal.reason or "aborted", retryable=False)
 
         provider, _model_id = parse_selector(selector)
-        spec = request.model if selector == primary_selector else spec_for_selector(request.model, selector)
+        spec = (
+            request.model
+            if selector == primary_selector
+            else spec_for_selector(request.model, selector)
+        )
         client = clients.get(selector)
         if client is None:
             built = client_for(spec)
@@ -416,7 +432,9 @@ async def stream_with_failover(
                 built = await built
             client = built
             clients[selector] = client
-        current_request = request if selector == primary_selector else request.model_copy(update={"model": spec})
+        current_request = (
+            request if selector == primary_selector else request.model_copy(update={"model": spec})
+        )
 
         state = AuthRetryKeyState()
         error: BaseException | None = None
@@ -429,7 +447,9 @@ async def stream_with_failover(
             if signal is not None and signal.aborted:
                 raise ProviderError(None, signal.reason or "aborted", retryable=False)
             if not retry_same_key:
-                access = await _resolve_access_for_provider(auth, provider, session_id, state, error)
+                access = await _resolve_access_for_provider(
+                    auth, provider, session_id, state, error
+                )
                 token = access.access_token if access is not None else None
                 if token != current_token:
                     current_token = token
@@ -485,7 +505,9 @@ async def stream_with_failover(
                     raise wrapped from exc
                 if transport_retries < retry.max_retries:
                     transport_retries += 1
-                    await _abortable_sleep(backoff_delay_ms(retry.base_delay_ms, transport_retries, rng=rng), signal)
+                    await _abortable_sleep(
+                        backoff_delay_ms(retry.base_delay_ms, transport_retries, rng=rng), signal
+                    )
                     retry_same_key = True
                     continue
                 error = wrapped

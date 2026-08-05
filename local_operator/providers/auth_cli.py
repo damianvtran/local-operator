@@ -144,7 +144,9 @@ def list_logins(auth_store: Any, credential_manager: Any = None) -> int:
         print("Stored credentials:")
         now_ms = int(time.time() * 1000)
         for row in rows:
-            identity = row.identity_key or row.data.get("email") or row.data.get("account_id") or "-"
+            identity = (
+                row.identity_key or row.data.get("email") or row.data.get("account_id") or "-"
+            )
             if row.credential_type == "oauth":
                 expires = row.data.get("expires")
                 state = "expired" if expires is not None and int(expires) < now_ms else "active"

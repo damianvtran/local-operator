@@ -65,9 +65,7 @@ def test_each_over_strings() -> None:
 
 def test_each_over_dicts_exposes_keys() -> None:
     template = "{{#each tools}}{{name}}={{value}} {{/each}}"
-    out = render_string(
-        template, {"tools": [{"name": "a", "value": 1}, {"name": "b", "value": 2}]}
-    )
+    out = render_string(template, {"tools": [{"name": "a", "value": 1}, {"name": "b", "value": 2}]})
     assert out == "a=1 b=2 "
 
 
@@ -181,9 +179,9 @@ def test_block_zero_and_one_are_byte_stable_across_turns() -> None:
     """Different per-turn inputs must not perturb the stable prefix — that is
     the whole point of the split (prompt-cache stability, >=90% cache rate)."""
     b0, b1 = build_system_blocks(TOOLS, SKILLS, ENV, DATE)[:2]
-    b0_again, b1_again = build_system_blocks(
-        TOOLS, "different skills", "other env", "2027-01-01"
-    )[:2]
+    b0_again, b1_again = build_system_blocks(TOOLS, "different skills", "other env", "2027-01-01")[
+        :2
+    ]
     assert b0 == b0_again
     assert b1 == b1_again
 

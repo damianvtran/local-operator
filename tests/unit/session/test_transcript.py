@@ -56,7 +56,9 @@ async def test_malformed_lines_dropped_individually(tmp_path):
     await store.append_message(Message.user("good"))
     with store.path.open("a") as handle:
         handle.write("{not json\n")
-        handle.write(json.dumps({"id": "x", "ts": 1, "type": "message"}) + "\n")  # missing payload ok
+        handle.write(
+            json.dumps({"id": "x", "ts": 1, "type": "message"}) + "\n"
+        )  # missing payload ok
 
     reopened = Transcript(directory)
     assert len(reopened.entries()) == 2  # corrupt line dropped, rest survives
@@ -171,5 +173,7 @@ async def test_custom_message_round_trip(transcript):
 
 def test_entry_from_json_rejects_bad_rows():
     assert TranscriptEntry.from_json("nonsense") is None
-    assert TranscriptEntry.from_json('{"id": "a", "type": "message"}') is not None  # payload defaults
+    assert (
+        TranscriptEntry.from_json('{"id": "a", "type": "message"}') is not None
+    )  # payload defaults
     assert TranscriptEntry.from_json('{"ts": 1, "type": "message"}') is None  # missing id

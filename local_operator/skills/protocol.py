@@ -97,23 +97,19 @@ def _resolve_child(skill: Skill, raw_path: str) -> str:
     segments = relative.split("/")
     if relative.startswith("/") or any(part == ".." for part in segments):
         raise ValueError(
-            f"Invalid skill path '{raw_path}': absolute paths and '..' segments "
-            "are not allowed"
+            f"Invalid skill path '{raw_path}': absolute paths and '..' segments " "are not allowed"
         )
     if any(part.startswith(".") and part != "." for part in segments):
         # "." alone just names the directory itself (the base-dir listing
         # probe); real dotfiles are unlisted and unreadable by design.
         raise ValueError(
-            f"Invalid skill path '{raw_path}': dotfiles are not listed and "
-            "cannot be read"
+            f"Invalid skill path '{raw_path}': dotfiles are not listed and " "cannot be read"
         )
 
     base = skill.base_dir.resolve()
     target = (skill.base_dir / relative).resolve()
     if not target.is_relative_to(base):
-        raise ValueError(
-            f"Invalid skill path '{raw_path}': escapes the skill directory"
-        )
+        raise ValueError(f"Invalid skill path '{raw_path}': escapes the skill directory")
     if not target.exists():
         raise ValueError(f"Skill path not found: skill://{skill.name}/{relative}")
     if target.is_dir():

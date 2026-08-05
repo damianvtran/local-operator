@@ -155,13 +155,17 @@ def test_resolve_chain_none_without_default() -> None:
 
 
 def test_expand_candidates_provider_wildcard_keeps_model_id() -> None:
-    candidates = expand_fallback_candidates("google/gemini-2.5-pro", ["openrouter/google/*", "fixed/model"])
+    candidates = expand_fallback_candidates(
+        "google/gemini-2.5-pro", ["openrouter/google/*", "fixed/model"]
+    )
     assert candidates == ["openrouter/google/gemini-2.5-pro", "fixed/model"]
 
 
 def test_expand_candidates_id_prefixed_wildcard_reprefixes_bare_id() -> None:
     """``provider/sub/*`` entries re-prefix the bare id after the provider."""
-    candidates = expand_fallback_candidates("openrouter/google/gemini-x", ["google-antigravity/google/*"])
+    candidates = expand_fallback_candidates(
+        "openrouter/google/gemini-x", ["google-antigravity/google/*"]
+    )
     # Bare id is everything after the FIRST slash of the current selector.
     assert candidates == ["google-antigravity/google/google/gemini-x"]
 
@@ -173,8 +177,15 @@ def test_expand_candidates_never_emits_current_selector() -> None:
 
 def test_retry_settings_from_config() -> None:
     settings = RetrySettings.from_settings(
-        {"retry": {"enabled": True, "maxRetries": 3, "baseDelayMs": 250, "modelFallback": False,
-                   "fallbackChains": {"default": ["a/b"]}}}
+        {
+            "retry": {
+                "enabled": True,
+                "maxRetries": 3,
+                "baseDelayMs": 250,
+                "modelFallback": False,
+                "fallbackChains": {"default": ["a/b"]},
+            }
+        }
     )
     assert settings.max_retries == 3
     assert settings.base_delay_ms == 250
@@ -210,11 +221,15 @@ class FakeAuth:
         self.keys = {provider: list(keys) for provider, keys in keys.items()}
         self.rotations: list[tuple[str, Any]] = []
 
-    async def get_api_key(self, provider: str, session_id: str | None = None, **kwargs: Any) -> str | None:
+    async def get_api_key(
+        self, provider: str, session_id: str | None = None, **kwargs: Any
+    ) -> str | None:
         pool = self.keys.get(provider, [])
         return pool[0] if pool else None
 
-    def rotate_sibling(self, provider: str, session_id: str | None, error: Any, api_key: str | None = None) -> bool:
+    def rotate_sibling(
+        self, provider: str, session_id: str | None, error: Any, api_key: str | None = None
+    ) -> bool:
         self.rotations.append((provider, api_key))
         pool = self.keys.get(provider, [])
         if api_key in pool:
@@ -250,7 +265,12 @@ async def test_stream_success_passes_events_through() -> None:
     async def client_for(spec: ModelSpec) -> Any:
         return client
 
-    got = [event async for event in stream_with_failover(_request(), FakeAuth({"openai": ["k"]}), None, client_for)]
+    got = [
+        event
+        async for event in stream_with_failover(
+            _request(), FakeAuth({"openai": ["k"]}), None, client_for
+        )
+    ]
     assert got == events
 
 
@@ -300,7 +320,9 @@ async def test_stream_fallback_chain_walks_to_next_model() -> None:
         specs_seen.append(spec)
         if spec.model_id == "gpt-4o":
             return ScriptedClient(ProviderError(500, "boom", retryable=True))
-        return ScriptedClient([StreamTextDelta(delta="fallback"), StreamEndEvent(stop_reason="stop")])
+        return ScriptedClient(
+            [StreamTextDelta(delta="fallback"), StreamEndEvent(stop_reason="stop")]
+        )
 
     settings = {"retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["anthropic/claude-x"]}}}
     auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"]})
@@ -315,7 +337,9 @@ async def test_stream_exhaustion_raises_last_error() -> None:
 
     settings = {"retry": {"baseDelayMs": 1, "maxRetries": 1, "fallbackChains": {}}}
     with pytest.raises(ProviderError) as excinfo:
-        async for _ in stream_with_failover(_request(), FakeAuth({"openai": ["k1"]}), settings, client_for):
+        async for _ in stream_with_failover(
+            _request(), FakeAuth({"openai": ["k1"]}), settings, client_for
+        ):
             pass
     assert excinfo.value.status == 500
 
@@ -325,7 +349,9 @@ async def test_stream_non_retryable_stops_provider_immediately() -> None:
     the fallback chain instead of re-trying the same key."""
     calls = {"n": 0}
 
-    def fail(request: ChatRequest, api_key: str | None, oauth_access: Any = None) -> AsyncIterator[Any]:
+    def fail(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
         calls["n"] += 1
         raise ProviderError(400, "bad request", retryable=False)
 
@@ -350,7 +376,9 @@ async def test_transport_retries_honor_budget_same_key_first() -> None:
     backoff BEFORE any credential rotation."""
     attempts: list[str | None] = []
 
-    def flaky(request: ChatRequest, api_key: str | None, oauth_access: Any = None) -> AsyncIterator[Any]:
+    def flaky(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
         attempts.append(api_key)
         raise ProviderError(503, "flaky", retryable=True)
 
@@ -373,7 +401,9 @@ async def test_403_rotates_once_per_credential_no_double_rotation() -> None:
     rotate_sibling per failed credential, never the old direct double rotate."""
     used: list[str | None] = []
 
-    def denied(request: ChatRequest, api_key: str | None, oauth_access: Any = None) -> AsyncIterator[Any]:
+    def denied(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
         used.append(api_key)
         raise ProviderError(403, "forbidden", auth_error=True)
 
@@ -397,12 +427,16 @@ async def test_ordinary_401_single_refresh_plus_single_switch() -> None:
     (legacyAuthSwitchUsed), even when more siblings exist."""
     used: list[str | None] = []
 
-    def unauthorized(request: ChatRequest, api_key: str | None, oauth_access: Any = None) -> AsyncIterator[Any]:
+    def unauthorized(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
         used.append(api_key)
         raise ProviderError(401, "unauthorized", auth_error=True)
 
     class SwitchOnceAuth(FakeAuth):
-        async def get_api_key(self, provider: str, session_id: str | None = None, **kwargs: Any) -> str | None:
+        async def get_api_key(
+            self, provider: str, session_id: str | None = None, **kwargs: Any
+        ) -> str | None:
             # Force-refresh returns the SAME (failed) bearer; only the
             # last_chance leg yields the next sibling.
             if kwargs.get("force_refresh"):
@@ -425,7 +459,9 @@ async def test_abort_interrupts_backoff_sleep() -> None:
     """PR-19: the backoff sleep races the abort signal and loses."""
     from local_operator.harness.types import AbortSignal
 
-    def flaky(request: ChatRequest, api_key: str | None, oauth_access: Any = None) -> AsyncIterator[Any]:
+    def flaky(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
         raise ProviderError(503, "flaky", retryable=True)
 
     async def client_for(spec: ModelSpec) -> Any:

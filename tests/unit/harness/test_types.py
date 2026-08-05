@@ -43,7 +43,5 @@ def test_explicit_event_flag_is_never_downgraded():
     """The loop stamps aborted/synthetic results via the event-level flag, so a
     clean result must not clear it."""
     ok = ToolResult(tool_call_id="t3", tool_name="bash", content=[TextContent(text="ok")])
-    forced = ToolExecutionEndEvent(
-        tool_call_id="t3", tool_name="bash", result=ok, is_error=True
-    )
+    forced = ToolExecutionEndEvent(tool_call_id="t3", tool_name="bash", result=ok, is_error=True)
     assert forced.is_error is True

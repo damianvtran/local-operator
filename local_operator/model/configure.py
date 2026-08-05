@@ -136,7 +136,9 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
 
     definition = get_provider_definition(canonical)
     lowered = model_name.lower()
-    reasoning = any(marker in lowered for marker in ("o1", "o3", "reasoner", "thinking", "deep-research"))
+    reasoning = any(
+        marker in lowered for marker in ("o1", "o3", "reasoner", "thinking", "deep-research")
+    )
 
     return ModelSpec(
         provider=canonical,
@@ -176,7 +178,9 @@ VALIDATION_ENDPOINTS: dict[str, ValidationDescriptor] = {
         extra_headers={"anthropic-version": "2023-06-01"},
     ),
     "kimi": ValidationDescriptor("https://api.moonshot.cn/v1/models"),
-    "alibaba": ValidationDescriptor("https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models"),
+    "alibaba": ValidationDescriptor(
+        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models"
+    ),
     "google": ValidationDescriptor(
         "https://generativelanguage.googleapis.com/v1/models", header_style="x-goog-api-key"
     ),
@@ -266,7 +270,9 @@ def _extra(obj: Any, key: str, default: Any = None) -> Any:
     return default if value is None else value
 
 
-def _info_from_listing(listing: Any, model_name: str, template: ModelInfo, source: str) -> ModelInfo:
+def _info_from_listing(
+    listing: Any, model_name: str, template: ModelInfo, source: str
+) -> ModelInfo:
     """Find ``model_name`` in a ``list_models()`` payload and describe it.
 
     ``listing`` is the legacy clients' ``list_models()`` result (object with
@@ -298,9 +304,7 @@ def _info_from_listing(listing: Any, model_name: str, template: ModelInfo, sourc
         if not isinstance(top, dict):
             top = getattr(top, "model_dump", lambda: {})()
         windows = [
-            int(w)
-            for w in (_extra(model, "context_length"), top.get("context_length"))
-            if w
+            int(w) for w in (_extra(model, "context_length"), top.get("context_length")) if w
         ]
         if windows:
             info.context_window = min(windows)
@@ -337,14 +341,18 @@ def get_model_info_from_openrouter(client: Any, model_name: str) -> ModelInfo:
     """Model info from the OpenRouter models listing (legacy-compatible)."""
     from local_operator.model.registry import openrouter_default_model_info
 
-    return _info_from_listing(client.list_models(), model_name, openrouter_default_model_info, "openrouter")
+    return _info_from_listing(
+        client.list_models(), model_name, openrouter_default_model_info, "openrouter"
+    )
 
 
 def get_model_info_from_radient(client: Any, model_name: str) -> ModelInfo:
     """Model info from the Radient models listing (legacy-compatible)."""
     from local_operator.model.registry import radient_default_model_info
 
-    return _info_from_listing(client.list_models(), model_name, radient_default_model_info, "radient")
+    return _info_from_listing(
+        client.list_models(), model_name, radient_default_model_info, "radient"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -482,7 +490,9 @@ def create_stream_fn(
     def client_for(spec: ModelSpec) -> Any:
         return client_for_spec(spec, http_client=shared)
 
-    async def stream_fn(request: ChatRequest, signal: AbortSignal | None) -> AsyncIterator[StreamEvent]:
+    async def stream_fn(
+        request: ChatRequest, signal: AbortSignal | None
+    ) -> AsyncIterator[StreamEvent]:
         async for event in stream_with_failover(
             request,
             auth_store,
