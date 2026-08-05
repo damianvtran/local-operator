@@ -71,6 +71,7 @@ from local_operator.harness.wake import (
     WakeScheduler,
     format_wake_delivery_text,
 )
+from local_operator.session.goal import GoalState
 from local_operator.session.transcript import Transcript
 
 logger = logging.getLogger(__name__)
@@ -213,6 +214,7 @@ class Session:
         cwd: str | None = None,
         skill_resolver: Callable[[str], str | None] | None = None,
         request_approval: Callable[[str, str], Awaitable[bool]] | None = None,
+        goal_state: GoalState | None = None,
         system_blocks_provider: Callable[[], list[str]] | Callable[[], Awaitable[list[str]]],
     ) -> None:
         self._model = model
@@ -221,6 +223,9 @@ class Session:
         self._transcript = transcript
         self._session_id = session_id or transcript.directory.name
         self._agent_id = agent_id
+        # The goal rides the prompt's volatile tail; the holder is shared with
+        # the system-blocks provider so an edit applies from the next turn.
+        self._goal_state = goal_state if goal_state is not None else GoalState()
         self._system_blocks_provider = system_blocks_provider
         self._convert_to_llm = convert_to_llm or _default_convert_to_llm
         self._compaction_settings = _coerce_compaction_settings(compaction_settings)
@@ -334,6 +339,20 @@ class Session:
         sampling rides on the spec (see ``model/configure.build_model_spec``).
         """
         self._model = model
+
+    @property
+    def goal(self) -> str:
+        """The session's standing objective ("" when unset)."""
+        return self._goal_state.text
+
+    def set_goal(self, text: str) -> str:
+        """Set (or clear, with an empty string) the standing objective.
+
+        Returns what was actually stored (trimmed and length-capped). The
+        goal rides the system prompt's volatile tail, so it applies from the
+        next turn and only invalidates that tail — never the cached prefix.
+        """
+        return self._goal_state.set(text)
 
     @property
     def wake_scheduler(self) -> WakeScheduler:

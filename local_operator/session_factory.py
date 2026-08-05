@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from local_operator.harness.types import AgentMessage, Message
 
 if TYPE_CHECKING:
+    from local_operator.session.goal import GoalState
     from local_operator.session.protocol import SessionProtocol
 
 
@@ -407,6 +408,7 @@ def _make_system_blocks_provider(
     transcript: Any,
     hooks: _SkillsHooks,
     cwd: str | None = None,
+    goal_state: "GoalState | None" = None,
 ) -> Callable[[], Awaitable[list[str]]]:
     """Build the per-turn system-prompt closure.
 
@@ -415,6 +417,10 @@ def _make_system_blocks_provider(
     ``prompts_api.build_system_blocks``: stable head (instructions, inventory,
     env) then the session-frozen skills block last, so the cache prefix stays
     warm.
+
+    ``goal_state`` is the SAME holder the session facade exposes through
+    ``set_goal``, which is how a ``/goal`` edit reaches the next turn's
+    prompt without rebuilding the session.
     """
 
     async def provider() -> list[str]:
@@ -426,7 +432,10 @@ def _make_system_blocks_provider(
         except Exception:  # noqa: BLE001 — never break the turn
             skills_block = ""
         date_str = datetime.now().strftime("%Y-%m-%d")
-        return build_system_blocks(tools, skills_block, _env_details(cwd), date_str)
+        goal = goal_state.text if goal_state is not None else ""
+        return build_system_blocks(
+            tools, skills_block, _env_details(cwd), date_str, goal=goal
+        )
 
     return provider
 
@@ -540,11 +549,15 @@ async def _prepare(
     )
     tools = create_tools(tool_context)
 
+    from local_operator.session.goal import GoalState
     from local_operator.session.transcript import Transcript
 
     transcript = Transcript(transcript_dir)
+    # One holder shared by the prompt provider and the session facade, so a
+    # ``/goal`` change lands in the next turn without a session rebuild.
+    goal_state = GoalState()
     system_blocks_provider = _make_system_blocks_provider(
-        tools, transcript, hooks, cwd=effective_cwd
+        tools, transcript, hooks, cwd=effective_cwd, goal_state=goal_state
     )
 
     session_kwargs: dict[str, Any] = dict(
@@ -563,6 +576,7 @@ async def _prepare(
         cwd=effective_cwd,
         skill_resolver=_make_skill_resolver(hooks),
         request_approval=request_approval,
+        goal_state=goal_state,
     )
     return _SessionPlan(
         session_kwargs=session_kwargs,

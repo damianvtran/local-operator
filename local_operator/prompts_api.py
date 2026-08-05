@@ -212,18 +212,24 @@ def build_system_blocks(
     skills_block: str,
     env_details: str,
     date_str: str,
+    goal: str = "",
 ) -> list[str]:
     """Build the system prompt blocks; see the module docstring.
 
     Block order is a cache-layout decision: the stable head (instructions,
     tool inventory, env) is byte-stable for the session, and the per-turn
-    volatile skills block rides LAST. A volatile block mid-prefix would
+    volatile content rides LAST. A volatile block mid-prefix would
     invalidate every message after it on each selection change — the bench
     measured 40% stability with skills at index 2; at the tail the
     conversation prefix stays warm. The list is fixed-arity (placeholder when
     nothing matched) so the wire clients' breakpoint derivation never shifts.
     The env block carries the calendar date — never a timestamp — plus
     volatile environment facts.
+
+    ``goal`` (the session objective set by ``/goal``) shares that volatile
+    tail block rather than adding a fifth one: that keeps the arity fixed,
+    and an edited goal then invalidates only the tail instead of the whole
+    conversation prefix.
     """
     instructions = render_template("system.md", {})
     inventory = f"## Available tools\n\n{_render_tool_inventory(tools)}"
@@ -231,4 +237,13 @@ def build_system_blocks(
     if env_details:
         env_block = f"{env_block}\n\n{env_details}"
 
-    return [instructions, inventory, env_block, skills_block or "<skills/>"]
+    tail = skills_block or "<skills/>"
+    if goal:
+        # Phrased as a standing objective so the model carries it as context
+        # for every turn instead of re-acknowledging a fresh instruction.
+        tail = (
+            f"{tail}\n\n<goal>\nThe user's standing objective for this "
+            f"session:\n{goal}\n</goal>"
+        )
+
+    return [instructions, inventory, env_block, tail]

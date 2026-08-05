@@ -104,6 +104,14 @@ class FakeSession:
     def set_model(self, model: Any) -> None:
         pass
 
+    @property
+    def goal(self) -> str:
+        return getattr(self, "_goal", "")
+
+    def set_goal(self, text: str) -> str:
+        self._goal = (text or "").strip()
+        return self._goal
+
     async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
         pass
 

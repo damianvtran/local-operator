@@ -84,12 +84,30 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("provider", "List providers and their login/usage state"),
     SlashCommand("accounts", "List stored credentials"),
     SlashCommand("usage", "Show provider usage quota"),
+    SlashCommand("goal", "Show, set, or clear the session goal"),
+    SlashCommand("loop", "Iterate autonomously toward the goal"),
     SlashCommand("compact", "About context compaction"),
     SlashCommand("skills", "List loaded skills"),
     SlashCommand("mcp", "List MCP servers"),
     SlashCommand("login", "Authenticate a provider"),
     SlashCommand("logout", "Remove stored provider credentials"),
 ]
+
+
+#: ``/loop`` defaults and hard ceiling. A loop spends real tokens per
+#: iteration, so it is bounded by construction — an unbounded "keep going"
+#: is how an agent burns a budget unattended.
+DEFAULT_LOOP_ITERATIONS = 3
+MAX_LOOP_ITERATIONS = 25
+
+#: The prompt each loop iteration submits. Deliberately references the
+#: standing goal (carried in the system prompt) rather than restating it, so
+#: the goal text is never duplicated into the conversation history.
+LOOP_PROMPT = (
+    "Continue working toward the standing goal. Make concrete progress with "
+    "the tools available, then briefly state what advanced and what remains. "
+    "If the goal is already fully met, say so plainly and stop."
+)
 
 #: One dim line shown until the first transcript block lands (D9).
 BOOT_HINT = "type a message, or /help for commands"
@@ -132,6 +150,10 @@ class OperatorApp(App[None]):
         # Serializes interactive login flows so two /login commands can never
         # race the one suspended terminal.
         self._login_lock: Any | None = None
+        # ``/loop`` state: one loop at a time, cooperatively cancellable at
+        # the turn boundary (never mid-turn, so a turn is never half-applied).
+        self._loop_running: bool = False
+        self._loop_cancelled: bool = False
 
     # -- composition --------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -230,11 +252,21 @@ class OperatorApp(App[None]):
         self.exit()
 
     def on_interrupt_requested(self, message: InterruptRequested) -> None:
-        if self._session is not None:
-            self._session.abort("interrupted")
+        self._interrupt()
 
     def action_interrupt(self) -> None:
         """App-level Ctrl+C: interrupt the turn, never exit."""
+        self._interrupt()
+
+    def _interrupt(self) -> None:
+        """Abort the running turn AND stop any ``/loop`` in flight.
+
+        Without cancelling the loop, an interrupt would abort one turn and the
+        loop would immediately submit the next — the user would have to press
+        Ctrl+C once per remaining iteration to actually stop.
+        """
+        if self._loop_running:
+            self._loop_cancelled = True
         if self._session is not None:
             self._session.abort("interrupted")
 
@@ -320,6 +352,10 @@ class OperatorApp(App[None]):
             self._cmd_accounts(notice)
         elif command == "/usage":
             self._cmd_usage(arg, notice)
+        elif command == "/goal":
+            self._cmd_goal(arg, notice)
+        elif command == "/loop":
+            self._cmd_loop(arg, notice)
         elif command == "/compact":
             notice("compaction runs automatically when the context fills up.")
         elif command == "/skills":
@@ -375,6 +411,101 @@ class OperatorApp(App[None]):
         notice(f"model: {old_label} → {session.model_label} (next turn)")
         if old_label.partition("/")[0] != provider:
             notice("switched provider — make sure you are logged in", "warning")
+
+    # -- goal / loop --------------------------------------------------------
+    def _cmd_goal(self, arg: str, notice: Callable[[str, str], None]) -> None:
+        """``/goal`` — show; ``/goal <text>`` — set; ``/goal clear`` — unset.
+
+        The goal is a standing objective carried in the prompt's volatile
+        tail, so it survives every turn (and compaction) without being
+        re-typed, and ``/loop`` uses it as the thing to iterate toward.
+        """
+        session = self._session
+        if session is None or not hasattr(session, "set_goal"):
+            notice("session is still starting…", "warning")
+            return
+        if not arg:
+            current = session.goal
+            notice(f"goal: {current}" if current else "no goal set — /goal <text> to set one")
+            return
+        if arg.lower() in ("clear", "none", "reset"):
+            session.set_goal("")
+            notice("goal cleared")
+            return
+        stored = session.set_goal(arg)
+        notice(f"goal set (applies from the next turn): {stored}")
+
+    def _cmd_loop(self, arg: str, notice: Callable[[str, str], None]) -> None:
+        """``/loop [n]`` — iterate toward the goal; ``/loop stop`` cancels.
+
+        Each iteration is a real turn that asks the agent to advance the
+        standing goal, so the loop is bounded, interruptible, and visible in
+        the transcript rather than a hidden background process.
+        """
+        session = self._session
+        if arg.lower() in ("stop", "cancel", "abort"):
+            if self._loop_running:
+                self._loop_cancelled = True
+                notice("loop will stop after the current turn")
+            else:
+                notice("no loop is running")
+            return
+        if session is None:
+            notice("session is still starting…", "warning")
+            return
+        if self._loop_running:
+            notice("a loop is already running — /loop stop to cancel", "warning")
+            return
+        if not getattr(session, "goal", ""):
+            notice("set a goal first: /goal <text>", "warning")
+            return
+        iterations = DEFAULT_LOOP_ITERATIONS
+        if arg:
+            try:
+                iterations = int(arg)
+            except ValueError:
+                notice(f"usage: /loop [n] (1..{MAX_LOOP_ITERATIONS})", "warning")
+                return
+        if iterations < 1 or iterations > MAX_LOOP_ITERATIONS:
+            notice(f"iterations must be between 1 and {MAX_LOOP_ITERATIONS}", "warning")
+            return
+        self._loop_cancelled = False
+        notice(f"looping toward the goal ({iterations} iteration(s)) — /loop stop to cancel")
+        self.run_worker(self._loop_worker(iterations), thread=False, group="loop")
+
+    async def _loop_worker(self, iterations: int) -> None:
+        """Run up to ``iterations`` goal-advancing turns, sequentially."""
+
+        def notice(body: str, kind: str = "info") -> None:
+            self._append_block(NoticeBlock(body, kind))
+
+        session = self._session
+        if session is None:
+            return
+        self._loop_running = True
+        completed = 0
+        try:
+            for index in range(iterations):
+                if self._loop_cancelled:
+                    break
+                self._append_block(UserBlock(f"[loop {index + 1}/{iterations}]"))
+                if self._status is not None:
+                    self._status.update(streaming=True)
+                try:
+                    await session.prompt(LOOP_PROMPT)
+                except Exception as error:  # surface and stop; never spin
+                    notice(f"loop stopped: {error}", "error")
+                    break
+                finally:
+                    if self._status is not None:
+                        self._status.update(streaming=False)
+                completed = index + 1
+        finally:
+            self._loop_running = False
+        if self._loop_cancelled:
+            notice(f"loop cancelled after {completed} iteration(s)")
+        else:
+            notice(f"loop finished after {completed} iteration(s)")
 
     # -- providers / accounts / usage --------------------------------------
     def _cmd_providers(self, notice: Callable[[str, str], None]) -> None:
