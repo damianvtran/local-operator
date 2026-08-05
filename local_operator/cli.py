@@ -41,8 +41,6 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
-import uvicorn
-
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config
@@ -584,9 +582,21 @@ def config_list_command() -> int:
 
 
 def serve_command(host: str, port: int, reload: bool) -> int:
+    """Start the FastAPI server using uvicorn.
+
+    ``uvicorn`` is imported HERE, not at module scope: the HTTP facade lives
+    behind the ``server`` extra, so a default install (and every non-server
+    entry point) must be able to ``import local_operator.cli`` without
+    fastapi/uvicorn/starlette and their dependency chain present.
     """
-    Start the FastAPI server using uvicorn.
-    """
+    try:
+        import uvicorn
+    except ImportError:
+        from local_operator.optional import missing_extra_error
+
+        print(f"\n\033[1;31m{missing_extra_error('server', 'The HTTP API server')}\033[0m")
+        return -1
+
     print(f"Starting server at http://{host}:{port}")
     if reload:
         uvicorn.run(
