@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import re
+
+from rich.cells import cell_len
 from pathlib import Path
 
 from local_operator.tui.widgets.status_line import StatusLine
@@ -34,6 +36,23 @@ def test_tcss_tool_card_and_status_band_are_single_rows() -> None:
     assert band_block is not None and "height: 1;" in band_block.group(1)
 
 
+def test_block_selectors_declare_no_margin_or_padding() -> None:
+    """The tcss comment claims the density contract — the blocks own no outer
+    margin/padding (a margin would insert blank filler rows between blocks,
+    the single largest violation of the minimalist mandate). Pin it so the
+    claim cannot silently rot."""
+    text = TCSS.read_text()
+    match = re.search(
+        r"^TranscriptBlock,\s*UserBlock,\s*NoticeBlock,\s*RichBlock,\s*"
+        r"AssistantBlock,\s*ToolCard\s*\{([^}]*)\}",
+        text,
+        re.MULTILINE,
+    )
+    assert match is not None, "block selectors rule not found in tcss"
+    body = match.group(1)
+    assert not re.search(r"\b(margin|padding)\s*:", body)
+
+
 def test_tool_card_renders_a_single_row() -> None:
     """Built rows never contain a newline; a finished card settles at 1 row."""
     card = ToolCard("t1", "bash", {"command": "pytest tests -q"})
@@ -41,12 +60,18 @@ def test_tool_card_renders_a_single_row() -> None:
     row = card._build_row(80)
     assert "\n" not in row.plain
     assert card.settled_rows() == 1
+    # A single-row card that OVERFLOWS and gets clipped is not "one line":
+    # assert the row actually fits its width across the usable range.
+    for w in (16, 20, 40, 80, 200):
+        assert cell_len(card._build_row(w).plain) <= w
 
     card = ToolCard("t2", "grep", {"pattern": "needle"})
     card.mark_failed("permission denied while reading the file")
     row = card._build_row(80)
     assert "\n" not in row.plain
     assert card.settled_rows() == 1
+    for w in (16, 20, 40, 80, 200):
+        assert cell_len(card._build_row(w).plain) <= w
 
 
 def test_status_band_renders_a_single_row() -> None:

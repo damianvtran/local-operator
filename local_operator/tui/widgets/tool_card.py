@@ -65,7 +65,7 @@ def truncate_cells(text: str, width: int, ellipsis: str = "…") -> str:
     if cell_len(text) <= width:
         return text
     if width <= cell_len(ellipsis):
-        return ellipsis[:width] if cell_len(ellipsis) >= width else ellipsis
+        return ellipsis[:width]
     out: list[str] = []
     used = 0
     target = width - cell_len(ellipsis)
@@ -199,11 +199,30 @@ class ToolCard(TranscriptBlock):
         status_runs = self._status_runs(status_cap)
         status_cells = sum(cell_len(text) for text, _style in status_runs)
 
-        # Prefix: glyph + space + 10-cell name column + space. The status
-        # segment and both separator cells are part of the summary budget
-        # (TUI-018).
-        name = self.tool_name[:NAME_COL].ljust(NAME_COL)
-        prefix_cells = 2 + NAME_COL + 1
+        # Prefix: glyph + space + name column + space. The status segment and
+        # both separator cells are part of the summary budget (TUI-018). The
+        # name column is cell-width bound and ADAPTIVE: below the full column
+        # width the name shrinks (truncated by CELL width — len() on a wide
+        # CJK/emoji name would break the spine) before the row overflows its
+        # card and clips the status off-screen.
+        name_budget = width - (2 + status_cells + 2)
+        if name_budget < 2:
+            # Too narrow for even a shrunken name: degrade to glyph + status
+            # so the status column survives.
+            row = Text()
+            row.append(ICON_GLYPH + " ", style=dim)
+            if status_runs:
+                used = cell_len(row.plain)
+                pad = max(1, width - used - status_cells)
+                row.append(" " * pad, style=dim)
+                for text, style in status_runs:
+                    row.append(text, style=style)
+            return row
+
+        name_col = min(NAME_COL, name_budget)
+        name = truncate_cells(self.tool_name, name_col, ellipsis="")
+        name = name + " " * max(0, name_col - cell_len(name))
+        prefix_cells = 2 + name_col + 1
 
         # Expand hint: only when the summary floor survives it (D8).
         hint = EXPAND_HINT

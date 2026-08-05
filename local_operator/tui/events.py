@@ -52,6 +52,7 @@ from local_operator.harness.types import (
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolExecutionUpdateEvent,
+    Usage,
     TurnEndEvent,
     TurnStartEvent,
 )
@@ -206,6 +207,7 @@ class EventController:
         self._app = app
         self._generation: int = 0
         self._turn_counter: int = 0  # monotonic fallback for older producers
+        self._stamped_start_turn: int | None = None
         self._pending_tool_ends: dict[str, ToolExecutionEndEvent] = {}
         self._started_tools: set[str] = set()
         self._assistant_buffer: str = ""
@@ -252,6 +254,13 @@ class EventController:
         else:
             self._generation += 1
         self._turn_counter += 1
+        # The turn counter of the run whose start currently owns the UI:
+        # an unstamped agent_end after a newer start must be dropped (see
+        # _handle_agent_end).
+        if gen:
+            self._stamped_start_turn = None
+        else:
+            self._stamped_start_turn = self._turn_counter
         self._pending_tool_ends.clear()
         self._started_tools.clear()
         self._assistant_buffer = ""
@@ -264,25 +273,52 @@ class EventController:
         # Drop ends stamped with a generation OLDER than the current one;
         # unstamped ends (older producers) belong to the current turn.
         gen = getattr(event, "generation", None)
-        if gen and gen < self._generation:
-            return  # superseded: belongs to an earlier turn
+        if gen:
+            if gen < self._generation:
+                return  # superseded: belongs to an earlier (newer stamped) turn
+        elif self._stamped_start_turn is not None and self._turn_counter > self._stamped_start_turn:
+            # Unstamped end (older producer) but the controller has seen a
+            # NEWER start since the one that opened this run: the end belongs
+            # to the superseded earlier turn and must not tear down the live
+            # one.
+            return
         # Final flush BEFORE stopping the timer so no buffered tail is lost
         # (TUI-005); message_end also stops the timer after its own flush
         # (TUI-006).
         self._flush_assistant()
         self._pending_tool_ends.clear()
         self._stop_flush_timer()
-        # Feed the latest usage into the status band (D10).
+        # Feed usage into the status band (D10). Cost must SUM every model
+        # call in the turn — the harness emits one assistant message per call
+        # and a tool-using turn spends most of its tokens in the earlier
+        # calls; the old overwrite-on-each-iteration loop counted only the
+        # last one. context_tokens is a point-in-time size, taken from the
+        # last message that reports it.
         usage = None
+        totals = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+        context_tokens = 0
         for message in getattr(event, "messages", None) or []:
             message_usage = getattr(message, "usage", None)
-            if message_usage is not None:
-                usage = message_usage
-        context_tokens = 0
+            if message_usage is None:
+                continue
+            totals["input"] += getattr(message_usage, "input_tokens", 0) or 0
+            totals["output"] += getattr(message_usage, "output_tokens", 0) or 0
+            totals["cache_read"] += getattr(message_usage, "cache_read_tokens", 0) or 0
+            totals["cache_write"] += getattr(message_usage, "cache_write_tokens", 0) or 0
+            usage = message_usage
+            context_tokens = (
+                getattr(message_usage, "context_tokens", None)
+                or getattr(message_usage, "input_tokens", 0)
+                or context_tokens
+            )
         if usage is not None:
-            context_tokens = getattr(usage, "context_tokens", None) or getattr(
-                usage, "input_tokens", 0
-            ) or 0
+            usage = Usage(
+                input_tokens=totals["input"],
+                output_tokens=totals["output"],
+                cache_read_tokens=totals["cache_read"],
+                cache_write_tokens=totals["cache_write"],
+                context_tokens=context_tokens or None,
+            )
         self._post(
             TurnEnded(
                 getattr(event, "aborted", False),

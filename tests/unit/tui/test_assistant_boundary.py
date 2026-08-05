@@ -93,14 +93,24 @@ def test_list_item_tail_defers_boundary_one_block() -> None:
     assert text[boundary:].startswith("- one")
 
 
-def test_non_list_tail_keeps_late_boundary() -> None:
-    """The frozen prefix may end exactly at a list's CLOSING blank: the tail
-    starts with a paragraph, so the list stays whole in the frozen render."""
+def test_boundary_advances_past_an_earlier_list() -> None:
+    """A list inside the frozen prefix is harmless: once the boundary sits
+    after the list's closing blank, render(prefix)+render(tail) ==
+    render(prefix+tail). The old "any list above pins the boundary" rule
+    re-rendered the whole tail on every flush for any message opening with
+    bullets — the boundary must advance into later prose instead."""
     text = "lead\n\n- one\n- two\n\nplain paragraph\n\nafter"
     boundary = find_stable_boundary(text)
-    # Tail starts with a paragraph, not list syntax: no deferral — the
-    # boundary sits right before "plain paragraph".
-    assert text[boundary:] == "plain paragraph\n\nafter"
+    assert text[boundary:] == "after"
+
+
+def test_list_continuing_tail_defers_one_block() -> None:
+    """The ONLY list deferral left: the frozen block is a list item and the
+    tail starts with list syntax — freezing would split the list, so the
+    boundary backs off to before the list."""
+    text = "lead\n\n- one\n- two\n\n- three"
+    boundary = find_stable_boundary(text)
+    assert text[boundary:].startswith("- one")
 
 
 def test_text_without_lists_settles_at_last_blank() -> None:
