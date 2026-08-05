@@ -36,9 +36,13 @@ def check(path: Path) -> list[str]:
     problems: list[str] = []
     events = []
     for number, line in enumerate(path.read_text().splitlines(), start=1):
-        line = line.strip()
-        if not line:
+        if not line.strip():
+            # A blank or whitespace-only line is NOT free: the consumer this
+            # checker models is a strict json.loads per line, which raises on
+            # it. Skipping them here left the last hole in SC-0.
+            problems.append(f"SC-0: line {number} is blank")
             continue
+        line = line.strip()
         try:
             events.append(json.loads(line))
         except json.JSONDecodeError:

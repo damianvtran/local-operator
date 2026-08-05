@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from typing import Callable, ClassVar
 
+from rich.cells import cell_len
 from rich.console import Console, RenderableType
 from rich.style import Style
 from rich.text import Text
@@ -390,20 +391,34 @@ class TranscriptView(ScrollableContainer):
 
 
 def _count_rows(renderable: RenderableType | None, width: int = 80) -> int:
-    """Row count a renderable occupies, measured through rich (one model).
+    """Row count a renderable occupies at ``width``, measured through rich.
 
-    Only called lazily from ``settled_rows`` — never on the streaming path.
+    WRAPPING COUNTS. Counting source newlines only reported 1 for a 400-char
+    single-line notice that actually paints nine rows, which fed
+    ``spans_multiple_rows`` and silently disabled the adaptive gap below tall
+    blocks — the exact "decays back into uniform filler" failure the spacing
+    rule is defended against, one layer lower.
+
+    Only called lazily from ``settled_rows``/``spans_multiple_rows`` — never on
+    the streaming path.
     """
-    if isinstance(renderable, str):
-        return max(1, len(renderable.splitlines()))
-    if isinstance(renderable, Text):
-        return max(1, len(renderable.plain.splitlines()))
     if renderable is None:
         return 0
-    console = Console(width=max(width, 10))
+    inner = max(width, 10)
+    if isinstance(renderable, str):
+        renderable = Text(renderable)
+    if isinstance(renderable, Text):
+        # cell-aware, so CJK and emoji account correctly; ceil-divide each
+        # logical line by the available width.
+        rows = 0
+        for line in renderable.plain.splitlines() or [""]:
+            cells = cell_len(line)
+            rows += max(1, -(-cells // inner))  # ceil without float error
+        return max(1, rows)
+    console = Console(width=inner)
     try:
         segments = console.render(renderable, console.options)  # type: ignore[arg-type]
-    except Exception:
+    except Exception:  # noqa: BLE001 — measurement must never break a render
         return 1
     rows = 1
     for segment in segments:

@@ -64,7 +64,7 @@ def read_jsonl(path: StrOrPath) -> Iterator[Any]:
         InvalidLineError: If any line is not a complete JSON value.
         OSError: If the file cannot be read.
     """
-    with open(path, "r", encoding="utf-8") as handle:
+    with open(path, "r", encoding="utf-8", newline="\n") as handle:
         for line_number, line in enumerate(handle, start=1):
             try:
                 yield json.loads(line)
@@ -88,5 +88,5 @@ def write_jsonl(path: StrOrPath, records: Iterable[Any]) -> None:
             as a failed save rather than trying to recover a partial one.
         OSError: If the file cannot be written.
     """
-    with open(path, "w", encoding="utf-8") as handle:
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
         dump_jsonl(handle, records)

@@ -5,6 +5,12 @@ on:
     branches:
       - main
       - 'dev-*'
+  # PULL REQUESTS TOO. Without this a feature branch received NO CI until it
+  # was already merged, which let a broken `pip install .` and an import that
+  # fails on the declared minimum Python both reach review looking green.
+  # Every gate below is worthless on a branch it never runs on.
+  pull_request:
+  workflow_dispatch:
 
 jobs:
   lint:
@@ -53,13 +59,21 @@ jobs:
         
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # BOTH ends of `requires-python`. Testing only the minimum let a
+        # 3.13-only typing feature ship; testing only the newest would let a
+        # 3.12 incompatibility ship. The declared range has to be the tested
+        # range or the classifier is a guess.
+        python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: |
@@ -138,6 +152,42 @@ jobs:
           fi
 
           echo "CLI sanity test passed successfully"
+
+      # The `exec --json` event stream is a CONTRACT with the TUI, the server
+      # websocket and any external consumer, and stdout is its data channel.
+      # This gate exists because the checker previously lived in the repo
+      # unwired: a working detector sitting beside the defect it detects proves
+      # nothing. `--json` is the point — the job above deliberately runs
+      # without it, so only this step can catch prose on stdout.
+      - name: Run Streaming Contract Check
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          local-operator --hosting openrouter --model x-ai/grok-4-fast \
+            --yolo exec --json "create a file called contract.txt containing ok" \
+            > run.jsonl 2> run.err || exit 1
+          python scripts/check_streaming_contract.py run.jsonl || {
+            echo "--- stdout that failed the contract ---"; cat run.jsonl; exit 1; }
+
+      # The error paths are the ones that regressed historically: a missing key
+      # or a bad model printed a coloured banner to stdout, so a consumer broke
+      # at exactly the moment it needed to read the failure. Assert stdout is
+      # EMPTY (or JSON) while the diagnosis lands on stderr.
+      - name: Assert Error Paths Keep stdout Clean
+        run: |
+          set +e
+          env -u OPENROUTER_API_KEY local-operator --hosting openrouter \
+            --model x-ai/grok-4-fast exec --json "hi" > err_out.jsonl 2> err_err.txt
+          set -e
+          if [ -s err_out.jsonl ]; then
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              echo "$line" | python -c 'import json,sys; json.loads(sys.stdin.read())' || {
+                echo "non-JSON on stdout from a failing exec --json run:"; echo "$line"; exit 1; }
+            done < err_out.jsonl
+          fi
+          test -s err_err.txt || { echo "expected a diagnostic on stderr"; exit 1; }
+          echo "error-path stdout is clean"
 
   server-sanity:
     runs-on: ubuntu-latest

@@ -260,6 +260,11 @@ REALISTIC_QUERIES: list[tuple[str, str]] = [
     ("open an MR and get it reviewed", "minerva-software-development"),
 ]
 
+#: The smallest separation worth calling a contract. Below this the threshold
+#: is sitting in noise: a corpus with one more near-duplicate skill, or a tweak
+#: to the n-gram mix, would cross it without anyone noticing.
+MIN_MARGIN = 0.01
+
 #: Queries with no matching skill in the corpus. The threshold must reject
 #: every one of them — recall is worthless if it is bought with noise.
 OFF_CORPUS_QUERIES: list[str] = [

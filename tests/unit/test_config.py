@@ -82,9 +82,11 @@ def test_config_manager_version_warning(mock_version, temp_config_dir, capsys):
 
     ConfigManager(temp_config_dir)
     captured = capsys.readouterr()
+    # stderr: ConfigManager is constructed on the `exec --json` path, so a
+    # warning on stdout is a non-JSON line in the middle of the event stream.
     assert (
         "Warning: Your config file version (2.0.0) is newer than the current version (1.0.0)"
-        in captured.out
+        in captured.err
     )
 
 

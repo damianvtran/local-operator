@@ -453,9 +453,12 @@ def test_main_exception_banner(tmp_home: Path, quiet_env: None, capsys) -> None:
     with patch("local_operator.cli.ConfigManager", side_effect=Exception("Test error")):
         with patch("sys.argv", ["program"]):
             assert main() == -1
-    out = capsys.readouterr().out
-    assert "Error: Test error" in out
-    assert "Stack Trace" in out
+    # STDERR: main() wraps the exec dispatch, so its error presenter must not
+    # write to the `exec --json` data channel. Asserting the stream is the
+    # point of the test now, not incidental.
+    err = capsys.readouterr().err
+    assert "Error: Test error" in err
+    assert "Stack Trace" in err
 
 
 def test_main_interactive_tty_uses_tui(
@@ -629,8 +632,11 @@ def test_main_preflight_missing_api_key(
 
     with patch("sys.argv", ["program", "--hosting", "openai", "--model", "gpt-4o"]):
         assert main() == -1
-    out = capsys.readouterr().out
-    assert "OPENAI_API_KEY" in out and "Error" in out
+    # stderr: this is the most common `exec --json` failure there is (fresh
+    # install, or a typo'd --hosting), so a coloured line on stdout broke the
+    # consumer at exactly the moment it needed to read the error.
+    err = capsys.readouterr().err
+    assert "OPENAI_API_KEY" in err and "Error" in err
     assert called["factory"] is False
 
 

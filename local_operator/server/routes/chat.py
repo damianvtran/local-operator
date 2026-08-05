@@ -11,9 +11,9 @@ from typing import TYPE_CHECKING  # Added
 from fastapi import APIRouter, Depends, HTTPException, Path
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from tiktoken import encoding_for_model
 
 from local_operator.agents import AgentRegistry
+from local_operator.compaction.tokens import count_text_tokens
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
@@ -157,17 +157,16 @@ async def chat_endpoint(
         else:
             response_content = ""
 
-        # Calculate token stats using tiktoken
-        tokenizer = None
-        try:
-            tokenizer = encoding_for_model(request.model)
-        except Exception:
-            tokenizer = encoding_for_model("gpt-4o")
-
+        # Token stats go through the shared counter, NOT tiktoken directly:
+        # tiktoken lives behind the `tokenizer` extra, and a module-scope import
+        # here meant `pip install local-operator[server] && local-operator
+        # serve` died with a raw ModuleNotFoundError from inside uvicorn's
+        # import machinery. count_text_tokens is exact when the extra is present
+        # and falls back to the chars/4 estimate when it is not.
         prompt_tokens = sum(
-            len(tokenizer.encode(msg.content)) for msg in operator.executor.agent_state.conversation
+            count_text_tokens(msg.content) for msg in operator.executor.agent_state.conversation
         )
-        completion_tokens = len(tokenizer.encode(response_content))
+        completion_tokens = count_text_tokens(response_content)
         total_tokens = prompt_tokens + completion_tokens
 
         return CRUDResponse(
@@ -270,17 +269,16 @@ async def chat_with_agent(
         )
         response_content = response_json.response if response_json is not None else ""
 
-        # Calculate token stats using tiktoken
-        tokenizer = None
-        try:
-            tokenizer = encoding_for_model(request.model)
-        except Exception:
-            tokenizer = encoding_for_model("gpt-4o")
-
+        # Token stats go through the shared counter, NOT tiktoken directly:
+        # tiktoken lives behind the `tokenizer` extra, and a module-scope import
+        # here meant `pip install local-operator[server] && local-operator
+        # serve` died with a raw ModuleNotFoundError from inside uvicorn's
+        # import machinery. count_text_tokens is exact when the extra is present
+        # and falls back to the chars/4 estimate when it is not.
         prompt_tokens = sum(
-            len(tokenizer.encode(msg.content)) for msg in operator.executor.agent_state.conversation
+            count_text_tokens(msg.content) for msg in operator.executor.agent_state.conversation
         )
-        completion_tokens = len(tokenizer.encode(response_content))
+        completion_tokens = count_text_tokens(response_content)
         total_tokens = prompt_tokens + completion_tokens
 
         return CRUDResponse(

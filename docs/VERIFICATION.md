@@ -169,10 +169,87 @@ abort/continuation contract, message breakpoints):
   pairing legality, delta-only message updates, compaction inside the boundary,
   usage carrying context_tokens.
 - Live E2E re-run against OpenRouter (deepseek-v4-flash): task completed,
-  artifacts on disk, context ≈2–4k tokens.
+  artifacts on disk, context ~2-4k tokens.
 
-Remaining gate note: `pyright` strict typing reports ~99 source-level
-diagnostics (parameterized generics, optional-narrowing across the new
-harness/providers/compaction modules). These are typing-precision refinements
-with no runtime/behavioural impact; black and flake8 are clean. A dedicated
-typing pass is tracked as follow-up, not merged into this change.
+The pyright backlog noted in the original version of this section has since
+been cleared; see §8.
+
+## 8. Second pass (2026-08-05) — deliveries re-verified independently
+
+A verification agent re-checked the previous round's claims against the real
+binaries rather than the unit mocks, and found three shipped features that did
+not work. All are fixed and re-verified here.
+
+### What was actually broken
+
+- **The browser tool never worked.** Real `cmux --json new-surface` returns
+  `surface_ref`; the parser only looked for `surface`/`surface_id`/`id`, so no
+  handle was recorded and every `goto`/`screenshot` failed. `screenshot` also
+  needs `--out <path>` — passed positionally, cmux ignores it, exits 0 and
+  writes elsewhere, so we reported a file that did not exist. The unit tests
+  passed because they mocked a payload cmux never emits.
+- **`exec --json` stdout was not machine-readable.** `logging.basicConfig`
+  wrote INFO records to stdout, the same channel as the event stream, and the
+  `--run-in` banner printed there too. The contract checker skipped non-JSON
+  lines, which is how it passed a corrupted stream.
+- **The provider controller reached the TUI positionally**, binding into the
+  wrong parameter, so the whole provider slash-command surface was inert while
+  the app still started cleanly.
+
+### Evidence after the fixes
+
+| check | result |
+|---|---|
+| unit suite | **1515 passed, 3 skipped, 3 snapshots** |
+| `pyright local_operator/` | **0 errors** (was 87 in-scope + 18 in the TUI) |
+| flake8 / black | clean |
+| `exec --json` stdout | 42/42 lines parse as JSON; operator notices on stderr |
+| streaming contract | PASS, and confirmed to FAIL on a deliberately polluted capture |
+| structural cache stability | **94.1%** (contract ≥ 90%) |
+| start context (15-skill corpus) | **2 567 tokens** vs 30 000 budget |
+| default install | **25 packages / 23 MB** (from 63 / 112 MB) |
+
+Real-binary and real-provider runs:
+
+- **Browser, through the agent.** The model opened `https://example.com`,
+  captured a 1600x1200 / 67 821-byte PNG, and verified the file itself with
+  `ls`. Surfaces were closed afterwards, leaving the operator's layout intact.
+- **Full task E2E** (`deepseek-v4-flash` via OpenRouter): the agent wrote a
+  memoized `fib.py`, wrote `test_fib.py`, ran it (3 tests OK), and its two
+  `write` calls reported `added: 10` and `added: 23` — the counters the TUI
+  renders as +N/-N.
+- **`/goal` and `/loop`** driven in a live TUI: set, show and clear all work;
+  `/loop 2` submitted exactly two turns and stopped with a "loop finished"
+  notice. The goal reaches the system prompt's LAST block, block arity stays
+  at 4, and the first three blocks stay byte-identical — so the objective is
+  visible to the model without invalidating the cached prefix.
+
+### Reimplementations checked against references
+
+The dependency trim replaced three compiled libraries. Each was verified
+independently of the agent that wrote it:
+
+- `skills/vectors.py` (replacing faiss+numpy) reproduces a reference inner
+  product to **8e-7** with **identical ranking**, round-trips its persisted
+  matrix exactly, and rejects both truncated and garbage blobs.
+- `compaction/png.py` (replacing Pillow) emits `IHDR`/`IDAT`/`IEND` with every
+  CRC independently verified by `zlib.crc32`, correct IHDR fields, filter byte
+  0 on every scanline, and decodes **pixel-identical** under both a
+  hand-rolled decoder and Pillow.
+
+### Skill selection was silently dropping matches
+
+Verifying the faiss removal surfaced a separate defect: the correct skill
+ranked FIRST but scored 0.21–0.29 against a 0.27 threshold, so short realistic
+queries selected **nothing** and the agent proceeded without its playbook. The
+threshold is now the max-margin midpoint 0.18:
+
+| threshold | recall | false positives |
+|---|---|---|
+| 0.27 (was) | 56% | 0% |
+| **0.18 (now)** | **100%** | **0%** |
+
+Cost: +279 tokens of start context. The old value came from a calibration at
+dim 512, where the noise floor was 0.31; at dim 4096 it is 0.07–0.08. The
+tests now pin the margin rather than the constant and were confirmed to fail
+on 0.27.

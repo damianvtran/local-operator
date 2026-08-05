@@ -55,10 +55,18 @@ _SECRET_RE = re.compile(
 def _is_secret(name: str) -> bool:
     """True when a name looks like a credential and must stay invisible.
 
-    The name is NFKC-normalised first: without it a homoglyph or compatibility
-    codepoint (fullwidth ``ＡＰＩ_ＫＥＹ``, for example) reads as a different
-    string to the regex while still naming the same env var to the OS, which
-    would be a silent exfiltration path through a teammate-supplied file.
+    The name is NFKC-normalised first, which folds COMPATIBILITY codepoints:
+    fullwidth ``ＡＰＩ_ＫＥＹ`` and mathematical-bold ``𝐀𝐏𝐈_𝐊𝐄𝐘`` both become
+    ``API_KEY``. Without it those read as different strings to the regex while
+    still naming the same variable, which is a silent exfiltration path through
+    a teammate-supplied project file.
+
+    NFKC does NOT fold cross-script confusables — Cyrillic ``а`` in
+    ``pаssword`` survives — so this narrows the gap rather than closing it.
+    That is acceptable because the denylist is defence in depth, not the
+    control: the ``LOCAL_OPERATOR_`` opt-in prefix is what actually keeps the
+    process environment invisible, and a name has to be deliberately opted in
+    before the denylist is ever consulted.
     """
     return bool(_SECRET_RE.search(unicodedata.normalize("NFKC", name)))
 

@@ -32,7 +32,13 @@ try:
     # Register HEIF opener with Pillow
     register_heif_opener()
     HEIF_SUPPORT = True
-except ImportError:
+except Exception:  # noqa: BLE001 — see below; this must never break the CLI
+    # NOT just ImportError. register_heif_opener() EXECUTES here, and these
+    # wheels are the platform-fragile ones: a partially-built or ABI-mismatched
+    # pillow-heif raises OSError/RuntimeError/AttributeError while loading
+    # libheif. helpers is on the core import path (cli.py imports it), so a
+    # narrower except turned a broken optional wheel into a dead CLI with an
+    # unrelated traceback — exactly what the extras split exists to prevent.
     Image = None  # type: ignore
     HEIF_SUPPORT = False
 

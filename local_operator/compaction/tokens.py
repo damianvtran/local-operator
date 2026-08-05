@@ -101,6 +101,18 @@ def _encode_len(text: str) -> int:
     return len(text) // _CHARS_PER_TOKEN_FALLBACK
 
 
+def count_text_tokens(text: str) -> int:
+    """Public token count for a plain string.
+
+    Callers outside compaction (the HTTP API's token stats, for example) need
+    a count without reaching for tiktoken themselves. Going through here means
+    they inherit the degradation ladder — exact counts when the ``tokenizer``
+    extra is installed, the chars/4 estimate otherwise — instead of raising
+    ImportError on an install that never asked for it.
+    """
+    return _encode_len(text)
+
+
 def truncate_to_tokens(text: str, max_tokens: int) -> str:
     """Prefix of ``text`` that fits within ``max_tokens`` tokens.
 

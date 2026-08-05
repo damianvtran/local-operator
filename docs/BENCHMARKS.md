@@ -68,14 +68,29 @@ Values and skills are deliberately NOT baked into the context:
 
 ## Install weight
 
-The default install carries no compiled wheel except `pydantic-core`, which
-is what makes a Windows install fast and build-tool-free:
+The default install dropped from 63 packages / 112 MB to 25 / 23 MB, and seven
+compiled wheels left the default path (faiss-cpu, numpy, pillow, pillow-heif,
+cryptography, tiktoken+regex, websockets, psutil).
 
 | install | packages | site-packages |
 |---|---|---|
-| default (`pip install -e .`) | 25 | 23 MB |
+| default (`pip install .`) | 25 | 23 MB |
 | everything (`.[all]`) | 56 | 76 MB |
 | before this work | 63 | 112 MB |
+
+Three compiled wheels remain in the default set, and it is worth being precise
+about which, because "no build tools needed" depends on it:
+
+| package | compiled | pure-Python fallback |
+|---|---|---|
+| `pydantic-core` | yes (Rust) | no — unavoidable, pydantic is the type foundation |
+| `pyyaml` | yes (libyaml) | **no** — can hit an sdist build where no wheel is published |
+| `charset-normalizer` (via requests) | yes | yes — degrades instead of building |
+
+So the honest claim is that the *fragile* wheels are gone — the ones most
+likely to lack a wheel for a freshly released CPython on Windows — not that
+nothing compiles. `pyyaml` is the one remaining package that can force a
+source build.
 
 Optional features live behind extras (`server`, `mcp`, `images`,
 `tokenizer`) and each degrades with an actionable message naming the extra

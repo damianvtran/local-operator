@@ -447,3 +447,72 @@ async def test_outcome_reaches_the_ground_not_just_the_glyph() -> None:
         assert running.styles.background.rgb == expected("raised")
         assert ok.styles.background.rgb == expected("surface")
         assert bad.styles.background.rgb == expected("tint-danger")
+
+
+# --- control-sequence sanitisation ------------------------------------------
+#
+# Tool output is arbitrary bytes from arbitrary programs. `ls --color=always`,
+# `git diff --color` and pytest/npm/cargo under FORCE_COLOR all emit CSI
+# sequences, and an erase-display from a build tool would clear the user's
+# screen from inside our own frame.
+
+
+def test_erase_display_never_reaches_the_frame() -> None:
+    """The worst case: a bare \\x1b[2J\\x1b[H would wipe the terminal."""
+    card = ToolCard("t", "bash", {"command": "npm run build"})
+    card.mark_done("\x1b[2J\x1b[HCLEARED-SCREEN")
+    card.toggle_expanded()
+    rendered = card._build_content(80).plain
+    assert "\x1b" not in rendered
+    assert "CLEARED-SCREEN" in rendered  # the text survives, the control does not
+
+
+def test_colour_codes_are_stripped_from_the_collapsed_row() -> None:
+    """No click needed to be exposed: a failure summary lands on the row, and
+    cell-aware truncation could cut a CSI in half and emit a corrupt one."""
+    card = ToolCard("t", "bash", {"command": "npm run build"})
+    card.mark_failed("\x1b[31merror\x1b[0m: build failed", "\x1b[31merror\x1b[0m: build failed")
+    row = card._build_row(80)
+    assert "\x1b" not in row.plain
+    assert "error" in row.plain
+
+
+def test_control_sequences_in_args_and_partials_are_stripped() -> None:
+    """Args and streaming partials are raw text too, not just results."""
+    card = ToolCard("t", "bash", {"command": "echo \x1b[1mbold\x1b[0m"})
+    assert "\x1b" not in card._build_row(80).plain
+    card.set_partial_detail("progress \x1b[32m50%\x1b[0m")
+    assert "\x1b" not in card._build_row(80).plain
+
+
+def test_width_accounting_is_correct_once_escapes_are_gone() -> None:
+    """cell_len counts '[31m' as 4 visible cells while ESC is 0, so unstripped
+    escapes made the fill and the right-aligned status column go ragged."""
+    plain = ToolCard("t", "bash", {"command": "run tests"})
+    plain.mark_done("ok")
+    coloured = ToolCard("t", "bash", {"command": "run tests"})
+    coloured.mark_done("\x1b[32mok\x1b[0m")
+    for width in (20, 40, 80, 200):
+        assert cell_len(coloured._build_row(width).plain) <= width
+        assert cell_len(coloured._build_row(width).plain) == cell_len(plain._build_row(width).plain)
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("\x1b[2J", ""),  # erase display
+        ("\x1b[H", ""),  # cursor home
+        ("\x1b[38;5;196mred\x1b[0m", "red"),  # 256-colour SGR
+        ("\x1b]0;window title\x07x", "x"),  # OSC window title
+        ("\x1b]8;;http://x\x1b\\link", "link"),  # OSC 8 hyperlink
+        ("\x1bM", ""),  # two-char escape (reverse index)
+        ("a\x00b\x07c", "abc"),  # stray C0 controls and BEL
+        ("keep \x7f me", "keep  me"),  # DEL
+        ("plain text", "plain text"),  # untouched
+        ("emoji 👨‍👩‍👧 and 中文", "emoji 👨‍👩‍👧 and 中文"),  # ZWJ survives
+    ],
+)
+def test_strip_control_sequences_cases(raw: str, expected: str) -> None:
+    from local_operator.tui.widgets.tool_card import _strip_control_sequences
+
+    assert _strip_control_sequences(raw) == expected

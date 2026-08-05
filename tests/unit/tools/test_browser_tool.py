@@ -9,6 +9,8 @@ what is pinned here.
 from __future__ import annotations
 
 import asyncio
+
+import pytest
 from pathlib import Path
 
 import local_operator.tools.builtin as builtin
@@ -205,3 +207,103 @@ def test_parse_surface_id_rejects_banners_and_errors() -> None:
     assert builtin._parse_surface_id("Created new browser surface.") == ""
     # Ref-shaped trailing token is still accepted from plain text.
     assert builtin._parse_surface_id("Opened surface:42") == "surface:42"
+
+
+# --- surface-handle parsing: the JSON branch is the PRIMARY path -------------
+#
+# The previous suite only fed plain text to the guard, so every one of these
+# JSON payloads was adopted as a real handle and injected into the next
+# `cmux browser --surface <x>` argv. They are the regression tests for that.
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # An error payload whose `id` is a request-dedupe token, not a surface.
+        '{"ok":false,"error":"browser disabled","id":"req-8f21"}',
+        '{"ok":false,"id":"pending"}',
+        '{"surface":null,"id":"internal_error"}',
+        # Prose smuggled through a surface-shaped key.
+        '{"surface_ref":"error: could not start"}',
+        # Option-looking value: would become `--surface --help` in the argv.
+        '{"id":"--help"}',
+        '{"surface_ref":"--focus"}',
+        # Sibling refs of the wrong KIND — real cmux output, wrong object.
+        '{"pane_ref":"pane:2","window_ref":"window:1"}',
+        # Nothing useful at all.
+        '{"nothing":"useful"}',
+        "",
+        "   ",
+    ],
+)
+def test_parse_surface_id_rejects_non_handles(payload: str) -> None:
+    assert builtin._parse_surface_id(payload) == ""
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # The real shape.
+        '{"pane_ref":"pane:2","surface_ref":"surface:73","type":"browser"}',
+        # Tolerated spellings.
+        '{"surface":"surface:73"}',
+        '{"surface_id":"surface:73"}',
+        # NDJSON: cmux may send an ack line first.
+        '{"type":"ack"}\n{"surface_ref":"surface:73"}',
+        # Human preamble before the payload.
+        'cmux: connected\n{"surface_ref":"surface:73"}',
+        # Trailing line after the payload.
+        '{"surface_ref":"surface:73"}\nDone.',
+        # Nested under a result envelope.
+        '{"ok":true,"result":{"surface_ref":"surface:73"}}',
+        # Plain-text fallback.
+        "Opened surface:73",
+        # The shape REAL cmux emits: pretty-printed, multi-line. A per-line
+        # NDJSON scan silently fails on this, which is why it is pinned.
+        '{\n  "pane_ref" : "pane:2",\n  "surface_ref" : "surface:73",\n'
+        '  "type" : "browser",\n  "window_ref" : "window:1"\n}',
+        # Pretty-printed WITH a preamble and a trailing line around it.
+        'cmux: connected\n{\n  "surface_ref" : "surface:73"\n}\nDone.',
+        # A stray brace in the preamble must not hide the real payload.
+        'note: use {braces} carefully\n{"surface_ref":"surface:73"}',
+    ],
+)
+def test_parse_surface_id_accepts_every_real_shape(payload: str) -> None:
+    assert builtin._parse_surface_id(payload) == "surface:73"
+
+
+def test_plain_text_rejects_wrong_kind_refs() -> None:
+    """`pane:2` and `window:1` are ref-SHAPED but not surfaces. The old
+    shape-only regex adopted both."""
+    assert builtin._parse_surface_id("Created pane:2") == ""
+    assert builtin._parse_surface_id("window:1") == ""
+    assert builtin._parse_surface_id("error:timeout") == ""
+
+
+def test_open_without_a_handle_is_an_error_not_a_silent_success(monkeypatch) -> None:
+    """Reporting success with no handle strands the session: every later call
+    can only say "no browser surface open", and the model was told it worked."""
+
+    async def fake_run(argv, timeout=30.0):
+        return 0, '{"ok":true,"note":"no ref for you"}'
+
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    monkeypatch.setattr(builtin, "_run_cmux", fake_run)
+    tool = builtin.build_browser_tool(_ctx())
+    ctx = _ctx()
+    result = _run(tool, "t1", {"action": "open", "url": "https://example.com"}, ctx)
+    assert result.is_error
+    assert "no surface handle" in result.text
+    assert ctx.browser is None or not ctx.browser.surface_id
+
+
+def test_run_cmux_reports_stderr_on_failure() -> None:
+    """cmux writes diagnostics to stderr and leaves stdout EMPTY on failure, so
+    returning stdout alone produced the blank message "cmux open failed: "."""
+    import asyncio
+
+    code, out = asyncio.run(
+        builtin._run_cmux(["--json", "definitely-not-a-real-subcommand-xyz"], timeout=20.0)
+    )
+    assert code != 0
+    assert out.strip(), "a failure must never produce an empty diagnostic"
