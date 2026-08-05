@@ -1365,7 +1365,24 @@ def main() -> int:
                     has_ui=True,
                 )
 
-            return asyncio.run(_run_with_scheduler(run_tui, session_factory, theme_name))
+            def tui_login_handler(action: str) -> None:
+                """Run the real credential flow in the suspended terminal.
+
+                The TUI hands us its terminal back (App.suspend) for the
+                duration, so the flow can print URLs and read stdin like a
+                normal CLI invocation.
+                """
+                flow_args = argparse.Namespace(provider=None)
+                if action == "login":
+                    login_command(flow_args)
+                else:
+                    print("usage: local-operator logout <provider>")
+
+            return asyncio.run(
+                _run_with_scheduler(
+                    run_tui, session_factory, theme_name, tui_login_handler
+                )
+            )
 
         return asyncio.run(
             _run_with_scheduler(

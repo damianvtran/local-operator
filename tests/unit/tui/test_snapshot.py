@@ -19,9 +19,6 @@ from typing import Any
 
 import pytest
 
-# Pin deterministic frames BEFORE the app boots (D26 static fallback).
-os.environ["LOCAL_OPERATOR_NO_SHIMMER"] = "1"
-
 from local_operator.harness.types import (  # noqa: E402
     AgentEndEvent,
     AgentStartEvent,

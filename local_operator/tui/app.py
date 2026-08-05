@@ -341,6 +341,7 @@ class OperatorApp(App):
         dim = Style(color=theme_mod.semantic_color("dim"))
         lines = []
         for command in SLASH_COMMANDS:
+
             names = ", ".join(f"/{name}" for name in command.names)
             line = Text()
             line.append(names.ljust(14), style=muted)
@@ -406,6 +407,11 @@ class OperatorApp(App):
         if cost is not None:
             self._total_cost += cost
             updates["cost"] = format_cost(self._total_cost)
+        elif message.usage is not None and getattr(message.usage, "input_tokens", 0):
+            # D20: the turn billed tokens but pricing is unknown — render an
+            # explicit "unavailable" so the segment's absence reads as that,
+            # not as "free".
+            updates["cost"] = "$—"
         self._status.update(**updates)
         if message.error:
             self._append_block(NoticeBlock(message.error, "error"))
@@ -429,6 +435,10 @@ class OperatorApp(App):
 
             provider, _, model_id = self._session.model_label.partition("/")
             info = get_model_info(provider, model_id)
+            if not (info.input_price or info.output_price):
+                # No pricing in the registry: a confident $0.0000 would read
+                # as "this turn was free" — treat as unknown instead.
+                return None
             return calculate_cost(
                 info, getattr(usage, "input_tokens", 0), getattr(usage, "output_tokens", 0)
             )

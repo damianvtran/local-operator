@@ -51,16 +51,26 @@ _LIST_ITEM_RE = re.compile(r"^\s{0,3}(?:[-+*]|\d{1,9}[.)])\s")
 _FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 
 
-def _scan_fences(lines: list[str], start_line: int, in_fence: bool, fence_marker: str,
-                 covered: set[int]) -> tuple[bool, str]:
-    """Advance fence state over ``lines[start_line:]``, marking covered rows.
+def _scan_fences(
+    lines: list[str],
+    start_line: int,
+    in_fence: bool,
+    fence_marker: str,
+    covered: set[int],
+    end_line: int | None = None,
+) -> tuple[bool, str]:
+    """Advance fence state over ``lines[start_line:end_line]``, marking rows.
 
-    Returns ``(in_fence, fence_marker)`` after the last line. Lines inside a
-    fence (including the marker rows themselves) land in ``covered``. Used
-    incrementally so append-only updates scan only the new text (TUI-011a);
-    the full re-scan path starts at ``start_line=0`` with fresh state.
+    Returns ``(in_fence, fence_marker)`` after the last scanned line. Lines
+    inside a fence (including the marker rows themselves) land in
+    ``covered``. Used incrementally so append-only updates scan only the new
+    text (TUI-011a); the full re-scan path starts at ``start_line=0`` with
+    fresh state. ``end_line`` bounds the scan to COMPLETED lines (their
+    newline has arrived) so a fence marker split across two deltas is never
+    toggled twice.
     """
-    for i in range(start_line, len(lines)):
+    stop = len(lines) if end_line is None else end_line
+    for i in range(start_line, stop):
         line = lines[i]
         if in_fence:
             covered.add(i)
@@ -149,36 +159,23 @@ def _stable_boundary(text: str, lines: list[str], covered: set[int]) -> int:
     """Shared boundary resolution with TUI-010 preconditions applied.
 
     Walks settled candidates from the LAST blank line backward. A candidate
-    is skipped when:
-
-    - the block immediately above the blank is a list item and the tail
-      starts with list syntax (freezing would split the list in two), or
-    - any list item sits above the blank (the prefix pins at the blank that
-      CLOSES the list so the list block stays whole in the frozen render).
-
-    The chosen candidate is then checked for the TUI-010 refusal: a
-    reference-link definition in the prefix can pair with a link anywhere in
-    the tail — never freeze across that.
+    is skipped only when the block immediately above the blank is a list
+    item AND the tail starts with list syntax (freezing would split the list
+    in two). Once the boundary sits after the list's closing blank the list
+    is entirely inside the frozen prefix, so render(prefix)+render(tail) ==
+    render(prefix+tail) holds and no further pinning is needed — a permanent
+    "any list above pins the boundary" rule re-rendered the whole tail on
+    every flush for any message opening with bullets.
     """
     offsets = _line_offsets(lines)
     candidates = _candidate_boundaries(lines, offsets, covered, len(text))
     if not candidates:
         return 0
 
-    # First list-item line anywhere (outside fences) — O(1) "list above"
-    # checks while walking candidates backward.
-    first_list = -1
-    for j, line in enumerate(lines):
-        if j not in covered and _LIST_ITEM_RE.match(line):
-            first_list = j
-            break
-
     for boundary, blank_line in reversed(candidates):
         if _last_preceding_list_item(lines, covered, blank_line):
             if _LIST_ITEM_RE.match(text[boundary:]):
                 continue  # tail continues the list: back off one block
-        elif first_list != -1 and first_list < blank_line:
-            continue  # a list above: pin at its closing blank instead
         # Refusal: a reference-link definition in the frozen prefix can pair
         # with a link anywhere in the tail — never freeze across that.
         if _REF_DEF_RE.search(text[:boundary]):
@@ -206,16 +203,9 @@ class AssistantBlock(TranscriptBlock):
         self._frozen_text: str = ""
         self._frozen_rendered: Markdown | None = None
         self._frozen_epoch: int = -1
-        # Render cache (TUI-011b): identical tail text reuses the cached
-        # Group verbatim, so the frozen prefix is never re-lexed and the
-        # tail is not re-parsed on no-change appends. Named away from
-        # ``_render_cache`` on purpose: textual.widgets._static/Widget owns
-        # that attribute and reassigns it on size changes, which would
-        # silently turn our dict into its _RenderCache mid-stream (live-run
-        # crash 2026-08-05).
-        self._tail_render_cache: dict[tuple[str, str], object] = {}
         # Incremental fence tracking (TUI-011a): state as of the last scan.
         self._scanned_len: int = 0
+        self._scanned_lines: int = 0  # completed lines already fence-scanned
         self._in_fence: bool = False
         self._fence_marker: str = ""
         self._covered: set[int] = set()
@@ -254,19 +244,14 @@ class AssistantBlock(TranscriptBlock):
                 self._frozen_text = prefix
                 self._frozen_rendered = Markdown(prefix)
                 self._frozen_epoch = epoch
-                self._tail_render_cache.clear()  # a new prefix invalidates tails
             assert self._frozen_rendered is not None
-            key = (prefix, tail)
-            renderable = self._tail_render_cache.get(key)
-            if renderable is None:
-                renderable = Group(self._frozen_rendered, Markdown(tail))
-                self._tail_render_cache[key] = renderable
+            # The tail is rebuilt per flush; a keyed cache here retained a
+            # full copy of the message per flush (O(n^2) bytes) for a cache
+            # that can never hit — the equality guard already no-ops
+            # identical re-emits and append-only text only moves forward.
+            renderable = Group(self._frozen_rendered, Markdown(tail))
         else:
-            key = ("", text)
-            renderable = self._tail_render_cache.get(key)
-            if renderable is None:
-                renderable = Markdown(text)
-                self._tail_render_cache[key] = renderable
+            renderable = Markdown(text)
         self.set_content(renderable)
 
     @property
@@ -280,16 +265,36 @@ class AssistantBlock(TranscriptBlock):
         Append-only updates scan ONLY the new suffix (carrying the running
         ``in_fence`` state); anything else re-scans from the top so the
         coverage stays authoritative.
+
+        The incremental resume rewinds to the start of the line containing
+        ``_scanned_len`` and carries the fence state from BEFORE that line
+        was first scanned: resuming at the line with the state it produced
+        double-toggles a closing fence whose newline arrives in the next
+        delta, pinning ``in_fence`` True forever (the frozen prefix then
+        never advances and every flush re-parses the whole message).
         """
         lines = text.split("\n")
-        if append_only and self._scanned_len > 0:
-            start_line = text[: self._scanned_len].count("\n")
+        # Only lines whose newline has arrived are scanned: a fence marker
+        # split across two deltas must not toggle until it is complete, and
+        # a boundary needs a blank line, which needs its newline. Resuming
+        # at the first never-completed line with the carried state keeps the
+        # scan O(new text) and the state authoritative.
+        completed = max(0, len(lines) - 1)  # the last element has no newline
+        if append_only and self._scanned_lines > 0:
             self._in_fence, self._fence_marker = _scan_fences(
-                lines, start_line, self._in_fence, self._fence_marker, self._covered
+                lines,
+                self._scanned_lines,
+                self._in_fence,
+                self._fence_marker,
+                self._covered,
+                completed,
             )
         else:
             self._covered = set()
-            self._in_fence, self._fence_marker = _scan_fences(lines, 0, False, "", self._covered)
+            self._in_fence, self._fence_marker = _scan_fences(
+                lines, 0, False, "", self._covered, completed
+            )
+        self._scanned_lines = completed
         self._scanned_len = len(text)
 
     @property
