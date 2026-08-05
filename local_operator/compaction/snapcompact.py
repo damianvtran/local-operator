@@ -21,20 +21,19 @@ Contract (see ``docs/REWRITE.md`` §C snapcompact bullets):
   ``context-full`` otherwise.
 
 Rendering uses a bundled 5x7 bitmap font (crisp at small sizes, deterministic)
-mirroring the established pixel-font property; Pillow does the PNG encoding only.
+and a stdlib-only grayscale PNG encoder (:mod:`local_operator.compaction.png`),
+so no imaging library is needed at install time.
 """
 
 from __future__ import annotations
 
 import base64
-import io
 import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal, Sequence
 
-from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
 from local_operator.harness.types import (
@@ -45,6 +44,7 @@ from local_operator.harness.types import (
 )
 
 from .api import TOOL_ARGS_MAX_CHARS, TOOL_RESULT_MAX_CHARS
+from .png import encode_grayscale_png
 from .tokens import estimate_tokens
 
 # ---------------------------------------------------------------------------
@@ -322,10 +322,7 @@ def render_frame(text_chunk: str, shape: Shape) -> bytes:
                             for dy in range(sy):
                                 buf[(yy + dy) * width + xx + dx] = 255
 
-    img = Image.frombytes("L", (width, height), bytes(buf))
-    out = io.BytesIO()
-    img.save(out, "PNG", optimize=True)
-    return out.getvalue()
+    return encode_grayscale_png(width, height, bytes(buf))
 
 
 # ---------------------------------------------------------------------------

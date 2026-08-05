@@ -8,6 +8,13 @@ so between requests we estimate locally with tiktoken's ``cl100k_base``.
 Estimation runs on hot paths (per-index suffix sums, backwards cut-point
 walks), so results are memoized.
 
+tiktoken lives behind the ``tokenizer`` extra: it is a compiled wheel that
+also fetches its BPE ranks over the network on first use, neither of which
+the default install should require. Without it every estimate falls back to
+the ``len(text) // 4`` heuristic below, which is coarser but keeps compaction
+working — real usage from the provider still corrects the accounting after
+each request.
+
 Settle rule / cache contract
 ----------------------------
 The cache is a module-level dict keyed on the message's stable ``id``. Two
@@ -38,6 +45,7 @@ from collections import OrderedDict
 from typing import Callable, Sequence
 
 from local_operator.harness.types import Message, TextContent
+from local_operator.optional import missing_extra_error
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +69,10 @@ _ENCODING_FAILED = False
 def _get_encoding() -> object | None:
     """Lazily load the cl100k_base encoding; never raise.
 
-    A broken tiktoken install must degrade to the ``len(text) // 4`` fallback,
-    not crash compaction (or startup — loading is deferred to first use).
+    A missing or broken tiktoken install must degrade to the ``len(text) //
+    4`` fallback, not crash compaction (or startup — loading is deferred to
+    first use). The warning fires once per process, so it names the extra
+    without turning into per-turn noise.
     """
     global _ENCODING, _ENCODING_FAILED
     if _ENCODING is not None or _ENCODING_FAILED:
@@ -73,7 +83,11 @@ def _get_encoding() -> object | None:
         _ENCODING = tiktoken.get_encoding("cl100k_base")
     except Exception as exc:  # noqa: BLE001 - degrade, never raise
         _ENCODING_FAILED = True
-        logger.warning("tiktoken unavailable (%s); using chars/4 token estimate", exc)
+        logger.warning(
+            "%s; falling back to the chars/4 token estimate (%s)",
+            missing_extra_error("tokenizer", "Exact token counting"),
+            exc,
+        )
     return _ENCODING
 
 

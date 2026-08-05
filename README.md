@@ -127,6 +127,29 @@ To run Local Operator with a 3rd party cloud-hosted LLM model, you need to have 
   pip install local-operator
   ```
 
+- 📌 (Optional) Extra features
+
+  The default install is deliberately small and fast — it carries only what the
+  agent itself needs. Optional features live behind extras, which you can add
+  at any time:
+
+  | Extra | Adds |
+  | --- | --- |
+  | `server` | The HTTP API server (`local-operator serve`) and the background scheduler |
+  | `mcp` | Model Context Protocol client support, for connecting external MCP servers |
+  | `images` | HEIC/HEIF image attachment decoding |
+  | `tokenizer` | Exact BPE token counting (without it, token usage is estimated) |
+  | `all` | Everything above |
+
+  ```bash
+  pip install "local-operator[server]"
+  pip install "local-operator[all]"
+  ```
+
+  Quote the requirement — most shells try to glob the square brackets. If you
+  reach a feature whose extra is missing, the agent tells you which one to
+  install rather than failing with an import error.
+
 - 📌 (Optional) Enabling Web Browsing
 
   This is not necessary to use the web browsing tool, as the agent will automatically install the browsers when they are needed, but it can be faster to install them ahead of start up if you know you will need them.

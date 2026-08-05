@@ -11,6 +11,7 @@ import pytest
 from local_operator.skills.discovery import Skill
 from local_operator.skills.embeddings import EmbeddingError, LocalEmbedder
 from local_operator.skills.index import SkillIndex, render_block
+from local_operator.skills.vectors import deserialize
 
 
 def _make_skill(root: Path, dirname: str, description: str, hide: bool = False) -> Skill:
@@ -59,11 +60,11 @@ class BrokenLocalEmbedder(LocalEmbedder):
         raise EmbeddingError("local backend broken")
 
 
-def _cache_npz(cache: Path) -> Path:
-    """The single identity-keyed npz a test cache dir holds."""
-    npzs = list(cache.glob("*.skills.npz"))
-    assert len(npzs) == 1, f"expected one keyed cache file, found {npzs}"
-    return npzs[0]
+def _cache_vectors(cache: Path) -> Path:
+    """The single identity-keyed vector blob a test cache dir holds."""
+    blobs = list(cache.glob("*.skills.vec"))
+    assert len(blobs) == 1, f"expected one keyed cache file, found {blobs}"
+    return blobs[0]
 
 
 class TestBuildAndCache:
@@ -74,7 +75,7 @@ class TestBuildAndCache:
         backend1 = CountingBackend()
         await SkillIndex(skills, backend1, cache_dir=cache).build()
         assert backend1.embed_calls == 1
-        assert _cache_npz(cache).exists()
+        assert _cache_vectors(cache).exists()
         assert list(cache.glob("*.skills.meta.json"))
 
         backend2 = CountingBackend()
@@ -338,46 +339,37 @@ class TestCacheCorruption:
     """RS-06 + RS-12: corrupt/mismatched caches rebuild, never crash."""
 
     @pytest.mark.asyncio
-    async def test_npz_embeds_content_hash(self, tmp_path: Path) -> None:
-        import numpy as np
-
+    async def test_blob_embeds_content_hash(self, tmp_path: Path) -> None:
         skills = [_make_skill(tmp_path, "alpha", "first skill")]
         cache = tmp_path / "cache"
         await SkillIndex(skills, CountingBackend(), cache_dir=cache).build()
-        with np.load(_cache_npz(cache)) as data:
-            assert (
-                str(data["content_hash"])
-                == json.loads(next(cache.glob("*.skills.meta.json")).read_text(encoding="utf-8"))[
-                    "hash"
-                ]
-            )
+        _matrix, stored_hash = deserialize(_cache_vectors(cache).read_bytes())
+        meta = json.loads(next(cache.glob("*.skills.meta.json")).read_text(encoding="utf-8"))
+        assert stored_hash == meta["hash"]
 
     @pytest.mark.asyncio
-    async def test_npz_hash_mismatch_rebuilds(self, tmp_path: Path) -> None:
-        import numpy as np
-
+    async def test_blob_hash_mismatch_rebuilds(self, tmp_path: Path) -> None:
         skills = [_make_skill(tmp_path, "alpha", "first skill")]
         cache = tmp_path / "cache"
         await SkillIndex(skills, CountingBackend(), cache_dir=cache).build()
-        # Rewrite the npz with a foreign hash — simulates an interleaved
+        # Repack the vectors under a foreign hash — simulates an interleaved
         # writer whose meta still describes a different payload.
-        npz = _cache_npz(cache)
-        with np.load(npz) as data:
-            vectors = data["vectors"]
-        np.savez_compressed(npz, vectors=vectors, content_hash=np.array("deadbeef"))
+        blob_path = _cache_vectors(cache)
+        matrix, _hash = deserialize(blob_path.read_bytes())
+        blob_path.write_bytes(matrix.serialize("deadbeef"))
 
         backend = CountingBackend()
         await SkillIndex(skills, backend, cache_dir=cache).build()
         assert backend.embed_calls == 1
 
     @pytest.mark.asyncio
-    async def test_truncated_npz_rebuilds(self, tmp_path: Path) -> None:
+    async def test_truncated_blob_rebuilds(self, tmp_path: Path) -> None:
         skills = [_make_skill(tmp_path, "alpha", "first skill")]
         cache = tmp_path / "cache"
         await SkillIndex(skills, CountingBackend(), cache_dir=cache).build()
-        npz = _cache_npz(cache)
-        blob = npz.read_bytes()
-        npz.write_bytes(blob[: len(blob) // 2])  # truncate mid-archive
+        blob_path = _cache_vectors(cache)
+        blob = blob_path.read_bytes()
+        blob_path.write_bytes(blob[: len(blob) // 2])  # truncate mid-payload
 
         backend = CountingBackend()
         await SkillIndex(skills, backend, cache_dir=cache).build()
@@ -436,7 +428,7 @@ class TestCacheKeyedByRoots:
         cache = tmp_path / "cache"
         await SkillIndex([skill_a], CountingBackend(), cache_dir=cache).build()
         await SkillIndex([skill_b], CountingBackend(), cache_dir=cache).build()
-        assert len(list(cache.glob("*.skills.npz"))) == 2
+        assert len(list(cache.glob("*.skills.vec"))) == 2
 
         # Each project still hits its own cache after the other wrote.
         backend = CountingBackend()

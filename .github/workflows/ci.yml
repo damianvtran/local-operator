@@ -46,8 +46,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyright
+          pip install -e ".[dev]"
 
       - name: Run pyright
         run: pyright
@@ -65,10 +64,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest pytest-asyncio coverage
-          pip install -e .
-          playwright install
+          pip install -e ".[dev]"
 
       - name: Run tests with coverage
         run: |
@@ -115,6 +111,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # Deliberately the bare default install, with no extras: this job is the
+      # regression guard that the core agent still runs on the lean dependency
+      # set. Do not add extras here to fix a failure — fix the lazy import.
       - name: Install Package
         run: |
           python -m pip install --upgrade pip
@@ -157,7 +156,7 @@ jobs:
       - name: Install Package in Editable Mode
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
+          pip install -e ".[server]"
       - name: Start Server and Check Functionality
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

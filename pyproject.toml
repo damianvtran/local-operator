@@ -13,43 +13,69 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
 keywords = ["local", "agent", "execution", "operator", "agent-to-agent", "agentic", "local-first", "ai", "proactive"]
+# The default install is deliberately small: the core agent (exec mode,
+# provider clients, the tool loop, and the terminal UI) and nothing else.
+# Everything with a heavy or platform-fragile footprint sits behind an extra
+# below. Adding a dependency here is a decision about every user's install
+# time, and on Windows about whether a compiled wheel exists at all.
 dependencies = [
-    # Harness / providers
+    # HTTP + data model. httpx drives every provider client and the OAuth
+    # flows; pydantic is the schema layer the whole harness is typed against.
     "httpx>=0.27",
     "pydantic>=2.7",
-    "tiktoken",
-    "python-dotenv",
-    "pyyaml",
-    "jsonlines",
-    "python-dateutil>=2.8.0",
-    # Server / API contract
-    "uvicorn",
-    "fastapi",
-    "python-multipart",
-    "websockets>=15.0.1",
+    # requests backs the legacy synchronous service clients (Radient, Ollama,
+    # OpenRouter model listings) and model validation. Pure Python with no
+    # compiled wheels, so it costs install size but never a build.
     "requests>=2.32.0",
-    # Scheduler / persistence
-    "apscheduler",
-    # TUI
+    # Configuration and persistence: agent.yml / config.yml, skill front
+    # matter, and .env loading.
+    "pyyaml",
+    "python-dotenv",
+    # Terminal UI. This is the default entry point of the `local-operator`
+    # command, so it stays required rather than optional. Pure Python, no
+    # compiled wheels — textual pulls rich, which pulls pygments and
+    # markdown-it-py. pygments is listed explicitly because the TUI imports
+    # it directly for syntax token styling.
     "textual>=8.0.0",
     "rich>=13.7",
-    "markdown-it-py>=3.0",
-    # MCP
-    "mcp>=1.2",
-    # Skills semantic search
-    "faiss-cpu==1.10.0",
-    # Platform glue / media
-    "psutil",
-    "pillow",
-    "pillow-heif",
-    "pyreadline3",
+    "pygments>=2.13",
 ]
 requires-python = ">=3.12"
 
 [project.optional-dependencies]
+# The HTTP API facade (local-operator serve) and the background scheduler it
+# owns. fastapi/starlette/uvicorn/websockets/python-multipart are pure Python
+# but total ~10 packages, and none of them are reachable from exec mode or
+# the TUI. dill is here too: only the server's agent-context endpoints pickle
+# execution namespaces.
+server = [
+    "fastapi",
+    "starlette",
+    "uvicorn",
+    "python-multipart",
+    "websockets>=15.0.1",
+    "apscheduler",
+    "dill",
+]
+# Model Context Protocol client support. The SDK's own chain is the single
+# heaviest thing this project can install: a TLS stack (cryptography, via
+# pyjwt[crypto]), a JSON Schema validator with a Rust-backed store, an
+# OpenTelemetry API, an ASGI server, and the entire pywin32 bundle on Windows.
+mcp = ["mcp>=1.2"]
+# HEIC/HEIF image attachment decoding. Both wheels are compiled, and
+# pillow-heif in particular is the most likely thing to have no wheel for a
+# freshly released CPython on Windows.
+images = ["pillow-heif"]
+# Exact BPE token counting for context management. A compiled (Rust) wheel
+# that also downloads its rank tables on first use; without it token
+# estimation falls back to a chars/4 heuristic and compaction still works.
+tokenizer = ["tiktoken"]
+all = ["local-operator[server,mcp,images,tokenizer]"]
 dev = [
+    "local-operator[all]",
     "ruff",
     "pyright",
     "pytest",
@@ -57,6 +83,8 @@ dev = [
     "pytest-cov",
     "pytest-textual-snapshot",
     "pip-audit",
+    # Independent decoder used to verify our own PNG encoder's output.
+    "pillow",
 ]
 
 [tool.setuptools.package-data]
@@ -74,7 +102,7 @@ target-version = ['py312']
 extend-exclude = "F401"
 
 [tool.pylint."messages control"]
-ignore = ["setup.py", "__init__.py"]
+ignore = ["__init__.py"]
 disable = "all"
 enable = [
     "empty-docstring",
