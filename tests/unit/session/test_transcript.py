@@ -128,14 +128,16 @@ async def test_latest_compaction_wins(transcript):
 
 
 @pytest.mark.asyncio
-async def test_compaction_with_missing_first_kept_falls_back(transcript):
-    """If first_kept_entry_id cannot be found, replay starts after the
-    compaction entry (no crash, no pre-cut leak)."""
+async def test_compaction_with_missing_first_kept_replays_full_history(transcript):
+    """If first_kept_entry_id cannot be found, replay falls back to the FULL
+    history. The old fallback (compaction_index + 1) pointed past the kept
+    window and silently dropped every message compaction promised to keep;
+    replaying too much is recoverable at the next compaction, amnesia is not."""
     await transcript.append_message(Message.user("before"))
     await transcript.append_compaction("S", "no-such-entry", 10)
     await transcript.append_message(Message.user("after"))
     history = transcript.build_llm_history()
-    assert [m.text for m in history if isinstance(m, Message)] == ["after"]
+    assert [m.text for m in history if isinstance(m, Message)] == ["before", "after"]
 
 
 @pytest.mark.asyncio
