@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
-from local_operator.harness.types import AgentEvent, EventHandler
+from local_operator.harness.types import EventHandler
 
 
 @runtime_checkable

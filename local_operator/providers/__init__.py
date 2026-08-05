@@ -15,18 +15,22 @@ public surface consumed by other streams:
   ``LoopConfig.stream_fn`` from an ``AuthStore``.
 """
 
-from local_operator.providers.auth_store import AuthStore, OAuthAccess, StoredCredential
-from local_operator.providers.clients import (
+from local_operator.providers.auth_store import (  # noqa: F401
+    AuthStore,
+    OAuthAccess,
+    StoredCredential,
+)
+from local_operator.providers.clients import (  # noqa: F401
     AnthropicClient,
     GoogleClient,
     MockClient,
     OpenAICompatClient,
-    WireClient,
+    WireClient,  # noqa: F401
 )
-from local_operator.providers.failover import (
+from local_operator.providers.failover import (  # noqa: F401
     AuthRetryKeyState,
     ProviderError,
-    RetrySettings,
+    RetrySettings,  # noqa: F401
     backoff_delay_ms,
     expand_fallback_candidates,
     resolve_chain,

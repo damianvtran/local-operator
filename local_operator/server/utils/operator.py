@@ -505,8 +505,6 @@ class ServerOperator:
         accounting and ``final_response`` for the envelope's ``response``
         field.
         """
-        from local_operator import session_factory
-
         attachments = list(attachments or [])
         prompt = user_input
         if additional_instructions:

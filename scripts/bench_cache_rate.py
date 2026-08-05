@@ -30,7 +30,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from local_operator.harness.types import (
+from local_operator.harness.types import (  # noqa: E402
     AbortSignal,
     ChatRequest,
     Message,
@@ -40,8 +40,8 @@ from local_operator.harness.types import (
     ToolContext,
     Usage,
 )
-from local_operator.prompts_api import build_system_blocks
-from local_operator.tools.registry import create_tools
+from local_operator.prompts_api import build_system_blocks  # noqa: E402
+from local_operator.tools.registry import create_tools  # noqa: E402
 
 TASK_PROMPTS = [
     "Create a file todo_app.py with a Todo dataclass (id, text, done).",

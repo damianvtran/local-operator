@@ -14,10 +14,8 @@ Regenerate after intentional visual changes with::
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
-import pytest
 
 from local_operator.harness.types import (  # noqa: E402
     AgentEndEvent,

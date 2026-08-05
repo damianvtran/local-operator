@@ -312,7 +312,6 @@ def test_renderer_tracks_failure() -> None:
 @pytest.mark.asyncio
 async def test_run_print_mode_prompts_sequentially(capsys) -> None:
     session = FakeSession([_success_script("one"), _success_script("two")])
-    renderer_seen: list[str] = []
 
     code = await run_print_mode(session, ["first", "second"])
     assert code == 0
@@ -439,7 +438,6 @@ def test_worker_records_exit_in_ledger(monkeypatch, tmp_path: Path, capsys) -> N
     logs_dir = tmp_path / "logs"
     logs_dir.mkdir()
     monkeypatch.setattr(exec_mode, "LOGS_DIR", logs_dir)
-    parsed = exec_worker.build_parser().parse_args(["--prompt", "x", "--job-id", "job1"])
     monkeypatch.setattr(sys, "argv", ["exec_worker", "--prompt", "x", "--job-id", "job1"])
     monkeypatch.setattr(exec_worker, "run", lambda _p, session_factory=None: 0)
 
@@ -473,7 +471,6 @@ def test_yolo_gate_approves_without_tty(monkeypatch) -> None:
 
 def test_exec_worker_success(fake_factory, capsys) -> None:
     session = FakeSession([_success_script("worker says hi")])
-    monkeypatch_default_factory = lambda: None  # noqa: E731 — placeholder for clarity
     parsed = exec_worker.build_parser().parse_args(["--prompt", "greet me"])
     code = exec_worker.run(parsed, session_factory=lambda: session)
     captured = capsys.readouterr()
@@ -490,7 +487,6 @@ def test_exec_worker_error_exit_code(fake_factory) -> None:
 
 def test_exec_worker_main_wraps_errors(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     """main() maps unexpected failures to exit 1 with the log-line on stderr."""
-    parsed = exec_worker.build_parser().parse_args(["--prompt", "x"])
     monkeypatch.setattr(sys, "argv", ["exec_worker", "--prompt", "x"])
 
     def boom(_parsed: argparse.Namespace, session_factory=None) -> int:

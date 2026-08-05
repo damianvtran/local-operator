@@ -37,7 +37,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
-from local_operator.harness.types import AgentMessage, Message, TextContent
+from local_operator.harness.types import AgentMessage, Message
 
 if TYPE_CHECKING:
     from local_operator.session.protocol import SessionProtocol

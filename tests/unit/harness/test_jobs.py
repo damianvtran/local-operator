@@ -63,7 +63,7 @@ async def test_max_running_enforced_queued_dont_count():
         return "ok"
 
     a = manager.register("task", "a", blocked)
-    b = manager.register("task", "b", blocked)
+    manager.register("task", "b", blocked)  # consumes a slot for the capacity cap
     assert manager.at_capacity() is True
     with pytest.raises(RuntimeError):
         manager.register("task", "c", blocked)

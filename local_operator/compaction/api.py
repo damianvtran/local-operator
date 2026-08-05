@@ -30,7 +30,6 @@ from local_operator.harness.types import (
     AgentMessage,
     CustomMessage,
     Message,
-    TextContent,
     ToolCall,
 )
 

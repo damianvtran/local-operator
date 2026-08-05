@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Any, Awaitable, Callable, Literal, Protocol, runtime_checkable
+from typing import Any, Awaitable, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 

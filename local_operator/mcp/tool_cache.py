@@ -80,7 +80,8 @@ class McpToolCache:
             return
         try:
             conn.execute(
-                "INSERT OR REPLACE INTO mcp_tool_cache (server, tools_json, saved_at) VALUES (?, ?, ?)",
+                "INSERT OR REPLACE INTO mcp_tool_cache "
+                "(server, tools_json, saved_at) VALUES (?, ?, ?)",
                 (server, json.dumps(tools), time.time()),
             )
             conn.commit()

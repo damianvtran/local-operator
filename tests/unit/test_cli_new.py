@@ -14,7 +14,6 @@ with the harness rewrite, and the CLI drives ``session_factory`` directly.
 from __future__ import annotations
 
 import argparse
-import asyncio
 import subprocess
 import sys
 import types

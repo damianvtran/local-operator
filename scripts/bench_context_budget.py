@@ -28,17 +28,17 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from local_operator.compaction.tokens import estimate_tokens
-from local_operator.harness.types import Message, ToolContext
-from local_operator.prompts_api import build_system_blocks
-from local_operator.skills.api import (
+from local_operator.compaction.tokens import estimate_tokens  # noqa: E402
+from local_operator.harness.types import Message, ToolContext  # noqa: E402
+from local_operator.prompts_api import build_system_blocks  # noqa: E402
+from local_operator.skills.api import (  # noqa: E402
     SkillIndex,
     default_backend_from_env,
     default_skill_roots,
     discover_skills,
     render_block,
 )
-from local_operator.tools.registry import create_tools
+from local_operator.tools.registry import create_tools  # noqa: E402
 
 BUDGET_TOKENS = 30_000
 SAMPLE_QUERIES = [

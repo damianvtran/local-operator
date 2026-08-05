@@ -7,9 +7,7 @@ the real wiring (hosting ``test``) where the contract demands it.
 from __future__ import annotations
 
 import argparse
-import asyncio
 import sqlite3
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
