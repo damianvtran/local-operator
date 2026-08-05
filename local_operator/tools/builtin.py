@@ -442,7 +442,7 @@ async def execute_bash(
     next_update = loop.time() + 0.5
 
     while True:
-        waiters: list[asyncio.Task] = [wait_task, stdout_task, stderr_task]
+        waiters: list[asyncio.Task[object]] = [wait_task, stdout_task, stderr_task]
         if abort_waiter is not None:
             waiters.append(abort_waiter)
         if wait_task.done():

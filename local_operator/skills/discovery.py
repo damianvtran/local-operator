@@ -53,7 +53,7 @@ class Skill(BaseModel):
     hide: bool = False
 
 
-def parse_frontmatter(text: str) -> dict:
+def parse_frontmatter(text: str) -> dict[str, object]:
     """Parse the leading ``---`` YAML block of a SKILL.md.
 
     Returns ``{}`` when there is no frontmatter, the block is unterminated,
