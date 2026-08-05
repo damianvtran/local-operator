@@ -29,6 +29,8 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     "grep": lambda _context: builtin.build_grep_tool(),
     "todo": lambda _context: builtin.build_todo_tool(),
     "wake": lambda context: builtin.build_wake_tool(context),
+    "list_variables": lambda _context: builtin.build_list_variables_tool(),
+    "read_variable": lambda _context: builtin.build_read_variable_tool(),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -44,6 +46,8 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "grep",
     "todo",
     "wake",
+    "list_variables",
+    "read_variable",
 ]
 
 

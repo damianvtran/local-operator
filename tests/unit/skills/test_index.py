@@ -222,7 +222,7 @@ class TestSelect:
         hidden = _make_skill(tmp_path, "beta", "second", hide=True)
         index = SkillIndex([visible, hidden], BrokenLocalEmbedder(), cache_dir=tmp_path / "cache")
         matches = await index.select("anything")
-        assert matches == [visible]  # ALL non-hidden, omp-style fallback
+        assert matches == [visible]  # ALL non-hidden fallback
         assert index.degraded is True
         assert any("static listing" in w for w in index.warnings)
 

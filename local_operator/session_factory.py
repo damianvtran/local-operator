@@ -250,6 +250,23 @@ def _env_details(cwd: str | None = None) -> str:
     )
 
 
+def _build_variable_store(cwd: str, config_manager: Any) -> Any:
+    """Construct the session's VariableStore for the list/read variable
+    tools. Config ``variables`` ride above the project file and environment;
+    no values are ever written into the system prompt (that is the whole
+    point — the model lists names and reads single values on demand)."""
+    from local_operator.variables import VariableStore
+
+    config_values: dict[str, str] | None = None
+    try:
+        raw = config_manager.get_config_value("variables", None)
+        if isinstance(raw, dict):
+            config_values = {str(k): str(v) for k, v in raw.items() if v is not None}
+    except Exception:  # noqa: BLE001 — a config read failure must not block tools
+        config_values = None
+    return VariableStore(cwd=cwd, config_values=config_values)
+
+
 @dataclass
 class _SkillsHooks:
     """Shared mutable state for skills wiring: the built index, the name map,
@@ -516,6 +533,10 @@ async def _prepare(
         agent_id=agent_id,
         has_ui=has_ui,
         request_approval=request_approval,
+        # The variables surface behind list_variables/read_variable: config
+        # overrides ride above the project file and process environment, and
+        # values stay out of the system prompt (read on demand, not baked).
+        variables=_build_variable_store(effective_cwd, config_manager),
     )
     tools = create_tools(tool_context)
 

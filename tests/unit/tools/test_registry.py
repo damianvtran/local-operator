@@ -39,7 +39,12 @@ def test_every_tool_has_schema_and_metadata() -> None:
     for tool in create_tools(ToolContext(cwd=".", wake_scheduler=_FakeScheduler())):
         # JSON Schema derived from the pydantic params model
         assert tool.parameters.get("type") == "object"
-        assert tool.parameters.get("properties")
+        assert "properties" in tool.parameters
+        # A zero-arg tool (e.g. list_variables) legitimately has no params.
+        if tool.parameters["properties"] == {}:
+            assert tool.name == "list_variables"
+        else:
+            assert tool.parameters.get("properties")
         # presentation + scheduling metadata are populated
         assert tool.label
         assert tool.description
@@ -47,10 +52,10 @@ def test_every_tool_has_schema_and_metadata() -> None:
         assert tool.concurrency in ("shared", "exclusive")
 
 
-def test_concurrency_tiers_match_omp_model() -> None:
-    # RT-02/RT-03/RT-04: omp-derived scheduling classes. write/edit/todo/wake
-    # rewrite shared state (a file, the todo list, the schedule list) so they
-    # run exclusive; bash/read/glob/grep are independent batch work -> shared.
+def test_concurrency_tiers_match_scheduling_model() -> None:
+    # RT-02/RT-03/RT-04: scheduling classes. write/edit/todo/wake rewrite
+    # shared state (a file, the todo list, the schedule list) so they run
+    # exclusive; bash/read/glob/grep are independent batch work -> shared.
     tools = {t.name: t for t in create_tools(ToolContext(cwd="."))}
     assert tools["bash"].concurrency == "shared"
     assert tools["read"].concurrency == "shared"

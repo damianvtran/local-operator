@@ -45,7 +45,7 @@ def test_resolve_threshold_defaulted_reserve_section_c_default():
 
 
 def test_resolve_threshold_defaulted_reserve_impossible_recovers_15_percent():
-    """omp resolveBudgetReserveTokens: a defaulted reserve that is impossible
+    """A defaulted reserve that is impossible
     for the window (>= window, or >= window - proportional) recovers to
     max(1, floor(w * 0.15))."""
     s = CompactionSettings()
