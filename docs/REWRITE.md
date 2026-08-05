@@ -357,6 +357,13 @@ the STRUCTURE is what we borrow, not the hue.
   keys are additive (`compaction.*`, `retry.*`, `skills.*`, `tui.*`). Fix
   the known `conversation_length` vs `max_conversation_history` mismatch by
   honoring BOTH (read either, write canonical `conversation_length`).
+- Deprecation: `conversation_length`, `detail_length`, and
+  `max_learnings_history` are deprecated — the compaction engine supersedes
+  them. Context retention is governed by `values.compaction.*`
+  (`CompactionSettings`); the three legacy keys remain readable in
+  `config.yml` and listed by `config list` (marked `[DEPRECATED]` there) so
+  existing files and scripts keep working, but they are inert.
+
 - `credentials.env`: still read (env tier of the credential cascade); still
   written by `credential update`. OAuth credentials live in auth.db, never in
   credentials.env.

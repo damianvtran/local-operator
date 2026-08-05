@@ -42,6 +42,30 @@ from local_operator.harness.types import AgentMessage, Message, TextContent
 if TYPE_CHECKING:
     from local_operator.session.protocol import SessionProtocol
 
+
+def coerce_compaction_settings(raw: Any) -> Any:
+    """Coerce ``values.compaction`` into a :class:`CompactionSettings` (CL-01).
+
+    ``ConfigManager`` returns the YAML shape verbatim — a plain ``dict`` — but
+    the session consumes attribute-style settings. ``None`` and already-typed
+    settings pass through; a dict is validated; an invalid dict degrades to
+    defaults with a warning (a bad compaction block must never block startup).
+    """
+    if raw is None or not isinstance(raw, dict):
+        return raw
+    from pydantic import ValidationError
+
+    from local_operator.compaction.api import CompactionSettings
+
+    try:
+        return CompactionSettings.model_validate(raw)
+    except ValidationError as exc:
+        print(
+            f"\033[1;33mWarning: invalid 'compaction' config, using defaults: {exc}\033[0m",
+            file=sys.stderr,
+        )
+        return CompactionSettings()
+
 #: Sampling knobs copied from an agent record onto ``configure_model`` when
 #: the agent sets them. Names match both ``AgentData`` and the committed
 #: ``configure_model`` keyword arguments (stream B).
@@ -169,14 +193,14 @@ def default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
                 out.append(Message(role="user", content=[TextContent(text=text)]))
     return out
 
-
 def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
     """Build the tool-approval gate.
 
     ``--yolo`` auto-approves every tier (read/write/exec). Otherwise approval
     is an interactive y/N prompt — which can only happen on a tty; headless
     runs deny, so a background job never hangs waiting for input it will
-    never get.
+    never get. A non-tty denial is NEVER silent (CL-04): the user must see
+    why the tool was rejected and how to change it (``--yolo``).
     """
     if yolo:
 
@@ -187,6 +211,11 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
 
     async def prompt_approval(tool_name: str, description: str) -> bool:
         if not sys.stdin.isatty():
+            print(
+                f"approval required but no tty; run with --yolo to auto-approve "
+                f"(tool '{tool_name}')",
+                file=sys.stderr,
+            )
             return False
         try:
             answer = await asyncio.to_thread(
@@ -345,10 +374,16 @@ def _make_skill_resolver(hooks: _SkillsHooks) -> Callable[[str], str | None]:
 class _SessionPlan:
     """Everything needed to construct the session, split out so
     ``build_initial_blocks`` can render the startup system prompt without
-    instantiating the facade (benchmark hook, orchestrator duty)."""
+    instantiating the facade (benchmark hook, orchestrator duty).
+
+    ``auth_store`` rides along (CL-08): callers own its lifetime — folded
+    into ``session.dispose`` by :func:`create_session`, closed directly by
+    :func:`build_initial_blocks` (which never constructs a session).
+    """
 
     session_kwargs: dict[str, Any]
     system_blocks_provider: Callable[[], Awaitable[list[str]]]
+    auth_store: Any = None
 
 
 def _make_system_blocks_provider(
@@ -382,20 +417,28 @@ def _make_system_blocks_provider(
 def _transcript_dir_and_agent_id(
     agent: Any, args: argparse.Namespace, agent_registry: Any
 ) -> tuple[Path, str]:
-    """Pick where this session's JSONL transcript lives.
+    """Pick where this session's JSONL transcript lives (CL-02).
 
-    - named agent -> the agent's own directory (legacy ``agent.yml + *.jsonl``
-      layout stays readable);
+    Legacy ``--train`` semantics:
+
+    - named agent + ``--train`` -> the agent's own directory, so history is
+      replayed at startup and appended after each turn;
+    - named agent WITHOUT ``--train`` -> an ephemeral per-session directory:
+      history is neither replayed from nor appended to the agent dir;
     - no agent but ``--train`` -> the registry's autosave agent (legacy
       ``create_autosave_agent`` semantics);
     - otherwise an ephemeral per-session directory under ``sessions/``: the
       default agent must not persist its session.
     """
     config_dir = Path(agent_registry.config_dir)
+    train = bool(getattr(args, "train", False))
     if agent is not None:
         agent_id = str(agent.id)
-        return config_dir / "agents" / agent_id, agent_id
-    if bool(getattr(args, "train", False)):
+        if train:
+            return config_dir / "agents" / agent_id, agent_id
+        session_dir = uuid.uuid4().hex[:12]
+        return config_dir / "sessions" / session_dir, agent_id
+    if train:
         try:
             autosave = agent_registry.create_autosave_agent()
             agent_id = str(autosave.id)
@@ -481,7 +524,9 @@ async def _prepare(
         agent_id=agent_id,
         system_blocks_provider=system_blocks_provider,
         convert_to_llm=default_convert_to_llm,
-        compaction_settings=config_manager.get_config_value("compaction", None),
+        compaction_settings=coerce_compaction_settings(
+            config_manager.get_config_value("compaction", None)
+        ),
         yolo=yolo,
         has_ui=has_ui,
         cwd=os.getcwd(),
@@ -489,7 +534,9 @@ async def _prepare(
         request_approval=request_approval,
     )
     return _SessionPlan(
-        session_kwargs=session_kwargs, system_blocks_provider=system_blocks_provider
+        session_kwargs=session_kwargs,
+        system_blocks_provider=system_blocks_provider,
+        auth_store=auth_store,
     )
 
 
@@ -576,6 +623,31 @@ def attach_mcp_dispose(session: Any, manager: Any) -> None:
     session.mcp_manager = manager
 
 
+def attach_auth_dispose(session: Any, auth_store: Any) -> None:
+    """Fold ``auth_store.close()`` into the session's dispose path (CL-08).
+
+    The ``AuthStore`` opens a SQLite connection per session; every front end
+    calls ``session.dispose()`` exactly once, so wrapping here guarantees the
+    connection (and its file lock) is released everywhere without teaching
+    each caller. Composes with :func:`attach_mcp_dispose` — the outermost
+    wrapper runs first, so MCP teardown and the store close both happen.
+    """
+    if auth_store is None:
+        return
+    original_dispose = session.dispose
+
+    async def dispose_with_auth() -> None:
+        try:
+            await original_dispose()
+        finally:
+            try:
+                auth_store.close()
+            except Exception:  # noqa: BLE001 — teardown must not mask dispose
+                pass
+
+    session.dispose = dispose_with_auth
+
+
 async def create_session(
     args: argparse.Namespace,
     config_manager: Any,
@@ -602,6 +674,11 @@ async def create_session(
     )
     session = Session(**plan.session_kwargs)
 
+    # Auth seam (CL-08): the AuthStore's SQLite connection is owned by this
+    # session; fold its close into dispose so every front end releases the
+    # file lock on the single ``session.dispose()`` call.
+    attach_auth_dispose(session, plan.auth_store)
+
     # MCP seam (MCP-20): merge discovered MCP tools in, subscribe to live
     # changes, and fold server teardown into session.dispose. Degrades to
     # zero MCP tools on any failure.
@@ -627,4 +704,13 @@ async def build_initial_blocks(
     budget without instantiating the session facade.
     """
     plan = await _prepare(args, config_manager, credential_manager, agent_registry, has_ui=False)
-    return await plan.system_blocks_provider()
+    # No session facade is built on this path, so the store's lifetime ends
+    # here: close it directly (CL-08) to release the SQLite lock.
+    try:
+        return await plan.system_blocks_provider()
+    finally:
+        if plan.auth_store is not None:
+            try:
+                plan.auth_store.close()
+            except Exception:  # noqa: BLE001
+                pass

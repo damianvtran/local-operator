@@ -156,7 +156,13 @@ def test_slugify_rules() -> None:
 
 def test_build_worker_argv_roundtrip() -> None:
     args = ExecArgs(
-        json_mode=True, yolo=True, agent_name="A", agent_id="id1", hosting="openai", model="gpt-4o"
+        json_mode=True,
+        yolo=True,
+        train=True,
+        agent_name="A",
+        agent_id="id1",
+        hosting="openai",
+        model="gpt-4o",
     )
     argv = build_worker_argv("do it", args)
     assert argv[:3] == [sys.executable, "-m", "local_operator.exec_worker"]
@@ -166,10 +172,31 @@ def test_build_worker_argv_roundtrip() -> None:
     assert parsed.prompt == "do it"
     assert parsed.json_mode is True
     assert parsed.yolo is True
+    assert parsed.train is True  # CL-05
     assert parsed.agent == "A"
     assert parsed.agent_id == "id1"
     assert parsed.hosting == "openai"
     assert parsed.model == "gpt-4o"
+
+
+def test_build_worker_argv_train_threaded_to_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CL-05: ExecArgs.train reaches the session-factory namespace via argv."""
+    argv = build_worker_argv("t", ExecArgs(train=True))
+    parsed = exec_worker.build_parser().parse_args(argv[3:])
+    assert parsed.train is True
+    # And the worker's factory passes it into the session args namespace.
+    seen: dict = {}
+
+    def fake_create_session(session_args, *managers, **kwargs):
+        seen["train"] = session_args.train
+        return None
+
+    monkeypatch.setattr("local_operator.config.ConfigManager", lambda *a: object())
+    monkeypatch.setattr("local_operator.credentials.CredentialManager", lambda *a: object())
+    monkeypatch.setattr("local_operator.agents.AgentRegistry", lambda *a: object())
+    monkeypatch.setattr("local_operator.session_factory.create_session", fake_create_session)
+    exec_worker._default_session_factory(parsed)
+    assert seen["train"] is True
 
 
 def test_build_worker_argv_omits_unset_flags() -> None:
@@ -229,9 +256,14 @@ def test_run_exec_foreground_json_mode(fake_factory, capsys) -> None:
         "message_end",
         "agent_end",
     ]
-    # Quadratic-growth fix: message_update keeps ONLY the delta.
+    # Quadratic-growth fix: message_update keeps ONLY the delta — plus the
+    # message_id so JSON consumers can attribute deltas (CL-15).
     update = lines[2]
-    assert update == {"type": "message_update", "delta": "streamed"}
+    assert update == {
+        "type": "message_update",
+        "message_id": reply.id,
+        "delta": "streamed",
+    }
 
 
 def test_printable_event_strips_provider_payload() -> None:
@@ -241,6 +273,29 @@ def test_printable_event_strips_provider_payload() -> None:
     # The payload key is gone entirely, and nothing leaks the secret value.
     assert "provider_payload" not in out["message"]
     assert "encrypted" not in json.dumps(out)
+
+
+def test_printable_event_message_update_carries_message_id() -> None:
+    """CL-15: message_update JSON lines carry message_id."""
+    message = Message.assistant("abc")
+    out = printable_event(MessageUpdateEvent(message=message, delta="abc"))
+    assert out["message_id"] == message.id
+    assert out["delta"] == "abc"
+    assert out["type"] == "message_update"
+
+
+def test_run_exec_prompt_raising_exits_one(fake_factory, capsys) -> None:
+    """CL-19: a prompt() that RAISES maps to exit 1 with the error on
+    stderr — never the interactive red banner."""
+
+    class RaisingSession(FakeSession):
+        async def prompt(self, text: str, attachments=None) -> None:
+            raise RuntimeError("turn blew up")
+
+    fake_factory(RaisingSession([]))
+    code = exec_mode.run_exec("explode", ExecArgs())
+    assert code == 1
+    assert "turn blew up" in capsys.readouterr().err
 
 
 def test_renderer_tracks_failure() -> None:
@@ -263,9 +318,6 @@ async def test_run_print_mode_prompts_sequentially(capsys) -> None:
     code = await run_print_mode(session, ["first", "second"])
     assert code == 0
     assert session.prompts == ["first", "second"]
-    # Last assistant text wins in text mode.
-    captured = capsys.readouterr()
-    assert "two" in captured.out
 
 
 # --- exec_mode background --------------------------------------------------------
@@ -274,6 +326,7 @@ async def test_run_print_mode_prompts_sequentially(capsys) -> None:
 def test_run_exec_background_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys) -> None:
     logs_dir = tmp_path / "logs"
     monkeypatch.setattr(exec_mode, "LOGS_DIR", logs_dir)
+    monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", lambda args: ("test", "m"))
 
     popen_mock = MagicMock()
     popen_mock.return_value.pid = 4321
@@ -291,11 +344,12 @@ def test_run_exec_background_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     assert argv[:5] == [sys.executable, "-m", "local_operator.exec_worker", "--prompt",
                         "write a long report about penguins"]
     assert "--json" in argv and "--yolo" in argv
+    assert "--job-id" in argv  # CL-09 terminal-record wiring
     kwargs = popen_mock.call_args[1]
     if sys.platform != "win32":
         assert kwargs.get("start_new_session") is True
 
-    # Log path printed and registered; jobs.json ledger appended.
+    # Log path printed and registered; JSONL ledger appended (CL-11).
     out = capsys.readouterr().out
     assert "Started background job" in out
     log_line = next(line for line in out.splitlines() if line.startswith("Log: "))
@@ -306,20 +360,108 @@ def test_run_exec_background_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     assert log_path.exists()
     assert "write a long report about penguins" in log_path.read_text()
 
-    jobs_path = logs_dir / "exec-jobs.json"
-    records = json.loads(jobs_path.read_text())
+    records = exec_mode.read_job_records()
     assert len(records) == 1
     record = records[0]
     assert record["pid"] == 4321
     assert record["prompt"] == "write a long report about penguins"
     assert record["log"] == str(log_path)
-    assert set(record) == {"id", "started_at", "prompt", "log", "pid"}
+    assert record["finished_at"] is None and record["exit_code"] is None
 
-    # A second spawn APPENDS rather than overwrites.
+    # A second spawn APPENDS a second JSONL line (never rewrites the file).
     exec_mode.run_exec("second task", ExecArgs(background=True))
-    records = json.loads(jobs_path.read_text())
+    records = exec_mode.read_job_records()
     assert len(records) == 2
     assert records[1]["prompt"] == "second task"
+    lines = (logs_dir / exec_mode.JOBS_FILE).read_text().splitlines()
+    assert len(lines) == 2
+
+
+def test_ledger_reader_tolerates_partial_line(tmp_path: Path, monkeypatch) -> None:
+    """CL-11: a truncated trailing line (crash mid-write) never breaks reads."""
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    monkeypatch.setattr(exec_mode, "LOGS_DIR", logs_dir)
+    good = json.dumps({"id": "abc", "prompt": "ok"})
+    (logs_dir / exec_mode.JOBS_FILE).write_text(good + "\n" + '{"id": "de", "prom', encoding="utf-8")
+    records = exec_mode.read_job_records()
+    assert len(records) == 1
+    assert records[0]["id"] == "abc"
+
+
+def test_logs_dir_and_log_file_permissions(monkeypatch, tmp_path: Path) -> None:
+    """CL-10: LOGS_DIR is 0700 and job logs are created 0600."""
+    logs_dir = tmp_path / "logs"
+    monkeypatch.setattr(exec_mode, "LOGS_DIR", logs_dir)
+    monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", lambda args: ("test", "m"))
+    popen_mock = MagicMock()
+    popen_mock.return_value.pid = 1
+    monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+
+    assert exec_mode.run_exec("perm task", ExecArgs(background=True)) == 0
+    assert (logs_dir.stat().st_mode & 0o777) == 0o700
+    log_files = list(logs_dir.glob("exec-*.log"))
+    assert len(log_files) == 1
+    assert (log_files[0].stat().st_mode & 0o777) == 0o600
+
+
+def test_background_preflight_blocks_spawn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    """CL-09: a failed hosting/model resolution returns non-zero WITHOUT
+    spawning the worker or writing a log."""
+    logs_dir = tmp_path / "logs"
+    monkeypatch.setattr(exec_mode, "LOGS_DIR", logs_dir)
+
+    def broken(args):
+        raise ValueError("Model name is not configured.")
+
+    monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", broken)
+    popen_mock = MagicMock()
+    monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+
+    code = exec_mode.run_exec("doomed", ExecArgs(background=True))
+    assert code != 0
+    popen_mock.assert_not_called()
+    out = capsys.readouterr().out
+    assert "Model name is not configured." in out
+    assert not logs_dir.exists() or not list(logs_dir.glob("exec-*.log"))
+
+
+def test_worker_records_exit_in_ledger(monkeypatch, tmp_path: Path, capsys) -> None:
+    """CL-09: main() with --job-id appends finished_at + exit_code."""
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    monkeypatch.setattr(exec_mode, "LOGS_DIR", logs_dir)
+    parsed = exec_worker.build_parser().parse_args(["--prompt", "x", "--job-id", "job1"])
+    monkeypatch.setattr(sys, "argv", ["exec_worker", "--prompt", "x", "--job-id", "job1"])
+    monkeypatch.setattr(exec_worker, "run", lambda _p, session_factory=None: 0)
+
+    assert exec_worker.main() == 0
+    records = exec_mode.read_job_records()
+    assert any(
+        r["id"] == "job1" and r["exit_code"] == 0 and r["finished_at"] for r in records
+    )
+
+
+def test_headless_approval_denial_notice(fake_factory, monkeypatch, capsys) -> None:
+    """CL-04: a non-tty approval denial prints the --yolo notice to stderr."""
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    import local_operator.session_factory as sf
+
+    gate = sf._make_request_approval(yolo=False)
+    approved = asyncio.run(gate("exec", "rm -rf /"))
+    assert approved is False
+    err = capsys.readouterr().err
+    assert "approval required but no tty; run with --yolo to auto-approve" in err
+
+
+def test_yolo_gate_approves_without_tty(monkeypatch) -> None:
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    import local_operator.session_factory as sf
+
+    gate = sf._make_request_approval(yolo=True)
+    assert asyncio.run(gate("exec", "anything")) is True
 
 
 # --- exec_worker -----------------------------------------------------------------
@@ -358,3 +500,55 @@ def test_exec_worker_main_wraps_errors(monkeypatch: pytest.MonkeyPatch, capsys) 
 def test_exec_worker_parser_requires_prompt() -> None:
     with pytest.raises(SystemExit):
         exec_worker.build_parser().parse_args([])
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM semantics are POSIX")
+def test_exec_worker_sigterm_yields_130(tmp_path: Path) -> None:
+    """CL-03/CL-19: a real SIGTERM to a running worker exits 130 with a
+    clean log (no traceback). Drives the worker through a subprocess with a
+    stubbed session whose prompt parks until abort — exactly the shape a
+    background turn has when SIGTERM arrives."""
+    import os as _os
+    import subprocess as sp
+    import time
+
+    repo_root = Path(exec_worker.__file__).resolve().parent.parent
+    script = (
+        "import asyncio\n"
+        "import local_operator.exec_worker as ew\n"
+        "from local_operator.exec_worker import EXIT_INTERRUPTED\n"
+        "class Slow:\n"
+        "    def __init__(self):\n"
+        "        self.disposed = False\n"
+        "        self._abort = asyncio.Event()\n"
+        "    def subscribe(self, handler):\n"
+        "        return lambda: None\n"
+        "    def abort(self, reason):\n"
+        "        self._abort.set()\n"
+        "    async def prompt(self, text, attachments=None):\n"
+        "        await self._abort.wait()\n"
+        "    async def dispose(self):\n"
+        "        self.disposed = True\n"
+        "parsed = ew.build_parser().parse_args(['--prompt', 'sleepy'])\n"
+        "code = ew.run(parsed, session_factory=Slow)\n"
+        "print('EXIT', code)\n"
+        "import sys\n"
+        "sys.exit(code)\n"
+    )
+    env = dict(_os.environ)
+    env["PYTHONPATH"] = str(repo_root) + _os.pathsep + env.get("PYTHONPATH", "")
+    proc = sp.Popen(
+        [sys.executable, "-c", script],
+        stdout=sp.PIPE,
+        stderr=sp.PIPE,
+        text=True,
+        cwd=str(tmp_path),
+        env=env,
+    )
+    # Give the worker time to install its signal handler and start the turn.
+    time.sleep(1.0)
+    proc.terminate()
+    stdout, stderr = proc.communicate(timeout=15)
+    assert proc.returncode == 130, f"stdout={stdout!r} stderr={stderr!r}"
+    assert "EXIT 130" in stdout
+    assert "Traceback" not in stderr

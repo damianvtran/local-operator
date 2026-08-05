@@ -1,0 +1,594 @@
+{
+  "$": {
+    "--agent,--agent-name": {
+      "choices": null,
+      "default": null,
+      "dest": "agent_name",
+      "nargs": null,
+      "required": false
+    },
+    "--debug": {
+      "choices": null,
+      "default": false,
+      "dest": "debug",
+      "nargs": 0,
+      "required": false
+    },
+    "--hosting": {
+      "choices": [
+        "alibaba",
+        "anthropic",
+        "deepseek",
+        "google",
+        "kimi",
+        "mistral",
+        "ollama",
+        "openai",
+        "openrouter",
+        "radient",
+        "test",
+        "xai"
+      ],
+      "default": null,
+      "dest": "hosting",
+      "nargs": null,
+      "required": false
+    },
+    "--model": {
+      "choices": null,
+      "default": null,
+      "dest": "model",
+      "nargs": null,
+      "required": false
+    },
+    "--run-in": {
+      "choices": null,
+      "default": null,
+      "dest": "run_in",
+      "nargs": null,
+      "required": false
+    },
+    "--train": {
+      "choices": null,
+      "default": false,
+      "dest": "train",
+      "nargs": 0,
+      "required": false
+    },
+    "--version": {
+      "choices": null,
+      "default": "<SUPPRESS>",
+      "dest": "version",
+      "nargs": 0,
+      "required": false
+    },
+    "POS:subcommand": {
+      "choices": [
+        "agents",
+        "config",
+        "credential",
+        "exec",
+        "serve"
+      ],
+      "default": null,
+      "dest": "subcommand",
+      "nargs": "A...",
+      "required": false
+    }
+  },
+  "agents": {
+    "--agent,--agent-name": {
+      "choices": null,
+      "default": null,
+      "dest": "agent_name",
+      "nargs": null,
+      "required": false
+    },
+    "--debug": {
+      "choices": null,
+      "default": false,
+      "dest": "debug",
+      "nargs": 0,
+      "required": false
+    },
+    "--train": {
+      "choices": null,
+      "default": false,
+      "dest": "train",
+      "nargs": 0,
+      "required": false
+    },
+    "POS:agents_command": {
+      "choices": [
+        "create",
+        "delete",
+        "list",
+        "pull",
+        "push"
+      ],
+      "default": null,
+      "dest": "agents_command",
+      "nargs": "A...",
+      "required": false
+    }
+  },
+  "agents create": {
+    "--agent,--agent-name": {
+      "choices": null,
+      "default": null,
+      "dest": "agent_name",
+      "nargs": null,
+      "required": false
+    },
+    "--debug": {
+      "choices": null,
+      "default": false,
+      "dest": "debug",
+      "nargs": 0,
+      "required": false
+    },
+    "--train": {
+      "choices": null,
+      "default": false,
+      "dest": "train",
+      "nargs": 0,
+      "required": false
+    },
+    "POS:name": {
+      "choices": null,
+      "default": null,
+      "dest": "name",
+      "nargs": null,
+      "required": true
+    }
+  },
+  "agents delete": {
+    "--agent,--agent-name": {
+      "choices": null,
+      "default": null,
+      "dest": "agent_name",
+      "nargs": null,
+      "required": false
+    },
+    "--debug": {
+      "choices": null,
+      "default": false,
+      "dest": "debug",
+      "nargs": 0,
+      "required": false
+    },
+    "--id": {
+      "choices": null,
+      "default": null,
+      "dest": "agent_id",
+      "nargs": null,
+      "required": false
+    },
+    "--name": {
+      "choices": null,
+      "default": null,
+      "dest": "name",
+      "nargs": null,
+      "required": false
+    },
+    "--train": {
+      "choices": null,
+      "default": false,
+      "dest": "train",
+      "nargs": 0,
+      "required": false
+    }
+  },
+  "agents list": {
+    "--agent,--agent-name": {
+      "choices": null,
+      "default": null,
+      "dest": "agent_name",
+      "nargs": null,
+      "required": false
+    },
+    "--debug": {
+      "choices": null,
+      "default": false,
+      "dest": "debug",
+      "nargs": 0,
+      "required": false
+    },
+    "--page": {
+      "choices": null,
+      "default": 1,
+      "dest": "page",
+      "nargs": null,
+      "required": false
+    },
+    "--perpage": {
+      "choices": null,
+      "default": 10,
+      "dest": "perpage",
+      "nargs": null,
+      "required": false
+    },
+    "--train": {
+      "choices": null,
+      "default": false,
+      "dest": "train",
+      "nargs": 0,
+      "required": false
+    }
+  },
+  "agents pull": {
+    "--agent,--agent-name": {
+      "choices": null,
+      "default": null,
+      "dest": "agent_name",
+      "nargs": null,
+      "required": false
+    },
+    "--debug": {
+      "choices": null,
+      "default": false,
+      "dest": "debug",
+      "nargs": 0,
+      "required": false
+    },
+    "--id": {
+      "choices": null,
+      "default": null,
+      "dest": "id",
+      "nargs": null,
+      "required": true
+    },
+    "--train": {
+      "choices": null,
+      "default": false,
+      "dest": "train",
+      "nargs": 0,
+      "required": false
+    }
+  },
+  "agents push": {
+    "--agent,--agent-name": {
+      "choices": null,
+      "default": null,
+      "dest": "agent_name",
+      "nargs": null,
+      "required": false
+    },
+    "--debug": {
+      "choices": null,
+      "default": false,
+      "dest": "debug",
+      "nargs": 0,
+      "required": false
+    },
+    "--id": {
+      "choices": null,
+      "default": null,
+      "dest": "id",
+      "nargs": null,
+      "required": false
+    },
+    "--name": {
+      "choices": null,
+      "default": null,
+      "dest": "name",
+      "nargs": null,
+      "required": false
+    },
+    "--train": {
+      "choices": null,
+      "default": false,
+      "dest": "train",
+      "nargs": 0,
+      "required": false
+    }
+  },
+  "config": {
+    "--agent,--agent-name": {
+      "choices": null,
+      "default": null,
+      "dest": "agent_name",
+      "nargs": null,
+      "required": false
+    },
+    "--debug": {
+      "choices": null,
+      "default": false,
+      "dest": "debug",
+      "nargs": 0,
+      "required": false
+    },
+    "--train": {
+      "choices": null,
+      "default": false,
+      "dest": "train",
+      "nargs": 0,
+      "required": false
+    },
+    "POS:config_command": {
+      "choices": [
+        "create",
+        "edit",
+        "list",
+        "open"
+      ],
+      "default": null,
+      "dest": "config_command",
+      "nargs": "A...",
+      "required": false
+    }
+  },
+  "config create": {
+    "--agent,--agent-name": {
+      "choices": null,
+      "default": null,
+      "dest": "agent_name",
+      "nargs": null,
+      "required": false
+    },
+    "--debug": {
+      "choices": null,
+      "default": false,
+      "dest": "debug",
+      "nargs": 0,
+      "required": false
+    },
+    "--train": {
+      "choices": null,
+      "default": false,
+      "dest": "train",
+      "nargs": 0,
+      "required": false
+    }
+  },
+  "config edit": {
+    "--agent,--agent-name": {
+      "choices": null,
+      "default": null,
+      "dest": "agent_name",
+      "nargs": null,
+      "required": false
+    },
+    "--debug": {
+      "choices": null,
+      "default": false,
+      "dest": "debug",
+      "nargs": 0,
+      "required": false
+    },
+    "--train": {
+      "choices": null,
+      "default": false,
+      "dest": "train",
+      "nargs": 0,
+      "required": false
+    },
+    "POS:key": {
+      "choices": null,
+      "default": null,
+      "dest": "key",
+      "nargs": null,
+      "required": true
+    },
+    "POS:value": {
+      "choices": null,
+      "default": null,
+      "dest": "value",
+      "nargs": null,
+      "required": true
+    }
+  },
+  "config list": {
+    "--agent,--agent-name": {
+      "choices": null,
+      "default": null,
+      "dest": "agent_name",
+      "nargs": null,
+      "required": false
+    },
+    "--debug": {
+      "choices": null,
+      "default": false,
+      "dest": "debug",
+      "nargs": 0,
+      "required": false
+    },
+    "--train": {
+      "choices": null,
+      "default": false,
+      "dest": "train",
+      "nargs": 0,
+      "required": false
+    }
+  },
+  "config open": {
+    "--agent,--agent-name": {
+      "choices": null,
+      "default": null,
+      "dest": "agent_name",
+      "nargs": null,
+      "required": false
+    },
+    "--debug": {
+      "choices": null,
+      "default": false,
+      "dest": "debug",
+      "nargs": 0,
+      "required": false
+    },
+    "--train": {
+      "choices": null,
+      "default": false,
+      "dest": "train",
+      "nargs": 0,
+      "required": false
+    }
+  },
+  "credential": {
+    "--agent,--agent-name": {
+      "choices": null,
+      "default": null,
+      "dest": "agent_name",
+      "nargs": null,
+      "required": false
+    },
+    "--debug": {
+      "choices": null,
+      "default": false,
+      "dest": "debug",
+      "nargs": 0,
+      "required": false
+    },
+    "--train": {
+      "choices": null,
+      "default": false,
+      "dest": "train",
+      "nargs": 0,
+      "required": false
+    },
+    "POS:credential_command": {
+      "choices": [
+        "delete",
+        "update"
+      ],
+      "default": null,
+      "dest": "credential_command",
+      "nargs": "A...",
+      "required": false
+    }
+  },
+  "credential delete": {
+    "--agent,--agent-name": {
+      "choices": null,
+      "default": null,
+      "dest": "agent_name",
+      "nargs": null,
+      "required": false
+    },
+    "--debug": {
+      "choices": null,
+      "default": false,
+      "dest": "debug",
+      "nargs": 0,
+      "required": false
+    },
+    "--train": {
+      "choices": null,
+      "default": false,
+      "dest": "train",
+      "nargs": 0,
+      "required": false
+    },
+    "POS:key": {
+      "choices": null,
+      "default": null,
+      "dest": "key",
+      "nargs": null,
+      "required": true
+    }
+  },
+  "credential update": {
+    "--agent,--agent-name": {
+      "choices": null,
+      "default": null,
+      "dest": "agent_name",
+      "nargs": null,
+      "required": false
+    },
+    "--debug": {
+      "choices": null,
+      "default": false,
+      "dest": "debug",
+      "nargs": 0,
+      "required": false
+    },
+    "--train": {
+      "choices": null,
+      "default": false,
+      "dest": "train",
+      "nargs": 0,
+      "required": false
+    },
+    "POS:key": {
+      "choices": null,
+      "default": null,
+      "dest": "key",
+      "nargs": null,
+      "required": true
+    }
+  },
+  "exec": {
+    "--agent,--agent-name": {
+      "choices": null,
+      "default": null,
+      "dest": "agent_name",
+      "nargs": null,
+      "required": false
+    },
+    "--debug": {
+      "choices": null,
+      "default": false,
+      "dest": "debug",
+      "nargs": 0,
+      "required": false
+    },
+    "--train": {
+      "choices": null,
+      "default": false,
+      "dest": "train",
+      "nargs": 0,
+      "required": false
+    },
+    "POS:command": {
+      "choices": null,
+      "default": null,
+      "dest": "command",
+      "nargs": null,
+      "required": true
+    }
+  },
+  "serve": {
+    "--agent,--agent-name": {
+      "choices": null,
+      "default": null,
+      "dest": "agent_name",
+      "nargs": null,
+      "required": false
+    },
+    "--debug": {
+      "choices": null,
+      "default": false,
+      "dest": "debug",
+      "nargs": 0,
+      "required": false
+    },
+    "--host": {
+      "choices": null,
+      "default": "0.0.0.0",
+      "dest": "host",
+      "nargs": null,
+      "required": false
+    },
+    "--port": {
+      "choices": null,
+      "default": 1111,
+      "dest": "port",
+      "nargs": null,
+      "required": false
+    },
+    "--reload": {
+      "choices": null,
+      "default": false,
+      "dest": "reload",
+      "nargs": 0,
+      "required": false
+    },
+    "--train": {
+      "choices": null,
+      "default": false,
+      "dest": "train",
+      "nargs": 0,
+      "required": false
+    }
+  }
+}

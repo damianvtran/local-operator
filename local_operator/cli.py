@@ -39,7 +39,7 @@ import sys
 import traceback
 from importlib.metadata import version
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import uvicorn
 
@@ -148,6 +148,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="no_tui",
         help="Disable the full-screen TUI; use the plain headless REPL instead",
+    )
+    parser.add_argument(
+        "--tui",
+        action="store_true",
+        dest="tui",
+        help="Force the full-screen TUI even when stdout is not a tty "
+        "(errors clearly if the TUI cannot run without a tty)",
     )
 
     subparsers = parser.add_subparsers(dest="subcommand")
@@ -421,7 +428,42 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Config scope to remove from (default: global)",
     )
 
+    # CL-04: ``--yolo`` is accepted on every subcommand too (additive). The
+    # root flag keeps its default; subparsers get a SUPPRESS copy so parsing
+    # inside a subcommand NEVER clobbers a root-level ``--yolo`` (the
+    # argparse re-default quirk that already applies to the legacy parent
+    # flags must not swallow this one — ``--yolo exec "task"`` is documented).
+    _propagate_yolo(parser)
+
     return parser
+
+
+def _propagate_yolo(parser: argparse.ArgumentParser) -> None:
+    """Add a default-suppressed ``--yolo`` to every subparser (recursively).
+
+    Not routed through ``parent_parser``: a shared parent action with a
+    SUPPRESS default still re-applies under argparse's subparser namespace
+    reset, and resolve-style conflicts mutate the shared action. A fresh
+    action per subparser is deterministic: each accepts ``--yolo`` locally
+    and never resets the value set before the subcommand.
+    """
+    for action in parser._actions:
+        if not isinstance(action, argparse._SubParsersAction):
+            continue
+        seen: set[int] = set()
+        for subparser in action.choices.values():
+            if id(subparser) in seen:
+                continue
+            seen.add(id(subparser))
+            subparser.add_argument(
+                "--yolo",
+                action="store_true",
+                default=argparse.SUPPRESS,
+                help="Auto-approve all tool executions (read/write/exec tiers)"
+                " without prompting",
+            )
+            _propagate_yolo(subparser)
+
 
 
 def credential_update_command(args: argparse.Namespace) -> int:
@@ -513,14 +555,23 @@ def config_list_command() -> int:
     config_manager = ConfigManager(Path.home() / ".local-operator")
     config = config_manager.get_config()
 
-    # Configuration descriptions
+    # Configuration descriptions. conversation_length / detail_length /
+    # max_learnings_history are DEPRECATED (CL-16): the compaction engine
+    # supersedes them — retention is governed by `values.compaction.*` now;
+    # the keys stay readable but are inert.
     descriptions = {
         "hosting": "AI provider platform (e.g., radient, openai, deepseek, anthropic, openrouter)",
         "model_name": "The specific model to use for interactions",
-        "conversation_length": "Maximum number of messages to keep in conversation history",
-        "detail_length": "Number of recent messages to leave unsummarized in conversation history",
-        "max_learnings_history": "Maximum number of learning entries to retain",
+        "conversation_length": "[DEPRECATED — superseded by compaction] "
+        "Maximum number of messages to keep in conversation history",
+        "detail_length": "[DEPRECATED — superseded by compaction] "
+        "Number of recent messages to leave unsummarized in conversation history",
+        "max_learnings_history": "[DEPRECATED — superseded by compaction] "
+        "Maximum number of learning entries to retain",
         "auto_save_conversation": "Whether to automatically save conversations",
+        "compaction": "Compaction engine settings (enabled, strategy, thresholds); "
+        "replaces conversation_length/detail_length",
+        "tui": "TUI settings (theme)",
     }
 
     print("\n\033[1;32m╭─ Configuration Options ───────────────────────\033[0m")
@@ -861,7 +912,9 @@ async def _run_headless_repl(
     try:
         while True:
             try:
-                line = input("> ")
+                # asyncio.to_thread (CL-14): blocking input() must not freeze
+                # the event loop (wake deliveries, session bookkeeping).
+                line = await asyncio.to_thread(input, "> ")
             except (EOFError, KeyboardInterrupt):
                 console.print()
                 break
@@ -881,6 +934,153 @@ async def _run_headless_repl(
         await session.dispose()
     return 0
 
+def _preflight_hosting_model(
+    config_manager: ConfigManager,
+    credential_manager: CredentialManager,
+    agent_registry: "AgentRegistry",
+    current_agent: Optional[Any],
+    args: argparse.Namespace,
+) -> int | None:
+    """Startup preflight (CL-06): resolve hosting/model and verify the
+    provider's API key resolves BEFORE any turn runs.
+
+    Resolution uses the composition root's precedence (agent > flag >
+    config); key resolution walks the AuthStore cascade (runtime override,
+    stored OAuth, stored api_key, env, legacy credentials.env). Providers
+    that need no key (ollama, test, custom) pass through, and anything the
+    provider registry cannot answer passes through too — a preflight must
+    never block a configuration the engine itself would accept.
+
+    Returns -1 (already printed) on failure, None to continue. All engine
+    imports stay lazy so this never weights down parser-only paths.
+    """
+    try:
+        from local_operator.session_factory import resolve_hosting_model
+
+        hosting, _model_name = resolve_hosting_model(current_agent, args, config_manager)
+    except ValueError as exc:
+        print(f"\n\033[1;31mError: {exc}\033[0m")
+        return -1
+    except Exception:  # noqa: BLE001 — unknown providers pass through
+        return None
+
+    return _preflight_api_key(hosting, credential_manager)
+
+
+def _preflight_api_key(hosting: str, credential_manager: CredentialManager) -> int | None:
+    """Verify the provider's API key resolves via the AuthStore cascade
+    (runtime override, stored OAuth, stored api_key, env, legacy
+    credentials.env). Providers that need no key (ollama, test) and anything
+    the provider registry cannot answer pass through — a preflight must
+    never block a configuration the engine itself would accept.
+
+    Returns -1 (already printed) on failure, None to continue.
+    """
+    canonical = "test" if hosting == "noop" else hosting
+    try:
+        from local_operator.providers.registry import get_provider_definition
+
+        definition = get_provider_definition(canonical)
+    except Exception:  # noqa: BLE001
+        return None
+    if definition is None or definition.env_keys is None:
+        # Keyless provider (ollama/test) or unregistered hosting: the
+        # engine decides; preflight must not be a second gatekeeper.
+        return None
+
+    try:
+        import asyncio as _asyncio
+
+        from local_operator.providers.auth_store import AuthStore
+
+        auth_store = AuthStore(credential_manager=credential_manager)
+        try:
+            api_key = _asyncio.run(auth_store.get_api_key(canonical))
+        finally:
+            auth_store.close()
+    except Exception:  # noqa: BLE001 — resolution failures pass through
+        return None
+
+    if api_key:
+        return None
+
+    key_name = definition.env_keys if isinstance(definition.env_keys, str) else "API key"
+    print(
+        f"\n\033[1;31mError: {key_name} is required for hosting platform "
+        f"'{hosting}' but is not configured. Set it via `local-operator "
+        f"credential update {key_name}`, the environment, or `local-operator "
+        f"login {canonical}`.\033[0m"
+    )
+    return -1
+
+
+async def _run_with_scheduler(run_fn, *run_args) -> int:
+    """Run the interactive front end with the SchedulerService alive (CL-07).
+
+    The legacy main() constructed ``SchedulerService`` (JobManager +
+    WebSocketManager, the same minimal managers the server app uses), started
+    it before the chat loop and shut it down afterwards — scheduled tasks
+    created during a session only fire while the service runs. Dropping it in
+    the rewrite would silently lose scheduled-task support, so the TUI and
+    headless REPL both run inside this wrapper. Every construction failure
+    (apscheduler missing, server-only managers unavailable) degrades to
+    running WITHOUT a scheduler — the front end itself must never be blocked
+    by scheduling support.
+    """
+    scheduler_service = None
+    try:
+        from local_operator.jobs import JobManager  # lazy: server-shared module
+        from local_operator.operator import OperatorType
+        from local_operator.scheduler_service import SchedulerService
+        from local_operator.server.utils.websocket_manager import WebSocketManager
+
+        config_dir = Path.home() / ".local-operator"
+        config_manager = ConfigManager(config_dir)
+        credential_manager = CredentialManager(config_dir)
+        from local_operator.agents import AgentRegistry  # lazy: heavy module
+
+        agent_registry = AgentRegistry(config_dir)
+
+        from local_operator.console import VerbosityLevel
+
+        scheduler_service = SchedulerService(
+            agent_registry=agent_registry,
+            config_manager=config_manager,
+            credential_manager=credential_manager,
+            env_config=get_env_config(),
+            operator_type=OperatorType.CLI,
+            verbosity_level=VerbosityLevel.DEBUG
+            if os.environ.get("LOCAL_OPERATOR_DEBUG", "false") == "true"
+            else VerbosityLevel.VERBOSE,
+            job_manager=JobManager(),
+            websocket_manager=WebSocketManager(),  # required by the constructor, unused in CLI
+        )
+    except Exception as exc:  # noqa: BLE001 — degrade to no scheduler
+        print(
+            f"\033[1;33mWarning: scheduler unavailable, continuing without "
+            f"scheduled tasks: {exc}\033[0m",
+            file=sys.stderr,
+        )
+        scheduler_service = None
+
+    if scheduler_service is not None:
+        try:
+            await scheduler_service.start()
+        except Exception as exc:  # noqa: BLE001 — never block the front end
+            print(
+                f"\033[1;33mWarning: failed to start scheduler: {exc}\033[0m",
+                file=sys.stderr,
+            )
+            scheduler_service = None
+    try:
+        return await run_fn(*run_args)
+    finally:
+        if scheduler_service is not None:
+            try:
+                await scheduler_service.shutdown()
+            except Exception:  # noqa: BLE001 — shutdown must not mask the exit code
+                pass
+
 
 def main() -> int:
     try:
@@ -891,10 +1091,9 @@ def main() -> int:
         setup_cross_platform_environment()
 
         os.environ["LOCAL_OPERATOR_DEBUG"] = "true" if args.debug else "false"
-
-        # Load environment configuration
-        env_config = get_env_config()
-
+        # (CL-12) No env_config binding here: the scheduler wrapper resolves its
+        # own env config and the session factory does the same lazily — a
+        # dead local would only invite drift.
         config_dir = Path.home() / ".local-operator"
         agent_home_dir = Path.home() / "local-operator-home"
 
@@ -1011,14 +1210,6 @@ def main() -> int:
         elif args.subcommand == "serve":
             # Use the provided host, port, and reload options for serving the API.
             return serve_command(args.host, args.port, args.reload)
-        elif args.subcommand == "login":
-            return login_command(args)
-        elif args.subcommand == "logout":
-            return logout_command(args)
-        elif args.subcommand in ("login-status", "status"):
-            return login_status_command()
-        elif args.subcommand == "mcp":
-            return mcp_command(args)
         elif args.subcommand == "exec":
             # Single-execution mode: headless one-shot (README contract —
             # exit 0 on success, non-zero on error). Working-directory
@@ -1028,18 +1219,38 @@ def main() -> int:
                 return invalid
             from local_operator.exec_mode import ExecArgs, run_exec
 
-            return run_exec(
-                args.command,
-                ExecArgs(
-                    background=args.background,
-                    json_mode=args.json_mode,
-                    agent_name=args.agent_name,
-                    agent_id=getattr(args, "agent_id", None),
-                    yolo=args.yolo,
-                    hosting=args.hosting,
-                    model=args.model,
-                ),
+            exec_args = ExecArgs(
+                background=args.background,
+                json_mode=args.json_mode,
+                agent_name=args.agent_name,
+                agent_id=getattr(args, "agent_id", None),
+                yolo=args.yolo,
+                hosting=args.hosting,
+                model=args.model,
+                train=args.train,
             )
+            # Startup preflight (CL-06) for the FOREGROUND path: hosting/
+            # model (agent > flag > config) + API-key resolution fail fast
+            # with the legacy message shape instead of dying mid-turn.
+            # ``--background`` preflight lives in exec_mode._spawn_background
+            # (CL-09) and shares the same resolution path.
+            if not args.background:
+                from local_operator.exec_mode import resolve_hosting_model_dry
+
+                try:
+                    hosting, _model = resolve_hosting_model_dry(exec_args)
+                except ValueError as exc:
+                    print(f"\n\033[1;31mError: {exc}\033[0m")
+                    return -1
+                except Exception as exc:  # noqa: BLE001
+                    print(f"\n\033[1;31mError: preflight failed: {exc}\033[0m")
+                    return -1
+                key_result = _preflight_api_key(
+                    hosting, CredentialManager(config_dir)
+                )
+                if key_result is not None:
+                    return key_result
+            return run_exec(args.command, exec_args)
 
         config_manager = ConfigManager(config_dir)
         credential_manager = CredentialManager(config_dir)
@@ -1106,18 +1317,44 @@ def main() -> int:
         if auto_save_enabled:
             args.train = True
 
+        # Startup preflight (CL-06): hosting/model + API-key resolution fails
+        # fast with the legacy message shape BEFORE any turn (the factory
+        # raises the same errors mid-construction; surfacing them here keeps
+        # the user from seeing a half-initialized session).
+        preflight_result = _preflight_hosting_model(
+            config_manager, credential_manager, agent_registry, current_agent, args
+        )
+        if preflight_result is not None:
+            return preflight_result
+
         # Interactive path: full-screen TUI when stdout is a tty and not
-        # disabled; plain headless REPL otherwise.
-        use_tui = not getattr(args, "no_tui", False) and sys.stdout.isatty()
+        # disabled; plain headless REPL otherwise. ``--tui`` (CL-13) forces
+        # the TUI even when stdout is not a tty — with a clear error when
+        # that is impossible.
+        force_tui = bool(getattr(args, "tui", False))
+        use_tui = force_tui or (not getattr(args, "no_tui", False) and sys.stdout.isatty())
         run_tui = None
         if use_tui:
             try:
                 from local_operator.tui import run_tui  # lazy: textual
             except ImportError:
                 run_tui = None
+                if force_tui:
+                    # Forced but impossible: surface WHY, don't silently fall
+                    # back to the plain REPL (the user asked for the TUI).
+                    print(
+                        "\n\033[1;31mError: the TUI is not available in this "
+                        "build/install (missing 'local_operator.tui'); remove "
+                        "--tui to use the plain REPL.\033[0m"
+                    )
+                    return -1
                 use_tui = False
 
         if use_tui and run_tui is not None:
+            tui_config = config_manager.get_config_value("tui", None)
+            theme_name = (
+                tui_config.get("theme", "dark") if isinstance(tui_config, dict) else "dark"
+            )
 
             async def session_factory():
                 return await create_session(
@@ -1128,10 +1365,16 @@ def main() -> int:
                     has_ui=True,
                 )
 
-            return asyncio.run(run_tui(session_factory))
+            return asyncio.run(_run_with_scheduler(run_tui, session_factory, theme_name))
 
         return asyncio.run(
-            _run_headless_repl(args, config_manager, credential_manager, agent_registry)
+            _run_with_scheduler(
+                _run_headless_repl,
+                args,
+                config_manager,
+                credential_manager,
+                agent_registry,
+            )
         )
     except Exception as e:
         print(f"\n\033[1;31mError: {str(e)}\033[0m")

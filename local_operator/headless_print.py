@@ -72,7 +72,12 @@ def printable_event(event: AgentEvent) -> dict[str, Any]:
     - ``provider_payload`` is stripped everywhere it appears.
     """
     if event.type == "message_update":
-        return {"type": "message_update", "delta": getattr(event, "delta", "")}
+        message = getattr(event, "message", None)
+        return {
+            "type": "message_update",
+            "message_id": getattr(message, "id", None),
+            "delta": getattr(event, "delta", ""),
+        }
     data = event.model_dump(mode="json")
     return strip_provider_payload(data)
 
