@@ -1,6 +1,6 @@
 """xAI / Grok OAuth — RFC 8628 device code via OIDC discovery.
 
-Ported from omp ``registry/oauth/xai-oauth.ts`` (itself adapted from
+xAI OAuth port (adapted from
 NousResearch/hermes-agent, MIT). The token endpoint is discovered from
 ``https://auth.x.ai/.well-known/openid-configuration`` and HARD-validated
 (https only, host ``x.ai`` or ``*.x.ai``) because every future refresh token
@@ -33,8 +33,7 @@ EXPIRY_SKEW_SECONDS = 5 * 60
 def validate_xai_endpoint(url: str) -> str:
     """Validate a discovered endpoint: https only, host ``x.ai`` or ``*.x.ai``.
 
-    Returns the URL unchanged so callers can chain: ``url = validate(...)``,
-    mirroring omp's ``validateXAIEndpoint``.
+    Returns the URL unchanged so callers can chain: ``url = validate(...)``.
     """
     parts = urlsplit(url)
     host = (parts.hostname or "").lower()
@@ -133,7 +132,7 @@ async def login_xai(
                     "grant_type": DEVICE_GRANT_TYPE,
                     "client_id": CLIENT_ID,
                     "device_code": device_code,
-                    # omp sends this; the IdP returns an error payload instead
+                    # The IdP returns an error payload instead
                     # of a redirect it cannot perform for device flows.
                     "redirect": "error",
                 },

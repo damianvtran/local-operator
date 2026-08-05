@@ -5,7 +5,7 @@ Contract shared with stream A's ``read`` tool (docs/REWRITE.md §C):
 skill URL (so the caller falls through to normal paths), a ``str`` with the
 resolved content, and raises ``ValueError`` for bad skill URLs.
 
-Resolution ladder (omp parity):
+Resolution ladder:
 
 1. ``skill://<name>`` — exact-name lookup of the skill; miss raises with ALL
    available names listed. That error message is the model's self-correction

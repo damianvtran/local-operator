@@ -1,9 +1,8 @@
 """snapcompact — deterministic bitmap-image archival for vision models.
 
-Ported from omp's ``packages/snapcompact`` (``snapcompact.ts``). Instead of
-asking an LLM to summarize discarded history, the serialized conversation is
-rendered onto PNG frames of pixel-font text that vision models read back
-directly. The whole pass is local and deterministic: no LLM call, no API key,
+Instead of asking an LLM to summarize discarded history, the serialized
+conversation is rendered onto PNG frames of pixel-font text that vision models
+read back directly. The whole pass is local and deterministic: no LLM call, no API key,
 no network.
 
 Contract (see ``docs/REWRITE.md`` §C snapcompact bullets):
@@ -22,7 +21,7 @@ Contract (see ``docs/REWRITE.md`` §C snapcompact bullets):
   ``context-full`` otherwise.
 
 Rendering uses a bundled 5x7 bitmap font (crisp at small sizes, deterministic)
-mirroring omp's pixel-font property; Pillow does the PNG encoding only.
+mirroring the established pixel-font property; Pillow does the PNG encoding only.
 """
 
 from __future__ import annotations
@@ -49,27 +48,27 @@ from .api import TOOL_ARGS_MAX_CHARS, TOOL_RESULT_MAX_CHARS
 from .tokens import estimate_tokens
 
 # ---------------------------------------------------------------------------
-# Constants (omp snapcompact.ts)
+# Constants (snapcompact)
 # ---------------------------------------------------------------------------
 
-#: Upper bound on archive frames carried per compaction (omp
-#: ``MAX_FRAMES_DEFAULT``). Oldest middle frames are dropped first.
+#: Upper bound on archive frames carried per compaction
+#: (``MAX_FRAMES_DEFAULT``). Oldest middle frames are dropped first.
 MAX_FRAMES = 80
 
 #: Conservative per-frame token estimate used for context budgeting — the
-#: upper bound across shapes (omp ``FRAME_TOKEN_ESTIMATE``).
+#: upper bound across shapes (``FRAME_TOKEN_ESTIMATE``).
 FRAME_TOKEN_ESTIMATE = 5024
 
 #: High-quality frames kept at each chronological edge of a foveated archive
-#: (omp ``HQ_EDGE_FRAMES``).
+#: (``HQ_EDGE_FRAMES``).
 HQ_EDGE_FRAMES = 3
 
 #: Maximum snapcompact image base64 carried in every rebuilt provider request
-#: (omp ``FRAME_DATA_BYTES_BUDGET``).
+#: (``FRAME_DATA_BYTES_BUDGET``).
 FRAME_DATA_BYTES_BUDGET = 3_000_000
 
-#: Per-tool-call cap across the whole serialized argument list (omp
-#: ``TOOL_CALL_MAX_CHARS``).
+#: Per-tool-call cap across the whole serialized argument list
+#: (``TOOL_CALL_MAX_CHARS``).
 TOOL_CALL_MAX_CHARS = 2000
 
 __all__ = [
@@ -295,7 +294,7 @@ def render_frame(text_chunk: str, shape: Shape) -> bytes:
 
     The frame is ``shape.page_width_px`` wide and hugs the text rows actually
     printed (``rows * line_pitch`` tall). Glyphs come from the bundled 5x7
-    bitmap font scaled into the cell — crisp and deterministic, like omp's
+    bitmap font scaled into the cell — crisp and deterministic, like the
     native pixel-font renderer.
     """
     lines = _wrap_lines(text_chunk, shape.chars_per_line)[: max(1, shape.lines_per_frame)]
@@ -385,7 +384,7 @@ def _render_tool_call(call: Any) -> str:
 def serialize_for_snapcompact(messages: Sequence[Message]) -> str:
     """Deterministic transcript of ``messages`` for frame rendering.
 
-    Ported omp rules: role headers; tool results truncated to
+    Serialization rules: role headers; tool results truncated to
     :data:`TOOL_RESULT_MAX_CHARS` with an explicit ``[... N more characters
     truncated]`` tail; tool arguments truncated to :data:`TOOL_ARGS_MAX_CHARS`;
     useless-flagged tool results AND their paired calls dropped entirely;
@@ -491,7 +490,7 @@ def compact_to_archive(
     """Run one snapcompact pass over discarded ``messages``.
 
     The serialized history is appended to the accumulated archive source
-    (``previous_text`` — omp re-renders from ``Archive.text`` each round) and
+    (``previous_text`` — re-rendered from ``Archive.text`` each round) and
     laid out as plain text at both chronological edges with the middle imaged.
     When the imaged middle overflows the frame budget, the OLDEST middle pages
     are dropped (with a marker) — mirrors how iterative summaries fade the
@@ -584,12 +583,12 @@ def history_blocks(
     plain text at the oldest edge → imaged middle → plain text at the newest
     edge (``[{'kind': 'text', ...}, {'kind': 'images', ...}, ...]``).
 
-    Foveation mirrors omp: the byte budget keeps the NEWEST frames (oldest are
+    Foveation keeps the NEWEST frames (oldest are
     omitted), and an archive middle beyond the HQ edges keeps only the first
     and last :data:`HQ_EDGE_FRAMES` frames, eliding the interior with a
     ``[N frames elided]`` marker.
     """
-    # Byte budget: drop the OLDEST frames over budget (omp keeps the newest).
+    # Byte budget: drop the OLDEST frames over budget (keeps the newest).
     kept: list[bytes] = []
     total = 0
     for frame in reversed(archive.frames):

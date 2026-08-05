@@ -1,11 +1,11 @@
 """SQLite credential store + the API-key resolution cascade.
 
-Ported from omp ``packages/ai/src/auth-storage.ts`` (schema in
+Credential store and cascade. The SQLite
 ``docs/recon/ScoutProviders.md`` §3). No OS keychain: credentials live in
 ``~/.local-operator/auth.db`` (0600, WAL, busy timeout).
 
 The resolution cascade (``get_api_key``) is the no-auth-mode-switch design
-from omp §4.1 — first match wins:
+First match wins:
 
 1. runtime override (CLI ``--api-key``)
 2. config override (``models.yml``/gateway pointer)
@@ -22,7 +22,7 @@ lookups stop attributing OAuth accounts.
 
 Single-process limitation (PR-24): refresh single-flight is a per-process
 ``asyncio.Lock``. Two local-operator processes racing a rotating OAuth
-refresh token can invalidate each other's new token; omp guards this with a
+refresh token can invalidate each other's new token; a guard with a
 cross-process ``auth_credential_refresh_leases`` table, which is deliberately
 deferred here.
 """
@@ -97,7 +97,7 @@ class StoredCredential:
 class OAuthAccess:
     """The identity-carrying credential record handed to wire clients.
 
-    omp's ``getOAuthAccess()``: everything a provider-specific request
+    ``get_oauth_access()``: everything a provider-specific request
     shaper needs beyond the bare bearer — which account/org pays, and
     whether the token is OAuth (needs provider-specific auth headers/routes)
     or a plain API key.
@@ -216,7 +216,7 @@ class AuthStore:
 
     def set_config_api_key(self, provider: str, api_key: str | None) -> None:
         """Tier 2: models.yml pointer. Beats OAuth because the user aimed the
-        provider at a custom base URL/gateway (omp rationale)."""
+        provider at a custom base URL/gateway."""
         if api_key:
             self._config_overrides[provider] = api_key
         else:
@@ -348,7 +348,7 @@ class AuthStore:
         block_scope: str = "",
         block_ms: int = DEFAULT_BLOCK_MS,
     ) -> None:
-        """Record a backoff; ``provider_key`` mirrors omp ``provider:type``."""
+        """Record a backoff keyed by ``provider:type``."""
         credential = self.get_credential(credential_id)
         provider_key = f"{provider}:{credential.credential_type if credential else 'api_key'}"
         until = self._now_ms() + max(1000, int(block_ms))
@@ -527,7 +527,7 @@ class AuthStore:
     async def get_oauth_access(
         self, provider: str, session_id: str | None = None, *, force_refresh: bool = False
     ) -> OAuthAccess | None:
-        """The identity-carrying record for wire clients (omp ``getOAuthAccess``).
+        """The identity-carrying record for wire clients.
 
         Returns :class:`OAuthAccess` for whichever credential the cascade
         picks — ``kind == "oauth"`` with account/org identity when an OAuth
@@ -600,7 +600,7 @@ class AuthStore:
                 return key, row
 
         # Leaving the OAuth tier: clear session stickiness so identity
-        # attribution stops for non-OAuth requests (PR-16; omp clears before
+        # attribution stops for non-OAuth requests (PR-16; cleared before
         # step 5, regardless of which later tier ends up winning).
         self._set_sticky(provider, session_id, None)
 

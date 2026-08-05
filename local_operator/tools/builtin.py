@@ -2,11 +2,11 @@
 
 Why this module exists
 ----------------------
-omp declares tools as classes implementing ``AgentTool`` with per-tool
+Tools declare as classes implementing ``AgentTool`` with per-tool
 parameter schemas; the old local-operator instead injected Python callables
 into executed code and rendered prose signatures into the prompt (the
 ``prompts.py`` reflection generator — the audit flagged that as the main
-thing keeping the prompt at 176 KB). The rewrite ports the omp shape: each
+thing keeping the prompt at 176 KB). The rewrite adopts that shape: each
 tool is an :class:`local_operator.harness.types.AgentTool` with a JSON Schema
 derived from a pydantic parameter model, executed via native provider tool
 calling.
@@ -25,7 +25,7 @@ Conventions every tool here follows:
   compaction may elide them once consumed; it is never combined with
   ``is_error``, and a useless result always carries
   ``details={"useless": True}`` so compaction can trust the payload.
-- Approval tiers follow the omp model (read/write/exec); the host's approval
+- Approval tiers follow the read/write/exec model; the host's approval
   callback on ``ToolContext`` gates mutating side effects. Paths are always
   resolved before the prompt is built, so the user approves the exact file
   that will change; paths outside the workspace are flagged in the approval
@@ -100,8 +100,7 @@ _GREP_PRUNE_DIRS = frozenset({"__pycache__", "node_modules", "dist", "build", ".
 #: Marker prefix on approval descriptions for targets outside the workspace.
 OUTSIDE_WORKSPACE_MARKER = "[outside workspace]"
 
-#: Environment overrides that make common CLIs non-interactive. Ported from
-#: omp ``exec/non-interactive-env.ts`` (NON_INTERACTIVE_ENV table).
+#: Environment overrides that make common CLIs non-interactive.
 NON_INTERACTIVE_ENV: dict[str, str] = {
     # Disable pagers so commands don't block on interactive views.
     "PAGER": "cat",
@@ -154,7 +153,7 @@ NON_INTERACTIVE_ENV: dict[str, str] = {
 def truncate_output(text: str, limit: int = BASH_OUTPUT_LIMIT_CHARS) -> str:
     """Keep the head and tail of ``text`` when it exceeds ``limit``.
 
-    Mirrors omp's output truncation: the middle is replaced by a marker so the
+    Mirrors the established output truncation: the middle is replaced by a marker so the
     model sees both the beginning (banners, command echo) and the end (actual
     error) of a large output without blowing up the transcript. The result is
     at most ``limit`` chars — the marker lives inside the budget.
@@ -528,7 +527,7 @@ def build_bash_tool() -> AgentTool:
         description=("Run a shell command and return its exit code, stdout and stderr."),
         parameters=BashParams.model_json_schema(),
         approval_tier="exec",
-        # omp: bash runs shared when non-pty; models batch independent
+        # bash runs shared when non-pty; models batch independent
         # commands, and exclusive would serialize the common case.
         concurrency="shared",
         interruptible=True,
@@ -706,7 +705,7 @@ def build_read_tool() -> AgentTool:
         description="Read a file, a line range, or an internal URL like skill://<name>.",
         parameters=ReadParams.model_json_schema(),
         approval_tier="read",
-        # omp read model: parallel reads are the common batch shape.
+        # read model: parallel reads are the common batch shape.
         concurrency="shared",
         interruptible=False,
         execute=execute_read,
@@ -762,7 +761,7 @@ def build_write_tool() -> AgentTool:
         description="Create or overwrite a file (parents are created automatically).",
         parameters=WriteParams.model_json_schema(),
         approval_tier="write",
-        # omp write model: concurrent writes to the same file race silently;
+        # write model: concurrent writes to the same file race silently;
         # an exclusive tool makes the last-writer outcome deterministic.
         concurrency="exclusive",
         interruptible=False,
@@ -853,7 +852,7 @@ def build_edit_tool() -> AgentTool:
         description="Replace exact text in a file (errors on missing or ambiguous matches).",
         parameters=EditParams.model_json_schema(),
         approval_tier="write",
-        # omp edit model: two concurrent edits on one file corrupt each
+        # edit model: two concurrent edits on one file corrupt each
         # other's match anchors; exclusive serializes the read-modify-write.
         concurrency="exclusive",
         interruptible=False,
@@ -931,7 +930,7 @@ def build_glob_tool() -> AgentTool:
         description="Find files and directories by glob pattern ('**' supported).",
         parameters=GlobParams.model_json_schema(),
         approval_tier="read",
-        # Read-only listing; parallel globs are the common batch shape (omp).
+        # Read-only listing; parallel globs are the common batch shape.
         concurrency="shared",
         interruptible=False,
         execute=execute_glob,
@@ -1132,7 +1131,7 @@ def build_grep_tool() -> AgentTool:
         description="Regex search across files, returning 'path:line:text' matches.",
         parameters=GrepParams.model_json_schema(),
         approval_tier="read",
-        # Read-only search; parallel greps are the common batch shape (omp).
+        # Read-only search; parallel greps are the common batch shape.
         concurrency="shared",
         interruptible=False,
         execute=execute_grep,
@@ -1249,7 +1248,7 @@ def build_todo_tool() -> AgentTool:
         # read tier exemption: todo mutates only session-local bookkeeping
         # (no files, no autonomous turns), so it stays auto-approved.
         approval_tier="read",
-        # omp: init rewrites the whole list; concurrent calls would lose one,
+        # init rewrites the whole list; concurrent calls would lose one,
         # so the tool runs exclusive despite being cheap.
         concurrency="exclusive",
         interruptible=False,
@@ -1359,7 +1358,7 @@ async def _wake_cancel(tool_call_id: str, params: WakeParams, scheduler: Any) ->
 def build_wake_tool(context: ToolContext) -> AgentTool | None:
     """CreateIf builder: the tool only exists when the context carries a wake
     scheduler. A session without wakes must not advertise a tool whose every
-    call errors (omp createIf convention)."""
+    call errors (the createIf convention)."""
     if getattr(context, "wake_scheduler", None) is None:
         return None
     return AgentTool(
@@ -1371,7 +1370,7 @@ def build_wake_tool(context: ToolContext) -> AgentTool | None:
         # future agent turns — the only tool that creates autonomous
         # execution, so it prompts like a mutation (the loop gates write/exec).
         approval_tier="write",
-        # omp: create/cancel rewrite the whole schedule list; two concurrent
+        # create/cancel rewrite the whole schedule list; two concurrent
         # calls would lose one, so the tool runs exclusive.
         concurrency="exclusive",
         interruptible=False,

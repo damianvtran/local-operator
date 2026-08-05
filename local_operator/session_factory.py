@@ -321,10 +321,11 @@ async def _select_skills_block(hooks: _SkillsHooks, query: str) -> str:
     Per-turn re-selection is incompatible with prompt caching: the skills
     block sits in the system prefix, and any change to it invalidates the
     entire conversation after it on every turn (the cache bench measured
-    ~40% stability under per-turn churn). omp resolves this by selecting at
-    session start and letting the agent pull deeper context via skill://
-    reads (progressive disclosure) — the same contract here: the frozen
-    listing names the relevant skills, the read tool fetches their bodies.
+    ~40% stability under per-turn churn). The reference engine resolves this
+    by selecting at session start and letting the agent pull deeper context
+    via skill:// reads (progressive disclosure) — the same contract here: the
+    frozen listing names the relevant skills, the read tool fetches their
+    bodies.
     Every failure degrades to an empty block.
     """
     if hooks.frozen_block is not None:
@@ -561,7 +562,7 @@ async def wire_mcp_into_session(
 
     1. ``discover_and_load_mcp_tools(cwd)`` — startup-gated discovery;
        returns ``(manager, tools, errors)``. Tools include deferred ones
-       that await their connection inside ``execute`` (omp semantics).
+       that await their connection inside ``execute`` (established semantics).
     2. Merge into the live inventory via ``session.refresh_tools`` — the
        committed hook: full merged set (builtins + MCP), effective from the
        next model call, even mid-turn.

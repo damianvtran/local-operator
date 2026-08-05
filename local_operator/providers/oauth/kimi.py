@@ -1,6 +1,6 @@
 """Kimi / Moonshot OAuth — RFC 8628 device authorization grant.
 
-Ported from omp ``registry/oauth/kimi.ts``. No callback server: the user
+Kimi OAuth port. No callback server: the user
 opens a verification URL and the CLI polls the token endpoint.
 
 Traps preserved:
@@ -44,7 +44,7 @@ DEVICE_ID_FILENAME = "kimi-device-id"
 
 
 def auth_host() -> str:
-    """OAuth host with omp-compatible env overrides."""
+    """OAuth host with env overrides."""
     return (
         os.environ.get("KIMI_CODE_OAUTH_HOST")
         or os.environ.get("KIMI_OAUTH_HOST")

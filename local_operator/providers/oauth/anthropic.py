@@ -1,6 +1,6 @@
 """Anthropic (Claude Pro/Max) OAuth — authorization code + PKCE.
 
-Ported from omp ``registry/oauth/anthropic.ts``. Traps preserved:
+Anthropic OAuth port. Traps preserved:
 
 - Loopback callback on port **54545** path ``/callback``; paste-code fallback
   is allowed (``paste_code_flow=True`` in the registry).
@@ -33,7 +33,7 @@ from local_operator.providers.oauth.callback_server import (
 )
 from local_operator.providers.oauth.pkce import create_pkce_pair
 
-# Stored base64-encoded in omp; decoded here at import.
+# Stored base64-encoded; decoded here at import.
 CLIENT_ID = base64.b64decode("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl").decode()
 
 AUTHORIZE_URL = "https://claude.ai/oauth/authorize"
@@ -99,7 +99,7 @@ class AnthropicOAuthFlow(OAuthCallbackFlow):
             "code_challenge": challenge,
             "code_challenge_method": "S256",
             "scope": SCOPES,
-            # omp sends this; the IdP uses it to select the code flow variant.
+            # The IdP uses this to select the code flow variant.
             "code": "true",
         }
         return f"{AUTHORIZE_URL}?{urllib.parse.urlencode(params)}"
@@ -147,7 +147,7 @@ async def _fetch_identity(
     try:
         response = await client.get(
             BOOTSTRAP_URL,
-            # omp sends the model too; the bootstrap response is model-scoped.
+            # The model is also sent; the bootstrap response is model-scoped.
             params={"entrypoint": "cli", "includeOrg": "true", "model": model},
             headers={"Authorization": f"Bearer {access_token}"},
         )

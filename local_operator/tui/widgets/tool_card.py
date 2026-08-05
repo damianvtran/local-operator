@@ -12,7 +12,7 @@ Row anatomy::
 - per-tool glyph ``▸``: the QUIET STATIC running marker (D25 — the shimmer
   rides the aggregate working line, not individual rows), painted in the
   accent while running so a still frame reads "live" (D26 fallback)
-- tool NAME in the string tint (omp's violet labels become our green),
+- tool NAME in the string tint (violet labels become our green),
   ljust'd into a 10-cell column spine (D7)
 - command/summary dim, ellipsized to the remaining budget
 - status right-aligned (D6): EMPTY while running — no trailing glyph, the
@@ -58,7 +58,7 @@ def truncate_cells(text: str, width: int, ellipsis: str = "…") -> str:
     """Truncate ``text`` to at most ``width`` cells (one width model).
 
     Measurement and slicing both go through ``rich.cells.cell_len``; mixing
-    ``len()`` with cell width is the crash class omp's history documents.
+    ``len()`` with cell width is a crash class the history documents.
     """
     if width <= 0:
         return ""

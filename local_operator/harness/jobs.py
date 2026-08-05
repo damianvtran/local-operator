@@ -1,8 +1,7 @@
 """Async background job manager.
 
-Port of the load-bearing parts of omp ``async/job-manager.ts`` (jobs + the
-owner-scoped delivery sink; the adaptive poll ladder and delivery-retry
-backoff live host-side in this rewrite).
+Async job manager (jobs + the owner-scoped delivery sink; the adaptive poll
+ladder and delivery-retry backoff live host-side in this rewrite).
 
 Semantics worth preserving exactly:
 

@@ -162,8 +162,8 @@ abort/continuation contract, message breakpoints):
   server, providers, skills, compaction, harness, scheduler).
 - `scripts/bench_cache_rate.py --turns 4`: **93.5%** structural stability
   (contract ≥ 90%) — the frozen-per-session skills block moved to the volatile
-  tail; per-turn churn measured 40% and was fixed by matching omp's
-  session-start selection.
+  tail; per-turn churn measured 40% and was fixed by selecting skills at
+  session start (matching the established behavior).
 - `scripts/check_streaming_contract.py` PASSES on a fresh live `exec --json`
   run: one agent_start/agent_end pair per prompt with matching generation, tool
   pairing legality, delta-only message updates, compaction inside the boundary,

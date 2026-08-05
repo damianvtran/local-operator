@@ -100,7 +100,7 @@ __all__ = [
 ]
 
 #: Tool results in the serialized transcript are truncated to this many
-#: characters (omp ``TOOL_RESULT_MAX_CHARS``): the summary model does not
+#: characters (``TOOL_RESULT_MAX_CHARS``): the summary model does not
 #: need full outputs, and unbounded results are the main context bloat.
 TOOL_RESULT_MAX_CHARS = 2000
 
@@ -108,7 +108,7 @@ TOOL_RESULT_MAX_CHARS = 2000
 TOOL_ARGS_MAX_CHARS = 500
 
 
-#: Hard cap on a generated summary (omp ``MAX_SUMMARY_TOKENS``). The
+#: Hard cap on a generated summary (``MAX_SUMMARY_TOKENS``). The
 #: complete_fn has no max-tokens knob yet, so the cap is enforced post-hoc:
 #: summaries above it are truncated by tokens with a
 #: ``[summary truncated]`` marker (see :func:`summarize_messages`).
@@ -118,10 +118,10 @@ _IF_BLOCK_RE = re.compile(r"\{\{#if (\w+)\}\}(.*?)\{\{/if\}\}", re.DOTALL)
 _VAR_RE = re.compile(r"\{\{(\w+)\}\}")
 
 #: File-operation summary cap: at most this many files are rendered before
-#: ``[…N files elided…]`` (omp ``FILE_OPERATION_SUMMARY_LIMIT``).
+#: ``[…N files elided…]`` (``FILE_OPERATION_SUMMARY_LIMIT``).
 _FILE_OPERATION_SUMMARY_LIMIT = 20
 
-#: Read-tool selector grammar, mirrored from omp ``splitReadSelector`` /
+#: Read-tool selector grammar, mirrored from ``splitReadSelector`` /
 #: ``stripReadSelector`` (utils.ts). A trailing ``:chunk`` is a selector only
 #: if it is a line-range list (``50``, ``50-200``, ``50+10``, ``5-16,960-973``,
 #: ``..`` alias), ``raw``, or ``conflicts`` — alone or as a ``range:raw`` /
@@ -134,12 +134,12 @@ _READ_RAW_ONLY_RE = re.compile(r"^raw$", re.IGNORECASE)
 
 #: ``scheme://`` paths (internal URIs and web URLs) are session-scoped or
 #: remote resources, not re-groundable files — they stay out of the ``<files>``
-#: summary (omp ``isUrlSchemePath``).
+#: summary (``isUrlSchemePath``).
 _URL_SCHEME_RE = re.compile(r"[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 
 #: Legacy file-operation tags are stripped from prior summaries so a summary
 #: written before the combined ``<files>`` tag self-heals on the next
-#: compaction (omp ``stripFileOperationTags``).
+#: compaction (``stripFileOperationTags``).
 _FILE_TAG_RE = re.compile(r"<files>.*?</files>\s*", re.DOTALL)
 _READ_FILES_TAG_RE = re.compile(r"<read-files>.*?</read-files>\s*", re.DOTALL)
 _MODIFIED_FILES_TAG_RE = re.compile(r"<modified-files>.*?</modified-files>\s*", re.DOTALL)
@@ -147,7 +147,7 @@ _MODIFIED_FILES_TAG_RE = re.compile(r"<modified-files>.*?</modified-files>\s*", 
 #: Truncation marker appended when a summary exceeds MAX_SUMMARY_TOKENS.
 SUMMARY_TRUNCATED_MARKER = "[summary truncated]"
 
-#: System prompt for the summarization call (omp summarization-system.md).
+#: System prompt for the summarization call (``summarization-system.md``).
 SUMMARIZATION_SYSTEM_PROMPT = (
     "You are a context compaction summarizer. Summarize conversations between "
     "users and AI coding assistants. Produce structured summaries in the exact "
@@ -196,7 +196,7 @@ def _useless_tool_call_ids(messages: Sequence[AgentMessage]) -> set[str]:
     """Call ids answered by useless-flagged tool results.
 
     Useless results AND their paired calls are dropped from the summary
-    input entirely (omp ``serializeConversation``): both carry no signal.
+    input entirely (``serializeConversation``): both carry no signal.
     """
     ids: set[str] = set()
     for message in messages:
@@ -260,7 +260,7 @@ def serialize_conversation(messages: Sequence[AgentMessage]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# File operations (omp utils.ts extractFileOpsFromMessage / upsertFileOperations)
+# File operations (utils.ts extractFileOpsFromMessage / upsertFileOperations)
 # ---------------------------------------------------------------------------
 
 
@@ -300,8 +300,7 @@ def _is_url_scheme_path(path: str) -> bool:
 
 
 def extract_file_ops_from_messages(messages: Sequence[AgentMessage]) -> dict[str, set[str]]:
-    """File-operation sets scanned from assistant tool calls (omp
-    ``extractFileOpsFromMessage`` over a message list).
+    """File-operation sets scanned from assistant tool calls.
 
     Returns ``{"read": ..., "written": ..., "edited": ...}`` sets keyed on the
     tool-call ``arguments['path']``: ``read`` calls land in the read set (line
@@ -330,7 +329,7 @@ def extract_file_ops_from_messages(messages: Sequence[AgentMessage]) -> dict[str
 
 
 def _format_grouped_paths(paths: Sequence[str], mode: dict[str, str]) -> str:
-    """Prefix-folded directory tree (omp ``formatGroupedPaths``): single-child
+    """Prefix-folded directory tree (``formatGroupedPaths``): single-child
     directory chains fold into one ``#`` header per level, files list bare
     under the deepest directory that owns them, annotated `` (Read)`` /
     `` (Write)`` / `` (RW)``."""
@@ -385,8 +384,9 @@ def format_file_operations(
     read_set: set[str] | None = None,
 ) -> str:
     """Render file operations as a folded tree with ``(Read)``/``(Write)``/
-    ``(RW)`` markers, capped at 20 files with ``[…N files elided…]`` (omp
-    ``formatFileOperations``). Empty when there is nothing to render."""
+    ``(RW)`` markers, capped at 20 files with ``[…N files elided…]``. Empty
+    when there is nothing to render.
+    """
     if not read_files and not modified_files:
         return ""
     mode: dict[str, str] = {file: "Read" for file in read_files}
@@ -401,8 +401,9 @@ def format_file_operations(
 
 
 def _compute_file_lists(ops: dict[str, set[str]]) -> tuple[list[str], list[str]]:
-    """Final ``(read_only, modified)`` lists from file-operation sets (omp
-    ``computeFileLists``): modified is edited ∪ written (scheme:// filtered);
+    """Final ``(read_only, modified)`` lists from file-operation sets.
+
+    ``modified`` is edited ∪ written, URL-scheme paths filtered;
     read-only is the read set minus modified, sorted."""
     modified = {f for f in (*ops["edited"], *ops["written"]) if not _is_url_scheme_path(f)}
     read_only = sorted(f for f in ops["read"] if not _is_url_scheme_path(f) and f not in modified)
@@ -424,9 +425,10 @@ def upsert_file_operations(
     modified_files: Sequence[str],
     read_set: set[str] | None = None,
 ) -> str:
-    """Append the ``<files>`` appendix to ``summary`` (omp
-    ``upsertFileOperations``): legacy ``<files>``/``<read-files>``/
-    ``<modified-files>`` tags are stripped first so old summaries self-heal."""
+    """Append the ``<files>`` appendix to ``summary``.
+
+    Legacy ``<files>``/``<read-files>``/``<modified-files>`` tags are
+    stripped first so old summaries self-heal."""
     base = _FILE_TAG_RE.sub("", summary)
     base = _READ_FILES_TAG_RE.sub("", base)
     base = _MODIFIED_FILES_TAG_RE.sub("", base).rstrip()
@@ -542,8 +544,8 @@ async def summarize_messages(
 
 
 def _cap_summary_tokens(summary: str) -> str:
-    """Post-hoc :data:`MAX_SUMMARY_TOKENS` enforcement (RC-18): a port of
-    omp's maxTokens knob, which ``complete_fn`` does not expose yet."""
+    """Post-hoc :data:`MAX_SUMMARY_TOKENS` enforcement (RC-18) mirroring the
+    maxTokens knob, which ``complete_fn`` does not expose yet."""
     if _encode_len(summary) <= MAX_SUMMARY_TOKENS:
         return summary
     truncated = truncate_to_tokens(summary, MAX_SUMMARY_TOKENS).rstrip()

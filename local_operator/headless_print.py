@@ -3,7 +3,7 @@
 Two consumers:
 
 - ``run_print_mode`` — the one-shot ``exec`` / ``exec_worker`` runner that
-  mirrors omp print-mode semantics (subscribe FIRST because session
+  mirrors the one-shot print-mode semantics (subscribe FIRST because session
   persistence hangs off the subscription, prompt each message sequentially,
   print the last assistant text in text mode, one JSON line per event in
   json mode, exit 1 on error/aborted).
@@ -45,7 +45,8 @@ def strip_provider_payload(data: Any) -> Any:
 
     The payload is transport-native replay state (encrypted reasoning items
     etc.) — opaque and useless outside the process that produced it, and it
-    can be enormous. Ported from omp's ``stripProviderPayload``.
+    can be enormous. The stripping mirrors the provider-payload sanitation
+    applied upstream so local rendering never carries that replay state.
     """
     if isinstance(data, dict):
         return {
@@ -64,7 +65,7 @@ def printable_event(event: AgentEvent) -> dict[str, Any]:
     Removes two classes of bloat so transcripts grow linearly with
     conversation size instead of quadratically (a single long turn used to
     re-serialize its whole in-progress message on every streamed delta,
-    producing multi-GB logs — the omp fix, ported):
+    producing multi-GB logs — fixed by forwarding only deltas):
 
     - ``message_update`` full-message snapshots are dropped; only the
       incremental ``delta`` is printed. The authoritative message follows in
@@ -210,7 +211,7 @@ def _args_summary(args: dict[str, Any]) -> str:
 async def run_print_mode(
     session: SessionProtocol, messages: list[str], json_mode: bool = False
 ) -> int:
-    """One-shot headless run mirroring omp print-mode semantics.
+    """One-shot headless run mirroring the print-mode semantics.
 
     Subscribe FIRST (session persistence depends on the subscription being
     active during ``prompt``), then prompt each message sequentially. Text

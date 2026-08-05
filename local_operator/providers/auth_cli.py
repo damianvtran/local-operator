@@ -24,7 +24,7 @@ def _callbacks_interactive(definition: Any) -> LoginCallbacks:
     """print-based callbacks for terminal logins.
 
     The paste-code prompt is attached ONLY for providers that declare
-    ``paste_code_flow`` (omp trap: for the rest it races the loopback HTTP
+    ``paste_code_flow`` (a trap otherwise: for the rest it races the loopback HTTP
     callback and leaves the terminal blocked). It runs in a thread via
     ``asyncio.to_thread(input, ...)`` so the callback server keeps serving
     the browser redirect while the prompt is pending.

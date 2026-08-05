@@ -1,21 +1,21 @@
 """Compaction settings and trigger-threshold math.
 
-Ported from omp ``packages/agent/src/compaction/compaction.ts``. The numbers
-here are cache-economics, not cosmetics:
+The numbers here are cache-economics, not cosmetics:
 - The reserve keeps room for the model's next output + tool calls after a
   compaction; it is floored at 15% of the window so small windows do not
   compact down to nothing. A DEFAULTED reserve that is impossible for a small
-  window is recovered to the proportional 15% reserve (omp
-  ``resolveBudgetReserveTokens``); an explicit reserve is always honored.
+  window is recovered to the proportional 15% reserve
+  (``resolveBudgetReserveTokens``); an explicit reserve is always honored.
 - With no explicit threshold/percent/reserve, the trigger is the
   ``docs/REWRITE.md`` §C default: the lesser of 80% of the window and
   600 000 tokens.
 - ``should_compact`` fires strictly *above* the resolved threshold so a
   context sitting exactly on the threshold does not thrash.
-- :data:`RECOVERY_BAND` is the anti-thrash hysteresis added after omp issue
-  #2275 (a pass that shaves just under the line every turn sustained an
-  auto-continue dead loop): a compaction pass only counts as having created
-  headroom when the residual lands at or below ``0.8 x threshold``.
+- :data:`RECOVERY_BAND` is the anti-thrash hysteresis added after a live
+  production dead-loop bug (a pass that shaves just under the line every turn
+  sustained an auto-continue dead loop): a compaction pass only counts as
+  having created headroom when the residual lands at or below
+  ``0.8 x threshold``.
 """
 
 from __future__ import annotations
@@ -38,8 +38,8 @@ __all__ = [
     "should_compact",
 ]
 
-#: Reserve floor applied when ``reserve_tokens`` is unset (omp
-#: ``DEFAULT_RESERVE_TOKENS``). ``reserve_tokens is None`` — not comparing
+#: Reserve floor applied when ``reserve_tokens`` is unset
+#: (``DEFAULT_RESERVE_TOKENS``). ``reserve_tokens is None`` — not comparing
 #: values against this default — is what marks the reserve as *defaulted*,
 #: which :func:`resolve_budget_reserve_tokens` needs to recover impossible
 #: defaults.
@@ -108,8 +108,8 @@ def effective_reserve_tokens(window_tokens: int, settings: CompactionSettings) -
 
 
 def resolve_budget_reserve_tokens(window_tokens: int, settings: CompactionSettings) -> int:
-    """Reserve used to derive the trigger threshold (omp
-    ``resolveBudgetReserveTokens``).
+    """Reserve used to derive the trigger threshold
+    (``resolveBudgetReserveTokens``).
 
     The default absolute reserve predates small bundled windows and can leave
     no practical budget there; recover a DEFAULTED reserve that is impossible
@@ -194,7 +194,7 @@ def compaction_context_tokens(provider_reported: int | None, local_estimate: int
 #: A compaction pass counts as having created headroom only when the residual
 #: context lands at or below ``RECOVERY_BAND * threshold``. Below the band the
 #: pass barely helped and scheduling an auto-continue (or re-firing) would
-#: thrash the prompt cache; see omp issue #2275.
+#: thrash the prompt cache; see the live dead-loop bug it guards against.
 RECOVERY_BAND = 0.8
 
 

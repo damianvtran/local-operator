@@ -1,6 +1,6 @@
 """Transcript container and the FINALIZED-BLOCK protocol.
 
-Ported from omp's ``TranscriptContainer``: blocks appended to the transcript
+The finalization protocol: blocks appended to the transcript
 declare when they are done mutating. A block exposing ``is_finalized()`` is
 treated as immutable by the container — its content is never updated again —
 and ``settled_rows()`` reports how many of its rows are provably stable now
@@ -158,12 +158,12 @@ class RichBlock(TranscriptBlock):
 class WorkingBlock(TranscriptBlock):
     """The ONE aggregate working line (D25): shimmer sweeps it at 30 fps.
 
-    omp rides a single working message, never per-row animation. When
+    A single working message, never per-row animation. When
     shimmer is disabled (settings/env), the line falls back to a static dim
     marker so the running state stays legible in a still frame (D26).
     """
 
-    #: Repaint cadence — omp repaints animated loader text at 30 fps.
+    #: Repaint cadence — repaints animated loader text at 30 fps.
     _FRAME_MS = 33
 
     def __init__(self) -> None:

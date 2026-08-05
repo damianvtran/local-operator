@@ -1,8 +1,9 @@
 """PKCE helpers (RFC 7636).
 
-omp uses 96 random bytes → base64url verifier, SHA-256 challenge (S256).
-The verifier entropy far exceeds the RFC minimum; keep it identical to omp so
-tokens minted by either harness are interchangeable.
+The verifier uses 96 random bytes → base64url, with an S256 SHA-256
+challenge. That entropy far exceeds the RFC minimum, so the derived
+``code_verifier``/``code_challenge`` pair is interchangeable across
+implementations.
 """
 
 from __future__ import annotations

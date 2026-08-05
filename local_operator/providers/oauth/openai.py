@@ -1,6 +1,6 @@
 """OpenAI (ChatGPT Plus/Pro) OAuth — two flows, one credential row.
 
-Ported from omp ``registry/oauth/openai-codex.ts``:
+OpenAI Codex OAuth port:
 
 - **Browser flow** (provider id ``openai``): authorization code + PKCE,
   loopback port **1455** pinned (``/auth/callback``). OpenAI allowlists the
@@ -42,7 +42,7 @@ DEVICE_REDIRECT_URI = "https://auth.openai.com/deviceauth/callback"
 
 SCOPES = "openid profile email offline_access api.connectors.read api.connectors.invoke"
 # Our product's originator for the IdP's telemetry; intentionally not the
-# omp value — local-operator identifies itself (PR-23).
+# reference value — local-operator identifies itself (PR-23).
 ORIGINATOR = "local-operator"
 
 CALLBACK_PORT = 1455
@@ -63,7 +63,7 @@ def _b64url_decode(segment: str) -> bytes:
 def decode_jwt_claims(token: str) -> dict[str, Any]:
     """Decode a JWT payload WITHOUT signature verification.
 
-    Never add PyJWT here: omp does not verify either — the token came
+    Never add PyJWT here: the token came
     straight from the IdP's token endpoint over TLS, and verification would
     only add a dependency plus a failure mode for rotating key sets.
     """
@@ -176,7 +176,7 @@ class OpenAIOAuthFlow(OAuthCallbackFlow):
         return f"{AUTHORIZE_URL}?{urllib.parse.urlencode(params)}"
 
     async def exchange_token(self, code: str, state: str, redirect_uri: str) -> dict[str, Any]:
-        # Form-encoded exchange, 15 s timeout (omp parity).
+        # Form-encoded exchange, 15 s timeout (established parity).
         payload = {
             "grant_type": "authorization_code",
             "client_id": CLIENT_ID,

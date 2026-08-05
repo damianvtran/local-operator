@@ -72,6 +72,31 @@ async def _factory(session: FakeSession) -> FakeSession:
     return session
 
 
+def _renderable_plain(renderable) -> str:
+    """Recursively flatten a Rich renderable (incl. Group/Padding) to text."""
+    from rich.text import Text
+    from rich.console import Group
+    from rich.padding import Padding
+
+    if isinstance(renderable, Text):
+        return renderable.plain
+    if isinstance(renderable, Group):
+        return "\n".join(_renderable_plain(child) for child in renderable.renderables)
+    if isinstance(renderable, Padding):
+        return _renderable_plain(renderable.renderable)
+    if isinstance(renderable, str):
+        return renderable
+    return ""
+
+
+def _transcript_text(app) -> str:
+    transcript = app.query_one(TranscriptView)
+    parts = []
+    for b in transcript.blocks():
+        parts.append(_renderable_plain(getattr(b, "renderable", "")))
+    return "\n".join(parts)
+
+
 @pytest.mark.asyncio
 async def test_boot_typing_sends_prompt() -> None:
     """Boot the app, type text, press Enter: the session records the prompt."""
@@ -395,3 +420,213 @@ def test_complete_matches_alias() -> None:
     commands = [SlashCommand("exit", "Quit", aliases=("quit",))]
     assert complete_command("/q", commands) == "/quit"
     assert complete_command("/ex", commands) == "/exit"
+
+
+# --- provider-controller slash commands -----------------------------------
+
+
+class FakeModel:
+    def __init__(self, provider: str, model_id: str) -> None:
+        self.provider = provider
+        self.model_id = model_id
+
+
+class FakeProviderController:
+    """Minimal stand-in for ProviderController (sync + immediate fetches)."""
+
+    def __init__(self) -> None:
+        self.set_model_calls: list[Any] = []
+        self.usage_reports: list[Any] = []
+        self.logins: list[str] = []
+        self.logouts: list[str] = []
+
+    def login_providers(self):
+        return [
+            _FakeDef("openrouter", "OpenRouter", None),
+            _FakeDef("deepseek", "DeepSeek", None),
+            _FakeDef("xai-oauth", "xAI OAuth", "xai"),
+        ]
+
+    def provider(self, pid):
+        for d in self.login_providers():
+            if d.id == pid:
+                return d
+        return None
+
+    def has_any_credential(self, provider):
+        return provider in ("openrouter",)
+
+    def credentials(self):
+        return [
+            _FakeCred(1, "openrouter", "api_key", {"source": "login"}),
+            _FakeCred(2, "deepseek", "oauth", {"expires": 9999999999999, "email": "a@b.c"}),
+        ]
+
+    def usage_enabled_providers(self):
+        return ["openrouter", "zai"]
+
+    def resolve_model(self, provider, model_id):
+        return FakeModel(provider, model_id)
+
+    async def login(self, provider):
+        self.logins.append(provider)
+        return f"logged in {provider}"
+
+    async def logout(self, provider):
+        self.logouts.append(provider)
+        return f"removed {provider}"
+
+    async def fetch_usage(self, provider_ids=None):
+        return self.usage_reports
+
+
+class _FakeDef:
+    def __init__(self, pid, name, store_as):
+        self.id = pid
+        self.name = name
+        self.store_credentials_as = store_as
+        self.login = object()  # truthy -> has interactive login
+
+
+class _FakeCred:
+    def __init__(self, ident, provider, ctype, data):
+        self.id = ident
+        self.provider = provider
+        self.credential_type = ctype
+        self.data = data
+        self.identity_key = None
+
+
+@pytest.mark.asyncio
+async def test_model_switch_calls_session_set_model() -> None:
+    session = FakeSession()
+    set_models: list[Any] = []
+
+    def set_model(spec):
+        set_models.append(spec)
+
+    session.set_model = set_model  # type: ignore[attr-defined]
+    ctrl = FakeProviderController()
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        # /model openrouter/deepseek/deepseek-chat
+        for key in "s", "p", "a", "c", "e":
+            pass
+        await pilot.press(
+            "slash",
+            "m",
+            "o",
+            "d",
+            "e",
+            "l",
+            "space",
+            "o",
+            "p",
+            "e",
+            "n",
+            "r",
+            "o",
+            "u",
+            "t",
+            "e",
+            "r",
+            "slash",
+            "d",
+            "e",
+            "e",
+            "p",
+            "s",
+            "e",
+            "e",
+            "k",
+            "slash",
+            "d",
+            "e",
+            "e",
+            "p",
+            "s",
+            "e",
+            "e",
+            "k",
+            "-",
+            "c",
+            "h",
+            "a",
+            "t",
+            "enter",
+        )
+        await pilot.pause()
+    assert len(set_models) == 1
+    assert set_models[0].provider == "openrouter"
+
+
+@pytest.mark.asyncio
+async def test_provider_command_renders_listing() -> None:
+    session = FakeSession()
+    ctrl = FakeProviderController()
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.press("slash")
+        for key in "p", "r", "o", "v", "i", "d", "e", "r":
+            await pilot.press(key)
+        await pilot.press("enter")
+        await pilot.pause()
+        texts = _transcript_text(app)
+    assert "openrouter" in texts
+    assert "OpenRouter" in texts
+    assert session.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_accounts_command_renders_credentials() -> None:
+    session = FakeSession()
+    ctrl = FakeProviderController()
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.press("slash")
+        for key in "a", "c", "c", "o", "u", "n", "t", "s":
+            await pilot.press(key)
+        await pilot.press("enter")
+        await pilot.pause()
+        texts = _transcript_text(app)
+    assert "openrouter" in texts
+    assert "api_key (login)" in texts
+
+
+@pytest.mark.asyncio
+async def test_usage_command_renders_report() -> None:
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+
+    session = FakeSession()
+    ctrl = FakeProviderController()
+    ctrl.usage_reports = [
+        UsageReport(
+            provider="openrouter",
+            limits=[
+                UsageLimit(
+                    id="openrouter:credits",
+                    label="Credits",
+                    amount=UsageAmount(used=5.0, limit=50.0, unit="usd"),
+                )
+            ],
+        )
+    ]
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.press("slash")
+        for key in "u", "s", "a", "g", "e":
+            await pilot.press(key)
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        texts = _transcript_text(app)
+    assert "openrouter" in texts
+    assert "Credits" in texts

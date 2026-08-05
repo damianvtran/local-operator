@@ -1,6 +1,6 @@
 """Semantic skill index: embed skill descriptions, select the relevant ones.
 
-This is the deliberate divergence from omp, which statically lists ALL skill
+This is the deliberate divergence from the common static approach, which lists ALL skill
 descriptions in the system prompt every turn. Here, each turn embeds the user
 message and injects ONLY the top-k descriptions scoring above a threshold
 (docs/REWRITE.md §C). The prompt cost becomes O(relevant skills) instead of
@@ -23,7 +23,7 @@ Layout:
 - ``select()`` never breaks startup: if the primary backend raises, it
   degrades to the offline :class:`LocalEmbedder` first (memoized for the
   index lifetime); only if the local fallback also fails does it return ALL
-  non-hidden skills (omp's static behavior), recording a warning.
+  non-hidden skills (the static behavior), recording a warning.
 
 Concurrency model: ONE process owns a cache directory at a time. Writes are
 atomic per file (temp file + ``os.replace``, meta last) and the in-npz hash
@@ -125,7 +125,7 @@ def _backend_meta(backend: EmbeddingBackend) -> Mapping[str, object]:
 def render_block(skills: list[Skill]) -> str:
     """Render the volatile ``<skills>`` system-prompt block.
 
-    Exact omp wire format — one ``- name: description`` line per skill inside
+    Exact wire format — one ``- name: description`` line per skill inside
     a ``<skills>`` tag, preceded by the hard "MUST read before proceeding"
     rule. Returns ``""`` for an empty list so the volatile block disappears
     entirely rather than emitting an empty tag.
@@ -343,7 +343,7 @@ class SkillIndex:
         :class:`LocalEmbedder`, memoized for the index lifetime so an API
         outage costs one failed request, not one per turn (subsequent turns
         skip straight to the local fallback); local failure too → ALL
-        non-hidden skills (omp's static behavior) with a warning.
+        non-hidden skills (the static behavior) with a warning.
         Selection never breaks a session.
         """
         self._degraded = False

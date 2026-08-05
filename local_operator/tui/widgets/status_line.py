@@ -7,7 +7,7 @@ on the ``sunken`` ground with icon-led segments separated by ``·``:
     π model · cwd          12.4k tok · $0.0021
 
 Left: brand glyph · model · cwd (+ the shimmering working indicator while a
-turn streams — omp-faithful: the working text rides the shimmer sweep; when
+turn streams — faithful: the working text rides the shimmer sweep; when
 shimmer is off a static dim spinner keeps it legible, D26). Right: tokens ·
 cost, right-aligned. The input panel sits ABOVE the band. One space of
 breathing room around every segment (D18). All widths measured with

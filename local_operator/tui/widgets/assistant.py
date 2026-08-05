@@ -1,7 +1,7 @@
 """Assistant message block — rich Markdown with the FROZEN-PREFIX trick.
 
 Naive re-render-the-whole-message-per-token is quadratic and is the dominant
-streaming cost (omp issue #4353). Instead we keep a ``(frozen_text,
+streaming cost (a real-world quadratic-re-render bug). Instead we keep a ``(frozen_text,
 frozen_rendered)`` pair and re-render only the *tail* after the last settled
 block boundary on each update.
 

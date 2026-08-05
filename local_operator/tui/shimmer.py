@@ -1,7 +1,6 @@
-"""omp-style shimmer — a dim -> muted -> accent band sweeping text.
+"""Shimmer — a dim -> muted -> accent band sweeping text.
 
-Ported from omp ``packages/coding-agent/src/modes/theme/shimmer.ts``
-(classic mode): a cosine band advances at a fixed velocity (30 cells/s) and
+A cosine band advances at a fixed velocity (30 cells/s) and
 recolors the characters under it. Characters outside the band sit in the LOW
 tier; the crest reads bold accent. One aggregate working line (D25) and the
 streaming assistant indicator ride this; individual running rows keep a quiet
@@ -25,13 +24,13 @@ from rich.text import Text
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.settings import settings_get
 
-#: Band speed — omp sweeps 30 cells per second.
+#: Band speed — sweeps 30 cells per second.
 SHIMMER_SPEED_CELLS_PER_S = 30.0
-#: Padding on each side of the text the band travels through (omp CLASSIC_PADDING).
+#: Padding on each side of the text the band travels through.
 CLASSIC_PADDING = 10
-#: Half-width of the cosine band in cells (omp BAND_HALF_WIDTH).
+#: Half-width of the cosine band in cells.
 CLASSIC_BAND_HALF_WIDTH = 6
-#: Intensity tier thresholds (omp TIER_HIGH / TIER_MID).
+#: Intensity tier thresholds.
 TIER_HIGH = 0.65
 TIER_MID = 0.22
 
@@ -61,7 +60,7 @@ def classic_intensity(time_ms: float, index: int, length: int) -> float:
 
 
 def shimmer_text(text: str, time_ms: float | None = None) -> Text:
-    """Sweep a dim -> muted -> accent crest across ``text`` (omp classic).
+    """Sweep a dim -> muted -> accent crest across ``text`` (classic shimmer).
 
     ``time_ms`` defaults to the monotonic clock; pass an explicit value in
     tests for deterministic frames. Disabled shimmer (flag or env) returns

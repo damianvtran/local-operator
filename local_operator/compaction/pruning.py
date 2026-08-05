@@ -5,7 +5,7 @@ tool-call/tool-result pair intact or the next request is rejected, so pruning
 replaces a victim's content with a short notice and marks it ``pruned`` in its
 details. The flags never reach provider wire formats.
 
-Two passes (omp ``pruneSupersededToolResults``):
+Two passes (``pruneSupersededToolResults``):
 
 (a) **Superseded reads** — a later tool result for the same path makes the
     earlier output dead weight (the model re-read precisely because the old
@@ -51,7 +51,7 @@ __all__ = [
 
 #: Generic pruning floor. Below this, blanking recovers nothing — the
 #: placeholder costs tokens too — so a sub-floor prune only grows the context
-#: and churns the prompt cache. Ported from omp ``MIN_PRUNE_TOKENS``.
+#: and churns the prompt cache.
 MIN_PRUNE_TOKENS = 50
 
 #: Exact placeholder written over a superseded tool result.
@@ -116,11 +116,11 @@ def _is_pruned(message: Message) -> bool:
 
 
 def _is_prunable(message: Message) -> bool:
-    """One gate for BOTH prune passes (omp ``protectedTools`` applies to the
+    """One gate for BOTH prune passes (``protectedTools`` applies to the
     superseded AND useless passes alike): never errors, never skill reads.
 
     Skill reads are exempt because a pruned skill gets re-read in a loop.
-    Protection matches omp's ``["skill", isSkillReadToolResult]``: the
+    Protection matches ``["skill", isSkillReadToolResult]``: the
     ``skill`` tool itself, or a ``read`` result whose recorded target is a
     ``skill://`` URL — the loop stores internal-URL reads under
     ``details['url']`` (tools/builtin.py) and filesystem reads under
@@ -146,7 +146,7 @@ def _supersede_key(message: Message) -> str | None:
     a later result for the same tool reading the same file supersedes the
     earlier one. Results without a path are exempt — grouping them by bare
     tool name would blank legitimately distinct outputs (two different bash
-    runs, two searches). Mirrors omp, where only path-carrying read results
+    runs, two searches). Mirrors the established behavior, where only path-carrying read results
     supersede.
 
     The range rides in the key: a ranged read must NOT supersede a different

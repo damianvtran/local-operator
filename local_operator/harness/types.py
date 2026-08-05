@@ -1,8 +1,8 @@
 """Core harness types — the binding contract between all rewrite streams.
 
-This module is the Python port of the ``packages/agent`` type surface in
-oh-my-pi (omp). It deliberately knows NOTHING about sessions, providers,
-persistence, skills, or UI. Every other stream programs against these types:
+This module defines the ``packages/agent`` type surface. It deliberately knows
+NOTHING about sessions, providers, persistence, skills, or UI. Every other
+stream programs against these types:
 
 - ``Message`` / ``CustomMessage`` — LLM-visible conversation entries.
 - ``ToolCall`` / ``ToolResult`` / ``AgentTool`` — the tool protocol.
@@ -13,7 +13,7 @@ persistence, skills, or UI. Every other stream programs against these types:
 - ``ModelSpec`` / ``ChatRequest`` / ``StreamEvent`` — the provider wire
   contract implemented by ``local_operator.providers.clients``.
 
-Design notes carried over from omp:
+Design notes carried over from the reference engine:
 
 - Messages carry an optional ``provider_payload`` for provider-native replay
   data (e.g. OpenAI Responses ids, Anthropic encrypted thinking). It rides
@@ -22,7 +22,8 @@ Design notes carried over from omp:
   (compaction summaries, skill prompts, wake deliveries). It renders to an
   LLM-visible message via the session's ``convert_to_llm`` and NEVER goes to
   a provider raw.
-- Aside commit/discard: omp attaches symbols to message objects; here they
+- Aside commit/discard: the reference engine attaches symbols to message
+  objects; here they
   are explicit optional callables excluded from serialization
   (``compare=False``), invoked by the loop when an aside message is actually
   injected (commit) or dropped as stale (discard).
@@ -234,8 +235,8 @@ class AgentToolUpdate(BaseModel):
 class ToolContext(BaseModel):
     """Minimal host-provided context handed to tool execution.
 
-    Kept tiny on purpose (omp's 100-field ToolSession is a symptom of a
-    9000-line session class); grow by demand.
+    Kept tiny on purpose (a 100-field monolithic session object is a symptom
+    of a 9000-line session class); grow by demand.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
@@ -497,8 +498,8 @@ EventHandler = Callable[[AgentEvent], Awaitable[None] | None]
 class LoopConfig(BaseModel):
     """Everything the loop needs from its host, injected as callbacks.
 
-    Python port of omp's ``AgentLoopConfig``. Only ``convert_to_llm`` and a
-    model streamer are required; everything else has a neutral default.
+    The ``AgentLoopConfig`` configuration record. Only ``convert_to_llm``
+    and a model streamer are required; everything else has a neutral default.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")

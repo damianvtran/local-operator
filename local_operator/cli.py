@@ -1364,22 +1364,29 @@ def main() -> int:
                     has_ui=True,
                 )
 
-            def tui_login_handler(action: str) -> None:
-                """Run the real credential flow in the suspended terminal.
+            # The provider controller gives the TUI the full provider/model/
+            # credential/usage surface behind /model /provider /login /usage.
+            # Its owning AuthStore lives for the TUI session only; the CLI
+            # closes it after run_tui returns.
+            from local_operator.providers.auth_store import AuthStore
+            from local_operator.providers.controller import ProviderController
 
-                The TUI hands us its terminal back (App.suspend) for the
-                duration, so the flow can print URLs and read stdin like a
-                normal CLI invocation.
-                """
-                flow_args = argparse.Namespace(provider=None)
-                if action == "login":
-                    login_command(flow_args)
-                else:
-                    print("usage: local-operator logout <provider>")
-
-            return asyncio.run(
-                _run_with_scheduler(run_tui, session_factory, theme_name, tui_login_handler)
-            )
+            tui_auth_store = AuthStore(credential_manager=credential_manager)
+            tui_controller = ProviderController(tui_auth_store, credential_manager)
+            try:
+                return asyncio.run(
+                    _run_with_scheduler(
+                        run_tui,
+                        session_factory,
+                        theme_name,
+                        tui_controller,
+                    )
+                )
+            finally:
+                try:
+                    tui_auth_store.close()
+                except Exception:  # noqa: BLE001 — closing on teardown, never fatal
+                    pass
 
         return asyncio.run(
             _run_with_scheduler(

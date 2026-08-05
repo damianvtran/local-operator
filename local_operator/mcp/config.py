@@ -1,6 +1,6 @@
 """MCP server configuration discovery and validation.
 
-Ports the omp config semantics (``packages/coding-agent/src/mcp/config.ts``)
+Ports the canonical MCP client config semantics
 onto local-operator paths:
 
 - Project config: ``<cwd>/.local-operator/mcp.json`` and ``<cwd>/.mcp.json``.
@@ -27,15 +27,15 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 # Server names allow letters, digits, underscore, dash, dot, colon; max 100
-# chars (omp config-writer rule; the colon covers namespaced plugin entries).
+# chars (config-writer rule; the colon covers namespaced plugin entries).
 SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,100}$")
 
 
 class MCPAuthConfig(BaseModel):
-    """Auth block mirroring omp's ``MCPAuthConfig``.
+    """Auth block mirroring the canonical MCP auth config.
 
     ``apikey`` is accepted for shape parity but not implemented — put API keys
-    in stdio ``env`` or remote ``headers`` instead (same as omp).
+    in stdio ``env`` or remote ``headers`` instead.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -49,7 +49,7 @@ class MCPAuthConfig(BaseModel):
 
 
 class MCPOAuthConfig(BaseModel):
-    """OAuth client knobs mirroring omp's per-server ``oauth`` block."""
+    """OAuth client knobs mirroring the canonical per-server ``oauth`` block."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -119,7 +119,7 @@ _TYPE_MODELS: dict[str, type[BaseModel]] = {
 def _coerce_server_config(raw: Any) -> MCPServerConfig | None:
     """Parse one raw server entry into a typed config.
 
-    Transport inference mirrors omp: explicit ``type`` wins; otherwise
+    Transport inference: explicit ``type`` wins; otherwise
     ``command`` implies stdio, ``url`` implies http. Malformed entries return
     ``None`` (validation reports them separately via
     :func:`validate_server_config`).

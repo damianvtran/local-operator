@@ -202,7 +202,7 @@ def _default_redirect_handler() -> Any:
     """Build the redirect handler: print the URL, open a browser when possible.
 
     The URL is hard-wrapped in brackets so trailing OAuth params can never be
-    silently lost on copy (omp issue #4418).
+    silently lost on copy (a real production paste bug).
     """
 
     async def redirect_handler(authorization_url: str) -> None:
