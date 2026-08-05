@@ -1497,12 +1497,18 @@ async def execute_read_variable(
     if value is None:
         value = ""
     if len(value) > MAX_VARIABLE_VALUE_CHARS:
-        value = value[:MAX_VARIABLE_VALUE_CHARS] + f"\n[… {len(value)} chars elided …]"
+        # Capture the elided count BEFORE truncation so the marker and the
+        # details agree (the RHS is evaluated before rebinding).
+        original_len = len(value)
+        value = value[:MAX_VARIABLE_VALUE_CHARS] + f"\n[… {original_len} chars total …]"
+        shown_len = original_len
+    else:
+        shown_len = len(value)
     return _text(
         tool_call_id,
         "read_variable",
         value,
-        details={"name": params.name, "chars": len(value)},
+        details={"name": params.name, "chars": shown_len},
     )
 
 
@@ -1591,7 +1597,9 @@ def _browser_state(context: ToolContext | None) -> _BrowserSession:
 
 
 async def _run_cmux(argv: list[str], timeout: float = 30.0) -> tuple[int, str]:
-    """Run a cmux subcommand; returns (exit_code, stdout). Never raises."""
+    """Run a cmux subcommand; returns (exit_code, stdout). Never raises, and
+    on timeout terminates the child so a hung cmux cannot orphan."""
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             "cmux",
@@ -1601,11 +1609,19 @@ async def _run_cmux(argv: list[str], timeout: float = 30.0) -> tuple[int, str]:
         )
         stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         return proc.returncode or 0, stdout.decode("utf-8", "replace")
+    except asyncio.TimeoutError:
+        if proc is not None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
+        return 1, f"cmux timed out after {timeout}s"
     except Exception as exc:  # noqa: BLE001 — surface, never crash
         return 1, str(exc)
 
 
-def _cmux_new_surface(url: str) -> str:
+def _cmux_new_surface(url: str) -> list[str]:
     """The open command — focus stays on the agent's own pane."""
     return ["--json", "new-surface", "--type", "browser", "--url", url, "--focus", "false"]
 
@@ -1684,8 +1700,8 @@ async def execute_browser(
 def _parse_surface_id(out: str) -> str:
     """Best-effort surface id extraction from ``cmux --json new-surface``.
 
-    Tolerates plain text or JSON; returns "" when the shape is unknown so the
-    call still succeeds with an open, just without a reusable id."""
+    Tolerates plain text or JSON; returns "" unless a plausible surface-id
+    token is found so a human banner never becomes a bogus --surface value."""
     cleaned = out.strip()
     if cleaned.startswith("{"):
         import json as _json
@@ -1693,11 +1709,16 @@ def _parse_surface_id(out: str) -> str:
         try:
             data = _json.loads(cleaned)
             surface = data.get("surface") or data.get("surface_id") or data.get("id")
-            return str(surface) if surface else ""
+            if surface:
+                return str(surface)
         except Exception:  # noqa: BLE001
             return ""
-    # Fallback: the id is often echoed as the last space-separated token.
-    return cleaned.split()[-1] if cleaned else ""
+    # Fallback: a trailing token that looks like a surface id (letters/digits
+    # and dashes/underscores) — anything else is a banner, not an id.
+    token = cleaned.split()[-1] if cleaned else ""
+    if token and all(c.isalnum() or c in "-_" for c in token):
+        return token
+    return ""
 
 
 def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
@@ -1712,7 +1733,9 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         label="Browser",
         description="Detect and drive the CMUX browser: open/goto/screenshot.",
         parameters=BrowserParams.model_json_schema(),
-        approval_tier="read",
+        # Navigates and can write a screenshot file, so it rides the write
+        # approval gate rather than auto-approved read.
+        approval_tier="write",
         concurrency="shared",
         interruptible=False,
         execute=execute_browser,

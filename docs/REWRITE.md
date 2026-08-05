@@ -315,7 +315,7 @@ is what we emphasize, not the hue.
 ## Performance contract (user requirements, binding)
 
 - **Start-of-session context budget**: a fresh conversation with the full
-  installed skill set (the user's skills at `~/.omp/agent/skills` as the
+  installed skill set (the user's configured skills directory as the
   benchmark corpus) MUST start at ≤ 30,000 context tokens. Semantic skill
   selection is what makes this possible — only matched skill descriptions
   are injected. A benchmark script (`scripts/bench_context_budget.py`)

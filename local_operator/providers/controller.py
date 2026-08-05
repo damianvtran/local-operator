@@ -141,17 +141,37 @@ class ProviderController:
     async def fetch_usage(self, provider_ids: list[str] | None = None) -> list[Any]:
         """Fetch normalized usage reports for the requested (or all
         report-able) providers. Never raises: a provider with no reachable
-        credential or endpoint is simply absent from the result."""
+        credential or endpoint is simply absent from the result, and one
+        malformed provider never aborts the others."""
         targets = provider_ids or []
         if not targets:
             targets = [p for p in self.usage_enabled_providers() if self.has_any_credential(p)]
+        # De-duplicate aliases that share a storage id (openai vs
+        # openai-device; xai vs xai-oauth) so one request/one report per row.
+        targets = self._dedupe_targets(targets)
         reports: list[Any] = []
         async with httpx.AsyncClient() as client:
             for provider in targets:
-                report = await self._fetch_one(client, provider)
+                try:
+                    report = await self._fetch_one(client, provider)
+                except Exception:  # noqa: BLE001 — isolate one broken provider
+                    report = None
                 if report is not None:
                     reports.append(report)
         return reports
+
+    def _dedupe_targets(self, targets: list[str]) -> list[str]:
+        """Keep one id per storage row so alias providers don't double-fetch."""
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for provider in targets:
+            definition = get_provider_definition(provider)
+            storage = (definition.store_credentials_as or provider) if definition else provider
+            if storage in seen:
+                continue
+            seen.add(storage)
+            ordered.append(provider)
+        return ordered
 
     async def _fetch_one(self, client: httpx.AsyncClient, provider: str) -> Any | None:
         if not usage_supported(provider):
