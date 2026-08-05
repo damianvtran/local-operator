@@ -38,7 +38,9 @@ from local_operator.harness.types import (
     AgentStartEvent,
     AgentTool,
     AgentToolUpdate,
+    Aside,
     ChatRequest,
+    Content,
     CustomMessage,
     LoopConfig,
     Message,
@@ -65,8 +67,17 @@ from local_operator.harness.types import (
 
 logger = logging.getLogger(__name__)
 
-# Sentinel pushed through the tool-event queue when one execution finishes.
-_TOOL_DONE = object()
+
+class _ToolDone:
+    """Sentinel pushed through the tool-event queue when one execution
+    finishes. A dedicated class rather than a bare ``object()`` so the queue's
+    element type stays exact and ``isinstance`` narrows the other branch to a
+    real event."""
+
+    __slots__ = ()
+
+
+_TOOL_DONE = _ToolDone()
 
 # Type adapters used to validate tool arguments against JSON-schema scalars.
 _TYPE_ADAPTERS: dict[str, TypeAdapter[Any]] = {
@@ -111,6 +122,16 @@ class _PlannedCall:
     tool: AgentTool | None = None
     args: dict[str, Any] = field(default_factory=dict)
     failure: ToolResult | None = None  # resolution/validation/approval failure
+
+
+def _batches_shared(item: _PlannedCall) -> bool:
+    """Whether this call may run alongside its neighbours in one batch.
+
+    An unresolved or pre-failed call counts as shared: it never executes, so
+    it cannot conflict with anything. Only a resolved ``exclusive`` tool
+    forces a batch of one.
+    """
+    return item.tool is None or item.tool.concurrency == "shared"
 
 
 class AgentLoop:
@@ -317,7 +338,7 @@ class AgentLoop:
         context: LoopContext,
         config: LoopConfig,
         signal: AbortSignal | None,
-    ) -> AsyncIterator[AgentEvent | "_ModelTurnResult"]:
+    ) -> AsyncIterator[AgentEvent | _ModelTurnResult]:
         """One provider call: build the request, stream it, assemble the
         assistant message, emitting message_start/update/end events."""
         shaped = list(context.messages)
@@ -469,7 +490,7 @@ class AgentLoop:
                     results.append(self._synthetic_result(remaining.call, SKIPPED_RESULT_TEXT))
                 break
 
-            if plan[index].tool is not None and plan[index].tool.concurrency == "exclusive":
+            if not _batches_shared(plan[index]):
                 async for event in self._execute_batch(
                     plan[index : index + 1], context, config, signal, results
                 ):
@@ -477,9 +498,7 @@ class AgentLoop:
                 index += 1
             else:
                 end = index
-                while end < len(plan) and (
-                    plan[end].tool is None or plan[end].tool.concurrency == "shared"
-                ):
+                while end < len(plan) and _batches_shared(plan[end]):
                     end += 1
                 async for event in self._execute_batch(
                     plan[index:end], context, config, signal, results
@@ -517,7 +536,7 @@ class AgentLoop:
         item: _PlannedCall,
         context: LoopContext,
         signal: AbortSignal | None,
-        queue: asyncio.Queue[Any],
+        queue: asyncio.Queue[AgentEvent | _ToolDone],
     ) -> ToolResult:
         """Execute one planned call and return its result.
 
@@ -593,9 +612,9 @@ class AgentLoop:
         which Anthropic rejects). A slot whose call failed planning never
         runs; its synthetic result is parked in its slot up front.
         """
-        queue: asyncio.Queue[Any] = asyncio.Queue()
+        queue: asyncio.Queue[AgentEvent | _ToolDone] = asyncio.Queue()
         results_by_slot: list[ToolResult | None] = [None] * len(batch)
-        tasks: list[asyncio.Task[ToolResult]] = []
+        tasks: list[asyncio.Task[None]] = []
         poll_interruptible = (
             config.interrupt_mode == "immediate" and config.has_steering_messages is not None
         )
@@ -688,7 +707,7 @@ class AgentLoop:
             finished = 0
             while finished < len(tasks):
                 item = await queue.get()
-                if item is _TOOL_DONE:
+                if isinstance(item, _ToolDone):
                     finished += 1
                     continue
                 yield item
@@ -721,7 +740,7 @@ class AgentLoop:
         context: LoopContext, results: list[ToolResult], new_messages: list[AgentMessage]
     ) -> None:
         for result in results:
-            content = list(result.content)
+            content: list[Content] = list(result.content)
             # coerceToolResult: an empty tool result serializes as "" on
             # most wires and Anthropic REJECTS an empty ``is_error`` content
             # with a 400 — backfill one placeholder block. Image-only results
@@ -821,7 +840,7 @@ class AgentLoop:
             task.cancel()
 
 
-def _materialize_asides(asides: Sequence[Any]) -> list[AgentMessage]:
+def _materialize_asides(asides: Sequence[Aside]) -> list[AgentMessage]:
     """Invoke aside thunks at injection time and keep the live messages.
 
     A ``None`` result is dropped silently; a :class:`StaleAside` result is

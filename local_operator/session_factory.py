@@ -40,23 +40,49 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from local_operator.harness.types import AgentMessage, Message
 
 if TYPE_CHECKING:
+    # Type-only imports: this module's whole discipline is that the heavy
+    # engine, registry and provider modules load lazily inside the functions
+    # that need them. Annotations are strings under ``from __future__ import
+    # annotations``, so naming the real types here costs nothing at runtime.
+    from local_operator.agents import AgentData, AgentRegistry
+    from local_operator.compaction.api import CompactionSettings
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+    from local_operator.harness.types import AgentTool
+    from local_operator.mcp.manager import McpManager
+    from local_operator.model.configure import SessionStreamFn
+    from local_operator.providers.auth_store import AuthStore
     from local_operator.session.goal import GoalState
     from local_operator.session.protocol import SessionProtocol
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from local_operator.skills.discovery import Skill
+    from local_operator.skills.index import SkillIndex
+    from local_operator.variables import VariableStore
 
 
-def coerce_compaction_settings(raw: Any) -> Any:
+def coerce_compaction_settings(raw: object) -> CompactionSettings | None:
     """Coerce ``values.compaction`` into a :class:`CompactionSettings` (CL-01).
 
     ``ConfigManager`` returns the YAML shape verbatim — a plain ``dict`` — but
     the session consumes attribute-style settings. ``None`` and already-typed
     settings pass through; a dict is validated; an invalid dict degrades to
     defaults with a warning (a bad compaction block must never block startup).
+
+    Anything else (``compaction: some-string`` in the YAML) is out of
+    contract and reads as "no block": handing the session a junk object would
+    only defer the failure to the first compaction check.
     """
-    if raw is None or not isinstance(raw, dict):
-        return raw
+    if raw is None:
+        return None
     from pydantic import ValidationError
 
     from local_operator.compaction.api import CompactionSettings
+
+    if isinstance(raw, CompactionSettings):
+        return raw
+    if not isinstance(raw, dict):
+        return None
 
     try:
         return CompactionSettings.model_validate(raw)
@@ -83,7 +109,7 @@ _AGENT_SAMPLING_FIELDS: tuple[str, ...] = (
 )
 
 
-def resolve_agent(args: argparse.Namespace, agent_registry: Any) -> Any:
+def resolve_agent(args: argparse.Namespace, agent_registry: AgentRegistry) -> AgentData | None:
     """Resolve the session's agent record, creating it when named.
 
     Mirrors the legacy ``main()`` behavior: ``--agent-id`` (exec) selects by
@@ -134,7 +160,7 @@ def resolve_agent(args: argparse.Namespace, agent_registry: Any) -> Any:
 
 
 def resolve_hosting_model(
-    agent: Any, args: argparse.Namespace, config_manager: Any
+    agent: AgentData | None, args: argparse.Namespace, config_manager: ConfigManager
 ) -> tuple[str, str]:
     """Apply the precedence agent > CLI flag > config file.
 
@@ -207,7 +233,7 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
     return prompt_approval
 
 
-def _latest_user_query(transcript: Any) -> str:
+def _latest_user_query(transcript: Transcript) -> str:
     """Extract the skill-selection query from the transcript.
 
     Per-turn selection embeds the last user message plus the latest
@@ -251,7 +277,7 @@ def _env_details(cwd: str | None = None) -> str:
     )
 
 
-def _build_variable_store(cwd: str, config_manager: Any) -> Any:
+def _build_variable_store(cwd: str, config_manager: ConfigManager) -> VariableStore:
     """Construct the session's VariableStore for the list/read variable
     tools. Config ``variables`` ride above the project file and environment;
     no values are ever written into the system prompt (that is the whole
@@ -274,13 +300,13 @@ class _SkillsHooks:
     and the session-frozen skills block (the first prompt selects; later
     turns reuse it so the system prefix stays byte-stable)."""
 
-    index: Any = None
-    by_name: dict[str, Any] = field(default_factory=dict)
+    index: SkillIndex | None = None
+    by_name: dict[str, Skill] = field(default_factory=dict)
     frozen_block: str | None = None
 
 
 async def _setup_skills(
-    credential_manager: Any, config_dir: Path, warnings_out: list[str]
+    credential_manager: CredentialManager, config_dir: Path, warnings_out: list[str]
 ) -> _SkillsHooks:
     """Discovery + index build at session creation (orchestrator duty).
 
@@ -400,12 +426,12 @@ class _SessionPlan:
 
     session_kwargs: dict[str, Any]
     system_blocks_provider: Callable[[], Awaitable[list[str]]]
-    auth_store: Any = None
+    auth_store: AuthStore | None = None
 
 
 def _make_system_blocks_provider(
-    tools: list[Any],
-    transcript: Any,
+    tools: list[AgentTool],
+    transcript: Transcript,
     hooks: _SkillsHooks,
     cwd: str | None = None,
     goal_state: "GoalState | None" = None,
@@ -433,15 +459,13 @@ def _make_system_blocks_provider(
             skills_block = ""
         date_str = datetime.now().strftime("%Y-%m-%d")
         goal = goal_state.text if goal_state is not None else ""
-        return build_system_blocks(
-            tools, skills_block, _env_details(cwd), date_str, goal=goal
-        )
+        return build_system_blocks(tools, skills_block, _env_details(cwd), date_str, goal=goal)
 
     return provider
 
 
 def _transcript_dir_and_agent_id(
-    agent: Any, args: argparse.Namespace, agent_registry: Any
+    agent: AgentData | None, args: argparse.Namespace, agent_registry: AgentRegistry
 ) -> tuple[Path, str]:
     """Pick where this session's JSONL transcript lives (CL-02).
 
@@ -477,9 +501,9 @@ def _transcript_dir_and_agent_id(
 
 async def _prepare(
     args: argparse.Namespace,
-    config_manager: Any,
-    credential_manager: Any,
-    agent_registry: Any,
+    config_manager: ConfigManager,
+    credential_manager: CredentialManager,
+    agent_registry: AgentRegistry,
     *,
     has_ui: bool,
     cwd: str | None = None,
@@ -586,11 +610,11 @@ async def _prepare(
 
 
 async def wire_mcp_into_session(
-    session: Any,
-    builtin_tools: list[Any],
+    session: Session,
+    builtin_tools: list[AgentTool],
     cwd: str,
-    auth_store: Any = None,
-) -> Any | None:
+    auth_store: AuthStore | None = None,
+) -> McpManager | None:
     """Load MCP tools and merge them into a constructed session (MCP-20).
 
     Steps (orchestrator duty, all lazy-imported):
@@ -638,7 +662,7 @@ async def wire_mcp_into_session(
     if mcp_tools:
         session.refresh_tools(merged)
 
-    def on_tools_changed(new_mcp_tools: list[Any]) -> None:
+    def on_tools_changed(new_mcp_tools: list[AgentTool]) -> None:
         # The manager's callback type tolerates sync handlers; refresh_tools
         # is the atomic swap point (loop re-reads the inventory per call).
         session.refresh_tools(list(builtin_tools) + list(new_mcp_tools))
@@ -647,85 +671,46 @@ async def wire_mcp_into_session(
     return manager
 
 
-def attach_mcp_dispose(session: Any, manager: Any) -> None:
+def attach_mcp_dispose(session: Session, manager: McpManager) -> None:
     """Fold ``manager.disconnect_all()`` into the session's dispose path.
 
-    The CLI/TUI/exec all call ``session.dispose()`` exactly once; wrapping
-    it here means MCP servers are torn down everywhere without teaching
-    every caller about the manager. The wrapper is an instance attribute
-    shadowing the method; the manager is also exposed as ``mcp_manager``
-    for diagnostics.
+    The CLI/TUI/exec all call ``session.dispose()`` exactly once, so hanging
+    MCP teardown off it tears the servers down everywhere without teaching
+    each caller about the manager. The manager is also exposed as
+    ``mcp_manager`` for diagnostics.
     """
-    original_dispose = session.dispose
-
-    async def dispose_with_mcp() -> None:
-        try:
-            await original_dispose()
-        finally:
-            try:
-                await manager.disconnect_all()
-            except Exception:  # noqa: BLE001 — teardown must not mask dispose
-                pass
-
-    session.dispose = dispose_with_mcp
+    session.add_dispose_hook(manager.disconnect_all)
     session.mcp_manager = manager
 
 
-def attach_auth_dispose(session: Any, auth_store: Any) -> None:
+def attach_auth_dispose(session: Session, auth_store: AuthStore | None) -> None:
     """Fold ``auth_store.close()`` into the session's dispose path (CL-08).
 
     The ``AuthStore`` opens a SQLite connection per session; every front end
-    calls ``session.dispose()`` exactly once, so wrapping here guarantees the
-    connection (and its file lock) is released everywhere without teaching
-    each caller. Composes with :func:`attach_mcp_dispose` — the outermost
-    wrapper runs first, so MCP teardown and the store close both happen.
+    calls ``session.dispose()`` exactly once, so registering here guarantees
+    the connection (and its file lock) is released everywhere without
+    teaching each caller.
     """
     if auth_store is None:
         return
-    original_dispose = session.dispose
-
-    async def dispose_with_auth() -> None:
-        try:
-            await original_dispose()
-        finally:
-            try:
-                auth_store.close()
-            except Exception:  # noqa: BLE001 — teardown must not mask dispose
-                pass
-
-    session.dispose = dispose_with_auth
+    session.add_dispose_hook(auth_store.close)
 
 
-def attach_stream_dispose(session: Any, stream_fn: Any) -> None:
+def attach_stream_dispose(session: Session, stream_fn: SessionStreamFn) -> None:
     """Fold the session's shared ``httpx.AsyncClient`` close into dispose.
 
-    ``create_stream_fn`` builds one client per session and parks its
-    ``close`` coroutine factory on the returned callable; without this seam
-    the pool leaks for the process lifetime (one per turn on the server
-    facade). Composes with the auth/MCP dispose wrappers.
+    ``create_stream_fn`` builds one client per session and hangs its close on
+    the returned object; without this seam the pool leaks for the process
+    lifetime (one per turn on the server facade).
     """
-    close = getattr(stream_fn, "close", None)
-    if close is None:
-        return
-    original_dispose = session.dispose
-
-    async def dispose_with_stream() -> None:
-        try:
-            await original_dispose()
-        finally:
-            try:
-                await close()
-            except Exception:  # noqa: BLE001 — teardown must not mask dispose
-                pass
-
-    session.dispose = dispose_with_stream
+    session.add_dispose_hook(stream_fn.close)
 
 
 async def create_session(
     args: argparse.Namespace,
-    config_manager: Any,
-    credential_manager: Any,
-    agent_registry: Any,
+    config_manager: ConfigManager,
+    credential_manager: CredentialManager,
+    agent_registry: AgentRegistry,
     *,
     has_ui: bool = False,
     cwd: str | None = None,
@@ -786,9 +771,9 @@ async def create_session(
 
 async def build_initial_blocks(
     args: argparse.Namespace,
-    config_manager: Any,
-    credential_manager: Any,
-    agent_registry: Any,
+    config_manager: ConfigManager,
+    credential_manager: CredentialManager,
+    agent_registry: AgentRegistry,
 ) -> list[str]:
     """Render the session's initial system blocks WITHOUT running a turn.
 

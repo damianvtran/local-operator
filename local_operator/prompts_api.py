@@ -38,7 +38,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from importlib.resources import files
-from typing import Any
+from typing import Any, Literal, TypeAlias
 
 from local_operator.harness.types import AgentTool
 
@@ -50,9 +50,20 @@ from local_operator.harness.types import AgentTool
 #: ``{{/if}}``, ``{{/each}}``. Names may be dotted paths.
 _TAG_RE = re.compile(r"\{\{\s*(#if\s+[\w.]+|#each\s+[\w.]+|/if|/each|[\w.]+)\s*\}\}")
 
+#: A lexed template piece: literal text, or the body of one ``{{...}}`` tag.
+Token: TypeAlias = "tuple[Literal['text', 'tag'], str]"
+
+#: A parsed template node. ``text``/``var`` carry a payload string (the
+#: literal, or the dotted data path); ``if``/``each`` carry the path plus the
+#: body they guard or repeat. Kept as tuples rather than classes because the
+#: renderer walks them in the hot path of every prompt build.
+TextNode: TypeAlias = "tuple[Literal['text', 'var'], str]"
+BlockNode: TypeAlias = "tuple[Literal['if', 'each'], str, list[Node]]"
+Node: TypeAlias = "TextNode | BlockNode"
+
 #: Compiled template cache keyed by template file name. Templates ship in the
 #: package and never change at runtime, so one parse per name is enough.
-_TEMPLATE_CACHE: dict[str, list[Any]] = {}
+_TEMPLATE_CACHE: dict[str, list[Node]] = {}
 
 
 def _lookup(data: dict[str, Any], name: str) -> Any:
@@ -66,9 +77,9 @@ def _lookup(data: dict[str, Any], name: str) -> Any:
     return current
 
 
-def _tokenize(text: str) -> list[tuple[str, Any]]:
+def _tokenize(text: str) -> list[Token]:
     """Split template text into ('text', str) / ('tag', str) tokens."""
-    tokens: list[tuple[str, Any]] = []
+    tokens: list[Token] = []
     pos = 0
     for match in _TAG_RE.finditer(text):
         if match.start() > pos:
@@ -80,9 +91,7 @@ def _tokenize(text: str) -> list[tuple[str, Any]]:
     return tokens
 
 
-def _parse(
-    tokens: list[tuple[str, Any]], index: int, terminators: tuple[str, ...]
-) -> tuple[list[Any], int]:
+def _parse(tokens: list[Token], index: int, terminators: tuple[str, ...]) -> tuple[list[Node], int]:
     """Recursive-descent parse of tokens into a node list.
 
     Nodes: ``("text", s)``, ``("var", name)``, ``("if", name, children)``,
@@ -91,7 +100,7 @@ def _parse(
     should fail loudly, not render half-way: a stray closing tag is as much a
     bug as a missing one.
     """
-    nodes: list[Any] = []
+    nodes: list[Node] = []
     while index < len(tokens):
         kind, value = tokens[index]
         if kind == "text":
@@ -121,19 +130,20 @@ def _parse(
     return nodes, index
 
 
-def _render_nodes(nodes: list[Any], data: dict[str, Any], out: list[str]) -> None:
+def _render_nodes(nodes: list[Node], data: dict[str, Any], out: list[str]) -> None:
     for node in nodes:
-        kind = node[0]
-        if kind == "text":
+        # Narrowing reads node[0] directly: assigning it to a local first
+        # would not discriminate the tuple union for a type checker.
+        if node[0] == "text":
             out.append(node[1])
-        elif kind == "var":
+        elif node[0] == "var":
             value = _lookup(data, node[1])
             if value is not None:
                 out.append(str(value))
-        elif kind == "if":
+        elif node[0] == "if":
             if _lookup(data, node[1]):
                 _render_nodes(node[2], data, out)
-        elif kind == "each":
+        elif node[0] == "each":
             items = _lookup(data, node[1])
             if not isinstance(items, (list, tuple)):
                 continue
@@ -172,7 +182,7 @@ def _read_template_text(name: str) -> str:
         return (Path(__file__).parent / "prompts_md" / name).read_text(encoding="utf-8")
 
 
-def _load_template(name: str) -> list[Any]:
+def _load_template(name: str) -> list[Node]:
     nodes = _TEMPLATE_CACHE.get(name)
     if nodes is None:
         nodes, _ = _parse(_tokenize(_read_template_text(name)), 0, ())

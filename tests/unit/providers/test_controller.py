@@ -8,6 +8,7 @@ httpx transport.
 from __future__ import annotations
 
 import types
+from typing import Any
 
 import pytest
 import httpx
@@ -19,7 +20,7 @@ class FakeAuthStore:
     """Minimal stand-in for the AuthStore credential surface."""
 
     def __init__(self) -> None:
-        self.rows: list[dict] = []
+        self.rows: list[dict[str, Any]] = []
         self._next_id = 1
         self.api_keys: dict[str, str] = {}
         self.oauth: dict[str, object] = {}

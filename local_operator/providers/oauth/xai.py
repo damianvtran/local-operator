@@ -17,7 +17,11 @@ from urllib.parse import urlsplit
 import httpx
 
 from local_operator.harness.types import AbortSignal
-from local_operator.providers.oauth.callback_server import LoginCallbacks, LoginError
+from local_operator.providers.oauth.callback_server import (
+    LoginCallbacks,
+    LoginError,
+    maybe_await,
+)
 from local_operator.providers.oauth.device_code import DevicePollResult, poll_device_code_flow
 
 CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
@@ -116,11 +120,12 @@ async def login_xai(
 
         if callbacks.on_auth_url is not None:
             user_code = authz.get("user_code", "")
-            result = callbacks.on_auth_url(
-                verification_url, instructions=f"Enter code: {user_code}" if user_code else None
+            await maybe_await(
+                callbacks.on_auth_url(
+                    verification_url,
+                    instructions=f"Enter code: {user_code}" if user_code else None,
+                )
             )
-            if hasattr(result, "__await__"):
-                await result
 
         interval = float(authz.get("interval", 5))
         expires_in = float(authz.get("expires_in", 900))

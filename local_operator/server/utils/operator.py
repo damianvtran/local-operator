@@ -43,7 +43,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Iterable, List, Optional, Sequence
+from typing import Any, Iterable, List, Literal, Optional, Protocol, Sequence
 
 from local_operator.agents import AgentData, AgentRegistry
 from local_operator.bootstrap import initialize_operator, resolve_model_configuration
@@ -51,6 +51,23 @@ from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
+from local_operator.harness.types import (
+    AgentEndEvent,
+    AgentEvent,
+    AgentStartEvent,
+    ChatRequest,
+    CustomMessage,
+    Message,
+    MessageEndEvent,
+    MessageStartEvent,
+    MessageUpdateEvent,
+    NoticeEvent,
+    StreamEndEvent,
+    StreamTextDelta,
+    TextContent,
+    ToolExecutionEndEvent,
+    ToolExecutionStartEvent,
+)
 from local_operator.model.configure import ModelConfiguration
 from local_operator.types import (
     ActionType,
@@ -67,6 +84,19 @@ from local_operator.types import (
 logger = logging.getLogger("local_operator.server.utils")
 
 
+class StatusQueue(Protocol):
+    """The producer half of the multiprocessing status queue.
+
+    The job processors create a ``multiprocessing.Queue`` in the parent
+    process and hand it down to the child; on this side only ``put`` is ever
+    called. Declaring just that keeps the annotation honest without dragging
+    in the unparameterizable ``multiprocessing.Queue`` alias, and lets tests
+    substitute a list-backed stub.
+    """
+
+    def put(self, obj: object, /) -> None: ...
+
+
 class ExecutorInitError(Exception):
     """Raised when conversation history is initialized twice.
 
@@ -74,7 +104,7 @@ class ExecutorInitError(Exception):
     routes branch on a second ``initialize_conversation_history`` call.
     """
 
-    def __init__(self, message: str = "Failed to initialize executor"):
+    def __init__(self, message: str = "Failed to initialize executor") -> None:
         self.message = message
         super().__init__(self.message)
 
@@ -97,32 +127,39 @@ _ROLE_MAP: dict[str, ConversationRole] = {
     "assistant": ConversationRole.ASSISTANT,
 }
 
+#: The same mapping in the other direction, for seeding the engine from the
+#: legacy conversation projection. Spelled out rather than reading
+#: ``ConversationRole.value`` so the harness ``Message.role`` literal stays
+#: checkable.
+_WIRE_ROLE_MAP: dict[ConversationRole, Literal["user", "assistant"]] = {
+    ConversationRole.USER: "user",
+    ConversationRole.ASSISTANT: "assistant",
+}
 
-def _project_conversation_to_messages(records: Sequence[Any]) -> list[Any]:
+
+def _project_conversation_to_messages(records: Sequence[ConversationRecord]) -> list[Message]:
     """Legacy ``ConversationRecord`` list → harness ``Message`` list.
 
     Only user/assistant text records project; system-prompt records, empty
     content and non-text roles are dropped (the engine's system blocks carry
     the instructions, and inventing tool history would break pairing).
     """
-    from local_operator.harness.types import Message, TextContent
-
-    out: list[Any] = []
+    out: list[Message] = []
     for record in records:
-        role = getattr(record, "role", None)
-        content = getattr(record, "content", "") or ""
-        if role not in (ConversationRole.USER, ConversationRole.ASSISTANT):
+        wire_role = _WIRE_ROLE_MAP.get(record.role)
+        content = record.content or ""
+        if wire_role is None:
             continue
-        if not content.strip() or getattr(record, "is_system_prompt", False):
+        if not content.strip() or record.is_system_prompt:
             continue
-        out.append(Message(role=role.value, content=[TextContent(text=content)]))
+        out.append(Message(role=wire_role, content=[TextContent(text=content)]))
     return out
 
 
-def _message_text(message: Any) -> str:
-    """Text of a harness ``Message``; empty for entries with no text blocks."""
-    text = getattr(message, "text", None)
-    return text if isinstance(text, str) else ""
+def _message_text(message: Message | CustomMessage) -> str:
+    """Text of a harness ``Message``; empty for ``CustomMessage`` plumbing
+    entries, which carry no text blocks at all."""
+    return message.text if isinstance(message, Message) else ""
 
 
 def _now() -> datetime:
@@ -155,7 +192,7 @@ class AgentEventBridge:
       the legacy ACTION records (code in, stdout/stderr out).
     """
 
-    def __init__(self, status_queue: Any = None, job_id: str | None = None) -> None:
+    def __init__(self, status_queue: StatusQueue | None = None, job_id: str | None = None) -> None:
         self._status_queue = status_queue
         self._job_id = job_id
         self._streams: dict[str, CodeExecutionResult] = {}
@@ -170,7 +207,7 @@ class AgentEventBridge:
 
     # -- queue plumbing ----------------------------------------------------
 
-    def _put(self, payload: tuple[Any, ...]) -> None:
+    def _put(self, payload: tuple[str, str, CodeExecutionResult]) -> None:
         if self._status_queue is None:
             return
         try:
@@ -187,17 +224,19 @@ class AgentEventBridge:
 
     # -- the handler -------------------------------------------------------
 
-    def handle(self, event: Any) -> None:
-        kind = getattr(event, "type", "")
-        if kind == "agent_start":
+    def handle(self, event: AgentEvent) -> None:
+        # isinstance rather than a ``.type`` string switch: each concrete
+        # event declares its own fields, so narrowing here is what lets the
+        # handlers below read them without probing.
+        if isinstance(event, AgentStartEvent):
             self._on_agent_start()
-        elif kind in ("message_start", "message_update", "message_end"):
-            self._on_message(kind, event)
-        elif kind == "tool_execution_start":
+        elif isinstance(event, (MessageStartEvent, MessageUpdateEvent, MessageEndEvent)):
+            self._on_message(event)
+        elif isinstance(event, ToolExecutionStartEvent):
             self._on_tool_start(event)
-        elif kind == "tool_execution_end":
+        elif isinstance(event, ToolExecutionEndEvent):
             self._on_tool_end(event)
-        elif kind == "notice":
+        elif isinstance(event, NoticeEvent):
             self._on_notice(event)
 
     def _on_agent_start(self) -> None:
@@ -213,11 +252,13 @@ class AgentEventBridge:
             )
         )
 
-    def _on_message(self, kind: str, event: Any) -> None:
-        message = getattr(event, "message", None)
-        if message is None or getattr(message, "role", None) != "assistant":
+    def _on_message(self, event: MessageStartEvent | MessageUpdateEvent | MessageEndEvent) -> None:
+        message = event.message
+        # ``CustomMessage`` entries are UI plumbing with no role and no text,
+        # so they never become a streamed assistant record.
+        if not isinstance(message, Message) or message.role != "assistant":
             return
-        message_id = getattr(message, "id", None) or uuid.uuid4().hex
+        message_id = message.id or uuid.uuid4().hex
         record = self._streams.get(message_id)
         if record is None:
             record = CodeExecutionResult(
@@ -232,7 +273,7 @@ class AgentEventBridge:
             self._ordered.append(record)
 
         record.message = _message_text(message)
-        if kind == "message_end":
+        if isinstance(event, MessageEndEvent):
             record.status = ProcessResponseStatus.SUCCESS
             record.is_complete = True
             if record.message:
@@ -240,17 +281,17 @@ class AgentEventBridge:
         self._broadcast(record)
         self._execution(record)
 
-    def _on_tool_start(self, event: Any) -> None:
-        call_id = getattr(event, "tool_call_id", "") or uuid.uuid4().hex
-        tool_name = getattr(event, "tool_name", "")
-        args = getattr(event, "args", {}) or {}
+    def _on_tool_start(self, event: ToolExecutionStartEvent) -> None:
+        call_id = event.tool_call_id or uuid.uuid4().hex
+        tool_name = event.tool_name
+        args = event.args or {}
         record = CodeExecutionResult(
             id=call_id,
             role=ConversationRole.ASSISTANT,
             status=ProcessResponseStatus.IN_PROGRESS,
             execution_type=ExecutionType.ACTION,
             action=ActionType.CODE,
-            message=getattr(event, "intent", None) or tool_name,
+            message=event.intent or tool_name,
             code=_render_tool_args(tool_name, args),
             timestamp=_now(),
         )
@@ -259,15 +300,12 @@ class AgentEventBridge:
         self._broadcast(record)
         self._execution(record)
 
-    def _on_tool_end(self, event: Any) -> None:
-        call_id = getattr(event, "tool_call_id", "")
-        record = self._tools.get(call_id)
+    def _on_tool_end(self, event: ToolExecutionEndEvent) -> None:
+        record = self._tools.get(event.tool_call_id)
         if record is None:
             return
-        result = getattr(event, "result", None)
-        text = getattr(result, "text", "") if result is not None else ""
-        is_error = bool(getattr(event, "is_error", False))
-        if is_error:
+        text = event.result.text
+        if event.is_error:
             record.stderr = text
             record.status = ProcessResponseStatus.ERROR
         else:
@@ -277,9 +315,9 @@ class AgentEventBridge:
         self._broadcast(record)
         self._execution(record)
 
-    def _on_notice(self, event: Any) -> None:
+    def _on_notice(self, event: NoticeEvent) -> None:
         record = CodeExecutionResult(
-            message=getattr(event, "text", ""),
+            message=event.text,
             role=ConversationRole.SYSTEM,
             status=ProcessResponseStatus.SUCCESS,
             execution_type=ExecutionType.INFO,
@@ -327,7 +365,7 @@ class ServerExecutor:
         agent_state: Optional[AgentState] = None,
         persist_conversation: bool = False,
         job_id: Optional[str] = None,
-        status_queue: Any = None,
+        status_queue: StatusQueue | None = None,
     ) -> None:
         self.model_configuration = model_configuration
         self.credential_manager = credential_manager
@@ -388,7 +426,7 @@ class ServerExecutor:
         return self.agent_state.conversation
 
     def add_to_code_history(
-        self, code_execution_result: CodeExecutionResult, response: Any = None
+        self, code_execution_result: CodeExecutionResult
     ) -> CodeExecutionResult:
         self.agent_state.execution_history.append(code_execution_result)
         return code_execution_result
@@ -402,7 +440,6 @@ class ServerExecutor:
         Goes straight through the provider wire clients (``stream_fn``), so no
         tools, no transcript, and no session lifecycle are involved.
         """
-        from local_operator.harness.types import ChatRequest, Message
         from local_operator.model.configure import create_stream_fn
         from local_operator.providers.auth_store import AuthStore
 
@@ -436,18 +473,18 @@ class ServerExecutor:
             )
             chunks: list[str] = []
             async for event in stream_fn(request, None):
-                if getattr(event, "type", "") == "text_delta":
+                # The stream union's members are distinct models; narrow so
+                # each branch reads only the fields it actually declares.
+                if isinstance(event, StreamTextDelta):
                     chunks.append(event.delta)
-                elif getattr(event, "type", "") == "end" and getattr(event, "error", None):
+                elif isinstance(event, StreamEndEvent) and event.error:
                     raise RuntimeError(event.error)
             return ModelResponse("".join(chunks))
         finally:
-            close = getattr(auth_store, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:  # noqa: BLE001 — teardown must not mask errors
-                    logger.debug("auth store close failed", exc_info=True)
+            try:
+                auth_store.close()
+            except Exception:  # noqa: BLE001 — teardown must not mask errors
+                logger.debug("auth store close failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -475,7 +512,7 @@ class ServerOperator:
         current_agent: Optional[AgentData] = None,
         persist_conversation: bool = False,
         job_id: Optional[str] = None,
-        status_queue: Any = None,
+        status_queue: StatusQueue | None = None,
     ) -> None:
         self.executor = executor
         self.config_manager = config_manager
@@ -562,10 +599,10 @@ class ServerOperator:
             status_queue=status_queue,
             verbosity_level=VerbosityLevel.QUIET,
         )
-        end_events: list[Any] = []
+        end_events: list[AgentEndEvent] = []
 
-        def _capture(event: Any) -> None:
-            if getattr(event, "type", None) == "agent_end":
+        def _capture(event: AgentEvent) -> None:
+            if isinstance(event, AgentEndEvent):
                 end_events.append(event)
             bridge.handle(event)
 
@@ -603,10 +640,10 @@ class ServerOperator:
                 logger.exception("failed to dispose server session")
 
         end_event = end_events[-1] if end_events else None
-        if end_event is not None and getattr(end_event, "error", None):
+        if end_event is not None and end_event.error:
             raise RuntimeError(f"Agent turn failed: {end_event.error}")
 
-        messages = list(getattr(end_event, "messages", []) or []) if end_event else []
+        messages: list[Message | CustomMessage] = list(end_event.messages) if end_event else []
         final_response = bridge.final_response or _last_assistant_text(messages)
 
         self._project_turn(messages, bridge)
@@ -619,7 +656,9 @@ class ServerOperator:
 
     # -- projection --------------------------------------------------------
 
-    def _project_turn(self, messages: Sequence[Any], bridge: AgentEventBridge) -> None:
+    def _project_turn(
+        self, messages: Sequence[Message | CustomMessage], bridge: AgentEventBridge
+    ) -> None:
         """Fold the turn's engine messages into the legacy ``AgentState`` and
         persist it when the request asked for conversation persistence.
 
@@ -630,7 +669,9 @@ class ServerOperator:
         """
         state = self.executor.agent_state
         for message in messages:
-            role = _ROLE_MAP.get(getattr(message, "role", ""))
+            # ``CustomMessage`` plumbing entries have no role and no legacy
+            # equivalent, so they never reach the conversation projection.
+            role = _ROLE_MAP.get(message.role) if isinstance(message, Message) else None
             if role is None:
                 continue
             text = _message_text(message)
@@ -653,9 +694,9 @@ class ServerOperator:
                 logger.exception("failed to persist agent state after turn")
 
 
-def _last_assistant_text(messages: Sequence[Any]) -> str:
+def _last_assistant_text(messages: Sequence[Message | CustomMessage]) -> str:
     for message in reversed(messages):
-        if getattr(message, "role", None) == "assistant":
+        if isinstance(message, Message) and message.role == "assistant":
             text = _message_text(message)
             if text:
                 return text
@@ -677,8 +718,7 @@ def create_operator(
     current_agent: Optional[AgentData] = None,
     persist_conversation: bool = False,
     job_id: Optional[str] = None,
-    scheduler_service=None,
-    status_queue=None,
+    status_queue: StatusQueue | None = None,
 ) -> ServerOperator:
     """Build the per-request session facade.
 
@@ -686,10 +726,6 @@ def create_operator(
     the agent's stored state, but does not touch the network, the skill index,
     or MCP. The harness session itself is constructed on the first
     ``handle_user_input`` call.
-
-    ``scheduler_service`` is accepted for call-site compatibility; scheduled
-    work now runs through ``SchedulerService`` building its own sessions, so
-    nothing here consumes it.
 
     Raises:
         ValueError: when hosting/model configuration is missing or invalid.

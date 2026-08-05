@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import inspect
 import random
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from local_operator.harness.types import (
     AbortSignal,
@@ -28,6 +29,10 @@ from local_operator.harness.types import (
     ModelSpec,
     StreamEvent,
 )
+
+if TYPE_CHECKING:  # import cycle: both modules import this one at runtime
+    from local_operator.providers.auth_store import OAuthAccess
+    from local_operator.providers.clients import WireClient
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -162,9 +167,10 @@ class AuthRetryKeyState:
 
 
 async def _call_resolver(resolver: ApiKeyResolver, ctx: ApiKeyResolveContext) -> str | None:
+    """Call a resolver that may be sync or async and normalise the result."""
     result = resolver(ctx)
-    if asyncio.iscoroutine(result):
-        result = await result
+    if inspect.isawaitable(result):
+        return await result
     return result
 
 
@@ -347,8 +353,45 @@ def spec_for_selector(base: ModelSpec, selector: str) -> ModelSpec:
 # High-level streaming with failover
 # ---------------------------------------------------------------------------
 
-WireClientLike = Any  # providers.clients.WireClient protocol
-ClientFactory = Callable[[ModelSpec], Any]
+# Factories may be sync (the usual case) or async, so the driver awaits when
+# it has to. ``WireClient`` is quoted: clients.py imports this module.
+ClientFactory = Callable[[ModelSpec], "WireClient | Awaitable[WireClient]"]
+
+
+@runtime_checkable
+class FailoverAuthStore(Protocol):
+    """The credential-store slice the failover driver needs.
+
+    Structural rather than the concrete ``AuthStore``: that module imports
+    this one, and hosts (plus test doubles) supply only these members.
+    """
+
+    async def get_api_key(
+        self, provider: str, session_id: str | None = None, *, force_refresh: bool = False
+    ) -> str | None: ...  # pragma: no cover
+
+    def rotate_sibling(
+        self,
+        provider: str,
+        session_id: str | None,
+        error: BaseException,
+        api_key: str | None = None,
+    ) -> bool: ...  # pragma: no cover
+
+
+@runtime_checkable
+class OAuthAccessSource(Protocol):
+    """A store that can also hand back the identity-carrying OAuth record.
+
+    Deliberately NOT a subclass of :class:`FailoverAuthStore`: the record is
+    an optional capability, so the driver tests for this ONE member with an
+    ``isinstance`` against this runtime-checkable protocol. A store exposing
+    only ``get_api_key`` yields bare bearers instead.
+    """
+
+    async def get_oauth_access(
+        self, provider: str, session_id: str | None = None, *, force_refresh: bool = False
+    ) -> "OAuthAccess | None": ...  # pragma: no cover
 
 
 def _selector_for_request(request: ChatRequest) -> str:
@@ -378,7 +421,7 @@ async def _abortable_sleep(delay_ms: int, signal: AbortSignal | None) -> None:
 
 async def stream_with_failover(
     request: ChatRequest,
-    auth: Any,  # providers.auth_store.AuthStore
+    auth: FailoverAuthStore,
     settings: Mapping[str, Any] | None,
     client_for: ClientFactory,
     *,
@@ -412,7 +455,7 @@ async def stream_with_failover(
             selectors.extend(expand_fallback_candidates(primary_selector, chain))
 
     last_error: ProviderError | None = None
-    clients: dict[str, Any] = {}
+    clients: dict[str, "WireClient"] = {}
     rng = random.Random()
 
     for selector in selectors:
@@ -428,9 +471,7 @@ async def stream_with_failover(
         client = clients.get(selector)
         if client is None:
             built = client_for(spec)
-            if asyncio.iscoroutine(built):
-                built = await built
-            client = built
+            client = await built if inspect.isawaitable(built) else built
             clients[selector] = client
         current_request = (
             request if selector == primary_selector else request.model_copy(update={"model": spec})
@@ -438,7 +479,7 @@ async def stream_with_failover(
 
         state = AuthRetryKeyState()
         error: BaseException | None = None
-        access: Any = None  # OAuthAccess for the current credential (or None)
+        access: "OAuthAccess | None" = None  # credential record for this attempt
         current_token: str | None = None
         transport_retries = 0
         retry_same_key = False
@@ -456,7 +497,7 @@ async def stream_with_failover(
                     transport_retries = 0  # fresh credential ⇒ fresh budget
                 if access is None and error is not None:
                     break  # rotation exhausted for this provider
-                if access is None and not await _provider_allows_missing(auth, provider):
+                if access is None and not _provider_allows_missing(provider):
                     last_error = last_error or ProviderError(
                         None, f"No API key configured for provider '{provider}'", retryable=False
                     )
@@ -521,22 +562,28 @@ async def stream_with_failover(
 
 
 async def _resolve_access_for_provider(
-    auth: Any,
+    auth: FailoverAuthStore,
     provider: str,
     session_id: str | None,
     state: AuthRetryKeyState,
     error: BaseException | None,
-) -> Any:
+) -> "OAuthAccess | None":
     """Bridge AuthStore into the a/b/c resolver shape, returning the
     :class:`~local_operator.providers.auth_store.OAuthAccess` record (or
     ``None``) so wire clients get identity headers alongside the bearer."""
-    get_oauth_access = getattr(auth, "get_oauth_access", None)
-    records: dict[str, Any] = {}
+    # Presence test, not a nominal one: stores exposing only get_api_key take
+    # the bare-bearer path and get wrapped at the bottom of this function.
+    oauth_store = auth if isinstance(auth, OAuthAccessSource) else None
+    records: dict[str, "OAuthAccess"] = {}
 
-    async def _access(**kwargs: Any) -> Any:
-        if get_oauth_access is None:
+    async def _access(*, force_refresh: bool = False) -> "OAuthAccess | None":
+        if oauth_store is None:
             return None
-        return await get_oauth_access(provider, session_id, **kwargs)
+        # force_refresh is only passed when set so stores declaring the bare
+        # (provider, session_id) signature keep working.
+        if force_refresh:
+            return await oauth_store.get_oauth_access(provider, session_id, force_refresh=True)
+        return await oauth_store.get_oauth_access(provider, session_id)
 
     async def resolver(ctx: ApiKeyResolveContext) -> str | None:
         try:
@@ -573,7 +620,7 @@ async def _resolve_access_for_provider(
     return record
 
 
-async def _provider_allows_missing(auth: Any, provider: str) -> bool:
+def _provider_allows_missing(provider: str) -> bool:
     """Providers that self-authenticate (ollama/test) need no key at all."""
     from local_operator.providers.registry import get_provider_definition
 

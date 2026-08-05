@@ -37,9 +37,16 @@ import sqlite3
 import time
 import zlib
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
-from local_operator.providers.registry import ProviderDefinition, get_provider_definition
+from local_operator.providers.registry import (
+    ProviderDefinition,
+    RefreshFn,
+    get_provider_definition,
+)
+
+if TYPE_CHECKING:  # the legacy reader stays an optional, import-guarded tier
+    from local_operator.credentials import CredentialManager
 
 logger = logging.getLogger("local_operator.providers.auth_store")
 
@@ -155,14 +162,12 @@ class AuthStore:
         self,
         db_path: str | Path | None = None,
         *,
-        credential_manager: Any = None,
+        credential_manager: "CredentialManager | None" = None,
         config_overrides: dict[str, str] | None = None,
-        http_client: Any = None,
     ) -> None:
         self._db_path = Path(db_path) if db_path is not None else default_db_path()
         self._credential_manager = credential_manager
         self._config_overrides = dict(config_overrides or {})
-        self._http_client = http_client
         self._runtime_overrides: dict[str, str] = {}
         self._fallback_resolvers: dict[str, Callable[[str], str | None]] = {}
         self._sticky: dict[tuple[str, str], int] = {}
@@ -294,7 +299,7 @@ class AuthStore:
                     (credential_type, data_json, now, row[0]),
                 )
                 self._conn.commit()
-                return self.get_credential(row[0])  # type: ignore[return-value]
+                return self._reread_after_write(row[0])
 
         cursor = self._conn.execute(
             "INSERT INTO auth_credentials "
@@ -303,7 +308,19 @@ class AuthStore:
             (provider, credential_type, data_json, identity, now, now),
         )
         self._conn.commit()
-        return self.get_credential(cursor.lastrowid)  # type: ignore[arg-type]
+        return self._reread_after_write(cursor.lastrowid)
+
+    def _reread_after_write(self, credential_id: int | None) -> StoredCredential:
+        """Re-read a row this connection just wrote.
+
+        The write and the read share one connection, so a miss is impossible;
+        surfacing it as an error beats leaking ``None`` out of a non-optional
+        return and failing somewhere further away.
+        """
+        stored = self.get_credential(credential_id) if credential_id is not None else None
+        if stored is None:
+            raise AuthStoreError("Credential row could not be read back after write")
+        return stored
 
     def get_credential(self, credential_id: int) -> StoredCredential | None:
         row = self._conn.execute(
@@ -379,7 +396,7 @@ class AuthStore:
 
     # -- OAuth refresh -----------------------------------------------------------
 
-    def _refresh_fn(self, provider: str) -> Any:
+    def _refresh_fn(self, provider: str) -> RefreshFn | None:
         definition = get_provider_definition(provider)
         if definition is not None and definition.refresh_token is not None:
             return definition.refresh_token
@@ -659,7 +676,7 @@ class AuthStore:
         self,
         provider: str,
         session_id: str | None,
-        error: Any,
+        error: BaseException,
         api_key: str | None = None,
         block_ms: int = DEFAULT_BLOCK_MS,
     ) -> bool:
@@ -722,7 +739,7 @@ class AuthStore:
         return None
 
 
-def _load_legacy_credential_manager() -> Any:
+def _load_legacy_credential_manager() -> "CredentialManager | None":
     """Best-effort legacy ``credentials.env`` reader (import-guarded)."""
     try:
         from local_operator.credentials import CredentialManager

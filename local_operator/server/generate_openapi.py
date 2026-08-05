@@ -22,7 +22,7 @@ logging.basicConfig(
 logger = logging.getLogger("local_operator.server.generate_openapi")
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     """Parse command line arguments for the script."""
     parser = argparse.ArgumentParser(description="Generate OpenAPI schema for Local Operator API")
     parser.add_argument(
@@ -40,7 +40,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
+def main() -> int:
     """Main entry point for the script."""
     args = parse_args()
 

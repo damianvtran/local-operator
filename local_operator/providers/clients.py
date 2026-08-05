@@ -28,9 +28,11 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 import httpx
 
 from local_operator.harness.types import (
+    AgentTool,
     ChatRequest,
     ImageContent,
     Message,
+    ModelSpec,
     StreamEndEvent,
     StreamEvent,
     StreamTextDelta,
@@ -49,7 +51,7 @@ if TYPE_CHECKING:
 class WireClient(Protocol):
     """The one method the harness needs from a provider client."""
 
-    async def stream(
+    def stream(
         self,
         request: ChatRequest,
         api_key: str | None,
@@ -59,8 +61,9 @@ class WireClient(Protocol):
 
         ``oauth_access`` carries the resolved credential record (kind,
         account/org identity) so OAuth bearers can take provider-specific
-        headers/routes that a bare API key must not. Must be an async
-        generator (``stream(...)`` called then iterated).
+        headers/routes that a bare API key must not. Declared without ``async``
+        because implementations are async generators: callers get the iterator
+        from the bare call and drive it with ``async for``, never ``await``.
         """
         ...  # pragma: no cover
 
@@ -222,7 +225,7 @@ def _tool_content_openai(message: Message) -> str | list[dict[str, Any]]:
     return parts
 
 
-def _tools_to_openai(tools: Sequence[Any]) -> list[dict[str, Any]]:
+def _tools_to_openai(tools: Sequence[AgentTool]) -> list[dict[str, Any]]:
     return [
         {
             "type": "function",
@@ -1095,7 +1098,7 @@ class MockClient:
         yield StreamEndEvent(stop_reason="stop", usage=Usage(input_tokens=10, output_tokens=8))
 
 
-def client_for_spec(spec: Any, *, http_client: httpx.AsyncClient | None = None) -> WireClient:
+def client_for_spec(spec: ModelSpec, *, http_client: httpx.AsyncClient | None = None) -> WireClient:
     """Build the wire client for a ``ModelSpec`` via the provider registry.
 
     Unknown providers raise :class:`ValueError` — the legacy fallback to the

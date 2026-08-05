@@ -5,7 +5,7 @@ Client for interacting with Google APIs (Gmail, Calendar, Drive).
 import base64
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional, Union, overload
 
 import requests
 from pydantic import BaseModel
@@ -22,7 +22,7 @@ GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 class GoogleAPIError(Exception):
     """Custom exception for Google API errors."""
 
-    def __init__(self, message: str, status_code: Optional[int] = None):
+    def __init__(self, message: str, status_code: Optional[int] = None) -> None:
         super().__init__(message)
         self.status_code = status_code
 
@@ -42,7 +42,7 @@ class GmailMessagePart(BaseModel):
     filename: Optional[str] = None
     headers: Optional[List[Dict[str, str]]] = None
     body: Optional[GmailMessagePartBody] = None
-    parts: Optional[List["GmailMessagePart"]] = None  # type: ignore
+    parts: Optional[List["GmailMessagePart"]] = None
 
 
 class GmailMessage(BaseModel):
@@ -256,7 +256,7 @@ class GoogleClient:
     across Gmail, Google Calendar, and Google Drive.
     """
 
-    def __init__(self, access_token: str):
+    def __init__(self, access_token: str) -> None:
         """
         Initializes the GoogleClient.
 
@@ -268,16 +268,41 @@ class GoogleClient:
         self.access_token = access_token
         self.headers = {"Authorization": f"Bearer {self.access_token}"}
 
+    @overload
     def _request(
         self,
         method: str,
         url: str,
         params: Optional[Dict[str, Any]] = None,
-        data: Optional[Any] = None,  # Can be Dict for JSON, or bytes for uploads
+        data: Optional[Union[Dict[str, Any], bytes]] = None,
+        is_upload: bool = False,
+        upload_content_type: Optional[str] = None,
+        is_download: Literal[False] = False,
+    ) -> Dict[str, Any]: ...
+
+    @overload
+    def _request(
+        self,
+        method: str,
+        url: str,
+        params: Optional[Dict[str, Any]] = None,
+        data: Optional[Union[Dict[str, Any], bytes]] = None,
+        is_upload: bool = False,
+        upload_content_type: Optional[str] = None,
+        *,
+        is_download: Literal[True],
+    ) -> bytes: ...
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        params: Optional[Dict[str, Any]] = None,
+        data: Optional[Union[Dict[str, Any], bytes]] = None,
         is_upload: bool = False,
         upload_content_type: Optional[str] = None,
         is_download: bool = False,
-    ) -> Any:  # Return type can be Dict or bytes
+    ) -> Union[Dict[str, Any], bytes]:
         """
         Makes an HTTP request to the Google API.
 
@@ -321,10 +346,17 @@ class GoogleClient:
 
             return response.json()
         except requests.exceptions.HTTPError as e:
-            status_code = e.response.status_code
-            error_message = f"Google API request failed: {e.response.text}"
+            # raise_for_status() always attaches the failing response, but HTTPError can
+            # also be raised without one; that case carries no status or body to report,
+            # so it is surfaced like any other response-less request failure.
+            error_response = e.response
+            if error_response is None:
+                logger.error(f"Google API request failed: {e}", exc_info=True)
+                raise GoogleAPIError(f"Google API request failed: {e}") from e
+            status_code = error_response.status_code
+            error_message = f"Google API request failed: {error_response.text}"
             try:
-                error_details = e.response.json()
+                error_details = error_response.json()
                 if "error" in error_details and "message" in error_details["error"]:
                     err_msg = error_details["error"]["message"]
                     error_message = f"Google API Error: {err_msg} (Status: {status_code})"
@@ -843,9 +875,17 @@ class GoogleClient:
             return self.update_drive_file_metadata(file_id, metadata_update=metadata)
 
         except requests.exceptions.HTTPError as e:
+            # raise_for_status() always attaches the failing response, but HTTPError can
+            # also be raised without one; that case has no status or body to report and
+            # is surfaced like any other response-less request failure.
+            error_response = e.response
+            if error_response is None:
+                raise GoogleAPIError(
+                    f"Drive multipart upload (simulated) request failed: {e}"
+                ) from e
             raise GoogleAPIError(
-                f"Drive multipart upload (simulated) failed: {e.response.text}",
-                e.response.status_code,
+                f"Drive multipart upload (simulated) failed: {error_response.text}",
+                error_response.status_code,
             ) from e
         except requests.exceptions.RequestException as e:
             raise GoogleAPIError(f"Drive multipart upload (simulated) request failed: {e}") from e
@@ -951,10 +991,17 @@ def refresh_google_access_token(
         response.raise_for_status()
         return response.json()
     except requests.exceptions.HTTPError as e:
-        status_code = e.response.status_code
-        error_message = f"Google token refresh failed: {e.response.text}"
+        # raise_for_status() always attaches the failing response, but HTTPError can also
+        # be raised without one; that case has no status or body to report and is surfaced
+        # like any other response-less request failure.
+        error_response = e.response
+        if error_response is None:
+            logger.error(f"Google token refresh request failed: {e}", exc_info=True)
+            raise GoogleAPIError(f"Google token refresh request failed: {e}") from e
+        status_code = error_response.status_code
+        error_message = f"Google token refresh failed: {error_response.text}"
         try:
-            error_details = e.response.json()
+            error_details = error_response.json()
             if "error_description" in error_details:  # Google often uses error_description here
                 err_desc = error_details["error_description"]
                 error_message = f"Google Token Refresh Error: {err_desc} (Status: {status_code})"

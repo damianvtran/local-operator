@@ -32,7 +32,7 @@ class Config:
     metadata: Dict[str, Any]
     values: Dict[str, Any]
 
-    def __init__(self, config_dict: Dict[str, Any]):
+    def __init__(self, config_dict: Dict[str, Any]) -> None:
         """Initialize the config with default or existing settings.
 
         Creates a new Config instance that manages configuration settings.
@@ -121,7 +121,7 @@ class ConfigManager:
     config_file: Path
     config: Config
 
-    def __init__(self, config_dir: Path):
+    def __init__(self, config_dir: Path) -> None:
         """Initialize the config manager with default or existing settings.
 
         Creates a new ConfigManager instance that manages configuration settings.

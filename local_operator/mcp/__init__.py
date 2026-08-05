@@ -9,10 +9,14 @@ outbound argument hygiene. See ``docs/REWRITE.md`` section E.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING
 
+from local_operator.harness.types import AgentTool
 from local_operator.mcp.manager import McpLoadResult, McpManager
 from local_operator.mcp.tool_cache import McpToolCache
+
+if TYPE_CHECKING:
+    from local_operator.mcp.auth import ManagedAuthStore
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +31,8 @@ __all__ = [
 async def discover_and_load_mcp_tools(
     cwd: str,
     tool_cache: McpToolCache | None = None,
-    auth_store: Any = None,
-) -> tuple[McpManager, list[Any], list[dict[str, str]]]:
+    auth_store: ManagedAuthStore | None = None,
+) -> tuple[McpManager, list[AgentTool], list[dict[str, str]]]:
     """Convenience loader that discovers and loads MCP tools in one pass.
 
     Returns ``(manager, tools, errors)``:

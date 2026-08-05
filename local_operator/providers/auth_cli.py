@@ -10,17 +10,23 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from local_operator.providers.oauth.callback_server import LoginCallbacks, LoginError
 from local_operator.providers.registry import (
     PROVIDER_REGISTRY,
+    ProviderDefinition,
+    env_key_name,
     get_provider_definition,
     list_login_providers,
 )
 
+if TYPE_CHECKING:  # lazy at runtime: the CLI top level must not import these
+    from local_operator.credentials import CredentialManager
+    from local_operator.providers.auth_store import AuthStore
 
-def _callbacks_interactive(definition: Any) -> LoginCallbacks:
+
+def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
     """print-based callbacks for terminal logins.
 
     The paste-code prompt is attached ONLY for providers that declare
@@ -45,19 +51,28 @@ def _callbacks_interactive(definition: Any) -> LoginCallbacks:
             return None
         return value.strip() or None
 
-    manual_input = on_manual_code_input if getattr(definition, "paste_code_flow", False) else None
+    manual_input = on_manual_code_input if definition.paste_code_flow else None
     return LoginCallbacks(
         on_auth_url=on_auth_url, on_progress=on_progress, on_manual_code_input=manual_input
     )
 
 
-def run_login(provider_id: str | None, credential_manager: Any, auth_store: Any) -> int:
-    """Log in to ``provider_id`` (or list options when ``None``). Exit code 0/1."""
+def run_login(
+    provider_id: str | None,
+    _credential_manager: "CredentialManager | None",
+    auth_store: "AuthStore",
+) -> int:
+    """Log in to ``provider_id`` (or list options when ``None``). Exit code 0/1.
+
+    The legacy credential manager is accepted for call-shape symmetry with
+    :func:`list_logins` but plays no part in a login: new credentials land in
+    ``auth_store`` only.
+    """
     if provider_id is None:
         print("Available login providers:")
-        for definition in list_login_providers():
-            marker = "*" if definition.store_credentials_as else " "
-            print(f"  {marker} {definition.id:<16} {definition.name}")
+        for candidate in list_login_providers():
+            marker = "*" if candidate.store_credentials_as else " "
+            print(f"  {marker} {candidate.id:<16} {candidate.name}")
         print("\nUsage: local-operator login <provider>")
         return 0
 
@@ -69,8 +84,11 @@ def run_login(provider_id: str | None, credential_manager: Any, auth_store: Any)
         print(f"Provider '{provider_id}' has no interactive login.")
         return 1
 
-    async def _run() -> Any:
-        return await definition.login(_callbacks_interactive(definition))  # type: ignore[misc]
+    login = definition.login
+    callbacks = _callbacks_interactive(definition)
+
+    async def _run() -> str | dict[str, Any]:
+        return await login(callbacks)
 
     try:
         result = asyncio.run(_run())
@@ -103,7 +121,7 @@ def run_login(provider_id: str | None, credential_manager: Any, auth_store: Any)
     return 0
 
 
-def run_logout(provider_id: str, auth_store: Any) -> int:
+def run_logout(provider_id: str, auth_store: "AuthStore") -> int:
     """Remove every stored credential (OAuth + pasted keys) for the provider."""
     definition = get_provider_definition(provider_id)
     if definition is None:
@@ -137,7 +155,9 @@ def run_logout(provider_id: str, auth_store: Any) -> int:
     return 0
 
 
-def list_logins(auth_store: Any, credential_manager: Any = None) -> int:
+def list_logins(
+    auth_store: "AuthStore", credential_manager: "CredentialManager | None" = None
+) -> int:
     """Print one line per active credential plus env/legacy keys in the cascade."""
     rows = auth_store.list_credentials()
     if rows:
@@ -158,10 +178,7 @@ def list_logins(auth_store: Any, credential_manager: Any = None) -> int:
     else:
         print("No stored credentials.")
 
-    from local_operator.providers.registry import env_key_name
-
     print("\nEnvironment keys visible to the cascade:")
-    import os
 
     found = False
     for definition in PROVIDER_REGISTRY:

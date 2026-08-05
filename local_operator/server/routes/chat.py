@@ -98,8 +98,8 @@ async def chat_endpoint(
     credential_manager: CredentialManager = Depends(get_credential_manager),
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
-    env_config=Depends(get_env_config),
-):
+    env_config: EnvConfig = Depends(get_env_config),
+) -> CRUDResponse[ChatResponse]:
     """
     Process a chat request and return the response with context.
 
@@ -227,11 +227,11 @@ async def chat_with_agent(
     credential_manager: CredentialManager = Depends(get_credential_manager),
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
-    env_config=Depends(get_env_config),
+    env_config: EnvConfig = Depends(get_env_config),
     agent_id: str = Path(
         ..., description="ID of the agent to use for the chat", examples=["agent123"]
     ),
-):
+) -> CRUDResponse[ChatResponse]:
     """
     Process a chat request using a specific agent from the registry and return the response with
     context. The specified agent is applied to both the operator and executor.
@@ -346,7 +346,7 @@ async def chat_async_endpoint(
     scheduler_service: "SchedulerService" = Depends(
         get_scheduler_service
     ),  # Changed to string literal
-):
+) -> JSONResponse:
     """
     Process a chat request asynchronously and return a job ID.
 
@@ -394,7 +394,7 @@ async def chat_async_endpoint(
                 agent_registry,
                 env_config,
                 request.context if request.context else None,
-                request.options.model_dump() if request.options else None,
+                request.options,
             ),
             job_manager=job_manager,
             websocket_manager=websocket_manager,
@@ -473,7 +473,7 @@ async def chat_with_agent_async(
     agent_id: str = Path(
         ..., description="ID of the agent to use for the chat", examples=["agent123"]
     ),
-):
+) -> JSONResponse:
     """
     Process a chat request asynchronously using a specific agent and return a job ID.
 
@@ -606,7 +606,7 @@ async def edit_file_with_agent(
     agent_id: str = Path(
         ..., description="ID of the agent to use for editing", examples=["agent123"]
     ),
-):
+) -> JSONResponse:
     """
     Edit a file using a specific agent with an edit prompt.
 

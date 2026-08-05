@@ -23,8 +23,23 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-from typing import Any, Protocol, runtime_checkable
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from urllib.parse import parse_qs, urlparse
+
+from pydantic import AnyUrl
+
+if TYPE_CHECKING:
+    # The SDK is an optional extra: these names are needed for annotations
+    # only, so importing them here keeps this module importable without it.
+    from mcp.shared.auth import (
+        AuthorizationCodeResult,
+        OAuthClientInformationFull,
+        OAuthToken,
+    )
+
+    from local_operator.mcp.config import MCPServerConfig
+    from local_operator.providers.auth_store import StoredCredential
 
 logger = logging.getLogger(__name__)
 
@@ -51,22 +66,36 @@ class StructuralAuthStore(Protocol):
     reality: integer-keyed rows, ``provider`` column, ``identity_key`` dedupe.
     """
 
-    def upsert_credential(self, provider: str, credential: dict[str, Any]) -> Any:
+    def upsert_credential(self, provider: str, credential: dict[str, Any]) -> StoredCredential:
         """Insert, or update the row for the same identity; returns the row."""
         ...
 
     def list_credentials(
         self, provider: str | None = None, include_disabled: bool = False
-    ) -> list[Any]:
+    ) -> list[StoredCredential]:
         """Enabled credential rows (all providers or one), oldest first."""
         ...
 
-    def get_credential(self, credential_id: int) -> Any | None:
+    def get_credential(self, credential_id: int) -> StoredCredential | None:
         """Return one row by integer id, or ``None``."""
         ...
 
 
-def _resolve_store(store: Any) -> Any:
+@runtime_checkable
+class ManagedAuthStore(StructuralAuthStore, Protocol):
+    """A store whose lifetime the MCP manager may own, and therefore close.
+
+    ``McpManager`` constructs its own store when none is injected; that one
+    has to be released on ``disconnect_all``, so the closing surface belongs
+    in the type rather than being discovered at teardown.
+    """
+
+    def close(self) -> None:
+        """Release the underlying database handle."""
+        ...
+
+
+def _resolve_store(store: StructuralAuthStore | None) -> StructuralAuthStore | None:
     """Return ``store`` or lazily construct the real ``AuthStore``.
 
     The providers import is deferred: the MCP package must stay importable in
@@ -94,7 +123,7 @@ class McpTokenStorage:
     then starts a fresh flow).
     """
 
-    def __init__(self, server_url: str, store: Any = None) -> None:
+    def __init__(self, server_url: str, store: StructuralAuthStore | None = None) -> None:
         self.server_url = server_url
         self.credential_id = mcp_oauth_credential_id(server_url)
         self._store = _resolve_store(store)
@@ -110,8 +139,8 @@ class McpTokenStorage:
             logger.debug("MCP token read failed for %s", self.credential_id, exc_info=True)
             return None
         for row in rows:
-            if getattr(row, "identity_key", None) == self.server_url:
-                data = getattr(row, "data", None)
+            if row.identity_key == self.server_url:
+                data = row.data
                 return dict(data) if isinstance(data, dict) else None
         return None
 
@@ -137,10 +166,10 @@ class McpTokenStorage:
 
     # --- SDK TokenStorage protocol ---------------------------------------
 
-    async def get_tokens(self) -> Any:
+    async def get_tokens(self) -> OAuthToken | None:
         """Stored access/refresh tokens as an ``OAuthToken``, or ``None``."""
         creds = self._read()
-        tokens = creds.get("tokens") if isinstance(creds, dict) else None
+        tokens = creds.get("tokens") if creds is not None else None
         if not isinstance(tokens, dict):
             return None
         try:
@@ -151,16 +180,16 @@ class McpTokenStorage:
             logger.debug("Stored MCP tokens invalid for %s", self.credential_id, exc_info=True)
             return None
 
-    async def set_tokens(self, tokens: Any) -> None:
+    async def set_tokens(self, tokens: OAuthToken) -> None:
         """Persist fresh/refreshed tokens (access + refresh together)."""
         creds = self._read() or {}
         creds["tokens"] = tokens.model_dump(mode="json")
         self._write(creds)
 
-    async def get_client_info(self) -> Any:
+    async def get_client_info(self) -> OAuthClientInformationFull | None:
         """Stored client registration (DCR result or pinned config), or ``None``."""
         creds = self._read()
-        info = creds.get("client_info") if isinstance(creds, dict) else None
+        info = creds.get("client_info") if creds is not None else None
         if not isinstance(info, dict):
             return None
         try:
@@ -171,7 +200,7 @@ class McpTokenStorage:
             logger.debug("Stored MCP client info invalid for %s", self.credential_id, exc_info=True)
             return None
 
-    async def set_client_info(self, client_info: Any) -> None:
+    async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
         """Persist a dynamic-client registration (RFC 7591)."""
         creds = self._read() or {}
         creds["client_info"] = client_info.model_dump(mode="json")
@@ -195,10 +224,9 @@ class McpTokenStorage:
         creds = self._read() or {}
         creds["client_info"] = info.model_dump(mode="json")
         self._write(creds)
-        self.seeded_client_id = client_id
 
 
-def _default_redirect_handler() -> Any:
+def _default_redirect_handler() -> Callable[[str], Awaitable[None]]:
     """Build the redirect handler: print the URL, open a browser when possible.
 
     The URL is hard-wrapped in brackets so trailing OAuth params can never be
@@ -252,7 +280,7 @@ def parse_oauth_callback_input(raw: str) -> tuple[str, str | None, str | None]:
 PASTE_INPUT_TIMEOUT_S = 300.0
 
 
-def _default_callback_handler() -> Any:
+def _default_callback_handler() -> Callable[[], Awaitable[AuthorizationCodeResult]]:
     """Build the callback handler: accept the pasted FULL redirect URL.
 
     The SDK hands us control between redirect and token exchange; we read the
@@ -268,7 +296,7 @@ def _default_callback_handler() -> Any:
     bounded by :data:`PASTE_INPUT_TIMEOUT_S`.
     """
 
-    async def callback_handler() -> Any:
+    async def callback_handler() -> AuthorizationCodeResult:
         from mcp.shared.auth import AuthorizationCodeResult
 
         if not sys.stdin.isatty():
@@ -295,7 +323,9 @@ def _default_callback_handler() -> Any:
     return callback_handler
 
 
-def wire_oauth_auth(server_url: str, cfg: Any, store: Any = None) -> dict[str, Any]:
+def wire_oauth_auth(
+    server_url: str, cfg: MCPServerConfig, store: StructuralAuthStore | None = None
+) -> dict[str, Any]:
     """Build ``OAuthClientProvider`` kwargs for one server.
 
     ``cfg`` is the server's :class:`~local_operator.mcp.config.MCPServerConfig`
@@ -317,32 +347,33 @@ def wire_oauth_auth(server_url: str, cfg: Any, store: Any = None) -> dict[str, A
     """
     from mcp.shared.auth import OAuthClientMetadata
 
-    auth = getattr(cfg, "auth", None)
-    oauth = getattr(cfg, "oauth", None)
+    auth = cfg.auth
+    oauth = cfg.oauth
 
-    callback_port = getattr(oauth, "callback_port", None) or DEFAULT_CALLBACK_PORT
-    callback_path = getattr(oauth, "callback_path", None) or DEFAULT_CALLBACK_PATH
+    callback_port = (oauth.callback_port if oauth is not None else None) or DEFAULT_CALLBACK_PORT
+    callback_path = (oauth.callback_path if oauth is not None else None) or DEFAULT_CALLBACK_PATH
     if not callback_path.startswith("/"):
         callback_path = f"/{callback_path}"
-    redirect_uri = (
-        getattr(oauth, "redirect_uri", None) or f"http://127.0.0.1:{callback_port}{callback_path}"
+    redirect_uri = (oauth.redirect_uri if oauth is not None else None) or (
+        f"http://127.0.0.1:{callback_port}{callback_path}"
     )
 
-    # Scopes: explicit `scope` on the auth block (extra-allowed field), else
-    # none (the server advertises them via protected-resource metadata).
-    scope = getattr(auth, "scope", None) if auth is not None else None
+    # Scopes: explicit `scope` on the auth block — an extra-allowed field, so
+    # it lives in ``model_extra`` rather than being declared — else none (the
+    # server advertises them via protected-resource metadata).
+    scope: str | None = (auth.model_extra or {}).get("scope") if auth is not None else None
+
+    client_secret = (auth.client_secret if auth is not None else None) or (
+        oauth.client_secret if oauth is not None else None
+    )
 
     client_metadata = OAuthClientMetadata(
         client_name="local-operator",
-        redirect_uris=[redirect_uri],
+        redirect_uris=[AnyUrl(redirect_uri)],
         scope=scope,
         grant_types=["authorization_code", "refresh_token"],
         response_types=["code"],
-        token_endpoint_auth_method=(
-            "client_secret_post"
-            if getattr(auth, "client_secret", None) or getattr(oauth, "client_secret", None)
-            else "none"
-        ),
+        token_endpoint_auth_method="client_secret_post" if client_secret else "none",
     )
 
     storage = McpTokenStorage(server_url, store)
@@ -351,11 +382,10 @@ def wire_oauth_auth(server_url: str, cfg: Any, store: Any = None) -> dict[str, A
     # client registration (MCP-11). DCR would mint a fresh client whose
     # redirect URI need not match what the provider registered, which breaks
     # pinned-redirect providers outright.
-    client_id = getattr(auth, "client_id", None) or getattr(oauth, "client_id", None)
+    client_id = (auth.client_id if auth is not None else None) or (
+        oauth.client_id if oauth is not None else None
+    )
     if client_id:
-        client_secret = getattr(auth, "client_secret", None) or getattr(
-            oauth, "client_secret", None
-        )
         storage.seed_client_info(client_id, client_secret)
 
     return {

@@ -24,7 +24,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 # Server names allow letters, digits, underscore, dash, dot, colon; max 100
 # chars (config-writer rule; the colon covers namespaced plugin entries).
@@ -109,14 +109,14 @@ class MCPSseServerConfig(BaseModel):
 MCPServerConfig = MCPStdioServerConfig | MCPHttpServerConfig | MCPSseServerConfig
 
 # Transport type keyword -> model, for parsing raw dicts.
-_TYPE_MODELS: dict[str, type[BaseModel]] = {
+_TYPE_MODELS: dict[str, type[MCPServerConfig]] = {
     "stdio": MCPStdioServerConfig,
     "http": MCPHttpServerConfig,
     "sse": MCPSseServerConfig,
 }
 
 
-def _coerce_server_config(raw: Any) -> MCPServerConfig | None:
+def _coerce_server_config(raw: JsonValue) -> MCPServerConfig | None:
     """Parse one raw server entry into a typed config.
 
     Transport inference: explicit ``type`` wins; otherwise
@@ -137,7 +137,7 @@ def _coerce_server_config(raw: Any) -> MCPServerConfig | None:
             transport = "stdio"
     model = _TYPE_MODELS[transport]
     try:
-        return model.model_validate(data)  # type: ignore[return-value]
+        return model.model_validate(data)
     except Exception:
         # extra="allow" + defaults make this nearly total; guard anyway.
         return None
@@ -154,7 +154,7 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
-def _string_list(value: Any) -> list[str]:
+def _string_list(value: JsonValue) -> list[str]:
     """Coerce a JSON value to a list of strings, dropping non-strings."""
     if not isinstance(value, list):
         return []
@@ -196,7 +196,7 @@ def _imported_servers(doc: dict[str, Any], key_path: tuple[str, ...] | None) -> 
     """
     if key_path is None:
         return _local_operator_servers(doc)
-    node: Any = doc
+    node: JsonValue = doc
     for key in key_path:
         if not isinstance(node, dict):
             return {}
@@ -204,7 +204,7 @@ def _imported_servers(doc: dict[str, Any], key_path: tuple[str, ...] | None) -> 
     return node if isinstance(node, dict) else {}
 
 
-def validate_server_config(name: str, cfg: MCPServerConfig | Any) -> list[str]:
+def validate_server_config(name: str, cfg: MCPServerConfig | dict[str, Any] | None) -> list[str]:
     """Validate one server config, returning human-readable error strings.
 
     An empty list means the config is usable. Shape problems that prevented
@@ -280,9 +280,6 @@ def load_all_mcp_configs(
         (home / ".cursor" / "mcp.json", None),
         (root / ".vscode" / "mcp.json", ("mcp", "servers")),
     ]
-
-    configs: dict[str, MCPServerConfig] = {}
-    sources: dict[str, str] = {}
 
     claude_path = home / ".claude.json"
     # First pass: collect every candidate per name (priority order) and the
@@ -471,8 +468,8 @@ def remove_server(
 
     path = _scope_path(cwd, scope)
     doc = _read_json(path)
-    servers = doc.get("mcpServers") if isinstance(doc, dict) else None
-    if not isinstance(servers, dict) or name not in servers:
+    servers = doc.get("mcpServers") if doc is not None else None
+    if doc is None or not isinstance(servers, dict) or name not in servers:
         print(f"error: server {name!r} not found in {path}", file=sys.stderr)
         return 1
     del servers[name]

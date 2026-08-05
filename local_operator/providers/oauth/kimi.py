@@ -25,7 +25,11 @@ from typing import Any
 import httpx
 
 from local_operator.harness.types import AbortSignal
-from local_operator.providers.oauth.callback_server import LoginCallbacks, LoginError
+from local_operator.providers.oauth.callback_server import (
+    LoginCallbacks,
+    LoginError,
+    maybe_await,
+)
 from local_operator.providers.oauth.device_code import DevicePollResult, poll_device_code_flow
 
 CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098"
@@ -149,11 +153,12 @@ async def login_kimi(
         verification_url = authz.get("verification_uri_complete") or authz.get("verification_uri")
         user_code = authz.get("user_code", "")
         if callbacks.on_auth_url is not None and verification_url:
-            result = callbacks.on_auth_url(
-                verification_url, instructions=f"Enter code: {user_code}" if user_code else None
+            await maybe_await(
+                callbacks.on_auth_url(
+                    verification_url,
+                    instructions=f"Enter code: {user_code}" if user_code else None,
+                )
             )
-            if hasattr(result, "__await__"):
-                await result
 
         interval = float(authz.get("interval", DEFAULT_INTERVAL_SECONDS))
         expires_in = float(authz.get("expires_in", DEFAULT_TTL_SECONDS))

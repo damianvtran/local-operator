@@ -16,10 +16,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import signal
 import sys
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
+
+if TYPE_CHECKING:
+    # Type-only: the worker's whole design is that engine imports stay lazy
+    # so a background spawn pays for them once, inside the factory.
+    from local_operator.session.protocol import SessionProtocol
 
 #: Exit code for an interrupted (SIGTERM/SIGINT) run — distinct from the
 #: engine's 0/1 success/error codes so job ledgers can tell them apart.
@@ -61,7 +67,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _install_sigterm_handler(
-    loop: asyncio.AbstractEventLoop, session_box: list[object], interrupted: asyncio.Event
+    loop: asyncio.AbstractEventLoop,
+    session_box: list[SessionProtocol],
+    interrupted: asyncio.Event,
 ) -> None:
     """SIGTERM -> signal ``interrupted``; async_main returns 130 (CL-03).
 
@@ -91,7 +99,7 @@ def _install_sigterm_handler(
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(EXIT_INTERRUPTED))
 
 
-def _default_session_factory(parsed: argparse.Namespace):
+def _default_session_factory(parsed: argparse.Namespace) -> Awaitable[SessionProtocol]:
     """Build the real session via the shared composition root.
 
     Returns an awaitable session; all engine imports stay lazy inside
@@ -119,7 +127,10 @@ def _default_session_factory(parsed: argparse.Namespace):
     return create_session(session_args, config_manager, credential_manager, agent_registry)
 
 
-def run(parsed: argparse.Namespace, session_factory: "Callable[[], Any] | None" = None) -> int:
+def run(
+    parsed: argparse.Namespace,
+    session_factory: Callable[[], SessionProtocol | Awaitable[SessionProtocol]] | None = None,
+) -> int:
     """Build the session, run one prompt, return the exit code.
 
     The engine's ``prompt`` never raises on provider errors (stream A
@@ -136,12 +147,11 @@ def run(parsed: argparse.Namespace, session_factory: "Callable[[], Any] | None" 
     async def async_main() -> int:
         loop = asyncio.get_running_loop()
         interrupted = asyncio.Event()
-        session_box: list[object] = []
+        session_box: list[SessionProtocol] = []
         _install_sigterm_handler(loop, session_box, interrupted)
 
-        session = factory()
-        if asyncio.iscoroutine(session):
-            session = await session
+        source = factory()
+        session: SessionProtocol = await source if inspect.isawaitable(source) else source
         session_box.append(session)
 
         prompt_task = asyncio.ensure_future(

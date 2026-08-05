@@ -41,8 +41,8 @@ logger = logging.getLogger("local_operator.server.routes.speech")
 )
 async def create_speech(
     speech_request: SpeechRequest,
-    radient_client=Depends(get_radient_client),
-):
+    radient_client: RadientClient = Depends(get_radient_client),
+) -> Response:
     """
     Generates speech from text using a specified provider and returns the audio data.
     This endpoint is protected by API key authentication and is subject to billing.
@@ -86,12 +86,12 @@ async def create_speech(
 async def create_agent_speech(
     agent_id: str,
     speech_request: AgentSpeechRequest,
-    radient_client=Depends(get_radient_client),
+    radient_client: RadientClient = Depends(get_radient_client),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     credential_manager: CredentialManager = Depends(get_credential_manager),
     config_manager: ConfigManager = Depends(get_config_manager),
     env_config: EnvConfig = Depends(get_env_config),
-):
+) -> Response:
     """
     Generates speech from an agent's last message.
     """

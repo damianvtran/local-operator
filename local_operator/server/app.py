@@ -5,6 +5,7 @@ Provides REST endpoints for interacting with the Local Operator agent
 through HTTP requests instead of CLI.
 """
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib.metadata import version
 from pathlib import Path
@@ -42,7 +43,7 @@ logger = get_logger("local_operator.server")
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Initialize and clean up application state.
 
     This function is called when the application starts up and shuts down.

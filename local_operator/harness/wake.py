@@ -29,7 +29,7 @@ import inspect
 import logging
 import re
 from datetime import datetime, time, timedelta
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Literal, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -97,7 +97,46 @@ class DueWake(BaseModel):
     final: bool = False
 
 
-WakeRetireReason = str  # "limit" | "until" | "one-shot" | "cancelled"
+#: Why a schedule stopped repeating. Only these three are ever produced:
+#: a non-repeating wake fires once, a repeating one runs out of ``limit``
+#: fires, or its next occurrence would land past ``until_at``. Cancelling a
+#: wake removes it through ``update`` and never retires it.
+WakeRetireReason = Literal["one-shot", "limit", "until"]
+
+
+class WakeBuilt(TypedDict):
+    """A validated schedule, ready to hand to the scheduler."""
+
+    schedule: WakeSchedule
+
+
+class WakeBuildFailed(TypedDict):
+    """Why the request was rejected, phrased for the model to act on."""
+
+    error: str
+
+
+#: :func:`build_wake_schedule` returns a mapping rather than raising because
+#: the failure text is written for the model to read. Modelling it as a union
+#: of two single-key mappings is what makes "exactly one key is present" a
+#: fact the type checker enforces at both ends: branch with ``"error" in
+#: outcome`` and each side sees only its own key.
+WakeBuildResult = WakeBuilt | WakeBuildFailed
+
+
+class WakeAdvanced(TypedDict):
+    """The same schedule moved on to its next occurrence."""
+
+    next: WakeSchedule
+
+
+class WakeRetired(TypedDict):
+    """The schedule fired for the last time; it must not be re-armed."""
+
+    retired: WakeRetireReason
+
+
+WakeAdvanceResult = WakeAdvanced | WakeRetired
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +205,7 @@ def parse_wake_at(text: str, now_ms: int) -> int | None:
     return int(parsed.timestamp() * 1000)
 
 
-def _format_duration(ms: int) -> str:
+def format_duration(ms: int) -> str:
     """Render a duration as the shortest exact unit (``1h``, ``45s``, …)."""
     for unit in ("w", "d", "h", "m", "s"):
         step = _DURATION_UNITS_MS[unit]
@@ -182,7 +221,7 @@ def _format_duration(ms: int) -> str:
 
 def build_wake_schedule(
     request: dict[str, Any], existing: list[WakeSchedule], now_ms: int
-) -> dict[str, Any]:
+) -> WakeBuildResult:
     """Validate a wake-create request. Returns ``{"schedule": WakeSchedule}``
     or ``{"error": str}`` — it returns the error text rather than raising, so
     the tool's failure path is a sentence the model can act on.
@@ -273,7 +312,7 @@ def build_wake_schedule(
     return {"schedule": schedule}
 
 
-def advance_wake_schedule(schedule: WakeSchedule, now_ms: int) -> dict[str, Any]:
+def advance_wake_schedule(schedule: WakeSchedule, now_ms: int) -> WakeAdvanceResult:
     """Advance a schedule after one fire. Returns ``{"next": WakeSchedule}`` or
     ``{"retired": reason}``.
 
@@ -320,7 +359,7 @@ def format_wake_delivery_text(due: DueWake) -> str:
     else:
         bits.append(str(due.occurrence))
     if schedule.every_ms is not None:
-        bits.append(f"every {_format_duration(schedule.every_ms)}")
+        bits.append(f"every {format_duration(schedule.every_ms)}")
     meta = ", ".join(bits)
 
     if due.final:
@@ -463,16 +502,15 @@ class WakeScheduler:
                 fired += 1
                 if "next" in advanced:
                     kept.append(advanced["next"])
-                else:
-                    if self._on_retire is not None:
-                        try:
-                            await self._maybe_await(self._on_retire(schedule, advanced["retired"]))
-                        except Exception:
-                            logger.warning(
-                                "wake on_retire failed for %s",
-                                schedule.id,
-                                exc_info=True,
-                            )
+                elif self._on_retire is not None:
+                    try:
+                        await self._maybe_await(self._on_retire(schedule, advanced["retired"]))
+                    except Exception:
+                        logger.warning(
+                            "wake on_retire failed for %s",
+                            schedule.id,
+                            exc_info=True,
+                        )
 
             if fired:
                 kept.sort(key=lambda s: s.created_at)
