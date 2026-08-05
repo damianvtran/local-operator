@@ -432,3 +432,98 @@ def test_validate_model_ollama_failure(mock_get):
     mock_response.json.return_value = {"models": []}
     mock_get.return_value = mock_response
     assert validate_model("ollama", "test_model", SecretStr("test_key")) is False
+
+
+class TestInfoFromListing:
+    """Listing-backed model metadata (OpenRouter/Radient).
+
+    The harness derives compaction thresholds from ``context_window`` and gates
+    cache_control / snapcompact on the capability flags, so a listing that only
+    yields price leaves compaction silently disabled — these pin the mapping.
+    """
+
+    @staticmethod
+    def _listing(**overrides: object):
+        from local_operator.clients.openrouter import (
+            OpenRouterListModelsResponse,
+            OpenRouterModelData,
+            OpenRouterModelPricing,
+        )
+
+        payload = {
+            "id": "vendor/model",
+            "name": "Model",
+            "description": "d",
+            "pricing": {"prompt": "0.000003", "completion": "0.000015"},
+            "context_length": 1_000_000,
+            "top_provider": {"context_length": 200_000, "max_completion_tokens": 64_000},
+            "architecture": {"input_modalities": ["image", "text"]},
+        }
+        payload.update(overrides)
+        return OpenRouterListModelsResponse(
+            data=[OpenRouterModelData.model_validate(payload)]
+        ), OpenRouterModelPricing
+
+    def test_window_takes_the_routed_provider_not_the_headline(self):
+        from local_operator.model.configure import _info_from_listing
+        from local_operator.model.registry import openrouter_default_model_info
+
+        listing, _ = self._listing()
+        info = _info_from_listing(listing, "vendor/model", openrouter_default_model_info, "or")
+        # 1M is the best any provider offers; 200k is what the routed one serves.
+        assert info.context_window == 200_000
+        assert info.max_tokens == 64_000
+
+    def test_single_window_source_is_used_when_top_provider_absent(self):
+        from local_operator.model.configure import _info_from_listing
+        from local_operator.model.registry import openrouter_default_model_info
+
+        listing, _ = self._listing(top_provider={})
+        info = _info_from_listing(listing, "vendor/model", openrouter_default_model_info, "or")
+        assert info.context_window == 1_000_000
+
+    def test_cache_read_price_implies_prompt_cache_support(self):
+        from local_operator.model.configure import _info_from_listing
+        from local_operator.model.registry import openrouter_default_model_info
+
+        listing, _ = self._listing(
+            pricing={
+                "prompt": "0.00000009",
+                "completion": "0.00000018",
+                "input_cache_read": "0.000000018",
+            }
+        )
+        info = _info_from_listing(listing, "vendor/model", openrouter_default_model_info, "or")
+        assert info.supports_prompt_cache is True
+        assert info.cache_reads_price == pytest.approx(0.018)
+        # Implicit-cache providers quote no write price: fall back to input.
+        assert info.cache_writes_price == pytest.approx(0.09)
+
+    def test_no_cache_price_leaves_cache_unsupported(self):
+        from local_operator.model.configure import _info_from_listing
+        from local_operator.model.registry import openrouter_default_model_info
+
+        listing, _ = self._listing()
+        info = _info_from_listing(listing, "vendor/model", openrouter_default_model_info, "or")
+        assert info.supports_prompt_cache is False
+
+    def test_image_modality_maps_to_supports_images(self):
+        from local_operator.model.configure import _info_from_listing
+        from local_operator.model.registry import openrouter_default_model_info
+
+        listing, _ = self._listing()
+        assert (
+            _info_from_listing(listing, "vendor/model", openrouter_default_model_info, "or")
+        ).supports_images is True
+        text_only, _ = self._listing(architecture={"input_modalities": ["text"]})
+        assert (
+            _info_from_listing(text_only, "vendor/model", openrouter_default_model_info, "or")
+        ).supports_images is False
+
+    def test_missing_model_raises(self):
+        from local_operator.model.configure import _info_from_listing
+        from local_operator.model.registry import openrouter_default_model_info
+
+        listing, _ = self._listing()
+        with pytest.raises(ValueError, match="Model not found"):
+            _info_from_listing(listing, "vendor/other", openrouter_default_model_info, "or")
