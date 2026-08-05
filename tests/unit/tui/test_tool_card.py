@@ -350,7 +350,7 @@ def test_explicit_intent_wins_over_argument_derived_summaries() -> None:
     assert "Recording the decision" in card._build_row(80).plain
 
 
-def test_compact_path_shrinks_against_cwd_then_home(monkeypatch, tmp_path) -> None:
+def test_compact_path_shrinks_against_cwd_then_home(monkeypatch) -> None:
     monkeypatch.setattr(card_mod.os, "getcwd", lambda: "/work/project")
     monkeypatch.setenv("HOME", "/home/dev")
 
@@ -500,19 +500,57 @@ def test_width_accounting_is_correct_once_escapes_are_gone() -> None:
 @pytest.mark.parametrize(
     "raw,expected",
     [
-        ("\x1b[2J", ""),  # erase display
+        # 7-bit CSI
+        ("\x1b[2J", ""),  # erase display — would clear the terminal
         ("\x1b[H", ""),  # cursor home
         ("\x1b[38;5;196mred\x1b[0m", "red"),  # 256-colour SGR
-        ("\x1b]0;window title\x07x", "x"),  # OSC window title
-        ("\x1b]8;;http://x\x1b\\link", "link"),  # OSC 8 hyperlink
+        ("\x1b[?25lhidden", "hidden"),  # private-mode CSI with intermediate
+        # 8-bit C1 forms. Easy to miss because they do not look like escapes in
+        # a decoded str, but \x9b IS a CSI to a terminal honouring C1.
+        ("\x9b31mred\x9b0m", "red"),
+        ("\x9d0;title\x9cafter", "after"),
+        # String controls are removed WITH their payload: device data is not
+        # display text, so leaving "tmux;xyz" behind turns a control into
+        # wrong content.
+        ("\x1b]0;window title\x07x", "x"),
+        ("\x1b]8;;http://x\x1b\\link", "link"),
+        ("\x1bPtmux;xyz\x1b\\after", "after"),
+        ("\x1b_G a=T\x1b\\after", "after"),
+        ("\x1b^private\x1b\\after", "after"),
+        ("\x1bXsomething\x1b\\after", "after"),
+        ("\x1b]0;unterminated", ""),
+        # Truncation boundaries: a fragment must not be left for the terminal
+        # to complete using the real content that follows.
+        ("text\x1b[3", "text"),
+        ("text\x9b38;5", "text"),
+        ("text\x1b", "text"),
         ("\x1bM", ""),  # two-char escape (reverse index)
-        ("a\x00b\x07c", "abc"),  # stray C0 controls and BEL
-        ("keep \x7f me", "keep  me"),  # DEL
-        ("plain text", "plain text"),  # untouched
-        ("emoji 👨‍👩‍👧 and 中文", "emoji 👨‍👩‍👧 and 中文"),  # ZWJ survives
+        # C0 and other C1 controls
+        ("a\x00b\x07c", "abc"),
+        ("keep \x7f me", "keep  me"),
+        ("a\x85b\x9ac", "abc"),
+        # Printable text is preserved EXACTLY — none of it lives in the
+        # control ranges, and over-stripping would corrupt real output.
+        ("plain text", "plain text"),
+        ("emoji 👨‍👩‍👧 and 中文", "emoji 👨‍👩‍👧 and 中文"),
+        ("┌─┐│└┘├", "┌─┐│└┘├"),
+        ("mixed مرحبا שלום rtl", "mixed مرحبا שלום rtl"),
+        ("«»—… ∑∫≈", "«»—… ∑∫≈"),
     ],
 )
 def test_strip_control_sequences_cases(raw: str, expected: str) -> None:
     from local_operator.tui.widgets.tool_card import _strip_control_sequences
 
     assert _strip_control_sequences(raw) == expected
+
+
+def test_no_control_codepoint_ever_survives() -> None:
+    """Property check over the whole control space, so a form nobody thought to
+    enumerate cannot slip through."""
+    from local_operator.tui.widgets.tool_card import _strip_control_sequences
+
+    for code in list(range(0x00, 0x20)) + [0x7F] + list(range(0x80, 0xA0)):
+        if code in (0x09, 0x0A):  # tab/newline are handled before this runs
+            continue
+        out = _strip_control_sequences(f"a{chr(code)}b")
+        assert chr(code) not in out, f"U+{code:04X} survived: {out!r}"
