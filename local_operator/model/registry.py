@@ -146,8 +146,10 @@ RecommendedOpenRouterModelIds = [
     "mistralai/mistral-large",
     "x-ai/grok-3-beta",
     "google/gemini-2.5-pro-preview",
-    "deepseek/deepseek-chat-v3-0324",
-    "deepseek/deepseek-r1-0528",
+    "deepseek/deepseek-v4-flash-0731",
+    "deepseek/deepseek-v4-flash",
+    "deepseek/deepseek-v4-pro",
+    "deepseek/deepseek-chat-v3.1",
 ]
 """List of recommended model IDs from OpenRouter.
 
@@ -754,6 +756,52 @@ google_models: Dict[str, ModelInfo] = {
 }
 
 deepseek_models: Dict[str, ModelInfo] = {
+    # V4 family (2026): 1M context, implicit prompt caching, an order of
+    # magnitude cheaper than the V3 line. `-latest` floats to the newest
+    # snapshot; the dated ids pin a snapshot so a rollout cannot silently
+    # change behaviour under a long-running agent.
+    "deepseek-v4-flash": ModelInfo(
+        id="deepseek-v4-flash",
+        name="DeepSeek V4 Flash",
+        max_tokens=32_768,
+        context_window=1_048_576,
+        supports_images=False,
+        supports_prompt_cache=True,
+        input_price=0.14,
+        output_price=0.28,
+        cache_writes_price=0.14,
+        cache_reads_price=0.014,
+        description="Fast, cheap agentic workhorse with a 1M context window",
+        recommended=True,
+    ),
+    "deepseek-v4-flash-0731": ModelInfo(
+        id="deepseek-v4-flash-0731",
+        name="DeepSeek V4 Flash (2026-07-31)",
+        max_tokens=32_768,
+        context_window=1_048_576,
+        supports_images=False,
+        supports_prompt_cache=True,
+        input_price=0.09,
+        output_price=0.18,
+        cache_writes_price=0.09,
+        cache_reads_price=0.009,
+        description="Pinned July 2026 V4 Flash snapshot",
+        recommended=True,
+    ),
+    "deepseek-v4-pro": ModelInfo(
+        id="deepseek-v4-pro",
+        name="DeepSeek V4 Pro",
+        max_tokens=65_536,
+        context_window=1_048_576,
+        supports_images=False,
+        supports_prompt_cache=True,
+        input_price=0.435,
+        output_price=0.87,
+        cache_writes_price=0.435,
+        cache_reads_price=0.0435,
+        description="Stronger V4 tier for harder reasoning and long refactors",
+        recommended=False,
+    ),
     "deepseek-chat": ModelInfo(
         id="deepseek-chat",
         name="Deepseek Chat",

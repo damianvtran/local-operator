@@ -250,20 +250,83 @@ def validate_model(hosting: str, model: str, api_key: SecretStr | str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _extra(obj: Any, key: str, default: Any = None) -> Any:
+    """Read a field the client schema does not declare.
+
+    The legacy listing models set ``extra="allow"``, so provider fields like
+    ``context_length`` and ``top_provider`` arrive as pydantic extras rather
+    than attributes. Reading them generically keeps this mapper working for
+    every listing-backed provider (OpenRouter, Radient) without teaching the
+    wire schemas about each field.
+    """
+    value = getattr(obj, key, None)
+    if value is None and hasattr(obj, "model_extra"):
+        extra = obj.model_extra or {}
+        value = extra.get(key)
+    return default if value is None else value
+
+
 def _info_from_listing(listing: Any, model_name: str, template: ModelInfo, source: str) -> ModelInfo:
-    """Find ``model_name`` in a ``list_models()`` payload and price it.
+    """Find ``model_name`` in a ``list_models()`` payload and describe it.
 
     ``listing`` is the legacy clients' ``list_models()`` result (object with
     ``.data`` of items carrying ``id``, ``description``, ``pricing``).
+
+    Beyond price this maps the fields the harness depends on at runtime, all of
+    which used to fall through to the "unknown model" template:
+
+    - ``context_window`` — compaction thresholds are derived from it, so an
+      unknown (-1) window silently disables compaction for the whole session.
+      A model routed through several providers advertises the largest window at
+      the top level and the routed one under ``top_provider``; we take the
+      smaller so a prompt sized to the window cannot 400 on the provider that
+      actually serves it.
+    - ``supports_prompt_cache`` — gates cache_control emission; inferred from
+      the presence of a cache-read price.
+    - ``supports_images`` — gates the snapcompact vision strategy.
     """
     for model in listing.data:
-        if model.id == model_name:
-            info = template.model_copy(deep=True)
-            # Providers quote price per token here; normalize to per-million.
-            info.input_price = model.pricing.prompt * 1_000_000
-            info.output_price = model.pricing.completion * 1_000_000
-            info.description = model.description
-            return info
+        if model.id != model_name:
+            continue
+        info = template.model_copy(deep=True)
+        # Providers quote price per token here; normalize to per-million.
+        info.input_price = float(model.pricing.prompt) * 1_000_000
+        info.output_price = float(model.pricing.completion) * 1_000_000
+        info.description = model.description
+
+        top = _extra(model, "top_provider", {}) or {}
+        if not isinstance(top, dict):
+            top = getattr(top, "model_dump", lambda: {})()
+        windows = [
+            int(w)
+            for w in (_extra(model, "context_length"), top.get("context_length"))
+            if w
+        ]
+        if windows:
+            info.context_window = min(windows)
+        max_out = top.get("max_completion_tokens")
+        if max_out:
+            info.max_tokens = int(max_out)
+
+        arch = _extra(model, "architecture", {}) or {}
+        if not isinstance(arch, dict):
+            arch = getattr(arch, "model_dump", lambda: {})()
+        modalities = arch.get("input_modalities") or []
+        if modalities:
+            info.supports_images = "image" in modalities
+
+        pricing_extra = getattr(model.pricing, "model_extra", None) or {}
+        cache_read = pricing_extra.get("input_cache_read")
+        cache_write = pricing_extra.get("input_cache_write")
+        if cache_read is not None:
+            info.supports_prompt_cache = True
+            info.cache_reads_price = float(cache_read) * 1_000_000
+            # Providers with implicit caching quote no write price; the read
+            # price is the only signal that caching exists at all.
+            info.cache_writes_price = (
+                float(cache_write) * 1_000_000 if cache_write is not None else info.input_price
+            )
+        return info
     raise ValueError(f"Model not found from {source} models API: {model_name}")
 
 
