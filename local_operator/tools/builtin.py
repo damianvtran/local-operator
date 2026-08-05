@@ -1530,3 +1530,190 @@ def build_read_variable_tool() -> AgentTool:
         interruptible=False,
         execute=execute_read_variable,
     )
+
+
+# ---------------------------------------------------------------------------
+# browser — detect and drive the CMUX browser (open / goto / screenshot)
+# ---------------------------------------------------------------------------
+
+
+class BrowserParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: str = Field(
+        description="'open' (new surface at a URL), 'goto' (navigate current), "
+        "'screenshot' (capture the current page)."
+    )
+    url: str = Field(default="", description="URL for 'open'/'goto'.")
+    path: str = Field(default="", description="Optional file path for 'screenshot'.")
+
+
+def cmux_browser_available() -> bool:
+    """Whether a CMUX browser can be driven from this session.
+
+    Detection is via the CMUX runtime environment (``CMUX_SOCKET`` /
+    ``CMUX_SURFACE_ID`` set) or a ``cmux`` binary on PATH. Absence is not an
+    error — the tool is simply not advertised (builder returns None), so a
+    host without cmux keeps a lean tool inventory.
+    """
+    if os.environ.get("CMUX_SOCKET") or os.environ.get("CMUX_SURFACE_ID"):
+        return True
+    try:
+        import shutil
+
+        return shutil.which("cmux") is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+class _BrowserSession:
+    """Per-session browser state: the last opened surface id.
+
+    Lives on ToolContext (``context.browser``, extra="allow") so a subsequent
+    ``goto``/``screenshot`` reuses the surface the agent opened, and there is
+    one browser per agent session — never a fresh leaky surface per call.
+    """
+
+    surface_id: str = ""
+
+    def __init__(self) -> None:
+        self.surface_id = ""
+
+
+def _browser_state(context: ToolContext | None) -> _BrowserSession:
+    state = getattr(context, "browser", None) if context else None
+    if state is None:
+        state = _BrowserSession()
+        if context is not None:
+            # Store back so later calls in the same session reuse it.
+            setattr(context, "browser", state)
+    return state
+
+
+async def _run_cmux(argv: list[str], timeout: float = 30.0) -> tuple[int, str]:
+    """Run a cmux subcommand; returns (exit_code, stdout). Never raises."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "cmux",
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        return proc.returncode or 0, stdout.decode("utf-8", "replace")
+    except Exception as exc:  # noqa: BLE001 — surface, never crash
+        return 1, str(exc)
+
+
+def _cmux_new_surface(url: str) -> str:
+    """The open command — focus stays on the agent's own pane."""
+    return ["--json", "new-surface", "--type", "browser", "--url", url, "--focus", "false"]
+
+
+@_guard("browser")
+async def execute_browser(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Drive the CMUX browser. Degrades to a clear error when cmux is absent."""
+    try:
+        params = BrowserParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "browser", exc)
+    action = params.action.lower()
+    if action not in ("open", "goto", "screenshot"):
+        return _error(tool_call_id, "browser", f"unknown action: {action}")
+    if not cmux_browser_available():
+        return _error(
+            tool_call_id, "browser", "CMUX browser not available (no CMUX_SOCKET / cmux binary)"
+        )
+    state = _browser_state(context)
+
+    if action == "open":
+        if not params.url.strip():
+            return _error(tool_call_id, "browser", "'open' requires a URL")
+        code, out = await _run_cmux(_cmux_new_surface(params.url))
+        if code != 0:
+            return _error(tool_call_id, "browser", f"cmux open failed: {out.strip()}")
+        # Parse the surface id from the JSON result.
+        surface_id = _parse_surface_id(out)
+        if surface_id:
+            state.surface_id = surface_id
+            return _text(
+                tool_call_id,
+                "browser",
+                f"Opened browser surface {surface_id} at {params.url}.",
+                details={"surface_id": surface_id, "url": params.url},
+            )
+        return _text(
+            tool_call_id,
+            "browser",
+            f"Opened browser at {params.url}.",
+            details={"url": params.url},
+        )
+
+    if not state.surface_id:
+        return _error(tool_call_id, "browser", "no browser surface open — use 'open' first")
+    surface = state.surface_id
+
+    if action == "goto":
+        if not params.url.strip():
+            return _error(tool_call_id, "browser", "'goto' requires a URL")
+        code, out = await _run_cmux(["browser", "--surface", surface, "goto", params.url])
+        if code != 0:
+            return _error(tool_call_id, "browser", f"cmux goto failed: {out.strip()}")
+        return _text(tool_call_id, "browser", f"Navigated {surface} to {params.url}.")
+
+    # screenshot
+    target = params.path or ""
+    if not target:
+        import tempfile
+
+        target = os.path.join(tempfile.gettempdir(), f"lo-browser-{surface}.png")
+    code, out = await _run_cmux(["browser", "--surface", surface, "screenshot", target])
+    if code != 0:
+        return _error(tool_call_id, "browser", f"cmux screenshot failed: {out.strip()}")
+    return _text(
+        tool_call_id, "browser", f"Screenshot saved to {target}.", details={"path": target}
+    )
+
+
+def _parse_surface_id(out: str) -> str:
+    """Best-effort surface id extraction from ``cmux --json new-surface``.
+
+    Tolerates plain text or JSON; returns "" when the shape is unknown so the
+    call still succeeds with an open, just without a reusable id."""
+    cleaned = out.strip()
+    if cleaned.startswith("{"):
+        import json as _json
+
+        try:
+            data = _json.loads(cleaned)
+            surface = data.get("surface") or data.get("surface_id") or data.get("id")
+            return str(surface) if surface else ""
+        except Exception:  # noqa: BLE001
+            return ""
+    # Fallback: the id is often echoed as the last space-separated token.
+    return cleaned.split()[-1] if cleaned else ""
+
+
+def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
+    """Advertise the browser tool only when a CMUX browser is reachable.
+
+    Mirrors the wake builder: an environment-specific capability that returns
+    None (excluded from the inventory) when the host cannot support it."""
+    if not cmux_browser_available():
+        return None
+    return AgentTool(
+        name="browser",
+        label="Browser",
+        description="Detect and drive the CMUX browser: open/goto/screenshot.",
+        parameters=BrowserParams.model_json_schema(),
+        approval_tier="read",
+        concurrency="shared",
+        interruptible=False,
+        execute=execute_browser,
+    )
