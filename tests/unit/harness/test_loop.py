@@ -536,3 +536,35 @@ def test_validate_tool_arguments():
     assert any("'n'" in e for e in wrong)
     bad_json = validate_tool_arguments(tool, {}, raw_arguments="{broken")
     assert any("JSON" in e for e in bad_json)
+
+
+@pytest.mark.asyncio
+async def test_exec_tier_prompts_exactly_once_per_call():
+    """The loop is the single write/exec gate: one approval prompt per call,
+    fired after tool_execution_start. A second prompt at the tool level was
+    the defect this pins (the user answered twice per action)."""
+    prompts: list[tuple[str, str]] = []
+
+    async def approve(name: str, summary: str) -> bool:
+        prompts.append((name, summary))
+        return True
+
+    executed: list[str] = []
+    tool = echo_tool(executed)
+    tool = AgentTool(
+        name=tool.name,
+        parameters=tool.parameters,
+        execute=tool.execute,
+        approval_tier="exec",
+    )
+    stream = ScriptedStream(
+        [
+            [tool_call_delta(0, id="c1", name="echo", args="{}"), StreamEndEvent(stop_reason="toolUse")],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[tool], tool_context=ToolContext(request_approval=approve))
+    await AgentLoop().run_to_end([Message.user("go")], context, make_config(stream), None)
+    assert executed == ["echo"]
+    assert len(prompts) == 1
+    assert prompts[0][0] == "echo"

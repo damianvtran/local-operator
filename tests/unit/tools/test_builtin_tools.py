@@ -211,18 +211,15 @@ async def test_bash_empty_command_is_error(tools, context) -> None:
 
 
 @pytest.mark.asyncio
-async def test_bash_requires_exec_approval(tmp_path) -> None:
-    # RT-29: bash prompts on the exec tier with the command in the text.
+async def test_bash_executes_without_tool_level_prompt(tmp_path) -> None:
+    # The write/exec approval gate is the LOOP's (it fires after
+    # tool_execution_start and sees the pending call). The tool itself must
+    # NOT prompt a second time: one gate per action, no tier-named prompt.
     context = _context_with_approval(tmp_path, approve=True)
     tools = {t.name: t for t in create_tools(context)}
     result = await _call(tools, "bash", {"command": "echo ok"}, context)
     assert result.is_error is False
-    assert context.recorder.requests == [("exec", "bash: echo ok")]
-
-    deny = _context_with_approval(tmp_path, approve=False)
-    tools = {t.name: t for t in create_tools(deny)}
-    result = await _call(tools, "bash", {"command": "echo ok"}, deny)
-    assert result.is_error is True
+    assert context.recorder.requests == []
 
 
 # ---------------------------------------------------------------------------
@@ -406,41 +403,50 @@ async def test_read_skill_url_without_resolver(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_write_outside_workspace_prompts_with_resolved_path(tmp_path) -> None:
+async def test_write_inside_workspace_never_prompts(tmp_path) -> None:
+    # Write-tier escalation lives in the loop; inside the workspace the tool
+    # must run clean with zero approval callbacks.
+    context = _context_with_approval(tmp_path, approve=True)
+    tools = {t.name: t for t in create_tools(context)}
+    result = await tools["write"].execute(
+        "c", {"path": "ok.txt", "content": "x"}, None, None, context
+    )
+    assert result.is_error is False
+    assert context.recorder.requests == []
+
+
+@pytest.mark.asyncio
+async def test_read_outside_workspace_still_escalates(tmp_path) -> None:
+    # Read-tier OUTSIDE-workspace escalation remains a tool-level gate (the
+    # loop only gates write/exec tiers).
     workspace = tmp_path / "ws"
     outside = tmp_path / "outside"
     workspace.mkdir()
     outside.mkdir()
-
+    (outside / "secret.txt").write_text("x")
     context = _context_with_approval(workspace, approve=True)
     tools = {t.name: t for t in create_tools(context)}
-    result = await tools["write"].execute(
-        "c", {"path": "../outside/evil.txt", "content": "x"}, None, None, context
+    result = await tools["read"].execute(
+        "c", {"path": "../outside/secret.txt"}, None, None, context
     )
     assert result.is_error is False
     tier, description = context.recorder.requests[0]
-    assert tier == "write"
+    assert tier == "read"
     assert description.startswith("[outside workspace] ")
-    # The RESOLVED absolute path is what the user approved.
-    assert str((outside / "evil.txt").resolve()) in description
-    assert ".." not in description
+    assert str((outside / "secret.txt").resolve()) in description
 
-
-@pytest.mark.asyncio
-async def test_write_denial_leaves_fs_untouched(tmp_path) -> None:
-    context = _context_with_approval(tmp_path, approve=False)
-    tools = {t.name: t for t in create_tools(context)}
-    result = await tools["write"].execute(
-        "c", {"path": "nope.txt", "content": "x"}, None, None, context
+    deny = _context_with_approval(workspace, approve=False)
+    tools = {t.name: t for t in create_tools(deny)}
+    result = await tools["read"].execute(
+        "c", {"path": "../outside/secret.txt"}, None, None, deny
     )
     assert result.is_error is True
-    assert not (tmp_path / "nope.txt").exists()
 
 
 @pytest.mark.asyncio
-async def test_edit_denial_leaves_file_untouched(tmp_path) -> None:
+async def test_edit_inside_workspace_never_prompts(tmp_path) -> None:
     (tmp_path / "keep.txt").write_text("alpha\n")
-    context = _context_with_approval(tmp_path, approve=False)
+    context = _context_with_approval(tmp_path, approve=True)
     tools = {t.name: t for t in create_tools(context)}
     result = await tools["edit"].execute(
         "c",
@@ -449,8 +455,9 @@ async def test_edit_denial_leaves_file_untouched(tmp_path) -> None:
         None,
         context,
     )
-    assert result.is_error is True
-    assert (tmp_path / "keep.txt").read_text() == "alpha\n"
+    assert result.is_error is False
+    assert (tmp_path / "keep.txt").read_text() == "beta\n"
+    assert context.recorder.requests == []
 
 
 @pytest.mark.asyncio

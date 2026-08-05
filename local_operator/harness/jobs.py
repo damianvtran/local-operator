@@ -171,6 +171,10 @@ class AsyncJobManager:
         job = self._jobs.get(job_id)
         if runner is None or job is None or job.status != "running" or not job.queued:
             return False
+        # register() checks capacity on admission; this second entry path must
+        # too, or promoting a parked job at a full manager yields 16 running.
+        if self.at_capacity():
+            return False
         job.queued = False
         del self._queued_runners[job_id]
         signal = self._signals[job_id]
@@ -267,6 +271,7 @@ class AsyncJobManager:
         except asyncio.CancelledError:
             job.status = "cancelled"
             self._settle(job)
+            self._tasks.pop(job.id, None)
             self._sweep_due()
             return
         except Exception as exc:
@@ -275,9 +280,14 @@ class AsyncJobManager:
             logger.warning("background job %s failed", job.id, exc_info=True)
         self._settle(job)
         self._tasks.pop(job.id, None)
-        await self._deliver(job)
-        self._sweep_due()
-
+        try:
+            await self._deliver(job)
+        except Exception:
+            # A raising sink must not become an unobserved task exception nor
+            # skip the retention sweep (the task handle was already popped).
+            logger.warning("delivery sink raised for job %s", job.id, exc_info=True)
+        finally:
+            self._sweep_due()
     async def _deliver(self, job: AsyncJob) -> None:
         text = job.result_text if job.status == "completed" else (job.error_text or "")
         if job.owner_id is not None:
@@ -314,6 +324,7 @@ class AsyncJobManager:
         ]:
             del self._jobs[job_id]
             self._signals.pop(job_id, None)
+            self._tasks.pop(job_id, None)
 
     @staticmethod
     async def _maybe_await(value: Any) -> Any:

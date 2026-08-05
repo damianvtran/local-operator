@@ -31,7 +31,7 @@ import re
 from datetime import datetime, time, timedelta
 from typing import Any, Awaitable, Callable
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,11 @@ class WakeSchedule(BaseModel):
     id: str
     message: str  # the self-prompt delivered on fire
     next_due_at: int  # epoch ms
-    every_ms: int | None = None  # absent => one-shot
+    # Constrained at the field level: load() adopts schedules straight from
+    # the transcript, and every_ms == 0 in a hand-edited file used to raise
+    # ZeroDivisionError inside pump(), killing the scheduler with an
+    # unobserved exception. Invalid rows are dropped with a warning in load().
+    every_ms: int | None = Field(default=None, ge=MIN_WAKE_INTERVAL_MS)
     until_at: int | None = None  # hard stop
     limit: int | None = None  # retire after N deliveries
     fired_count: int = 0
@@ -370,9 +374,16 @@ class WakeScheduler:
         self._on_retire = on_retire
         self._schedules: list[WakeSchedule] = []
         self._timer: asyncio.TimerHandle | None = None
-        # The tick task the armed timer spawns; kept so dispose() can cancel
-        # an in-flight pump instead of leaving it dangling.
-        self._tick_task: asyncio.Task[None] | None = None
+        # Tick tasks spawned by the armed timer; kept as a set so dispose()
+        # cancels every in-flight pump. A single slot used to let a re-arm
+        # orphan the previous tick, which then delivered a wake after
+        # disposal.
+        self._tick_tasks: set[asyncio.Task[None]] = set()
+        # pump() and update() both mutate _schedules across await points;
+        # without mutual exclusion an update landing inside a pump is
+        # overwritten by the pump's pre-update snapshot (resurrecting
+        # cancelled wakes, dropping new ones).
+        self._write_lock = asyncio.Lock()
         # Set when ``_arm`` runs without a running loop; the session's async
         # init re-arms by calling ``pump()`` once.
         self.needs_rearm = False
@@ -393,7 +404,15 @@ class WakeScheduler:
         now = self._now()
         adopted: list[WakeSchedule] = []
         for schedule in schedules:
-            copy = schedule.model_copy(deep=True)
+            # Persisted rows are untrusted input: a hand-edited or truncated
+            # transcript can carry values the field constraints reject, and
+            # load() must drop them rather than let a later pump() die.
+            try:
+                validated = WakeSchedule.model_validate(schedule.model_dump())
+            except Exception:
+                logger.warning("dropping invalid wake schedule %r", schedule.id)
+                continue
+            copy = validated.model_copy(deep=True)
             if copy.next_due_at <= now:
                 copy = copy.model_copy(update={"next_due_at": now + LOAD_GRACE_MS})
             adopted.append(copy)
@@ -403,71 +422,90 @@ class WakeScheduler:
 
     async def update(self, schedules: list[WakeSchedule] | tuple[WakeSchedule, ...]) -> None:
         """Caller-driven change: persist the full list then re-arm."""
-        copies = [schedule.model_copy(deep=True) for schedule in schedules]
-        copies.sort(key=lambda s: s.created_at)
-        self._schedules = copies
-        await self._maybe_await(self._persist(list(self._schedules)))
-        self._arm()
+        async with self._write_lock:
+            copies = [schedule.model_copy(deep=True) for schedule in schedules]
+            copies.sort(key=lambda s: s.created_at)
+            self._schedules = copies
+            try:
+                await self._maybe_await(self._persist(list(self._schedules)))
+            except Exception:
+                logger.warning("wake persist failed", exc_info=True)
+            self._arm()
 
     async def pump(self, now_ms: int | None = None) -> int:
         """Fire every due wake (delivering each and advancing it), persist if
         anything changed, and re-arm. Returns the number of wakes fired."""
         if self._disposed:
             return 0
-        now = now_ms if now_ms is not None else self._now()
+        async with self._write_lock:
+            now = now_ms if now_ms is not None else self._now()
 
-        due = [s for s in self._schedules if s.next_due_at <= now]
-        kept = [s for s in self._schedules if s.next_due_at > now]
-        fired = 0
+            due = [s for s in self._schedules if s.next_due_at <= now]
+            kept = [s for s in self._schedules if s.next_due_at > now]
+            fired = 0
 
-        for schedule in due:
-            occurrence = schedule.fired_count + 1
-            if schedule.every_ms is None:
-                planned_total: int | None = 1
-            else:
-                planned_total = schedule.limit
-            advanced = advance_wake_schedule(schedule, now)
-            final = "retired" in advanced
-            due_wake = DueWake(
-                schedule=schedule,
-                occurrence=occurrence,
-                planned_total=planned_total,
-                final=final,
-            )
-            try:
-                await self._maybe_await(self._deliver(due_wake))
-            except Exception:
-                # A delivery that throws still advances the schedule, otherwise
-                # one broken wake becomes a hot loop.
-                logger.warning("wake delivery failed for %s", schedule.id, exc_info=True)
-            fired += 1
-            if "next" in advanced:
-                kept.append(advanced["next"])
-            else:
-                if self._on_retire is not None:
-                    try:
-                        await self._maybe_await(self._on_retire(schedule, advanced["retired"]))
-                    except Exception:
-                        logger.warning("wake on_retire failed for %s", schedule.id, exc_info=True)
+            for schedule in due:
+                occurrence = schedule.fired_count + 1
+                if schedule.every_ms is None:
+                    planned_total: int | None = 1
+                else:
+                    planned_total = schedule.limit
+                advanced = advance_wake_schedule(schedule, now)
+                final = "retired" in advanced
+                due_wake = DueWake(
+                    schedule=schedule,
+                    occurrence=occurrence,
+                    planned_total=planned_total,
+                    final=final,
+                )
+                try:
+                    await self._maybe_await(self._deliver(due_wake))
+                except Exception:
+                    # A delivery that throws still advances the schedule,
+                    # otherwise one broken wake becomes a hot loop.
+                    logger.warning(
+                        "wake delivery failed for %s", schedule.id, exc_info=True
+                    )
+                fired += 1
+                if "next" in advanced:
+                    kept.append(advanced["next"])
+                else:
+                    if self._on_retire is not None:
+                        try:
+                            await self._maybe_await(
+                                self._on_retire(schedule, advanced["retired"])
+                            )
+                        except Exception:
+                            logger.warning(
+                                "wake on_retire failed for %s",
+                                schedule.id,
+                                exc_info=True,
+                            )
 
-        if fired:
-            kept.sort(key=lambda s: s.created_at)
-            self._schedules = kept
-            await self._maybe_await(self._persist(list(self._schedules)))
-
-        self._arm()
-        return fired
+            if fired:
+                kept.sort(key=lambda s: s.created_at)
+                self._schedules = kept
+                try:
+                    await self._maybe_await(self._persist(list(self._schedules)))
+                except Exception:
+                    # The schedules are already advanced in memory; a failed
+                    # persist (disk full, transcript I/O) must not kill the
+                    # scheduler — one OSError used to skip _arm() and leave
+                    # every remaining wake dead for the life of the session.
+                    logger.warning("wake persist failed", exc_info=True)
+            self._arm()
+            return fired
 
     def dispose(self) -> None:
-        """Cancel the armed timer AND any in-flight tick task. asyncio has no
-        ``unref``, so this is the only thing that stops a pending wake from
-        keeping the loop alive."""
+        """Cancel the armed timer AND every in-flight tick task. asyncio has
+        no ``unref``, so this is the only thing that stops a pending wake
+        from keeping the loop alive."""
         self._disposed = True
         self._cancel_timer()
-        tick = self._tick_task
-        if tick is not None and not tick.done():
-            tick.cancel()
-        self._tick_task = None
+        for tick in list(self._tick_tasks):
+            if not tick.done():
+                tick.cancel()
+        self._tick_tasks.clear()
 
     # -- internals ----------------------------------------------------------
 
@@ -514,8 +552,11 @@ class WakeScheduler:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        # Keep the tick task so dispose() can cancel an in-flight pump.
-        self._tick_task = loop.create_task(self._tick())
+        # Track every tick so dispose() cancels all of them; a re-arm used to
+        # overwrite the single slot and orphan the in-flight pump.
+        task = loop.create_task(self._tick())
+        self._tick_tasks.add(task)
+        task.add_done_callback(self._tick_tasks.discard)
 
     async def _tick(self) -> None:
         await self.pump()
