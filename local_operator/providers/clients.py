@@ -413,6 +413,14 @@ class OpenAICompatClient:
                         input_tokens=int(raw.get("prompt_tokens", 0)),
                         output_tokens=int(raw.get("completion_tokens", 0)),
                         cache_read_tokens=int(details.get("cached_tokens", 0) if isinstance(details, Mapping) else 0),
+                        cache_write_tokens=int(
+                            details.get("cache_write_tokens", 0) if isinstance(details, Mapping) else 0
+                        ),
+                        # Prompt tokens ARE the context the provider just read:
+                        # this is the authoritative context size the compaction
+                        # trigger prefers over its own estimate, and what the
+                        # TUI status line reports.
+                        context_tokens=int(raw.get("prompt_tokens", 0)) or None,
                     )
                     yield StreamUsageEvent(usage=usage)
                 choices = chunk.get("choices") or []
@@ -509,6 +517,7 @@ class OpenAICompatClient:
                             cache_read_tokens=int(
                                 details.get("cached_tokens", 0) if isinstance(details, Mapping) else 0
                             ),
+                            context_tokens=int(raw.get("input_tokens", 0)) or None,
                         )
                         yield StreamUsageEvent(usage=usage)
 
@@ -712,6 +721,14 @@ class AnthropicClient:
                     usage.input_tokens = int(raw_usage.get("input_tokens", usage.input_tokens))
                     usage.cache_read_tokens = int(raw_usage.get("cache_read_input_tokens", 0))
                     usage.cache_write_tokens = int(raw_usage.get("cache_creation_input_tokens", 0))
+                    # Anthropic reports input_tokens EXCLUDING cached blocks
+                    # (OpenAI includes them), so the context actually read is
+                    # the sum of the three. The compaction trigger and the TUI
+                    # status line both consume context_tokens, so the provider
+                    # difference has to be normalized here, not downstream.
+                    usage.context_tokens = (
+                        usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+                    ) or None
                 elif event_type == "content_block_start":
                     block = event.get("content_block") or {}
                     if block.get("type") == "tool_use":
@@ -908,6 +925,7 @@ class GoogleClient:
                         input_tokens=int(raw_usage.get("promptTokenCount", 0)),
                         output_tokens=int(raw_usage.get("candidatesTokenCount", 0)),
                         cache_read_tokens=int(raw_usage.get("cachedContentTokenCount", 0)),
+                        context_tokens=int(raw_usage.get("promptTokenCount", 0)) or None,
                     )
 
         if usage is not None:

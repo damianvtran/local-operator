@@ -545,3 +545,65 @@ def test_unknown_provider_raises_value_error() -> None:
 
     with pytest.raises(ValueError, match="Unknown provider"):
         client_for_spec(ModelSpec(provider="not-a-provider", model_id="x"))
+
+
+async def test_openai_compat_context_tokens_is_prompt_total() -> None:
+    """OpenAI-style ``prompt_tokens`` already includes cached blocks, so the
+    context the provider read equals prompt_tokens. The compaction trigger
+    prefers this over its local estimate, so a missing value silently degrades
+    the trigger to estimation only."""
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, content=_openai_sse_with_tool_call(), headers={"content-type": "text/event-stream"}
+        )
+    )
+    client = OpenAICompatClient(
+        "https://api.test.example/v1", http_client=httpx.AsyncClient(transport=transport)
+    )
+    events = await _collect(
+        client.stream(
+            ChatRequest(model=_spec(), system_blocks=["be brief"], messages=[Message.user("hi")]),
+            "sk-test",
+        )
+    )
+    usage = [e.usage for e in events if isinstance(e, StreamUsageEvent)][-1]
+    assert usage.input_tokens == 40
+    assert usage.cache_read_tokens == 12
+    assert usage.context_tokens == 40
+
+
+async def test_anthropic_context_tokens_sums_uncached_and_cached() -> None:
+    """Anthropic reports ``input_tokens`` EXCLUDING cached blocks, so context is
+    input + cache_read + cache_write. Normalizing here keeps the compaction
+    trigger and the TUI status line provider-agnostic."""
+    body = _sse(
+        [
+            {
+                "type": "message_start",
+                "message": {
+                    "usage": {
+                        "input_tokens": 500,
+                        "cache_read_input_tokens": 8_000,
+                        "cache_creation_input_tokens": 1_000,
+                    }
+                },
+            },
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}},
+            {"type": "content_block_delta", "index": 0, "delta": {"text": "ok"}},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+        ]
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+    )
+    client = AnthropicClient(http_client=httpx.AsyncClient(transport=transport))
+    events = await _collect(
+        client.stream(
+            ChatRequest(model=_spec(provider="anthropic"), messages=[Message.user("hi")]), "sk-ant"
+        )
+    )
+    end = [e for e in events if isinstance(e, StreamEndEvent)][-1]
+    assert end.usage is not None
+    assert end.usage.input_tokens == 500
+    assert end.usage.cache_read_tokens == 8_000
+    assert end.usage.context_tokens == 9_500
