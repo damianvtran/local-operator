@@ -1030,9 +1030,9 @@ async def _run_with_scheduler(run_fn, *run_args) -> int:
     scheduler_service = None
     try:
         from local_operator.jobs import JobManager  # lazy: server-shared module
-        from local_operator.operator import OperatorType
         from local_operator.scheduler_service import SchedulerService
         from local_operator.server.utils.websocket_manager import WebSocketManager
+        from local_operator.types import OperatorType
 
         config_dir = Path.home() / ".local-operator"
         config_manager = ConfigManager(config_dir)

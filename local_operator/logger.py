@@ -56,8 +56,8 @@ def _configure_logging(level: int) -> None:
     for handler in root_logger.handlers:
         handler.setFormatter(formatter)
 
-    # Set log level for requests, urllib3, langchain, and langchain.callbacks
-    for lib_logger in ("requests", "urllib3", "langchain", "langchain.callbacks"):
+    # Quieten noisy HTTP client libraries used by the provider wire clients.
+    for lib_logger in ("requests", "urllib3", "httpx", "httpcore"):
         logging.getLogger(lib_logger).setLevel(level)
 
 

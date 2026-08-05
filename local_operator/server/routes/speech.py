@@ -10,7 +10,6 @@ from local_operator.clients.radient import RadientClient
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig, get_env_config
-from local_operator.executor import LocalCodeExecutor
 from local_operator.model.configure import configure_model
 from local_operator.server.dependencies import (
     get_agent_registry,
@@ -19,6 +18,7 @@ from local_operator.server.dependencies import (
     get_radient_client,
 )
 from local_operator.server.models.schemas import AgentSpeechRequest, SpeechRequest
+from local_operator.server.utils.operator import ServerExecutor
 from local_operator.server.utils.speech_utils import determine_voice_and_instructions
 
 router = APIRouter()
@@ -137,7 +137,13 @@ async def create_agent_speech(
             model_info_client=model_info_client,
             env_config=env_config,
         )
-        executor = LocalCodeExecutor(model_configuration=model_config)
+        executor = ServerExecutor(
+            model_configuration=model_config,
+            credential_manager=credential_manager,
+            config_manager=config_manager,
+            agent_registry=agent_registry,
+            agent=agent,
+        )
 
         voice, instructions = await determine_voice_and_instructions(agent, executor)
 

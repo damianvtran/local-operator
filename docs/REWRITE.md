@@ -50,7 +50,7 @@ oh-my-pi (omp) to Python:
 | `local_operator/tui/` | D | Textual app, brand theme, widgets |
 | `local_operator/mcp/` | E | MCP manager, config discovery, tool bridge |
 | `local_operator/exec_mode.py`, `local_operator/cli.py` | E | Headless exec, CLI surface (backward compatible) |
-| `local_operator/operator.py` | integration | Becomes a thin facade: server API shape over `session.Session` |
+| `local_operator/server/utils/operator.py` | integration | Session facade: server API shape over `session.Session` (the legacy `local_operator/operator.py` is DELETED) |
 | `local_operator/bootstrap.py` | integration | Composition root rewired to the new engine |
 
 Streams MUST NOT edit files owned by another stream. Shared contract changes

@@ -6,10 +6,9 @@ criteria, the lazy-import discipline, and ``main()`` dispatch for the new
 subcommands. Engine-dependent flows are NOT exercised here — they live in
 ``test_exec_mode.py`` with fake sessions.
 
-The rewrite venv has no langchain, so these tests never import
-``local_operator.operator`` / ``executor`` (the legacy test_cli.py does and
-cannot run in this venv; its expectations for the removed operator flow are
-obsolete by the rewrite contract).
+The legacy engine modules these tests were once careful to avoid importing
+no longer exist: the classify/plan/act operator and its executor were deleted
+with the harness rewrite, and the CLI drives ``session_factory`` directly.
 """
 
 from __future__ import annotations

@@ -31,9 +31,8 @@ Deliberate removals from the legacy module (disposition notes):
   targeting it (``tests/unit/test_scheduler_service.py``) was removed with
   the old engine.
 - **``ScheduleInstructionsPrompt``** is INLINED as ``SCHEDULE_INSTRUCTIONS``
-  (verbatim): ``local_operator.prompts`` imports the legacy tool chain
-  (``tools/general`` -> ``playwright``), which is not in the rewrite's
-  runtime module graph.
+  (verbatim): its home, ``local_operator.prompts``, was deleted with the
+  legacy engine.
 - ``operator_type`` / ``verbosity_level`` / ``env_config`` are accepted for
   interface compatibility with the legacy constructor (``server/app.py`` and
   ``cli.py`` pass them) but are informational only: the rewritten engine has
@@ -75,10 +74,9 @@ from local_operator.console import VerbosityLevel
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.jobs import JobContextRecord, JobManager, JobStatus
-from local_operator.types import ConversationRole, Schedule, ScheduleUnit
+from local_operator.types import ConversationRole, OperatorType, Schedule, ScheduleUnit
 
 if TYPE_CHECKING:
-    from local_operator.operator import OperatorType  # legacy enum, annotation only
     from local_operator.server.utils.websocket_manager import WebSocketManager
 
 logger = logging.getLogger(__name__)
