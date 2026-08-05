@@ -222,10 +222,12 @@ def build_system_blocks(
     Block 0 is rendered with EMPTY data: ``system.md`` carries no per-turn
     ``{{#if}}`` sections, so it is a byte-stable instruction block. Block 1
     is the tool inventory alone. The skills listing rides verbatim in its OWN
-    block, and only when skills matched this turn — an empty skills block is
-    omitted rather than emitted as a dead third block, and its absence never
-    moves the env block, which is always last. The env block carries the
-    calendar date — never a timestamp — plus volatile environment facts.
+    block — ALWAYS, with a constant placeholder when nothing matched, so the
+    block list is fixed-arity: the wire clients derive the cache-breakpoint
+    count from the block count, and an omitted skills block would move the
+    inventory block between cached and re-written on every selection toggle.
+    The env block carries the calendar date — never a timestamp — plus
+    volatile environment facts, and is always last.
     """
     instructions = render_template("system.md", {})
     inventory = f"## Available tools\n\n{_render_tool_inventory(tools)}"
@@ -233,8 +235,4 @@ def build_system_blocks(
     if env_details:
         env_block = f"{env_block}\n\n{env_details}"
 
-    blocks = [instructions, inventory]
-    if skills_block:
-        blocks.append(skills_block)
-    blocks.append(env_block)
-    return blocks
+    return [instructions, inventory, skills_block or "<skills/>", env_block]

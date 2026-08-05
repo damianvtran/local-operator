@@ -294,14 +294,17 @@ class OpenAICompatClient:
         return headers
 
     def _build_body(self, request: ChatRequest) -> dict[str, Any]:
+        messages = [
+            *self._system_messages(request),
+            *[_message_to_openai(m) for m in request.messages],
+        ]
+        if request.model.supports_prompt_cache:
+            self._message_cache_markers(messages)
         body: dict[str, Any] = {
             "model": request.model.model_id,
             "stream": True,
             "stream_options": {"include_usage": True},
-            "messages": [
-                *self._system_messages(request),
-                *[_message_to_openai(m) for m in request.messages],
-            ],
+            "messages": messages,
         }
         if request.tools:
             body["tools"] = _tools_to_openai(request.tools)
@@ -344,6 +347,37 @@ class OpenAICompatClient:
             else:
                 out.append({"role": "system", "content": block})
         return out
+
+    def _message_cache_markers(self, messages: list[dict[str, Any]]) -> None:
+        """Mark the final message (and the previous user turn) for caching.
+
+        Same economics as the Anthropic client: system-only markers stop the
+        warm prefix before the conversation. OpenAI-compatible pools that
+        honor ``cache_control`` on content parts (OpenRouter BYOK) then keep
+        the previous request's prefix warm; providers that ignore the field
+        are unaffected. Only applied when the model reports prompt caching.
+        """
+        targets: list[dict[str, Any]] = []
+        if messages:
+            last = messages[-1]
+            content = last.get("content")
+            if isinstance(content, str):
+                last["content"] = [{"type": "text", "text": content}]
+                content = last["content"]
+            if isinstance(content, list) and content:
+                targets.append(content[-1])
+        user_indices = [i for i, m in enumerate(messages) if m.get("role") == "user"]
+        if len(user_indices) >= 2:
+            prev = messages[user_indices[-2]]
+            content = prev.get("content")
+            if isinstance(content, str):
+                prev["content"] = [{"type": "text", "text": content}]
+                content = prev["content"]
+            if isinstance(content, list) and content and content[-1] not in targets:
+                targets.append(content[-1])
+        for block in targets:
+            if isinstance(block, dict):
+                block["cache_control"] = {"type": "ephemeral"}
 
     def _responses_mode(self, oauth_access: "OAuthAccess | None") -> bool:
         """ChatGPT OAuth ⇒ Responses endpoint; plain API keys stay on completions."""
@@ -630,6 +664,49 @@ class AnthropicClient:
             return [{"type": "text", "text": EMPTY_TOOL_RESULT_TEXT}]
         return blocks
 
+    def _message_cache_breakpoints(
+        self, messages: list[dict[str, Any]], body: dict[str, Any]
+    ) -> None:
+        """Place cache_control on the conversation, not just the system head.
+
+        Anthropic caches the prefix ending at each marker; system-only
+        markers stop the cached prefix before the first message, so the
+        growing conversation (every tool result, every assistant turn) is
+        re-processed at full price on every request. Mark the last content
+        block of the final message and of the second-to-last user turn so
+        the previous prefix stays warm across turns.
+
+        Budget: MAX_CACHE_BREAKPOINTS total. System markers are counted
+        first; when the sum would exceed the cap the LOWEST-value system
+        breakpoint (the last stable block) is dropped in favour of the
+        message markers, which cover far more tokens.
+        """
+        system = body.get("system") or []
+        system_markers = [i for i, entry in enumerate(system) if "cache_control" in entry]
+        message_targets: list[dict[str, Any]] = []
+        if messages:
+            last = messages[-1]
+            if isinstance(last.get("content"), list) and last["content"]:
+                message_targets.append(last["content"][-1])
+        # Second-to-last USER turn keeps the previous request's prefix warm.
+        user_indices = [i for i, m in enumerate(messages) if m.get("role") == "user"]
+        if len(user_indices) >= 2:
+            prev_user = messages[user_indices[-2]]
+            if isinstance(prev_user.get("content"), list) and prev_user["content"]:
+                block = prev_user["content"][-1]
+                if block not in message_targets:
+                    message_targets.append(block)
+        if not message_targets:
+            return
+        budget = self.MAX_CACHE_BREAKPOINTS - len(message_targets)
+        # Drop the lowest-value system breakpoints (the last stable blocks)
+        # until system + message markers fit the cap.
+        for index in system_markers[budget:]:
+            system[index].pop("cache_control", None)
+        for block in message_targets:
+            if isinstance(block, dict):
+                block["cache_control"] = {"type": "ephemeral"}
+
     def _build_body(self, request: ChatRequest) -> dict[str, Any]:
         messages: list[dict[str, Any]] = []
         for message in request.messages:
@@ -672,6 +749,14 @@ class AnthropicClient:
         }
         if request.system_blocks:
             body["system"] = self._system_blocks(request.system_blocks)
+        # System-only breakpoints stop the cached prefix before the first
+        # message: the entire growing conversation would be re-processed at
+        # full price on every request. Mark the last content block of the
+        # final message and the second-to-last user turn so the previous
+        # prefix stays warm across turns, within MAX_CACHE_BREAKPOINTS by
+        # dropping the lowest-value system breakpoint.
+        self._message_cache_breakpoints(messages, body)
+
         if request.tools:
             body["tools"] = [
                 {

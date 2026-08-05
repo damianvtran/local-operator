@@ -290,9 +290,20 @@ async def _setup_skills(
             return value or None
 
         backend = default_backend_from_env(get_credential)
-        hooks.index = SkillIndex(skills, backend, cache_dir=config_dir / "cache")
-        await hooks.index.build()
-        warnings_out.extend(hooks.index.warnings)
+        try:
+            hooks.index = SkillIndex(skills, backend, cache_dir=config_dir / "cache")
+            await hooks.index.build()
+            warnings_out.extend(hooks.index.warnings)
+        except Exception as exc:  # noqa: BLE001 — degradation is the contract
+            # An unreachable or 500-ing embeddings endpoint degrades SEMANTIC
+            # SELECTION only. by_name — the map behind every skill:// read —
+            # has no embedding dependency and must stay populated, or a
+            # backend outage would turn every skill read into "Unknown
+            # skill" for the whole session.
+            warnings_out.append(
+                f"Skill selection unavailable, continuing with static listing: {exc}"
+            )
+            hooks.index = None
     except Exception as exc:  # noqa: BLE001 — degradation is the contract
         warnings_out.append(f"Skills unavailable, continuing without them: {exc}")
         hooks.index = None

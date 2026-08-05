@@ -607,3 +607,47 @@ async def test_anthropic_context_tokens_sums_uncached_and_cached() -> None:
     assert end.usage.input_tokens == 500
     assert end.usage.cache_read_tokens == 8_000
     assert end.usage.context_tokens == 9_500
+
+
+def test_anthropic_message_breakpoints_cover_the_conversation():
+    """System-only cache_control stops the warm prefix before the first
+    message; the conversation must carry markers too (the §A >=90% target is
+    unreachable without them)."""
+    from local_operator.providers.clients import AnthropicClient
+
+    request = ChatRequest(
+        model=_spec(provider="anthropic"),
+        system_blocks=["instructions", "inventory", "skills", "env"],
+        messages=[
+            Message.user("first"),
+            Message.assistant("mid"),
+            Message.user("second"),
+        ],
+    )
+    body = AnthropicClient()._build_body(request)
+    system_markers = [i for i, e in enumerate(body["system"]) if "cache_control" in e]
+    messages = body["messages"]
+    last_block = messages[-1]["content"][-1]
+    assert "cache_control" in last_block
+    prev_user_block = messages[0]["content"][-1]
+    assert "cache_control" in prev_user_block
+    total = len(system_markers) + 2
+    assert total <= AnthropicClient.MAX_CACHE_BREAKPOINTS
+
+
+def test_openai_compat_markers_gate_on_cache_support():
+    from local_operator.providers.clients import OpenAICompatClient
+
+    spec = _spec()
+    spec.supports_prompt_cache = True
+    cached = OpenAICompatClient("https://x")._build_body(
+        ChatRequest(model=spec, messages=[Message.user("a"), Message.user("b")])
+    )
+    assert cached["messages"][-1]["content"][-1].get("cache_control") == {"type": "ephemeral"}
+
+    spec_nocache = _spec()
+    spec_nocache.supports_prompt_cache = False
+    plain = OpenAICompatClient("https://x")._build_body(
+        ChatRequest(model=spec_nocache, messages=[Message.user("a"), Message.user("b")])
+    )
+    assert "cache_control" not in str(plain["messages"])

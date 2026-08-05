@@ -86,10 +86,15 @@ Port omp `packages/agent` semantics:
   Synthetic tool results for dangling/aborted tool calls (pairing must stay
   legal). Guards: max paused continuations 8, tool-error retry is the model's
   job (return `is_error` results, don't throw).
-- `context.py`: `AppendOnlyContextManager` — StablePrefix (system prompt +
-  tools fingerprint), append-only log, `sync_messages` with the three cases
-  append / compaction-clear / longest-stable-prefix rewrite. Digest covers
-  role, content, tool_calls, tool_call_id, name, is_error.
+- Prefix stability (the §A cache contract) is provided by STRUCTURE, not a
+  manager class: `build_system_blocks` emits a FIXED-ARITY block list
+  (instructions, tool inventory, skills-or-placeholder, env) so the wire
+  clients' breakpoint derivation never shifts mid-conversation; the session
+  appends to `context.messages` and never rewrites the head, and compaction
+  replaces the head with a single marker whose rendered form is byte-stable.
+  An earlier `AppendOnlyContextManager`/`StablePrefix` prototype was deleted
+  (2026-08-05) because nothing constructed it — the doc must not claim a
+  mechanism that is not in the request path.
 - `wake.py`: near-verbatim port of omp wake/schedule.ts — `WakeSchedule`
   dataclass, `parse_wake_duration` (bare numbers REJECTED), `parse_wake_at`
   (+duration / HH:MM / ISO), `build_wake_schedule` returning errors as

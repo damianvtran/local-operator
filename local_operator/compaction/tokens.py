@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import OrderedDict
 from typing import Callable, Sequence
 
 from local_operator.harness.types import ImageContent, Message, TextContent
@@ -109,10 +110,14 @@ def truncate_to_tokens(text: str, max_tokens: int) -> str:
 # Estimate cache
 # ---------------------------------------------------------------------------
 
-#: Memoized estimates keyed by ``message.id``. See the module docstring for
-#: the settle rule: entries are only valid until the message is mutated in
-#: place, and every mutator must invalidate.
-_ESTIMATE_CACHE: dict[str, int] = {}
+#: Memoized estimates keyed by ``message.id``, LRU-bounded. The cache used to
+#: be an unbounded dict that no session ever cleared — the server facade
+#: builds and disposes a session per request, and converters mint fresh
+#: message ids per call, so every message ever estimated leaked an entry for
+#: the life of the process. The bound keeps the memoization useful for a
+#: turn's working set without unbounded growth.
+_ESTIMATE_CACHE: OrderedDict[str, int] = OrderedDict()
+_ESTIMATE_CACHE_MAX = 4096
 
 #: Cross-package subscribers notified on every invalidation. Insertion-ordered
 #: dict keyed by ``id(callable)`` so registration is idempotent per callable
@@ -134,10 +139,13 @@ def estimate_tokens(message: Message) -> int:
         return _compute_tokens(message)
     cached = _ESTIMATE_CACHE.get(message.id)
     if cached is not None:
+        _ESTIMATE_CACHE.move_to_end(message.id)
         return cached
 
     tokens = _compute_tokens(message)
     _ESTIMATE_CACHE[message.id] = tokens
+    while len(_ESTIMATE_CACHE) > _ESTIMATE_CACHE_MAX:
+        _ESTIMATE_CACHE.popitem(last=False)
     return tokens
 
 

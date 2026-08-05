@@ -237,7 +237,12 @@ class ApiEmbedder:
             raise EmbeddingError(
                 f"Embedding API returned width {width}, declared dim is {self.dim}"
             )
-        return vectors
+        # The index compares inner products against a COSINE threshold, so the
+        # vectors must be unit-length. Providers differ: Ollama and many
+        # OpenRouter-proxied models return norms > 1 (every skill clears the
+        # bar, blowing the token budget), OpenAI's shortened embeddings
+        # < 1 (nothing ever matches). Normalize here, once.
+        return [_normalize(vector) for vector in vectors]
 
     async def aclose(self) -> None:
         """Close the client only when we created it (injected clients are

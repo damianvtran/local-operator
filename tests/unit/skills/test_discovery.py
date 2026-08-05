@@ -189,16 +189,23 @@ class TestDiscoverSkills:
         assert skill.source == str(root)
         assert skill.hide is False
 
-    def test_enabled_false_string_not_dropped(self, tmp_path: Path) -> None:
-        # Only boolean false drops; a weird string value is kept (yaml parses
-        # it as a truthy non-False value), matching omp's `enabled === false`.
+    def test_enabled_falsy_spellings_drop_the_skill(self, tmp_path: Path) -> None:
+        # Authors write enabled: 0 or enabled: "false" expecting a disabled
+        # skill; the old identity comparison against the False singleton kept
+        # them enabled. Every falsy spelling now drops.
         root = tmp_path / "skills"
-        (root / "odd").mkdir(parents=True)
-        (root / "odd" / "SKILL.md").write_text(
-            "---\ndescription: odd\nenabled: 'false'\n---\n", encoding="utf-8"
+        for name, value in (("zero", "0"), ("quoted", "'false'"), ("no", "no")):
+            (root / name).mkdir(parents=True)
+            (root / name / "SKILL.md").write_text(
+                f"---\ndescription: {name}\nenabled: {value}\n---\n",
+                encoding="utf-8",
+            )
+        (root / "live").mkdir(parents=True)
+        (root / "live" / "SKILL.md").write_text(
+            "---\ndescription: live\nenabled: true\n---\n", encoding="utf-8"
         )
         skills, _ = discover_skills([root])
-        assert [s.name for s in skills] == ["odd"]
+        assert [s.name for s in skills] == ["live"]
 
     def test_stable_across_repeated_scans(self, tmp_path: Path) -> None:
         root = tmp_path / "skills"

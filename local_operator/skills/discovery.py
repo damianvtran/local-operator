@@ -93,7 +93,14 @@ def _skill_from_file(
         return None
     meta = parse_frontmatter(text)
 
-    if meta.get("enabled") is False:
+    # Authors write enabled: 0 or enabled: "false" expecting a disabled
+    # skill; identity-comparing against the False singleton kept those
+    # enabled. Any explicitly-present falsy value (and the string spellings)
+    # disables.
+    enabled = meta.get("enabled")
+    if enabled is not None and (
+        not enabled or str(enabled).strip().lower() in ("false", "no", "off")
+    ):
         return None
 
     description = meta.get("description")

@@ -223,14 +223,19 @@ class SkillIndex:
                 f"{len(self.skills)} skills"
             )
         matrix = np.asarray(vectors, dtype=np.float32)
+        synthetic = False
         if matrix.ndim != 2 or matrix.shape[1] == 0:
             # Backend returned junk (e.g. empty strings); keep a zero matrix
             # so search degrades to "nothing matches" rather than crashing.
             matrix = np.zeros((len(self.skills), backend.dim), dtype=np.float32)
+            synthetic = True
         self._matrix = matrix
         self._matrix_backend = backend
         self._faiss_index = None
-        if own_backend:
+        # A synthetic placeholder must NOT be cached under the real content
+        # hash: persisted, it reloads forever and silently degrades semantic
+        # selection until the file is deleted by hand.
+        if own_backend and not synthetic:
             self._persist_cache(content_hash, matrix)
 
     def _try_load_cache(self, content_hash: str) -> bool:
@@ -367,7 +372,9 @@ class SkillIndex:
                 return picked
 
         self._degraded = True
-        self._warnings.append("Skill selection degraded to static listing")
+        if not getattr(self, "_degraded_warned", False):
+            self._degraded_warned = True
+            self._warnings.append("Skill selection degraded to static listing")
         return [skill for skill in self.skills if not skill.hide]
 
     async def _select_with_backend(

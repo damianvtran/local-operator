@@ -104,7 +104,9 @@ def make_skill_resolver(skills: Mapping[str, Skill]) -> Callable[[str], str | No
             return None
         try:
             return resolve_skill_url(url, skills)
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
+            # OSError: a SKILL.md deleted or chmod-000'd between discovery and
+            # the read. The adapter's contract is "never raises".
             return str(exc)
 
     return resolver
