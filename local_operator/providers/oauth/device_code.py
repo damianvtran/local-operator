@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Awaitable, Callable, Generic, Literal, TypeVar
+from typing import Awaitable, Callable, Generic, Literal, TypeVar, cast
 
 from local_operator.harness.types import AbortSignal
 from local_operator.providers.oauth.callback_server import (
     LoginCancelledError,
     LoginError,
     LoginTimeoutError,
+    maybe_await,
 )
 
 T = TypeVar("T")
@@ -115,12 +116,12 @@ async def poll_device_code_flow(
 
         result = await poll_fn()
         if result.status == "complete":
-            return result.value  # type: ignore[return-value]
+            # ``complete()`` is the only constructor that fills ``value`` and it
+            # demands a T, so the optional field is populated on this branch.
+            return cast(T, result.value)
         if result.status == "failed":
             raise LoginError(result.message or "Device authorization failed")
         if result.status == "slow_down":
             interval += SLOW_DOWN_INCREMENT_SECONDS
         if on_progress is not None:
-            note = on_progress(f"Waiting for authorization ({int(interval)}s poll)…")
-            if asyncio.iscoroutine(note):
-                await note
+            await maybe_await(on_progress(f"Waiting for authorization ({int(interval)}s poll)…"))

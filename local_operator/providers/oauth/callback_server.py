@@ -19,11 +19,12 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import inspect
 import secrets
 import urllib.parse
 import webbrowser
 from abc import ABC, abstractmethod
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, TypeVar
 
 from local_operator.harness.types import AbortSignal
 
@@ -73,8 +74,17 @@ class LoginCallbacks:
     on_manual_code_input: Callable[[], Awaitable[str | None] | str | None] | None = None
 
 
-async def _maybe_await(value: Any) -> Any:
-    if asyncio.iscoroutine(value):
+_T = TypeVar("_T")
+
+
+async def maybe_await(value: Awaitable[_T] | _T) -> _T:
+    """Await ``value`` when a host callback handed back an awaitable.
+
+    Every hook a host supplies (see :class:`LoginCallbacks`) may be written
+    sync or async, so results funnel through here instead of an inline
+    ``__await__`` probe that no type checker can narrow.
+    """
+    if inspect.isawaitable(value):
         return await value
     return value
 
@@ -132,9 +142,10 @@ class OAuthCallbackFlow(ABC):
         """Build the provider authorization URL (PKCE params already stored)."""
 
     @abstractmethod
-    async def exchange_token(self, code: str, state: str, redirect_uri: str) -> Any:
-        """Exchange ``code`` for provider credentials (return value is flow-specific,
-        usually an ``OAuthCredentials`` dict)."""
+    async def exchange_token(self, code: str, state: str, redirect_uri: str) -> dict[str, Any]:
+        """Exchange ``code`` for the provider credentials mapping (the shape is
+        flow-specific, but always the ``OAuthCredentials`` dict the auth store
+        persists)."""
 
     # -- server ------------------------------------------------------------
 
@@ -301,7 +312,7 @@ class OAuthCallbackFlow(ABC):
 
     # -- driver ------------------------------------------------------------
 
-    async def run(self) -> Any:
+    async def run(self) -> dict[str, Any]:
         """Run the full flow and return the exchanged credentials.
 
         Raises :class:`LoginCancelledError`, :class:`LoginTimeoutError`,
@@ -322,7 +333,7 @@ class OAuthCallbackFlow(ABC):
             launch_url = self._launch_url()
             if self.callbacks.on_auth_url is not None:
                 instructions = f"Or open: {launch_url}" if launch_url else None
-                await _maybe_await(self.callbacks.on_auth_url(auth_url, instructions=instructions))
+                await maybe_await(self.callbacks.on_auth_url(auth_url, instructions=instructions))
             if not self.options.manual_input_only:
                 try:
                     self._open_browser(auth_url)
@@ -342,10 +353,14 @@ class OAuthCallbackFlow(ABC):
         async def _manual() -> tuple[str, str]:
             # Only paste-code providers may prompt; otherwise this races the
             # HTTP callback and leaves a dirty terminal (see module docstring).
-            if self.callbacks.on_manual_code_input is None:
+            # The loops park forever: this task exists only to lose the race in
+            # asyncio.wait, and re-parking is the correct answer if a future
+            # ever did resolve.
+            prompt = self.callbacks.on_manual_code_input
+            while prompt is None:
                 await asyncio.Future()  # park forever
-            pasted = await _maybe_await(self.callbacks.on_manual_code_input())
-            if pasted is None:
+            pasted = await maybe_await(prompt())
+            while pasted is None:
                 await asyncio.Future()  # declined; keep waiting for the browser
             pasted = pasted.strip()
             # Providers hand users "code#state" in the redirect URL fragment.

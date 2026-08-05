@@ -15,23 +15,55 @@ a ``run_worker`` so the Textual message thread never blocks.
 from __future__ import annotations
 
 import time
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 import httpx
 
+from local_operator.harness.types import ModelSpec
 from local_operator.model.configure import build_model_spec  # noqa: F401  (used by callers)
 from local_operator.providers.oauth.callback_server import LoginCallbacks
 from local_operator.providers.registry import (
+    ProviderDefinition,
     get_provider_definition,
     list_login_providers,
 )
 from local_operator.providers.usage import (
     USAGE_PROVIDERS,
+    UsageReport,
     fetch_usage,
     usage_supported,
 )
 
-LoginCallbackFactory = Callable[[Any], LoginCallbacks]
+if TYPE_CHECKING:  # auth_store stays off this module's runtime import graph
+    from local_operator.credentials import CredentialManager
+    from local_operator.providers.auth_store import OAuthAccess, StoredCredential
+
+LoginCallbackFactory = Callable[[ProviderDefinition], LoginCallbacks]
+
+
+class ControllerAuthStore(Protocol):
+    """The credential-store slice this facade uses.
+
+    Structural so a host can supply its own store; every member is called
+    exactly as declared here (no extra keywords), which keeps the contract
+    small enough for lightweight stand-ins.
+    """
+
+    def list_credentials(
+        self, provider: str | None = None
+    ) -> list["StoredCredential"]: ...  # pragma: no cover
+
+    def upsert_credential(
+        self, provider: str, credential: dict[str, Any]
+    ) -> "StoredCredential": ...  # pragma: no cover
+
+    def delete_credentials_for_provider(
+        self, provider: str, disabled_cause: str = ...
+    ) -> int: ...  # pragma: no cover
+
+    async def get_oauth_access(self, provider: str) -> "OAuthAccess | None": ...  # pragma: no cover
+
+    async def get_api_key(self, provider: str) -> str | None: ...  # pragma: no cover
 
 
 class ProviderController:
@@ -39,8 +71,8 @@ class ProviderController:
 
     def __init__(
         self,
-        auth_store: Any,
-        credential_manager: Any = None,
+        auth_store: ControllerAuthStore,
+        credential_manager: "CredentialManager | None" = None,
         *,
         login_callbacks: LoginCallbackFactory | None = None,
     ) -> None:
@@ -52,14 +84,14 @@ class ProviderController:
         self._login_callbacks = login_callbacks
 
     # -- discovery ---------------------------------------------------------
-    def login_providers(self) -> list[Any]:
+    def login_providers(self) -> list[ProviderDefinition]:
         """Providers offering an interactive login, registry order."""
         return list_login_providers()
 
-    def provider(self, provider_id: str) -> Any | None:
+    def provider(self, provider_id: str) -> ProviderDefinition | None:
         return get_provider_definition(provider_id)
 
-    def credentials(self) -> list[Any]:
+    def credentials(self) -> list["StoredCredential"]:
         """Every active stored credential (StoredCredential rows)."""
         return self.auth_store.list_credentials()
 
@@ -74,13 +106,13 @@ class ProviderController:
         return sorted(USAGE_PROVIDERS)
 
     # -- model -------------------------------------------------------------
-    def resolve_model(self, provider: str, model_id: str) -> Any:
+    def resolve_model(self, provider: str, model_id: str) -> ModelSpec:
         """Build a ModelSpec for a provider/model pair (raises on unknown
         provider/hosting). Used by ``/model <provider>/<id>``."""
         return build_model_spec(provider, model_id)
 
     # -- login / logout ----------------------------------------------------
-    def _default_callbacks(self, definition: Any) -> LoginCallbacks:
+    def _default_callbacks(self, definition: ProviderDefinition) -> LoginCallbacks:
         """Fall back to the CLI's terminal print/input callbacks."""
         from local_operator.providers.auth_cli import _callbacks_interactive
 
@@ -102,7 +134,7 @@ class ProviderController:
 
         factory = self._login_callbacks or self._default_callbacks
         callbacks = factory(definition)
-        result = await definition.login(callbacks)  # type: ignore[misc]
+        result = await definition.login(callbacks)
 
         storage = definition.store_credentials_as or provider_id
         if isinstance(result, str):
@@ -138,7 +170,7 @@ class ProviderController:
         return f"Removed {removed} credential(s) for '{provider_id}'."
 
     # -- usage -------------------------------------------------------------
-    async def fetch_usage(self, provider_ids: list[str] | None = None) -> list[Any]:
+    async def fetch_usage(self, provider_ids: list[str] | None = None) -> list[UsageReport]:
         """Fetch normalized usage reports for the requested (or all
         report-able) providers. Never raises: a provider with no reachable
         credential or endpoint is simply absent from the result, and one
@@ -149,7 +181,7 @@ class ProviderController:
         # De-duplicate aliases that share a storage id (openai vs
         # openai-device; xai vs xai-oauth) so one request/one report per row.
         targets = self._dedupe_targets(targets)
-        reports: list[Any] = []
+        reports: list[UsageReport] = []
         async with httpx.AsyncClient() as client:
             for provider in targets:
                 try:
@@ -173,18 +205,18 @@ class ProviderController:
             ordered.append(provider)
         return ordered
 
-    async def _fetch_one(self, client: httpx.AsyncClient, provider: str) -> Any | None:
+    async def _fetch_one(self, client: httpx.AsyncClient, provider: str) -> UsageReport | None:
         if not usage_supported(provider):
             return None
         access = await self.auth_store.get_oauth_access(provider)
-        if access is not None and getattr(access, "kind", None) == "oauth":
+        if access is not None and access.kind == "oauth":
             # An OAuth subscription token — the endpoint wants the access
             # token, not a billing API key.
             return await fetch_usage(
                 client,
                 provider,
                 access_token=access.access_token,
-                account_id=getattr(access, "account_id", None),
+                account_id=access.account_id,
             )
         api_key: str | None = None
         # Fall back to the API-key cascade (covers both a stored/pasted key

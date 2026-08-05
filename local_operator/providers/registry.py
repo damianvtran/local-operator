@@ -17,11 +17,14 @@ import importlib
 import os
 from typing import Any, Awaitable, Callable, Literal
 
-from local_operator.providers.oauth.callback_server import LoginCallbacks
+from local_operator.harness.types import AbortSignal
+from local_operator.providers.oauth.callback_server import LoginCallbacks, maybe_await
 
 WireFormat = Literal["openai-compat", "anthropic", "google", "mock"]
 
-LoginFn = Callable[..., Awaitable[Any]]
+# A login yields either the OAuth credentials mapping or, for paste-a-key
+# providers, the bare key string.
+LoginFn = Callable[..., Awaitable[str | dict[str, Any]]]
 RefreshFn = Callable[..., Awaitable[dict[str, Any]]]
 GetApiKeyFn = Callable[[dict[str, Any]], str]
 EnvKeys = str | Callable[[], str | None] | None
@@ -59,10 +62,10 @@ def _lazy_login(module: str, attr: str) -> LoginFn:
     async def login(
         callbacks: LoginCallbacks,
         *,
-        signal: Any = None,
+        signal: AbortSignal | None = None,
         open_browser: Callable[[str], None] | None = None,
         **kwargs: Any,
-    ) -> Any:
+    ) -> dict[str, Any]:
         fn = getattr(importlib.import_module(module), attr)
         if attr in ("login_anthropic", "login_openai"):
             return await fn(callbacks, signal=signal, open_browser=open_browser, **kwargs)
@@ -93,17 +96,13 @@ def create_api_key_login(provider_label: str, auth_url: str, instructions: str =
 
     async def login(callbacks: LoginCallbacks, **_kwargs: Any) -> str:
         if callbacks.on_auth_url is not None:
-            result = callbacks.on_auth_url(auth_url, instructions=instructions or None)
-            if hasattr(result, "__await__"):
-                await result
+            await maybe_await(callbacks.on_auth_url(auth_url, instructions=instructions or None))
         if callbacks.on_manual_code_input is None:
             raise ValueError(f"{provider_label} login requires an interactive code prompt")
-        pasted = callbacks.on_manual_code_input()
-        if hasattr(pasted, "__await__"):
-            pasted = await pasted
+        pasted = await maybe_await(callbacks.on_manual_code_input())
         if pasted is None:
             raise ValueError(f"{provider_label} login cancelled")
-        return str(pasted).strip()
+        return pasted.strip()
 
     return login
 

@@ -18,14 +18,44 @@ and dispatching to the right wire client through
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import AsyncIterator, Callable, Mapping
-from typing import Any, Optional
+from collections.abc import AsyncIterator, Mapping
+from typing import TYPE_CHECKING, Any, Optional
 
 import requests
-from pydantic import SecretStr
+from pydantic import BaseModel, SecretStr
 
 from local_operator.harness.types import AbortSignal, ChatRequest, ModelSpec, StreamEvent
 from local_operator.model.registry import ModelInfo, get_model_info
+
+if TYPE_CHECKING:
+    # Import-time cost only for type checkers: the listing clients pull in the
+    # whole requests/provider surface, and this module is on the CLI startup
+    # path. Nothing here touches them at runtime.
+    from typing import Protocol
+
+    from local_operator.clients.openrouter import OpenRouterListModelsResponse
+    from local_operator.clients.radient import RadientListModelsResponse
+    from local_operator.credentials import CredentialManager
+    from local_operator.env import EnvConfig
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.clients import WireClient
+
+    #: Either provider's ``list_models()`` payload. The two schemas are
+    #: structurally identical (``data`` of items with ``id``/``description``/
+    #: ``pricing``) and both allow extras, so one mapper serves both.
+    ListingResponse = OpenRouterListModelsResponse | RadientListModelsResponse
+
+    class ModelListingClient(Protocol):
+        """A provider client that can enumerate its models.
+
+        Structural on purpose: ``configure_model`` picks the mapper from the
+        hosting name, so pinning the concrete client class here would only
+        force a narrowing cast at the branch that already knows which one it
+        holds.
+        """
+
+        def list_models(self) -> ListingResponse: ...
+
 
 DEFAULT_TEMPERATURE = 0.2
 """Default temperature value for language models."""
@@ -250,33 +280,44 @@ def validate_model(hosting: str, model: str, api_key: SecretStr | str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Model info via OpenRouter/Radient clients (duck-typed; no legacy imports)
+# Model info via the OpenRouter/Radient listing clients
 # ---------------------------------------------------------------------------
 
 
-def _extra(obj: Any, key: str, default: Any = None) -> Any:
-    """Read a field the client schema does not declare.
+def _extra(model: BaseModel, key: str) -> Any:
+    """Read a provider field the wire schema does not declare.
 
-    The legacy listing models set ``extra="allow"``, so provider fields like
-    ``context_length`` and ``top_provider`` arrive as pydantic extras rather
-    than attributes. Reading them generically keeps this mapper working for
-    every listing-backed provider (OpenRouter, Radient) without teaching the
-    wire schemas about each field.
+    The listing schemas set ``extra="allow"``, so provider fields like
+    ``context_length`` and ``top_provider`` land in ``model_extra`` instead of
+    becoming declared attributes. Values are whatever JSON the provider sent,
+    hence ``Any``.
     """
-    value = getattr(obj, key, None)
-    if value is None and hasattr(obj, "model_extra"):
-        extra = obj.model_extra or {}
-        value = extra.get(key)
-    return default if value is None else value
+    return (model.model_extra or {}).get(key)
+
+
+def _extra_mapping(model: BaseModel, key: str) -> Mapping[str, Any]:
+    """Read an undeclared *nested object* out of the listing extras.
+
+    Extras parsed from a live response are plain JSON dicts; a caller that
+    hands the schema an already-built pydantic object instead is flattened
+    back to a mapping. Anything else (a scalar, a missing key) reads as empty
+    so the lookups at the call site stay uniform.
+    """
+    value = _extra(model, key)
+    if isinstance(value, Mapping):
+        return value
+    if isinstance(value, BaseModel):
+        return value.model_dump()
+    return {}
 
 
 def _info_from_listing(
-    listing: Any, model_name: str, template: ModelInfo, source: str
+    listing: ListingResponse, model_name: str, template: ModelInfo, source: str
 ) -> ModelInfo:
     """Find ``model_name`` in a ``list_models()`` payload and describe it.
 
-    ``listing`` is the legacy clients' ``list_models()`` result (object with
-    ``.data`` of items carrying ``id``, ``description``, ``pricing``).
+    ``listing`` is either provider's ``list_models()`` result: a ``data`` list
+    of items carrying ``id``, ``description`` and ``pricing``.
 
     Beyond price this maps the fields the harness depends on at runtime, all of
     which used to fall through to the "unknown model" template:
@@ -300,9 +341,7 @@ def _info_from_listing(
         info.output_price = float(model.pricing.completion) * 1_000_000
         info.description = model.description
 
-        top = _extra(model, "top_provider", {}) or {}
-        if not isinstance(top, dict):
-            top = getattr(top, "model_dump", lambda: {})()
+        top = _extra_mapping(model, "top_provider")
         windows = [
             int(w) for w in (_extra(model, "context_length"), top.get("context_length")) if w
         ]
@@ -312,14 +351,11 @@ def _info_from_listing(
         if max_out:
             info.max_tokens = int(max_out)
 
-        arch = _extra(model, "architecture", {}) or {}
-        if not isinstance(arch, dict):
-            arch = getattr(arch, "model_dump", lambda: {})()
-        modalities = arch.get("input_modalities") or []
+        modalities = _extra_mapping(model, "architecture").get("input_modalities") or []
         if modalities:
             info.supports_images = "image" in modalities
 
-        pricing_extra = getattr(model.pricing, "model_extra", None) or {}
+        pricing_extra = model.pricing.model_extra or {}
         cache_read = pricing_extra.get("input_cache_read")
         cache_write = pricing_extra.get("input_cache_write")
         # OpenRouter quotes "input_cache_read": "0" for models with no prompt
@@ -337,7 +373,7 @@ def _info_from_listing(
     raise ValueError(f"Model not found from {source} models API: {model_name}")
 
 
-def get_model_info_from_openrouter(client: Any, model_name: str) -> ModelInfo:
+def get_model_info_from_openrouter(client: ModelListingClient, model_name: str) -> ModelInfo:
     """Model info from the OpenRouter models listing (legacy-compatible)."""
     from local_operator.model.registry import openrouter_default_model_info
 
@@ -346,7 +382,7 @@ def get_model_info_from_openrouter(client: Any, model_name: str) -> ModelInfo:
     )
 
 
-def get_model_info_from_radient(client: Any, model_name: str) -> ModelInfo:
+def get_model_info_from_radient(client: ModelListingClient, model_name: str) -> ModelInfo:
     """Model info from the Radient models listing (legacy-compatible)."""
     from local_operator.model.registry import radient_default_model_info
 
@@ -363,9 +399,9 @@ def get_model_info_from_radient(client: Any, model_name: str) -> ModelInfo:
 def configure_model(
     hosting: str,
     model_name: str,
-    credential_manager: Any = None,
-    model_info_client: Any = None,
-    env_config: Any = None,
+    credential_manager: CredentialManager | None = None,
+    model_info_client: ModelListingClient | None = None,
+    env_config: EnvConfig | None = None,
     temperature: float = DEFAULT_TEMPERATURE,
     top_p: float = DEFAULT_TOP_P,
     top_k: Optional[int] = None,
@@ -432,7 +468,7 @@ def configure_model(
     spec = spec.model_copy(update={"temperature": temperature, "top_p": top_p})
     # Radient base URL is env-overridable (legacy EnvConfig behaviour).
     if canonical == "radient" and env_config is not None:
-        base_url = getattr(env_config, "radient_api_base_url", None)
+        base_url = env_config.radient_api_base_url
         if base_url:
             spec = spec.model_copy(update={"base_url": base_url})
 
@@ -459,55 +495,71 @@ def configure_model(
 # ---------------------------------------------------------------------------
 
 
+class SessionStreamFn:
+    """The ``LoopConfig.stream_fn`` for one session, plus the pool it owns.
+
+    One ``httpx.AsyncClient`` per session: every wire client shares it, and
+    :meth:`close` releases the connection pool on session dispose — a fresh
+    client per LLM round trip leaked one pool per turn for the process
+    lifetime. ``close`` lives on the callable (rather than being returned
+    alongside it) because the loop config carries nothing but the callable.
+    """
+
+    def __init__(
+        self,
+        auth_store: AuthStore,
+        settings: Mapping[str, Any] | None,
+        session_id: str | None,
+    ) -> None:
+        import httpx
+
+        self._auth_store = auth_store
+        self._settings = settings
+        self._session_id = session_id
+        self._http = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))
+
+    def _client_for(self, spec: ModelSpec) -> WireClient:
+        from local_operator.providers.clients import client_for_spec
+
+        return client_for_spec(spec, http_client=self._http)
+
+    async def __call__(
+        self, request: ChatRequest, signal: AbortSignal | None
+    ) -> AsyncIterator[StreamEvent]:
+        from local_operator.providers.failover import stream_with_failover
+
+        async for event in stream_with_failover(
+            request,
+            self._auth_store,
+            self._settings,
+            self._client_for,
+            signal=signal,
+            session_id=self._session_id,
+        ):
+            yield event
+
+    async def close(self) -> None:
+        await self._http.aclose()
+
+
 def create_stream_fn(
-    auth_store: Any,
+    auth_store: AuthStore,
     settings: Mapping[str, Any] | None = None,
     *,
     session_id: str | None = None,
-) -> Callable[[ChatRequest, AbortSignal | None], AsyncIterator[StreamEvent]]:
+) -> SessionStreamFn:
     """Build the ``LoopConfig.stream_fn`` for a session.
 
     Resolves the API key through ``auth_store`` (7-step cascade + OAuth
     refresh), picks the wire client from the request's ``ModelSpec``, and
     wraps the call in credential-rotation + model-fallback failover.
 
-    One ``httpx.AsyncClient`` per session: every wire client shares it, and
-    ``close`` releases the connection pool on session dispose — a fresh
-    client per LLM round trip leaked one pool per turn for the process
-    lifetime. ``session_id`` rides into the failover layer so the auth store
-    keeps credential selection STICKY per session; without it the store
-    round-robins on every resolve and multi-credential providers alternate
-    accounts mid-conversation (cold cache prefix, alternating identity
-    headers).
+    ``session_id`` rides into the failover layer so the auth store keeps
+    credential selection STICKY per session; without it the store round-robins
+    on every resolve and multi-credential providers alternate accounts
+    mid-conversation (cold cache prefix, alternating identity headers).
     """
-    import httpx
-
-    from local_operator.providers.clients import client_for_spec
-    from local_operator.providers.failover import stream_with_failover
-
-    shared = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))
-
-    def client_for(spec: ModelSpec) -> Any:
-        return client_for_spec(spec, http_client=shared)
-
-    async def stream_fn(
-        request: ChatRequest, signal: AbortSignal | None
-    ) -> AsyncIterator[StreamEvent]:
-        async for event in stream_with_failover(
-            request,
-            auth_store,
-            settings,
-            client_for,
-            signal=signal,
-            session_id=session_id,
-        ):
-            yield event
-
-    async def close() -> None:
-        await shared.aclose()
-
-    stream_fn.close = close  # type: ignore[attr-defined]
-    return stream_fn
+    return SessionStreamFn(auth_store, settings, session_id)
 
 
 def calculate_cost(model_info: ModelInfo, input_tokens: int, output_tokens: int) -> float:

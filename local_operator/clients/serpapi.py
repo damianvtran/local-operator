@@ -4,6 +4,8 @@ from urllib.parse import urlencode
 import requests
 from pydantic import BaseModel, Field, SecretStr
 
+from local_operator.clients._http import response_body
+
 
 class SerpApiSearchMetadata(BaseModel):
     """Metadata about a SERP API search request.
@@ -442,7 +444,7 @@ class SerpApiClient:
         api_key (str): SERP API key for authentication
     """
 
-    def __init__(self, api_key: SecretStr):
+    def __init__(self, api_key: SecretStr) -> None:
         """Initialize the SERP API client.
 
         Args:
@@ -516,7 +518,7 @@ class SerpApiClient:
         except requests.exceptions.RequestException as e:
             raise RuntimeError(
                 f"Failed to execute SERP API search due to a requests error: {str(e)}, Response"
-                f" Body: {e.response.content.decode() if e.response else 'No response body'}"
+                f" Body: {response_body(e)}"
             ) from e
         except Exception as e:
             raise RuntimeError(f"Failed to execute SERP API search: {str(e)}") from e

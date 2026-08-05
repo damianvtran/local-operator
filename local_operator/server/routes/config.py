@@ -8,7 +8,6 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.encoders import jsonable_encoder
@@ -85,7 +84,7 @@ async def get_config(
         return CRUDResponse(
             status=200,
             message="Configuration retrieved successfully",
-            result=cast(Dict[str, Any], config_dict),
+            result=config_dict,
         )
     except Exception as e:
         logger.exception("Error retrieving configuration")
@@ -150,7 +149,7 @@ async def get_config(
 async def update_config(
     config_update: ConfigUpdate,
     config_manager: ConfigManager = Depends(get_config_manager),
-):
+) -> JSONResponse:
     """
     Update the configuration settings with new values.
     """
@@ -175,7 +174,7 @@ async def update_config(
         response = CRUDResponse(
             status=200,
             message="Configuration updated successfully",
-            result=cast(Dict[str, Any], config_dict),
+            result=config_dict,
         )
         return JSONResponse(status_code=200, content=jsonable_encoder(response))
     except HTTPException:
@@ -220,7 +219,7 @@ async def update_config(
         },
     },
 )
-async def get_system_prompt():
+async def get_system_prompt() -> CRUDResponse[SystemPromptResponse] | Response:
     """
     Retrieve the current system prompt content.
     """
@@ -282,7 +281,7 @@ async def get_system_prompt():
         },
     },
 )
-async def update_system_prompt(system_prompt_update: SystemPromptUpdate):
+async def update_system_prompt(system_prompt_update: SystemPromptUpdate) -> JSONResponse:
     """
     Update the system prompt content.
     """

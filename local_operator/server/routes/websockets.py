@@ -22,7 +22,7 @@ async def websocket_message_endpoint(
     websocket: WebSocket,
     message_id: str,
     websocket_manager: WebSocketManager = Depends(get_websocket_manager_ws),
-):
+) -> None:
     """
     WebSocket endpoint for subscribing to message updates for a specific message ID.
 
@@ -158,7 +158,7 @@ async def websocket_message_endpoint(
 async def websocket_health_endpoint(
     websocket: WebSocket,
     websocket_manager: WebSocketManager = Depends(get_websocket_manager_ws),
-):
+) -> None:
     """
     WebSocket health check endpoint.
 

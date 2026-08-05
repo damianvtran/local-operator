@@ -34,8 +34,8 @@ import contextlib
 import inspect
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from typing import Any
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+from typing import TYPE_CHECKING, Any
 
 from local_operator.harness.jobs import AsyncJobManager
 from local_operator.harness.loop import AgentLoop, LoopContext
@@ -46,9 +46,12 @@ from local_operator.harness.types import (
     AgentMessage,
     AgentStartEvent,
     AgentTool,
+    Aside,
+    AsideResult,
     ChatRequest,
     CompactionEndEvent,
     CompactionStartEvent,
+    Content,
     CustomMessage,
     EventHandler,
     ImageContent,
@@ -73,6 +76,11 @@ from local_operator.harness.wake import (
 )
 from local_operator.session.goal import GoalState
 from local_operator.session.transcript import Transcript
+
+if TYPE_CHECKING:
+    # Type-only: the session must never pull the MCP stack in at import time.
+    # It only holds the manager the composition root hands it.
+    from local_operator.mcp.manager import McpManager
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +161,20 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
     return out
 
 
+def _replayed_user_message(content: list[Content], entry_id: str | None) -> Message:
+    """Build a replayed user message, preserving its transcript entry id.
+
+    A message rendered from a persisted entry MUST keep that entry's id:
+    ``first_kept_entry_id`` references it, so minting a fresh uuid here would
+    make replay unable to find the cut point. A message with no originating
+    entry keeps the model's default id.
+    """
+    message = Message(role="user", content=content)
+    if entry_id:
+        message.id = entry_id
+    return message
+
+
 def _render_compaction_marker(marker: CustomMessage, entry_id: str | None = None) -> Message:
     """Render one compaction marker into an LLM-visible message. ``entry_id``
     (the marker's transcript entry id) rides onto the rendered message.
@@ -177,21 +199,16 @@ def _render_compaction_marker(marker: CustomMessage, entry_id: str | None = None
                     for frame_b64 in block["frames"]:
                         content.append(ImageContent(data=frame_b64, mime_type="image/png"))
             if content:
-                return Message(
-                    role="user",
-                    content=content,
-                    **({"id": entry_id} if entry_id else {}),
-                )
+                return _replayed_user_message(content, entry_id)
         except Exception:
             logger.warning("snapcompact replay failed; falling back to text summary", exc_info=True)
-    return Message(
-        role="user",
-        content=[
+    return _replayed_user_message(
+        [
             TextContent(
                 text="<previous-context-summary>\n" f"{summary}\n" "</previous-context-summary>"
             )
         ],
-        **({"id": entry_id} if entry_id else {}),
+        entry_id,
     )
 
 
@@ -243,7 +260,14 @@ class Session:
         )
         self._handlers: list[EventHandler] = []
         self._steering_queue: asyncio.Queue[AgentMessage] = asyncio.Queue()
-        self._aside_thunks: list[Callable[[], Any]] = []
+        # Host-registered teardown (see add_dispose_hook): resources the
+        # composition root owns but the session's lifetime governs.
+        self._dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
+        # Set by the composition root when MCP servers are wired in, and read
+        # only for diagnostics — the session never drives the manager itself,
+        # it just governs its lifetime through a dispose hook.
+        self.mcp_manager: McpManager | None = None
+        self._aside_thunks: list[Aside] = []
         self._continuation_queue: list[AgentMessage] = []
         self._last_usage: Usage | None = None  # latest provider-reported usage
         self._last_activity_ms: int = 0  # epoch ms; drives idle-flush pruning
@@ -360,11 +384,8 @@ class Session:
         return self._wake
 
     # -- driving turns --------------------------------------------------------
-    async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
+    async def prompt(self, text: str) -> None:
         """Run one user turn to completion (awaitable) or raise.
-
-        ``attachments`` is reserved for the wire clients (image blocks); this
-        engine turn carries text only.
 
         Reentrancy: ``_turn_lock`` is consulted FIRST — if a live turn (user
         prompt or wake delivery) holds it, a concurrent ``prompt`` is
@@ -652,7 +673,7 @@ class Session:
             await self._run_turn([message])
             continuations += 1
 
-    def _spawn_background(self, coro: Any) -> None:
+    def _spawn_background(self, coro: Coroutine[Any, Any, Any]) -> None:
         """Route a fire-and-forget coroutine through the session task group
         when one is open (wake deliveries, aside persistence); otherwise fall
         back to ``ensure_future``. Every spawned task is tracked so
@@ -681,9 +702,9 @@ class Session:
         task.add_done_callback(self._background_tasks.discard)
 
     def _build_tool_context(self) -> ToolContext:
-        # ``wake_scheduler`` rides as an extra field (ToolContext allows
-        # extras); the wake tool's createIf check and executor read it off the
-        # context — a session without a scheduler must not advertise the tool.
+        # ``wake_scheduler`` is a declared ToolContext field: the wake tool's
+        # createIf check and executor read it off the context, and a session
+        # without a scheduler must not advertise the tool at all.
         return ToolContext(
             cwd=self._cwd,
             session_id=self._session_id,
@@ -705,21 +726,21 @@ class Session:
             messages.append(message)
         return messages
 
-    async def _drain_asides(self) -> list[Any]:
+    async def _drain_asides(self) -> list[Aside]:
         """Drain queued aside thunks (the loop materializes them at the
         injection boundary and fires commit/discard hooks)."""
         thunks = self._aside_thunks
         self._aside_thunks = []
         return list(thunks)
 
-    def queue_aside(self, thunk: Callable[[], Any]) -> None:
+    def queue_aside(self, thunk: Callable[[], AsideResult]) -> None:
         """Queue a lazy aside message for the next injection boundary. The thunk
         is wrapped so a materialized (non-None, non-stale) message is
         persisted exactly once, at the moment it actually reaches the model.
         A :class:`StaleAside` result passes through unpersisted; the loop
         fires its ``on_discard``."""
 
-        def _wrapped() -> Any:
+        def _wrapped() -> AsideResult:
             message = thunk()
             if message is not None and not isinstance(message, StaleAside):
                 self._spawn_background(self._transcript.append_message(message))
@@ -965,9 +986,21 @@ class Session:
 
     # -- lifecycle ----------------------------------------------------------------
 
+    def add_dispose_hook(self, hook: Callable[[], Awaitable[None] | None]) -> None:
+        """Register teardown that runs after the session's own dispose.
+
+        The composition root owns resources the session never created — MCP
+        connections, the auth store's SQLite handle, the shared HTTP client —
+        and every front end calls ``dispose`` exactly once, so this is the one
+        place to hang them. Hooks run in registration order, and one that
+        raises is logged rather than propagated: teardown must never mask the
+        dispose that triggered it.
+        """
+        self._dispose_hooks.append(hook)
+
     async def dispose(self) -> None:
         """Abort any in-flight turn, cancel background work, dispose jobs and
-        the wake scheduler, then flush the transcript.
+        the wake scheduler, flush the transcript, then run dispose hooks.
 
         Order matters: the running turn is aborted and AWAITED (bounded)
         before anything is torn down, so its persistence and event emission
@@ -977,28 +1010,39 @@ class Session:
         if self._disposed:
             return
         self._disposed = True
-        # HC-14: abort the in-flight turn and await its completion (bounded)
-        # before flushing — its persistence must land on a live transcript.
-        turn = self._turn_task
-        if turn is not None and not turn.done() and self._signal is not None:
-            self.abort("session disposed")
-            try:
-                await asyncio.wait_for(asyncio.shield(turn), timeout=5.0)
-            except BaseException:  # noqa: BLE001 — dispose must always proceed
-                pass
-        # HC-11: cancel tracked background tasks (wake deliveries, aside
-        # persistence), then close the session task group.
-        for task in list(self._background_tasks):
-            if not task.done():
-                task.cancel()
-        if self._background_tasks:
-            await asyncio.gather(*self._background_tasks, return_exceptions=True)
-        self._background_tasks.clear()
-        if self._tg_stack is not None:
-            with contextlib.suppress(Exception):
-                await self._tg_stack.aclose()
-            self._tg_stack = None
-        self._task_group = None
-        await self.jobs.dispose()
-        self._wake.dispose()
-        self._transcript.flush()
+        try:
+            # HC-14: abort the in-flight turn and await its completion (bounded)
+            # before flushing — its persistence must land on a live transcript.
+            turn = self._turn_task
+            if turn is not None and not turn.done() and self._signal is not None:
+                self.abort("session disposed")
+                try:
+                    await asyncio.wait_for(asyncio.shield(turn), timeout=5.0)
+                except BaseException:  # noqa: BLE001 — dispose must always proceed
+                    pass
+            # HC-11: cancel tracked background tasks (wake deliveries, aside
+            # persistence), then close the session task group.
+            for task in list(self._background_tasks):
+                if not task.done():
+                    task.cancel()
+            if self._background_tasks:
+                await asyncio.gather(*self._background_tasks, return_exceptions=True)
+            self._background_tasks.clear()
+            if self._tg_stack is not None:
+                with contextlib.suppress(Exception):
+                    await self._tg_stack.aclose()
+                self._tg_stack = None
+            self._task_group = None
+            await self.jobs.dispose()
+            self._wake.dispose()
+            self._transcript.flush()
+        finally:
+            # ``finally``: host-owned resources must be released even when the
+            # session's own teardown blew up part way through.
+            for hook in self._dispose_hooks:
+                try:
+                    outcome = hook()
+                    if inspect.isawaitable(outcome):
+                        await outcome
+                except Exception:
+                    logger.warning("session dispose hook failed", exc_info=True)

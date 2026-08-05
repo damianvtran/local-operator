@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -430,9 +430,15 @@ def _num(value: Any, default: float | None = None) -> float | None:
         return default
 
 
-#: Provider id (canonical) -> fetcher. ``*`` selects the OAuth access token
-#: path; a bare fetcher takes an API key.
-_FETCHERS: dict[str, str] = {
+#: The fetcher a provider id routes to. Naming the kinds keeps the dispatch
+#: table and the if-chain in :func:`fetch_usage` in lockstep.
+FetcherKind = Literal[
+    "openrouter", "zai", "anthropic-oauth", "openai-oauth", "kimi-oauth", "xai-oauth"
+]
+
+#: Provider id (canonical) -> fetcher. The ``-oauth`` kinds take the OAuth
+#: access token; a bare kind takes an API key.
+_FETCHERS: dict[str, FetcherKind] = {
     "openrouter": "openrouter",
     "zai": "zai",
     "anthropic": "anthropic-oauth",

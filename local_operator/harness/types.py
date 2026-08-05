@@ -33,9 +33,25 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Any, Awaitable, Callable, Literal
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Generic,
+    Literal,
+    Protocol,
+    Sequence,
+    TypeVar,
+    runtime_checkable,
+)
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+# One-way, in-package dependency: ``wake`` is pure schedule data plus a timer
+# and imports nothing else from the harness, so naming its schedule type here
+# cannot cycle. It buys the wake-scheduler contract on ``ToolContext`` a real
+# element type instead of ``Any``.
+from local_operator.harness.wake import WakeSchedule
 
 # ---------------------------------------------------------------------------
 # Content blocks
@@ -91,7 +107,10 @@ class ToolResult(BaseModel):
     tool_call_id: str
     tool_name: str = ""
     content: list[Content] = Field(default_factory=list)
-    details: Any = None  # structured payload for renderers/logs, not serialized to providers
+    # Structured payload for renderers, logs and compaction pruning. Never
+    # serialized to providers; always a JSON-ish mapping so consumers can
+    # index it without probing the value's shape first.
+    details: dict[str, Any] | None = None
     is_error: bool = False
     useless: bool = False
 
@@ -219,6 +238,14 @@ class StaleAside:
 
 AgentMessage = Message | CustomMessage
 
+#: What evaluating an aside yields: a live message to inject, a stale-receipt
+#: so the producer's ``on_discard`` still fires, or nothing at all.
+AsideResult = AgentMessage | StaleAside | None
+#: A queued aside is either a ready message or a thunk evaluated at the
+#: injection boundary. The thunk form is the point: a payload that went stale
+#: while the turn ran can withdraw itself instead of being injected.
+Aside = AsideResult | Callable[[], AsideResult]
+
 
 # ---------------------------------------------------------------------------
 # Tools
@@ -229,14 +256,72 @@ class AgentToolUpdate(BaseModel):
     """A partial result streamed from a running tool."""
 
     content: list[Content] = Field(default_factory=list)
-    details: Any = None
+    # Same contract as ``ToolResult.details``: a mapping or nothing.
+    details: dict[str, Any] | None = None
+
+
+# --- capability contracts carried on ToolContext ---------------------------
+#
+# These are Protocols rather than concrete classes for two reasons: the
+# harness must not import the session/app layers that own the
+# implementations, and hosts (and tests) legitimately supply their own
+# stand-ins. They are ``runtime_checkable`` because pydantic validates an
+# arbitrary-type field with ``isinstance``.
+
+
+@runtime_checkable
+class WakeSchedulerProtocol(Protocol):
+    """The slice of a wake scheduler the ``wake`` tool drives.
+
+    Implemented by :class:`local_operator.harness.wake.WakeScheduler`. The
+    tool only ever reads the current list and writes a replacement, so the
+    arming/timer half of the scheduler stays out of the contract.
+    """
+
+    @property
+    def schedules(self) -> Sequence[WakeSchedule]: ...
+
+    async def update(self, schedules: list[WakeSchedule]) -> None: ...
+
+
+@runtime_checkable
+class VariableStoreProtocol(Protocol):
+    """The slice of a variable store the variables tools read.
+
+    Implemented by :class:`local_operator.variables.VariableStore`. Listing
+    yields names only — values are pulled one at a time — so the store's
+    denylist stays the single gate on what the model can see.
+    """
+
+    def names(self) -> list[str]: ...
+
+    def get(self, name: str) -> str | None: ...
+
+    def read(self, name: str) -> str:
+        """Resolve ``name`` or raise ``KeyError`` when unknown or denied."""
+        ...
+
+
+@runtime_checkable
+class BrowserSurfaceProtocol(Protocol):
+    """Mutable handle to the host browser surface a session has open.
+
+    The browser tool creates one on first ``open`` and stores it back on the
+    context so later calls drive the same surface instead of leaking a fresh
+    one per call.
+    """
+
+    surface_id: str
 
 
 class ToolContext(BaseModel):
     """Minimal host-provided context handed to tool execution.
 
     Kept tiny on purpose (a 100-field monolithic session object is a symptom
-    of a 9000-line session class); grow by demand.
+    of a 9000-line session class); grow by demand. ``extra="allow"`` remains
+    so a host can stash something bespoke, but every capability the built-in
+    tools look for is DECLARED below — a tool must not have to probe for an
+    undeclared attribute to find out what its host supports.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
@@ -255,7 +340,17 @@ class ToolContext(BaseModel):
     # Values are never baked into the prompt; the model lists names and reads
     # single values on demand. ``None`` degrades those tools to the process
     # environment only.
-    variables: Any | None = None
+    variables: VariableStoreProtocol | None = None
+    # Wake scheduling. ``None`` means the host has no scheduler, and the wake
+    # tool is then not advertised at all (createIf) rather than advertised and
+    # always failing.
+    wake_scheduler: WakeSchedulerProtocol | None = None
+    # Durable todo lists keyed by session id. A host that attaches one gets
+    # todo state it can persist alongside the transcript; otherwise the tool
+    # falls back to a process-local table.
+    todos: dict[str, list[dict[str, str]]] | None = None
+    # Set by the browser tool on first open; see BrowserSurfaceProtocol.
+    browser: BrowserSurfaceProtocol | None = None
 
 
 ToolExecuteFn = Callable[
@@ -375,22 +470,30 @@ class AbortSignal:
 # ---------------------------------------------------------------------------
 
 
-class AgentEvent(BaseModel):
+#: The discriminator literal of a concrete event, defaulting to plain ``str``
+#: so an unparameterized ``AgentEvent`` still means "any event". Declaring it
+#: covariant is what lets a handler take ``AgentEvent`` and receive any
+#: concrete subclass while each subclass keeps its exact ``Literal`` type —
+#: the discriminator is written once at construction and never reassigned.
+EventTypeT = TypeVar("EventTypeT", bound=str, default=str, covariant=True)
+
+
+class AgentEvent(BaseModel, Generic[EventTypeT]):
     """Base event. ``type`` discriminates; UIs match exhaustively."""
 
     model_config = ConfigDict(extra="allow")
 
-    type: str
+    type: EventTypeT
 
 
-class AgentStartEvent(AgentEvent):
+class AgentStartEvent(AgentEvent[Literal["agent_start"]]):
     type: Literal["agent_start"] = "agent_start"
     # Per-session monotonic turn counter; lets UIs drop a superseded
     # agent_end that arrives after the next agent_start.
     generation: int = 0
 
 
-class AgentEndEvent(AgentEvent):
+class AgentEndEvent(AgentEvent[Literal["agent_end"]]):
     type: Literal["agent_end"] = "agent_end"
     messages: list[AgentMessage] = Field(default_factory=list)
     aborted: bool = False
@@ -398,33 +501,33 @@ class AgentEndEvent(AgentEvent):
     generation: int = 0
 
 
-class TurnStartEvent(AgentEvent):
+class TurnStartEvent(AgentEvent[Literal["turn_start"]]):
     type: Literal["turn_start"] = "turn_start"
 
 
-class TurnEndEvent(AgentEvent):
+class TurnEndEvent(AgentEvent[Literal["turn_end"]]):
     type: Literal["turn_end"] = "turn_end"
     message: AgentMessage | None = None
     tool_results: list[ToolResult] = Field(default_factory=list)
 
 
-class MessageStartEvent(AgentEvent):
+class MessageStartEvent(AgentEvent[Literal["message_start"]]):
     type: Literal["message_start"] = "message_start"
     message: AgentMessage
 
 
-class MessageUpdateEvent(AgentEvent):
+class MessageUpdateEvent(AgentEvent[Literal["message_update"]]):
     type: Literal["message_update"] = "message_update"
     message: AgentMessage
     delta: str = ""  # incremental text for this update (UIs should append, not re-read)
 
 
-class MessageEndEvent(AgentEvent):
+class MessageEndEvent(AgentEvent[Literal["message_end"]]):
     type: Literal["message_end"] = "message_end"
     message: AgentMessage
 
 
-class ToolExecutionStartEvent(AgentEvent):
+class ToolExecutionStartEvent(AgentEvent[Literal["tool_execution_start"]]):
     type: Literal["tool_execution_start"] = "tool_execution_start"
     tool_call_id: str
     tool_name: str
@@ -432,14 +535,14 @@ class ToolExecutionStartEvent(AgentEvent):
     intent: str | None = None
 
 
-class ToolExecutionUpdateEvent(AgentEvent):
+class ToolExecutionUpdateEvent(AgentEvent[Literal["tool_execution_update"]]):
     type: Literal["tool_execution_update"] = "tool_execution_update"
     tool_call_id: str
     tool_name: str
     partial_result: AgentToolUpdate
 
 
-class ToolExecutionEndEvent(AgentEvent):
+class ToolExecutionEndEvent(AgentEvent[Literal["tool_execution_end"]]):
     """A tool finished. ``is_error`` mirrors ``result.is_error``.
 
     The flag is kept as a serialized field because UI clients and the JSON
@@ -463,31 +566,31 @@ class ToolExecutionEndEvent(AgentEvent):
         return self
 
 
-class NoticeEvent(AgentEvent):
+class NoticeEvent(AgentEvent[Literal["notice"]]):
     type: Literal["notice"] = "notice"
     text: str
     kind: Literal["info", "warning", "error"] = "info"
 
 
-class CompactionStartEvent(AgentEvent):
+class CompactionStartEvent(AgentEvent[Literal["compaction_start"]]):
     type: Literal["compaction_start"] = "compaction_start"
     reason: str
 
 
-class CompactionEndEvent(AgentEvent):
+class CompactionEndEvent(AgentEvent[Literal["compaction_end"]]):
     type: Literal["compaction_end"] = "compaction_end"
     reason: str
     success: bool
 
 
-class RetryStartEvent(AgentEvent):
+class RetryStartEvent(AgentEvent[Literal["retry_start"]]):
     type: Literal["retry_start"] = "retry_start"
     attempt: int
     error: str
     fallback_model: str | None = None
 
 
-class RetryEndEvent(AgentEvent):
+class RetryEndEvent(AgentEvent[Literal["retry_end"]]):
     type: Literal["retry_end"] = "retry_end"
     success: bool
 
@@ -531,7 +634,7 @@ class LoopConfig(BaseModel):
         default=None, exclude=True
     )
     has_steering_messages: Callable[[], bool] | None = Field(default=None, exclude=True)
-    get_aside_messages: Callable[[], Awaitable[list[Any]]] | None = Field(
+    get_aside_messages: Callable[[], Awaitable[list[Aside]]] | None = Field(
         default=None, exclude=True
     )
     get_follow_up_messages: Callable[[], Awaitable[list[AgentMessage]]] | None = Field(

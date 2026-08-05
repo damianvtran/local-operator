@@ -2,7 +2,17 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import base64
+
+from mcp.types import (
+    BlobResourceContents,
+    CallToolResult,
+    EmbeddedResource,
+    ImageContent,
+    TextContent,
+    TextResourceContents,
+    Tool,
+)
 
 import pytest
 
@@ -156,12 +166,12 @@ class TestPrepareOutboundArgs:
 
 class TestFormatMcpResult:
     def test_text_joined(self) -> None:
-        result = SimpleNamespace(
+        result = CallToolResult(
             content=[
-                SimpleNamespace(type="text", text="one"),
-                SimpleNamespace(type="text", text="two"),
+                TextContent(type="text", text="one"),
+                TextContent(type="text", text="two"),
             ],
-            is_error=False,
+            isError=False,
         )
         formatted = format_mcp_result(result, "id1", "mcp__srv_tool")
         assert formatted.text == "one\n\ntwo"
@@ -170,29 +180,45 @@ class TestFormatMcpResult:
         assert formatted.tool_name == "mcp__srv_tool"
 
     def test_image_placeholder(self) -> None:
-        result = SimpleNamespace(
-            content=[SimpleNamespace(type="image", mime_type="image/png")], is_error=False
+        result = CallToolResult(
+            content=[
+                ImageContent(
+                    type="image",
+                    data=base64.b64encode(b"\x89PNG\r\n\x1a\n").decode(),
+                    mimeType="image/png",
+                )
+            ],
+            isError=False,
         )
         assert format_mcp_result(result).text == "[Image: image/png]"
 
     def test_resource_uri_plus_text(self) -> None:
-        result = SimpleNamespace(
+        """A text resource contributes its body; a blob resource is URI-only."""
+        result = CallToolResult(
             content=[
-                SimpleNamespace(
-                    type="resource", resource=SimpleNamespace(uri="file:///a", text="body")
+                EmbeddedResource(
+                    type="resource",
+                    resource=TextResourceContents(
+                        uri="file:///a", text="body", mimeType="text/plain"
+                    ),
                 ),
-                SimpleNamespace(
-                    type="resource", resource=SimpleNamespace(uri="file:///b", text=None)
+                EmbeddedResource(
+                    type="resource",
+                    resource=BlobResourceContents(
+                        uri="file:///b",
+                        blob=base64.b64encode(b"\x00\x01\x02").decode(),
+                        mimeType="application/octet-stream",
+                    ),
                 ),
             ],
-            is_error=False,
+            isError=False,
         )
         assert (
             format_mcp_result(result).text == "[Resource: file:///a]\nbody\n\n[Resource: file:///b]"
         )
 
     def test_is_error_prefix_and_flag(self) -> None:
-        result = SimpleNamespace(content=[SimpleNamespace(type="text", text="boom")], is_error=True)
+        result = CallToolResult(content=[TextContent(type="text", text="boom")], isError=True)
         formatted = format_mcp_result(result)
         assert formatted.is_error is True
         assert formatted.text == "Error: boom"
@@ -208,7 +234,14 @@ class TestFormatMcpResult:
         assert formatted.text == "Error: hi"
 
     def test_empty_content(self) -> None:
-        assert format_mcp_result(SimpleNamespace(content=[], is_error=False)).text == ""
+        assert format_mcp_result(CallToolResult(content=[], isError=False)).text == ""
+
+    def test_details_carry_the_server_payload(self) -> None:
+        """``details['server_result']`` round-trips the server's own result."""
+        result = CallToolResult(content=[TextContent(type="text", text="ok")], isError=False)
+        details = format_mcp_result(result).details
+        assert details is not None
+        assert details["server_result"] == result.model_dump()
 
 
 class TestIsRetriableConnectionError:
@@ -239,10 +272,10 @@ class TestIsRetriableConnectionError:
 
 class TestBuildAgentTool:
     def test_wraps_sdk_tool_model(self) -> None:
-        mcp_tool = SimpleNamespace(
+        mcp_tool = Tool(
             name="search",
             description="Search things",
-            input_schema={"type": "object", "properties": {"q": {"type": "string"}}},
+            inputSchema={"type": "object", "properties": {"q": {"type": "string"}}},
         )
 
         async def call_fn(*args, **kwargs):  # pragma: no cover - not invoked here

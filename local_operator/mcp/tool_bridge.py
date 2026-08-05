@@ -3,17 +3,24 @@
 Implements the MCP tool bridge: tool-name mangling,
 schema normalization, outbound argument hygiene, result flattening, and the
 retriable-connection-error classification that drives the manager's
-reconnect-once + retry-once policy. Pure functions only — no MCP SDK imports,
-so this module stays importable anywhere.
+reconnect-once + retry-once policy. Pure functions only, and no MCP SDK
+import at module scope, so this module stays importable (and cheap) when the
+SDK extra is absent; the one SDK reference sits inside the branch that only
+runs once an SDK-validated content block has actually arrived.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
-from local_operator.harness.types import AgentTool, TextContent, ToolResult
+from local_operator.harness.types import AgentTool, TextContent, ToolExecuteFn, ToolResult
+
+if TYPE_CHECKING:
+    # Annotation-only: the SDK is an optional extra, and this module must
+    # stay importable (and cheap) for config-only callers.
+    from mcp.types import CallToolResult, ContentBlock, Tool
 
 # The harness injects an ``i`` (intent) field into every tool's wire schema;
 # strict-schema MCP servers reject calls that carry undeclared fields.
@@ -94,7 +101,7 @@ def normalize_input_schema(input_schema: dict[str, Any] | None) -> dict[str, Any
     return schema
 
 
-def _is_unused_optional_placeholder(value: Any) -> bool:
+def _is_unused_optional_placeholder(value: object) -> bool:
     """Empty string / empty dict / None — placeholders models invent."""
     return value is None or value == "" or (isinstance(value, dict) and not value)
 
@@ -103,7 +110,7 @@ def prepare_outbound_args(
     args: dict[str, Any] | None,
     declared_properties: dict[str, Any] | None,
     required: list[str] | None = None,
-    additional_properties: Any = None,
+    additional_properties: bool | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Clean harness-side arguments before forwarding to ``tools/call``.
 
@@ -143,8 +150,50 @@ def prepare_outbound_args(
     return cleaned
 
 
+def _dict_block_text(block: dict[str, Any]) -> str | None:
+    """Render one raw-JSON content block, or ``None`` for kinds we drop.
+
+    Servers that answer ``tools/call`` with unvalidated JSON (and the tool
+    cache) hand us plain dicts rather than SDK models, so both wire shapes of
+    the image mime key are accepted.
+    """
+    block_type = block.get("type")
+    if block_type == "text":
+        return block.get("text") or ""
+    if block_type == "image":
+        return f"[Image: {block.get('mimeType') or block.get('mime_type') or 'image'}]"
+    if block_type == "resource":
+        raw_resource = block.get("resource")
+        resource: dict[str, Any] = raw_resource if isinstance(raw_resource, dict) else {}
+        uri = resource.get("uri", "")
+        text = resource.get("text")
+        return f"[Resource: {uri}]\n{text}" if text else f"[Resource: {uri}]"
+    return None
+
+
+def _model_block_text(block: ContentBlock) -> str | None:
+    """Render one SDK content block, or ``None`` for kinds we drop.
+
+    Audio and resource links carry nothing a text transcript can show, so
+    they contribute no part at all rather than an empty one.
+    """
+    if block.type == "text":
+        return block.text or ""
+    if block.type == "image":
+        return f"[Image: {block.mime_type}]"
+    if block.type == "resource":
+        # Only the text variant of an embedded resource has inline content;
+        # blob resources are base64 payloads we summarize by URI alone.
+        from mcp.types import TextResourceContents
+
+        resource = block.resource
+        text = resource.text if isinstance(resource, TextResourceContents) else None
+        return f"[Resource: {resource.uri}]\n{text}" if text else f"[Resource: {resource.uri}]"
+    return None
+
+
 def format_mcp_result(
-    result: Any,
+    result: CallToolResult | dict[str, Any],
     tool_call_id: str = "",
     tool_name: str = "",
 ) -> ToolResult:
@@ -154,50 +203,27 @@ def format_mcp_result(
     image blocks become ``[Image: <mime>]`` placeholders, embedded resources
     become ``[Resource: <uri>]`` plus their text when present. ``isError``
     maps to ``is_error`` (with an ``Error:`` prefix, matching the established behavior).
-    """
-    content_blocks = getattr(result, "content", None)
-    if content_blocks is None and isinstance(result, dict):
-        content_blocks = result.get("content")
-    content_blocks = content_blocks or []
 
+    ``result`` is the SDK model on every live call path; the raw-dict branch
+    covers servers whose payload never went through SDK validation.
+    """
+    blocks: Sequence[ContentBlock] | Sequence[dict[str, Any]]
+    server_result: dict[str, Any] | None
     if isinstance(result, dict):
+        raw_blocks = result.get("content")
+        blocks = raw_blocks if isinstance(raw_blocks, list) else []
         is_error = bool(result.get("is_error", result.get("isError")))
+        server_result = result
     else:
-        is_error = bool(getattr(result, "is_error", False))
+        blocks = result.content
+        is_error = bool(result.is_error)
+        server_result = result.model_dump()
 
     parts: list[str] = []
-    for item in content_blocks:
-        item_type = getattr(item, "type", None) if not isinstance(item, dict) else item.get("type")
-        if item_type == "text":
-            text = getattr(item, "text", "") if not isinstance(item, dict) else item.get("text", "")
-            parts.append(text or "")
-        elif item_type == "image":
-            mime = (
-                getattr(item, "mime_type", "image")
-                if not isinstance(item, dict)
-                else item.get("mimeType") or item.get("mime_type") or "image"
-            )
-            parts.append(f"[Image: {mime}]")
-        elif item_type == "resource":
-            resource = (
-                getattr(item, "resource", None)
-                if not isinstance(item, dict)
-                else item.get("resource")
-            )
-            uri = (
-                getattr(resource, "uri", "")
-                if resource is not None and not isinstance(resource, dict)
-                else (resource or {}).get("uri", "")
-            )
-            text = (
-                getattr(resource, "text", None)
-                if resource is not None and not isinstance(resource, dict)
-                else (resource or {}).get("text")
-            )
-            if text:
-                parts.append(f"[Resource: {uri}]\n{text}")
-            else:
-                parts.append(f"[Resource: {uri}]")
+    for block in blocks:
+        rendered = _dict_block_text(block) if isinstance(block, dict) else _model_block_text(block)
+        if rendered is not None:
+            parts.append(rendered)
 
     text = "\n\n".join(parts)
     if is_error:
@@ -207,13 +233,7 @@ def format_mcp_result(
         tool_name=tool_name,
         content=[TextContent(text=text)],
         is_error=is_error,
-        details={
-            "server_result": (
-                result
-                if isinstance(result, dict)
-                else getattr(result, "model_dump", lambda: None)()
-            ),
-        },
+        details={"server_result": server_result},
     )
 
 
@@ -229,36 +249,27 @@ def is_retriable_connection_error(error: BaseException) -> bool:
 
 def build_agent_tool(
     server_name: str,
-    mcp_tool: Any,
-    call_fn: Callable[..., Any],
+    mcp_tool: Tool | dict[str, Any],
+    call_fn: ToolExecuteFn,
 ) -> AgentTool:
     """Wrap one MCP tool as a harness ``AgentTool``.
 
     ``mcp_tool`` may be an SDK ``Tool`` model or a cached plain dict with
     ``name`` / ``description`` / ``inputSchema``. ``call_fn`` is the manager's
-    execute coroutine: ``call_fn(tool_call_id, args, signal, on_update,
-    context) -> ToolResult`` — deferred vs live behavior lives there, so this
+    execute coroutine — deferred vs live behavior lives there, so this
     wrapper is identical for both.
     """
+    raw_name: str
+    description: str
+    input_schema: dict[str, Any] | None
     if isinstance(mcp_tool, dict):
         raw_name = mcp_tool.get("name", "")
         description = mcp_tool.get("description", "") or ""
         input_schema = mcp_tool.get("inputSchema") or mcp_tool.get("input_schema") or {}
     else:
-        raw_name = getattr(mcp_tool, "name", "") or ""
-        description = getattr(mcp_tool, "description", "") or ""
-        input_schema = (
-            getattr(mcp_tool, "input_schema", None) or getattr(mcp_tool, "inputSchema", None) or {}
-        )
-
-    async def _execute(
-        tool_call_id: str,
-        args: dict[str, Any],
-        signal: Any,
-        on_update: Any,
-        context: Any,
-    ) -> ToolResult:
-        return await call_fn(tool_call_id, args, signal, on_update, context)
+        raw_name = mcp_tool.name
+        description = mcp_tool.description or ""
+        input_schema = mcp_tool.input_schema
 
     return AgentTool(
         name=create_mcp_tool_name(server_name, raw_name),
@@ -267,5 +278,5 @@ def build_agent_tool(
         parameters=normalize_input_schema(input_schema),
         approval_tier="exec",  # unknown external side effects default to exec
         interruptible=True,
-        execute=_execute,
+        execute=call_fn,
     )

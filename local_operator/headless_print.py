@@ -21,26 +21,30 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any
+from typing import Any, Callable
 
 from rich.console import Console
 
-from local_operator.harness.types import AgentEvent, Message
+from local_operator.harness.types import (
+    AgentEndEvent,
+    AgentEvent,
+    CompactionStartEvent,
+    Message,
+    MessageEndEvent,
+    MessageStartEvent,
+    MessageUpdateEvent,
+    NoticeEvent,
+    RetryStartEvent,
+    ToolExecutionEndEvent,
+    ToolExecutionStartEvent,
+)
 from local_operator.session.protocol import SessionProtocol
 
 #: One-line tool rows get truncated to this many columns (TUI minimalism).
 _TOOL_LINE_WIDTH = 100
 
 
-def _message_text(message: Any) -> str:
-    """Text of a harness message; custom entries render as empty (they are
-    context plumbing, never user-facing output)."""
-    if isinstance(message, Message):
-        return message.text
-    return ""
-
-
-def strip_provider_payload(data: Any) -> Any:
+def strip_provider_payload(data: dict[str, Any]) -> dict[str, Any]:
     """Recursively drop ``provider_payload`` keys from a dumped event.
 
     The payload is transport-native replay state (encrypted reasoning items
@@ -48,15 +52,17 @@ def strip_provider_payload(data: Any) -> Any:
     can be enormous. The stripping mirrors the provider-payload sanitation
     applied upstream so local rendering never carries that replay state.
     """
-    if isinstance(data, dict):
-        return {
-            key: strip_provider_payload(value)
-            for key, value in data.items()
-            if key != "provider_payload"
-        }
-    if isinstance(data, list):
-        return [strip_provider_payload(item) for item in data]
-    return data
+    return {key: _stripped(value) for key, value in data.items() if key != "provider_payload"}
+
+
+def _stripped(value: Any) -> Any:
+    """Recurse into a dumped value. ``Any`` is honest here: this walks
+    arbitrary JSON produced by ``model_dump``."""
+    if isinstance(value, dict):
+        return strip_provider_payload(value)
+    if isinstance(value, list):
+        return [_stripped(item) for item in value]
+    return value
 
 
 def printable_event(event: AgentEvent) -> dict[str, Any]:
@@ -72,12 +78,11 @@ def printable_event(event: AgentEvent) -> dict[str, Any]:
       ``message_end``.
     - ``provider_payload`` is stripped everywhere it appears.
     """
-    if event.type == "message_update":
-        message = getattr(event, "message", None)
+    if isinstance(event, MessageUpdateEvent):
         return {
             "type": "message_update",
-            "message_id": getattr(message, "id", None),
-            "delta": getattr(event, "delta", ""),
+            "message_id": event.message.id,
+            "delta": event.delta,
         }
     data = event.model_dump(mode="json")
     return strip_provider_payload(data)
@@ -129,7 +134,7 @@ class PrintRenderer:
         self._render(event)
         self._track_outcome(event)
 
-    def attach(self, session: SessionProtocol) -> Any:
+    def attach(self, session: SessionProtocol) -> Callable[[], None]:
         """Subscribe to a session, returning the unsubscribe callable."""
         return session.subscribe(self.handle)
 
@@ -137,60 +142,50 @@ class PrintRenderer:
 
     def _track_outcome(self, event: AgentEvent) -> None:
         """Record error/abort outcome and the last assistant text."""
-        if event.type == "agent_end":
-            if getattr(event, "error", None) or getattr(event, "aborted", False):
+        if isinstance(event, AgentEndEvent):
+            if event.error or event.aborted:
                 self.failed = True
-        elif event.type == "message_end":
-            message = getattr(event, "message", None)
+        elif isinstance(event, MessageEndEvent):
+            message = event.message
             if isinstance(message, Message) and message.role == "assistant":
                 text = message.text
                 if text:
                     self.last_assistant_text = text
 
     def _render(self, event: AgentEvent) -> None:
-        event_type = event.type
-        if event_type == "message_start":
-            message = getattr(event, "message", None)
+        if isinstance(event, MessageStartEvent):
+            message = event.message
             if self.stream_text and isinstance(message, Message) and message.role == "assistant":
                 self._streaming_assistant = True
-        elif event_type == "message_update":
-            if self.stream_text and self._streaming_assistant:
-                delta = getattr(event, "delta", "")
-                if delta:
-                    # Plain write, no markup interpretation, immediate flush:
-                    # this is the "streamed via print" path.
-                    sys.stdout.write(delta)
-                    sys.stdout.flush()
-        elif event_type == "message_end":
+        elif isinstance(event, MessageUpdateEvent):
+            if self.stream_text and self._streaming_assistant and event.delta:
+                # Plain write, no markup interpretation, immediate flush:
+                # this is the "streamed via print" path.
+                sys.stdout.write(event.delta)
+                sys.stdout.flush()
+        elif isinstance(event, MessageEndEvent):
             if self.stream_text and self._streaming_assistant:
                 self._streaming_assistant = False
                 sys.stdout.write("\n")
                 sys.stdout.flush()
-        elif event_type == "tool_execution_start":
-            name = getattr(event, "tool_name", "tool")
-            summary = getattr(event, "intent", None) or _args_summary(getattr(event, "args", {}))
-            line = f"● {name} {summary}".rstrip()
+        elif isinstance(event, ToolExecutionStartEvent):
+            summary = event.intent or _args_summary(event.args)
+            line = f"● {event.tool_name} {summary}".rstrip()
             self.console.print(f"[dim]{line[:_TOOL_LINE_WIDTH]}[/dim]", highlight=False)
-        elif event_type == "tool_execution_end":
-            if getattr(event, "is_error", False):
-                name = getattr(event, "tool_name", "tool")
-                self.console.print(f"[red]✗ {name} failed[/red]", highlight=False)
-        elif event_type == "notice":
-            text = getattr(event, "text", "")
-            kind = getattr(event, "kind", "info")
-            style = {"error": "red", "warning": "yellow"}.get(kind, "dim")
-            self.console.print(f"[{style}]{text}[/{style}]", highlight=False)
-        elif event_type == "retry_start":
-            error = getattr(event, "error", "")
-            attempt = getattr(event, "attempt", 0)
-            self.console.print(f"[dim]retry {attempt}: {error}[/dim]", highlight=False)
-        elif event_type == "compaction_start":
+        elif isinstance(event, ToolExecutionEndEvent):
+            if event.is_error:
+                self.console.print(f"[red]✗ {event.tool_name} failed[/red]", highlight=False)
+        elif isinstance(event, NoticeEvent):
+            style = {"error": "red", "warning": "yellow"}.get(event.kind, "dim")
+            self.console.print(f"[{style}]{event.text}[/{style}]", highlight=False)
+        elif isinstance(event, RetryStartEvent):
+            self.console.print(f"[dim]retry {event.attempt}: {event.error}[/dim]", highlight=False)
+        elif isinstance(event, CompactionStartEvent):
             self.console.print("[dim]compacting context…[/dim]", highlight=False)
-        elif event_type == "agent_end":
-            error = getattr(event, "error", None)
-            if error:
-                self.console.print(f"[red]Error: {error}[/red]", highlight=False)
-            elif getattr(event, "aborted", False):
+        elif isinstance(event, AgentEndEvent):
+            if event.error:
+                self.console.print(f"[red]Error: {event.error}[/red]", highlight=False)
+            elif event.aborted:
                 self.console.print("[red]aborted[/red]", highlight=False)
 
 

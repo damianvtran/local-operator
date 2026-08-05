@@ -20,7 +20,7 @@ from __future__ import annotations
 import base64
 import time
 import urllib.parse
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -69,7 +69,7 @@ class AnthropicOAuthFlow(OAuthCallbackFlow):
         self,
         callbacks: LoginCallbacks | None = None,
         *,
-        open_browser: Any = None,
+        open_browser: Callable[[str], None] | None = None,
         signal: AbortSignal | None = None,
         manual_input_only: bool = False,
         http_client: httpx.AsyncClient | None = None,
@@ -210,7 +210,7 @@ async def login_anthropic(
     *,
     signal: AbortSignal | None = None,
     http_client: httpx.AsyncClient | None = None,
-    open_browser: Any = None,
+    open_browser: Callable[[str], None] | None = None,
     manual_input_only: bool = False,
 ) -> dict[str, Any]:
     """Run the interactive Anthropic login; returns OAuthCredentials dict."""

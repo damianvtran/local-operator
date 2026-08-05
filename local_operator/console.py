@@ -164,7 +164,7 @@ def print_cli_banner(
         print("\033[1;36m╰──────────────────────────────────────────────────\033[0m\n")
 
 
-async def spinner(text: str):
+async def spinner(text: str) -> None:
     """
     Asynchronously display a rotating spinner with the provided text.
 
@@ -226,8 +226,8 @@ async def with_spinner(
     message: str,
     verbosity_level: VerbosityLevel,
     coro_func: Callable[..., Awaitable[T]],
-    *args,
-    **kwargs,
+    *args: Any,
+    **kwargs: Any,
 ) -> T:
     """Execute a coroutine function with a spinner.
 

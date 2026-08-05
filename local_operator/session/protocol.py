@@ -14,9 +14,9 @@ superseded — UIs must handle that (see docs/REWRITE.md, stream D).
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from typing import Callable, Protocol, runtime_checkable
 
-from local_operator.harness.types import EventHandler
+from local_operator.harness.types import EventHandler, Message, ModelSpec
 
 
 @runtime_checkable
@@ -39,11 +39,11 @@ class SessionProtocol(Protocol):
         ...
 
     @property
-    def model(self) -> Any:
-        """The active ModelSpec (provider/model_id/base_url/context_window)."""
+    def model(self) -> ModelSpec:
+        """The active spec (provider/model_id/base_url/context_window)."""
         ...
 
-    def set_model(self, model: Any) -> None:
+    def set_model(self, model: ModelSpec) -> None:
         """Swap the model spec; takes effect from the next turn onward.
 
         The TUI's ``/model <provider>/<id>`` path calls this after building a
@@ -67,8 +67,19 @@ class SessionProtocol(Protocol):
         ...
 
     # --- driving turns ----------------------------------------------------
-    async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
+    async def prompt(self, text: str) -> None:
         """Run one user turn to completion (awaitable) or raise."""
+        ...
+
+    async def seed_history(self, messages: list[Message]) -> None:
+        """Prime the conversation from a host-supplied history.
+
+        Once-only and pre-prompt: a no-op once the context carries messages
+        (transcript replay populated them) or after the first turn. The server
+        facade needs it for the two paths where the transcript is not the
+        history source — stateless chat and non-persisted agent chat — so the
+        provider sees the same history the response envelope echoes.
+        """
         ...
 
     def steer(self, text: str) -> None:
@@ -81,7 +92,7 @@ class SessionProtocol(Protocol):
         ...
 
     # --- events -----------------------------------------------------------
-    def subscribe(self, handler: EventHandler) -> Any:
+    def subscribe(self, handler: EventHandler) -> Callable[[], None]:
         """Register an event handler; returns an unsubscribe callable."""
         ...
 

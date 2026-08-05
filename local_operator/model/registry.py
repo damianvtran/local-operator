@@ -19,8 +19,12 @@ class ProviderDetail(BaseModel):
     description: str = Field(..., description="Description of the provider")
     url: str = Field(..., description="URL to the provider's platform")
     requiredCredentials: List[str] = Field(..., description="List of required credential keys")
+    # `default=` must be spelled as a keyword: a positional default in
+    # `Field()` is honoured at runtime but is not recognised as a default by
+    # static analysis, which then treats the field as required and flags every
+    # construction site that omits it.
     recommended: bool = Field(
-        False,
+        default=False,
         description="Whether the provider is recommended for use in Local Operator",
     )
 
@@ -211,7 +215,7 @@ class ModelInfo(BaseModel):
     id: str = Field(..., description="Unique identifier for the model")
     name: str = Field(..., description="Display name for the model")
     recommended: bool = Field(
-        False,
+        default=False,
         description=(
             "Whether the model is recommended for use in Local Operator. "
             "This is determined based on community usage and feedback."

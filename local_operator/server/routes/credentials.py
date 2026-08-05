@@ -109,7 +109,7 @@ async def list_credentials(
 async def update_credential(
     credential_data: CredentialUpdate,
     credential_manager: CredentialManager = Depends(get_credential_manager),
-):
+) -> JSONResponse:
     """
     Update an existing credential or create a new one.
     """

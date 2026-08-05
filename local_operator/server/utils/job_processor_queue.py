@@ -9,18 +9,20 @@ It uses a shared queue to communicate status updates from the child process to t
 import asyncio
 import logging
 import multiprocessing
-from multiprocessing import Process, Queue
-from typing import TYPE_CHECKING, Callable, List, Optional  # Added TYPE_CHECKING
-
+from multiprocessing import Process
+from typing import TYPE_CHECKING, Callable, List, Optional
 
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.jobs import JobContext, JobContextRecord, JobManager, JobStatus
-
-# from local_operator.scheduler_service import SchedulerService # Moved to TYPE_CHECKING
-from local_operator.server.utils.operator import ExecutorInitError, create_operator
+from local_operator.server.models.schemas import ChatOptions
+from local_operator.server.utils.operator import (
+    ExecutorInitError,
+    StatusQueue,
+    create_operator,
+)
 from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import ConversationRecord
 
@@ -41,9 +43,9 @@ def run_job_in_process_with_queue(
     agent_registry: AgentRegistry,
     env_config: EnvConfig,
     context: Optional[list[ConversationRecord]] = None,
-    options: Optional[dict[str, object]] = None,
-    status_queue: Optional[Queue] = None,  # type: ignore
-):
+    options: Optional[ChatOptions] = None,
+    status_queue: Optional[StatusQueue] = None,
+) -> None:
     """
     Run a chat job in a separate process, using a queue to communicate status updates.
 
@@ -68,7 +70,7 @@ def run_job_in_process_with_queue(
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    async def process_chat_job_in_context():
+    async def process_chat_job_in_context() -> None:
         try:
             # Create a new operator in this process context
             job_context = JobContext()
@@ -102,7 +104,7 @@ def run_job_in_process_with_queue(
                 # The facade reads this when it subscribes to the session's
                 # AgentEvent stream, so streaming frames reach the parent
                 # process exactly as before.
-                if status_queue and hasattr(process_operator, "executor"):
+                if status_queue:
                     process_operator.executor.status_queue = status_queue
 
                 # Initialize conversation history
@@ -124,10 +126,10 @@ def run_job_in_process_with_queue(
                 # rewritten engine has no mutable chat-model object.
                 model_configuration = process_operator.executor.model_configuration
                 if options:
-                    if options.get("temperature") is not None:
-                        model_configuration.temperature = options["temperature"]
-                    if options.get("top_p") is not None:
-                        model_configuration.top_p = options["top_p"]
+                    if options.temperature is not None:
+                        model_configuration.temperature = options.temperature
+                    if options.top_p is not None:
+                        model_configuration.top_p = options.top_p
 
                 # Process the request
                 _, final_response = await process_operator.handle_user_input(
@@ -173,8 +175,8 @@ def run_agent_job_in_process_with_queue(
     env_config: EnvConfig,
     persist_conversation: bool = False,
     user_message_id: Optional[str] = None,
-    status_queue: Optional[Queue] = None,  # type: ignore
-):
+    status_queue: Optional[StatusQueue] = None,
+) -> None:
     """
     Run an agent chat job in a separate process, using a queue to communicate status updates.
 
@@ -201,7 +203,7 @@ def run_agent_job_in_process_with_queue(
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    async def process_chat_job_in_context():
+    async def process_chat_job_in_context() -> None:
         try:
             # Create a new operator in this process context
             job_context = JobContext()
@@ -245,7 +247,7 @@ def run_agent_job_in_process_with_queue(
                 )
 
                 # Set the status queue on the executor for execution state updates
-                if status_queue and hasattr(process_operator, "executor"):
+                if status_queue:
                     process_operator.executor.status_queue = status_queue
 
                 # Process the request
@@ -317,7 +319,7 @@ def create_and_start_job_process_with_queue(
     process.start()
 
     # Create a task to monitor the status queue
-    async def monitor_status_queue():
+    async def monitor_status_queue() -> None:
         current_job_id = job_id  # Capture job_id in closure to avoid unbound variable issue
         try:
             while process.is_alive() or not status_queue.empty():
@@ -342,9 +344,9 @@ def create_and_start_job_process_with_queue(
                                 )
                             elif msg_type == "message_update" and len(message) == 3:
                                 # Message update: (type, job_id, message)
-                                _, received_job_id, message = message
+                                _, received_job_id, update = message
 
-                                await websocket_manager.broadcast_update(received_job_id, message)
+                                await websocket_manager.broadcast_update(received_job_id, update)
                             # schedule_add / schedule_remove frames were
                             # produced by the legacy executor's agent
                             # scheduling tools; the rewritten tool table has
@@ -368,7 +370,7 @@ def create_and_start_job_process_with_queue(
 
     # Register the task with the job manager
     # Use a separate function to avoid capturing the monitor_task in the closure
-    async def register_monitor_task():
+    async def register_monitor_task() -> None:
         await job_manager.register_task(job_id, monitor_task)
 
     # Create a separate task for registration to avoid pickling issues

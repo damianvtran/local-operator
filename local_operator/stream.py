@@ -208,8 +208,6 @@ def _handle_partial_mentioned_files(content: str, result: CodeExecutionResult) -
     for line in complete_lines:
         file_candidate = line.strip()
         if file_candidate:
-            if not hasattr(result, "files") or result.files is None:
-                result.files = []
             result.files.append(file_candidate)
 
 
@@ -253,8 +251,6 @@ def _assign_tag_content(
             for line in lines:
                 file_candidate = line.strip()
                 if file_candidate:
-                    if not hasattr(result, "files") or result.files is None:
-                        result.files = []
                     result.files.append(file_candidate)
         elif tag == "learnings":
             result.learnings += content

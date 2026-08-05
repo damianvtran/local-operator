@@ -17,7 +17,7 @@ UPLOADS_DIR = LOCAL_OPERATOR_HOME / "uploads"
 BASE64_DATA_URL_PATTERN = re.compile(r"^data:(?P<mime_type>[^;]+);base64,(?P<data>.+)$")
 
 
-def _ensure_uploads_dir_exists():
+def _ensure_uploads_dir_exists() -> None:
     """Ensures the uploads directory exists."""
     try:
         UPLOADS_DIR.mkdir(parents=True, exist_ok=True)

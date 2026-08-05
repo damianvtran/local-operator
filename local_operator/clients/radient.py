@@ -1,9 +1,12 @@
 import time
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
 from pydantic import BaseModel, SecretStr
+
+from local_operator.clients._http import NO_RESPONSE_BODY, response_body
 
 
 class ImageSize(str, Enum):
@@ -447,7 +450,7 @@ class RadientClient:
             headers["Content-Type"] = content_type
         return headers
 
-    def upload_agent_to_marketplace(self, zip_path) -> str:
+    def upload_agent_to_marketplace(self, zip_path: Path) -> str:
         """
         Upload a new agent to the Radient Agent Hub.
 
@@ -474,11 +477,7 @@ class RadientClient:
             # Return the first value (agent ID)
             return next(iter(data.values()))
         except requests.exceptions.RequestException as e:
-            error_body = (
-                e.response.content.decode()
-                if hasattr(e, "response") and e.response
-                else "No response body"
-            )
+            error_body = response_body(e)
             raise RuntimeError(
                 f"Failed to upload agent to Radient Agent Hub: {str(e)},"
                 f"Response Body: {error_body}"
@@ -486,7 +485,7 @@ class RadientClient:
         finally:
             files["file"][1].close()
 
-    def overwrite_agent_in_marketplace(self, agent_id: str, zip_path) -> None:
+    def overwrite_agent_in_marketplace(self, agent_id: str, zip_path: Path) -> None:
         """
         Overwrite an existing agent in the Radient Agent Hub.
 
@@ -504,11 +503,7 @@ class RadientClient:
             response = requests.put(url, headers=headers, files=files)
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
-            error_body = (
-                e.response.content.decode()
-                if hasattr(e, "response") and e.response
-                else "No response body"
-            )
+            error_body = response_body(e)
             raise RuntimeError(
                 f"Failed to overwrite agent in Radient Agent Hub: {str(e)},"
                 f"Response Body: {error_body}"
@@ -516,7 +511,7 @@ class RadientClient:
         finally:
             files["file"][1].close()
 
-    def download_agent_from_marketplace(self, agent_id: str, dest_path) -> None:
+    def download_agent_from_marketplace(self, agent_id: str, dest_path: Path) -> None:
         """
         Download an agent from the Radient Agent Hub.
 
@@ -538,11 +533,7 @@ class RadientClient:
                     if chunk:
                         f.write(chunk)
         except requests.exceptions.RequestException as e:
-            error_body = (
-                e.response.content.decode()
-                if hasattr(e, "response") and e.response
-                else "No response body"
-            )
+            error_body = response_body(e)
             raise RuntimeError(
                 f"Failed to download agent from Radient Agent Hub: {str(e)},"
                 f"Response Body: {error_body}"
@@ -570,13 +561,24 @@ class RadientClient:
             response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
             return response.json()
         except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 404:
+            # raise_for_status() always attaches the failing response, but HTTPError can
+            # also be raised without one, in which case there is nothing to inspect and
+            # this is reported the same way as any other response-less request failure.
+            error_response = e.response
+            if error_response is None:
+                raise RuntimeError(
+                    f"Failed to get agent {agent_id} from Radient Agent Hub due to a "
+                    f"network error: {str(e)}"
+                ) from e
+            if error_response.status_code == 404:
                 return None  # Agent not found
             # For other HTTP errors, raise a runtime error
-            error_body = e.response.content.decode() if e.response.content else "No response body"
+            error_body = (
+                error_response.content.decode() if error_response.content else NO_RESPONSE_BODY
+            )
             raise RuntimeError(
                 f"Failed to get agent {agent_id} from Radient Agent Hub: "
-                f"HTTP {e.response.status_code}, Response Body: {error_body}"
+                f"HTTP {error_response.status_code}, Response Body: {error_body}"
             ) from e
         except requests.exceptions.RequestException as e:
             # For non-HTTP request errors (e.g., connection issues)
@@ -605,9 +607,7 @@ class RadientClient:
         except requests.exceptions.RequestException as e:
             raise RuntimeError(
                 f"Failed to fetch Radient models due to a requests error: {str(e)},"
-                f"Response Body: {
-                    e.response.content.decode() if e.response else 'No response body'
-                }"
+                f"Response Body: {response_body(e)}"
             ) from e
         except Exception as e:
             raise RuntimeError(f"Failed to fetch Radient models: {str(e)}") from e
@@ -710,11 +710,7 @@ class RadientClient:
             )
 
         except requests.exceptions.RequestException as e:
-            error_body = (
-                e.response.content.decode()
-                if hasattr(e, "response") and e.response
-                else "No response body"
-            )
+            error_body = response_body(e)
             raise RuntimeError(
                 f"Failed to generate image: {str(e)}, Response Body: {error_body}"
             ) from e
@@ -750,11 +746,7 @@ class RadientClient:
             data = response.json()
             return RadientImageGenerationResponse.model_validate(data)
         except requests.exceptions.RequestException as e:
-            error_body = (
-                e.response.content.decode()
-                if hasattr(e, "response") and e.response
-                else "No response body"
-            )
+            error_body = response_body(e)
             raise RuntimeError(
                 f"Failed to get image generation status: {str(e)}, Response Body: {error_body}"
             ) from e
@@ -779,11 +771,7 @@ class RadientClient:
             data = response.json()
             return RadientImageGenerationProvidersResponse.model_validate(data)
         except requests.exceptions.RequestException as e:
-            error_body = (
-                e.response.content.decode()
-                if hasattr(e, "response") and e.response
-                else "No response body"
-            )
+            error_body = response_body(e)
             raise RuntimeError(
                 f"Failed to list image generation providers: {str(e)}, Response Body: {error_body}"
             ) from e
@@ -844,11 +832,7 @@ class RadientClient:
             data = response.json()
             return RadientSearchResponse.model_validate(data)
         except requests.exceptions.RequestException as e:
-            error_body = (
-                e.response.content.decode()
-                if hasattr(e, "response") and e.response
-                else "No response body"
-            )
+            error_body = response_body(e)
             raise RuntimeError(
                 f"Failed to execute search: {str(e)}, Response Body: {error_body}"
             ) from e
@@ -873,11 +857,7 @@ class RadientClient:
             data = response.json()
             return RadientSearchProvidersResponse.model_validate(data)
         except requests.exceptions.RequestException as e:
-            error_body = (
-                e.response.content.decode()
-                if hasattr(e, "response") and e.response
-                else "No response body"
-            )
+            error_body = response_body(e)
             raise RuntimeError(
                 f"Failed to list search providers: {str(e)}, Response Body: {error_body}"
             ) from e
@@ -901,17 +881,13 @@ class RadientClient:
             if response.status_code == 204:
                 return
             # If not 204, try to extract error details
-            error_body = response.content.decode() if response.content else "No response body"
+            error_body = response.content.decode() if response.content else NO_RESPONSE_BODY
             raise RuntimeError(
                 f"Failed to delete agent from Radient Agent Hub: HTTP {response.status_code}, "
                 f"Response Body: {error_body}"
             )
         except requests.exceptions.RequestException as e:
-            error_body = (
-                e.response.content.decode()
-                if hasattr(e, "response") and e.response
-                else "No response body"
-            )
+            error_body = response_body(e)
             raise RuntimeError(
                 f"Failed to delete agent from Radient Agent Hub: {str(e)}, "
                 f"Response Body: {error_body}"
@@ -948,11 +924,7 @@ class RadientClient:
                 raise RuntimeError("Failed to send email: No result data in response.")
             return api_response.result
         except requests.exceptions.RequestException as e:
-            error_body = (
-                e.response.content.decode()
-                if hasattr(e, "response") and e.response
-                else "No response body"
-            )
+            error_body = response_body(e)
             raise RuntimeError(
                 f"Failed to send email: {str(e)}, Response Body: {error_body}"
             ) from e
@@ -998,11 +970,7 @@ class RadientClient:
             # The actual token data is in api_response.result
             return api_response.result
         except requests.exceptions.RequestException as e:
-            error_body = (
-                e.response.content.decode()
-                if hasattr(e, "response") and e.response
-                else "No response body"
-            )
+            error_body = response_body(e)
             raise RuntimeError(
                 f"Failed to refresh token: {str(e)}, Response Body: {error_body}"
             ) from e
@@ -1083,11 +1051,7 @@ class RadientClient:
         except FileNotFoundError:
             raise FileNotFoundError(f"Audio file not found: {file_path}")
         except requests.exceptions.RequestException as e:
-            error_body = (
-                e.response.content.decode()
-                if hasattr(e, "response") and e.response
-                else "No response body"
-            )
+            error_body = response_body(e)
             raise RuntimeError(
                 f"Failed to create transcription: {str(e)}, Response Body: {error_body}"
             ) from e
@@ -1146,11 +1110,7 @@ class RadientClient:
             response.raise_for_status()
             return response.content
         except requests.exceptions.RequestException as e:
-            error_body = (
-                e.response.content.decode()
-                if hasattr(e, "response") and e.response and e.response.content
-                else "No response body"
-            )
+            error_body = response_body(e)
             raise RuntimeError(
                 f"Failed to generate speech: {str(e)}, Response Body: {error_body}"
             ) from e

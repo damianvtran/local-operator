@@ -3,6 +3,8 @@ from typing import Any, Dict, List
 import requests
 from pydantic import BaseModel, SecretStr
 
+from local_operator.clients._http import response_body
+
 
 class OpenRouterModelPricing(BaseModel):
     """Pricing information for an OpenRouter model.
@@ -107,7 +109,7 @@ class OpenRouterClient:
         except requests.exceptions.RequestException as e:
             raise RuntimeError(
                 f"Failed to fetch OpenRouter models due to a requests error: {str(e)}, Response"
-                f" Body: {e.response.content.decode() if e.response else 'No response body'}"
+                f" Body: {response_body(e)}"
             ) from e
         except Exception as e:
             raise RuntimeError(f"Failed to fetch OpenRouter models: {str(e)}") from e

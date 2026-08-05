@@ -59,6 +59,7 @@ import asyncio
 import inspect
 import logging
 import os
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Optional
 from uuid import UUID
@@ -73,6 +74,7 @@ from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
+from local_operator.harness.types import AgentEndEvent, AgentEvent, Message, MessageRole
 from local_operator.jobs import JobContextRecord, JobManager, JobStatus
 from local_operator.types import ConversationRole, OperatorType, Schedule, ScheduleUnit
 
@@ -97,7 +99,7 @@ Don't make assumptions about variables or data that are already in your context 
 """  # noqa: E501
 
 #: Harness message roles that map onto the legacy job-context ledger shape.
-_MESSAGE_ROLE_TO_CONVERSATION_ROLE = {
+_MESSAGE_ROLE_TO_CONVERSATION_ROLE: dict[MessageRole, ConversationRole] = {
     "user": ConversationRole.USER,
     "assistant": ConversationRole.ASSISTANT,
     "tool": ConversationRole.TOOL,
@@ -122,7 +124,7 @@ class SchedulerService:
         verbosity_level: VerbosityLevel,
         job_manager: JobManager,
         websocket_manager: "WebSocketManager",
-    ):
+    ) -> None:
         self.agent_registry = agent_registry
         self.config_manager = config_manager
         self.credential_manager = credential_manager
@@ -707,7 +709,7 @@ class SchedulerService:
 
     def _resolve_agent_cwd(self, agent_data: AgentData) -> Optional[str]:
         """The agent's working directory for session construction, if usable."""
-        raw = getattr(agent_data, "current_working_directory", None)
+        raw = agent_data.current_working_directory
         if not raw or raw == ".":
             return None
         expanded = os.path.expanduser(raw)
@@ -739,10 +741,10 @@ class SchedulerService:
             train=True,
         )
 
-        captured_events: list[Any] = []
+        captured_events: list[AgentEndEvent] = []
 
-        def _capture(event: Any) -> None:
-            if getattr(event, "type", None) == "agent_end":
+        def _capture(event: AgentEvent) -> None:
+            if isinstance(event, AgentEndEvent):
                 captured_events.append(event)
 
         # The agent's working directory is passed, not chdir'd: os.chdir is
@@ -760,21 +762,19 @@ class SchedulerService:
             cwd=cwd_override,
         )
 
-        unsubscribe = None
-        subscribe = getattr(session, "subscribe", None)
-        if callable(subscribe):
-            try:
-                unsubscribe = subscribe(_capture)
-            except Exception:
-                logger.debug("Session subscribe failed for scheduled run.", exc_info=True)
-                unsubscribe = None
+        unsubscribe: Callable[[], None] | None = None
+        try:
+            unsubscribe = session.subscribe(_capture)
+        except Exception:
+            logger.debug("Session subscribe failed for scheduled run.", exc_info=True)
+            unsubscribe = None
 
         full_prompt = f"{prompt}\n\n## Additional Instructions\n\n{SCHEDULE_INSTRUCTIONS}"
 
         try:
             await session.prompt(full_prompt)
         finally:
-            if callable(unsubscribe):
+            if unsubscribe is not None:
                 try:
                     unsubscribe()
                 except Exception:
@@ -787,30 +787,30 @@ class SchedulerService:
                 )
 
         end_event = captured_events[-1] if captured_events else None
-        messages = list(getattr(end_event, "messages", []) or []) if end_event is not None else []
+        messages = list(end_event.messages) if end_event is not None else []
 
-        if end_event is not None and getattr(end_event, "error", None):
+        if end_event is not None and end_event.error:
             raise RuntimeError(f"Scheduled run ended with error: {end_event.error}")
 
         response_text = ""
         for message in reversed(messages):
-            if getattr(message, "role", None) == "assistant":
-                text = getattr(message, "text", "") or ""
-                if text:
-                    response_text = text
-                    break
+            # CustomMessage entries are host plumbing (compaction summaries,
+            # skill prompts); only real LLM messages carry a role and text.
+            if isinstance(message, Message) and message.role == "assistant" and message.text:
+                response_text = message.text
+                break
 
         context_records: list[JobContextRecord] = []
         for message in messages:
-            conversation_role = _MESSAGE_ROLE_TO_CONVERSATION_ROLE.get(
-                getattr(message, "role", None)
-            )
-            if conversation_role is None:
+            if not isinstance(message, Message):
                 continue  # CustomMessage and other plumbing entries
+            conversation_role = _MESSAGE_ROLE_TO_CONVERSATION_ROLE.get(message.role)
+            if conversation_role is None:
+                continue  # a harness role with no ledger equivalent
             context_records.append(
                 JobContextRecord(
                     role=conversation_role,
-                    content=getattr(message, "text", "") or "",
+                    content=message.text,
                     files=None,
                 )
             )
@@ -887,7 +887,7 @@ class SchedulerService:
         payload: dict[str, Any] = {
             "type": "scheduled_job_status",
             "job_id": job_id,
-            "status": getattr(status, "value", str(status)),
+            "status": status.value,
         }
         if isinstance(result, dict):
             for key in ("error", "schedule_id", "agent_id"):

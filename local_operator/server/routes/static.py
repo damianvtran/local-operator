@@ -82,7 +82,7 @@ ALLOWED_HTML_TYPES: List[str] = [
 )
 async def get_image(
     path: str = Query(..., description="Path to the image file on disk"),
-):
+) -> FileResponse:
     """
     Serve an image file from disk. HEIC/HEIF files are automatically converted to PNG.
 
@@ -156,7 +156,7 @@ async def get_image(
 )
 async def get_video(
     path: str = Query(..., description="Path to the video file on disk"),
-):
+) -> FileResponse:
     """
     Serve a video file from disk.
 
@@ -212,7 +212,7 @@ async def get_video(
 )
 async def get_audio(
     path: str = Query(..., description="Path to the audio file on disk"),
-):
+) -> FileResponse:
     """
     Serve an audio file from disk.
 

@@ -18,7 +18,7 @@ import base64
 import json
 import time
 import urllib.parse
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -28,6 +28,7 @@ from local_operator.providers.oauth.callback_server import (
     LoginCallbacks,
     LoginError,
     OAuthCallbackFlow,
+    maybe_await,
 )
 from local_operator.providers.oauth.device_code import DevicePollResult, poll_device_code_flow
 from local_operator.providers.oauth.pkce import create_pkce_pair
@@ -139,7 +140,7 @@ class OpenAIOAuthFlow(OAuthCallbackFlow):
         self,
         callbacks: LoginCallbacks | None = None,
         *,
-        open_browser: Any = None,
+        open_browser: Callable[[str], None] | None = None,
         signal: AbortSignal | None = None,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -202,7 +203,7 @@ async def login_openai(
     *,
     signal: AbortSignal | None = None,
     http_client: httpx.AsyncClient | None = None,  # reserved for tests
-    open_browser: Any = None,
+    open_browser: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Run the browser flow; returns OAuthCredentials dict."""
     flow = OpenAIOAuthFlow(
@@ -239,9 +240,9 @@ async def login_openai_device(
         interval = max(1.0, float(device.get("interval", 5)))
 
         if callbacks.on_auth_url is not None:
-            result = callbacks.on_auth_url(DEVICE_PAGE_URL, instructions=f"Enter code: {user_code}")
-            if hasattr(result, "__await__"):
-                await result
+            await maybe_await(
+                callbacks.on_auth_url(DEVICE_PAGE_URL, instructions=f"Enter code: {user_code}")
+            )
 
         async def _poll() -> DevicePollResult[dict[str, Any]]:
             response = await http.post(

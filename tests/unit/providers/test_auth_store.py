@@ -4,6 +4,7 @@ rotation, blocking. No network: fakes for the refresh capability."""
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,7 @@ pytestmark = pytest.mark.asyncio
 
 
 @pytest.fixture()
-def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AuthStore:
+def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[AuthStore]:
     # Hermeticity: the env-tier legacy loader reads ~/.local-operator/
     # credentials.env; point it at an empty dir so real user keys never leak in.
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "empty-config"))

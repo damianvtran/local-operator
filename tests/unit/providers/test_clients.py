@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
 import httpx
@@ -30,7 +31,7 @@ from local_operator.providers.failover import ProviderError
 pytestmark = pytest.mark.asyncio
 
 
-def _sse(payloads: list[dict[str, Any] | str]) -> bytes:
+def _sse(payloads: Sequence[dict[str, Any] | str]) -> bytes:
     """Render an SSE body (dicts as data JSON, strings verbatim)."""
     lines = []
     for payload in payloads:

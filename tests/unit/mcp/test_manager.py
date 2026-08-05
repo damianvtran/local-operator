@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 
 from local_operator.harness.types import ToolContext, ToolResult
 from local_operator.mcp.manager import (
@@ -24,29 +25,31 @@ from local_operator.mcp.manager import (
 from local_operator.mcp.tool_cache import McpToolCache
 
 
-def _tool(name: str, schema: dict | None = None) -> SimpleNamespace:
-    """SDK-shaped Tool model stand-in."""
-    return SimpleNamespace(
+def _tool(name: str, schema: dict | None = None) -> Tool:
+    """One SDK ``Tool`` as a server would advertise it."""
+    return Tool(
         name=name,
         description=f"{name} desc",
-        input_schema=schema or {"type": "object", "properties": {"q": {"type": "string"}}},
+        inputSchema=schema or {"type": "object", "properties": {"q": {"type": "string"}}},
     )
 
 
 class FakeSession:
     """ClientSession stand-in: records calls, returns canned results."""
 
-    def __init__(self, call_result: Any = None, raise_on_call: Exception | None = None) -> None:
+    def __init__(
+        self, call_result: CallToolResult | None = None, raise_on_call: Exception | None = None
+    ) -> None:
         self.calls: list[tuple[str, dict]] = []
-        self.call_result = call_result or SimpleNamespace(
-            content=[SimpleNamespace(type="text", text="ok")], is_error=False
+        self.call_result = call_result or CallToolResult(
+            content=[TextContent(type="text", text="ok")], isError=False
         )
         self.raise_on_call = raise_on_call
 
-    async def list_tools(self, params: Any = None) -> SimpleNamespace:
-        return SimpleNamespace(tools=[_tool("search")], next_cursor=None)
+    async def list_tools(self, params: Any = None) -> ListToolsResult:
+        return ListToolsResult(tools=[_tool("search")], nextCursor=None)
 
-    async def call_tool(self, name: str, arguments: dict | None, **kwargs: Any) -> Any:
+    async def call_tool(self, name: str, arguments: dict | None, **kwargs: Any) -> CallToolResult:
         self.calls.append((name, dict(arguments or {})))
         if self.raise_on_call is not None:
             raise self.raise_on_call

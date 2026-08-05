@@ -38,6 +38,10 @@ from local_operator.model.configure import ModelConfiguration, configure_model
 from local_operator.types import OperatorType
 
 if TYPE_CHECKING:
+    # Type-only: the server facade and scheduler both import bootstrap, so
+    # naming their types here must not create an import cycle at runtime.
+    from local_operator.scheduler_service import SchedulerService
+    from local_operator.server.utils.operator import StatusQueue
     from local_operator.session.protocol import SessionProtocol
 
 logger = get_logger()
@@ -160,8 +164,8 @@ async def initialize_operator(
     agent_registry: AgentRegistry,
     env_config: EnvConfig,
     sampling_overrides: Optional[dict[str, float]] = None,
-    scheduler_service: Optional[Any] = None,
-    status_queue: Optional[Any] = None,
+    scheduler_service: Optional[SchedulerService] = None,
+    status_queue: Optional[StatusQueue] = None,
     request_hosting: Optional[str] = None,
     request_model: Optional[str] = None,
     current_agent: Optional[AgentData] = None,
@@ -222,8 +226,9 @@ async def initialize_operator(
             for key, value in sampling_overrides.items()
             if key in ("temperature", "top_p") and value is not None
         }
-        set_model = getattr(session, "set_model", None)
-        model = getattr(session, "model", None)
-        if updates and callable(set_model) and model is not None:
-            set_model(model.model_copy(update=updates))
+        if updates:
+            # ``set_model``/``model`` are declared on SessionProtocol, so the
+            # override applies straight to the live spec; sampling rides on
+            # the ModelSpec and the loop re-reads it every turn.
+            session.set_model(session.model.model_copy(update=updates))
     return session

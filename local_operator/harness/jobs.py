@@ -289,7 +289,10 @@ class AsyncJobManager:
             self._sweep_due()
 
     async def _deliver(self, job: AsyncJob) -> None:
-        text = job.result_text if job.status == "completed" else (job.error_text or "")
+        # ``_run_job`` always stores a string on completion, so the ``or ""``
+        # is belt-and-braces: it keeps the sink's ``str`` contract total even
+        # if a row is ever built or replayed without one.
+        text = (job.result_text or "") if job.status == "completed" else (job.error_text or "")
         if job.owner_id is not None:
             sink = self._sinks.get(job.owner_id)
             if sink is None:

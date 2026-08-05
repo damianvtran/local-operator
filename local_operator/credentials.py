@@ -33,7 +33,7 @@ class CredentialManager:
     config_file: Path
     credentials: Dict[str, SecretStr]
 
-    def __init__(self, config_dir: Path):
+    def __init__(self, config_dir: Path) -> None:
         self.config_dir = config_dir
         self.config_file = self.config_dir / CREDENTIALS_FILE_NAME
         self._ensure_config_exists()
@@ -52,13 +52,13 @@ class CredentialManager:
 
         return self.credentials
 
-    def write_to_file(self):
+    def write_to_file(self) -> None:
         """Write credentials to the config file."""
         with open(self.config_file, "w") as f:
             for key, value in self.credentials.items():
                 f.write(f"{key}={value.get_secret_value()}\n")
 
-    def _ensure_config_exists(self):
+    def _ensure_config_exists(self) -> None:
         """Ensure the credentials configuration file exists and has proper permissions.
 
         Creates the config directory and credentials file if they don't exist.
@@ -110,7 +110,7 @@ class CredentialManager:
 
         return output
 
-    def set_credential(self, key: str, value: str, write: bool = True):
+    def set_credential(self, key: str, value: str, write: bool = True) -> None:
         """Set the credential in the config file.
         If the key already exists, it will be updated.
         If the key does not exist, it will be added.
