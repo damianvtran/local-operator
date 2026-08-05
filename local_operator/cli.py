@@ -39,13 +39,16 @@ import sys
 import traceback
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import uvicorn
 
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config
+
+if TYPE_CHECKING:
+    from local_operator.agents import AgentRegistry
 from local_operator.helpers import setup_cross_platform_environment
 
 CLI_DESCRIPTION = """

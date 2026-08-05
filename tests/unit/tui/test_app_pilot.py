@@ -7,14 +7,12 @@ paints first, then awaits the session in a worker.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import pytest
 
-from local_operator.session.protocol import SessionProtocol
 from local_operator.tui.app import OperatorApp, SLASH_COMMANDS
-from local_operator.tui.widgets.editor import Editor, InterruptRequested
+from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
 
@@ -353,7 +351,7 @@ async def test_skills_and_mcp_commands_never_crash() -> None:
 
 
 # --- autocomplete scoring (sync, I/O-free) --------------------------------
-from local_operator.tui.autocomplete import (
+from local_operator.tui.autocomplete import (  # noqa: E402
     SlashCommand,
     complete_command,
     match_commands,

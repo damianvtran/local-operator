@@ -3,7 +3,6 @@
 import importlib.resources
 import re
 
-import pytest
 
 from local_operator.compaction import api as compaction_api
 from local_operator.compaction.api import (
@@ -13,7 +12,6 @@ from local_operator.compaction.api import (
     build_compaction_prompt,
     extract_file_ops_from_messages,
     format_file_operations,
-    render_file_operations,
     serialize_conversation,
     summarize_messages,
     upsert_file_operations,

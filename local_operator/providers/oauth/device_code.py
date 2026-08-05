@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, Awaitable, Callable, Generic, Literal, TypeVar
+from typing import Awaitable, Callable, Generic, Literal, TypeVar
 
 from local_operator.harness.types import AbortSignal
 from local_operator.providers.oauth.callback_server import (

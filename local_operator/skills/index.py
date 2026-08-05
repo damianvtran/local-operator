@@ -101,6 +101,11 @@ def _identity_digest(skills: Sequence[Skill], backend: EmbeddingBackend) -> str:
     return digest.hexdigest()[:16]
 
 
+def _backend_kind(backend: EmbeddingBackend) -> str:
+    """Short class name identifying the backend's persisted identity."""
+    return type(backend).__name__
+
+
 def _backend_meta(backend: EmbeddingBackend) -> Mapping[str, object]:
     """The backend's persisted identity. Any mismatch on load = cache miss.
 
@@ -110,7 +115,7 @@ def _backend_meta(backend: EmbeddingBackend) -> Mapping[str, object]:
     backend may only know after its first response.)
     """
     meta: dict[str, object] = {
-        "backend": type(backend).__name__,
+        "backend": _backend_kind(backend),
         "model": getattr(backend, "model", None),
         "base_url": getattr(backend, "base_url", None),
     }
@@ -253,7 +258,7 @@ class SkillIndex:
         if (
             meta.get("hash") != content_hash
             or meta.get("order") != [skill.name for skill in self.skills]
-            or meta.get("backend") != type(self.backend).__name__
+            or meta.get("backend") != _backend_kind(self.backend)
             or meta.get("model") != getattr(self.backend, "model", None)
             or meta.get("base_url") != getattr(self.backend, "base_url", None)
         ):

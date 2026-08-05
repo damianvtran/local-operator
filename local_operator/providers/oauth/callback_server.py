@@ -227,11 +227,11 @@ class OAuthCallbackFlow(ABC):
                             "Authorization callback state mismatch — stale tab or forged "
                             "redirect. Restart the login."
                         )
-                        body = b"<html><body><h1>Login failed</h1><p>You may close this tab.</p></body></html>"
+                        body = b"<html><body><h1>Login failed</h1><p>You may close this tab.</p></body></html>"  # noqa: E501
                         await self._respond(writer, 200, body)
                     else:
                         self._finish(code, state)
-                        body = b"<html><body><h1>Login complete</h1><p>You may close this tab.</p></body></html>"
+                        body = b"<html><body><h1>Login complete</h1><p>You may close this tab.</p></body></html>"  # noqa: E501
                         await self._respond(writer, 200, body)
                 else:
                     # PR-14: no code AND no error — fail the login promptly
@@ -240,7 +240,7 @@ class OAuthCallbackFlow(ABC):
                         "Authorization callback arrived with neither a code nor an error "
                         "parameter. Restart the login."
                     )
-                    body = b"<html><body><h1>Login failed</h1><p>You may close this tab.</p></body></html>"
+                    body = b"<html><body><h1>Login failed</h1><p>You may close this tab.</p></body></html>"  # noqa: E501
                     await self._respond(writer, 200, body)
         elif path == "/launch" and method == "GET":
             if self._pending_auth_url:

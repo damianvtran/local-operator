@@ -21,7 +21,7 @@ from __future__ import annotations
 import email.utils
 import json
 import time
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import timezone
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -37,7 +37,6 @@ from local_operator.harness.types import (
     StreamToolCallDelta,
     StreamUsageEvent,
     TextContent,
-    ToolCall,
     Usage,
 )
 from local_operator.providers.failover import ProviderError

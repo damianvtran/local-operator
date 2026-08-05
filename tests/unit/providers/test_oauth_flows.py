@@ -528,7 +528,6 @@ async def test_kimi_slow_down_updates_poller_interval(monkeypatch: pytest.Monkey
     """PR-10: a slow_down payload with a larger interval raises the poller's
     interval via the mutable holder."""
     from local_operator.providers.oauth.kimi import (
-        DEFAULT_AUTH_HOST,
         DEVICE_AUTHORIZATION_PATH,
         TOKEN_PATH,
         login_kimi,
@@ -610,9 +609,7 @@ async def test_anthropic_login_via_browser_redirect_without_paste(
     browser redirect alone, with NO paste callback attached."""
     from local_operator.providers.oauth.anthropic import (
         AUTHORIZE_URL,
-        CALLBACK_PORT,
         TOKEN_URL,
-        login_anthropic,
     )
 
     def handler(request: httpx.Request) -> httpx.Response:

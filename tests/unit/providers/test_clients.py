@@ -417,8 +417,8 @@ async def test_mock_client_tool_branch() -> None:
 # ---------------------------------------------------------------------------
 
 
-from local_operator.providers.auth_store import OAuthAccess
-from local_operator.providers.clients import GoogleClient
+from local_operator.providers.auth_store import OAuthAccess  # noqa: E402
+from local_operator.providers.clients import GoogleClient  # noqa: E402
 
 
 async def test_anthropic_oauth_sends_bearer_and_beta_header() -> None:

@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -40,6 +41,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from local_operator.providers.registry import ProviderDefinition, get_provider_definition
+
+logger = logging.getLogger("local_operator.providers.auth_store")
 
 OAUTH_REFRESH_SKEW_MS = 60_000  # pre-emptive refresh trigger
 DEFAULT_BLOCK_MS = 60_000  # rate-limit / 401 backoff
@@ -280,12 +283,14 @@ class AuthStore:
 
         if identity is not None:
             row = self._conn.execute(
-                "SELECT id FROM auth_credentials WHERE provider = ? AND identity_key = ? ORDER BY id",
+                "SELECT id FROM auth_credentials WHERE provider = ? "
+                "AND identity_key = ? ORDER BY id",
                 (provider, identity),
             ).fetchone()
             if row is not None:
                 self._conn.execute(
-                    "UPDATE auth_credentials SET credential_type = ?, data = ?, disabled_cause = NULL,"
+                    "UPDATE auth_credentials SET credential_type = ?, data = ?, "
+                    "disabled_cause = NULL,"
                     " updated_at = ? WHERE id = ?",
                     (credential_type, data_json, now, row[0]),
                 )
@@ -293,7 +298,8 @@ class AuthStore:
                 return self.get_credential(row[0])  # type: ignore[return-value]
 
         cursor = self._conn.execute(
-            "INSERT INTO auth_credentials (provider, credential_type, data, identity_key, created_at, updated_at)"
+            "INSERT INTO auth_credentials "
+            "(provider, credential_type, data, identity_key, created_at, updated_at)"
             " VALUES (?, ?, ?, ?, ?, ?)",
             (provider, credential_type, data_json, identity, now, now),
         )
@@ -350,7 +356,8 @@ class AuthStore:
             "INSERT INTO auth_credential_blocks (credential_id, provider_key, block_scope,"
             " blocked_until_ms, updated_at) VALUES (?, ?, ?, ?, ?)"
             " ON CONFLICT(credential_id, provider_key, block_scope)"
-            " DO UPDATE SET blocked_until_ms = excluded.blocked_until_ms, updated_at = excluded.updated_at",
+            " DO UPDATE SET blocked_until_ms = excluded.blocked_until_ms, "
+            "updated_at = excluded.updated_at",
             (credential_id, provider_key, block_scope, until, self._now_ms()),
         )
         self._conn.commit()

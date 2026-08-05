@@ -37,7 +37,7 @@ import logging
 from collections import OrderedDict
 from typing import Callable, Sequence
 
-from local_operator.harness.types import ImageContent, Message, TextContent
+from local_operator.harness.types import Message, TextContent
 
 logger = logging.getLogger(__name__)
 
