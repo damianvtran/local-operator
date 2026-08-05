@@ -21,6 +21,10 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Union
 
+# Imaging lives behind the `images` extra: Pillow and pillow-heif are both
+# compiled wheels, and HEIC/HEIF attachments are a niche input the core agent
+# never needs. Probing here (rather than at each call site) keeps the flag
+# cheap and the failure mode explicit.
 try:
     from PIL import Image
     from pillow_heif import register_heif_opener
@@ -29,18 +33,20 @@ try:
     register_heif_opener()
     HEIF_SUPPORT = True
 except ImportError:
-    # PIL and pillow_heif are optional dependencies
     Image = None  # type: ignore
     HEIF_SUPPORT = False
 
+from local_operator.optional import missing_extra_error
 from local_operator.types import ResponseJsonSchema
 
-# Configure logging (optional, but helpful for debugging)
-# Use sys.stdout to ensure logs appear if running as a GUI app without a console
-# Note: BasicConfig should ideally be called only once at application entry point.
-# If called elsewhere, it might not reconfigure. Consider moving this to main app setup.
+# Logging goes to STDERR, never stdout. stdout is a DATA channel: `exec --json`
+# writes one JSON event per line there, and any log record interleaved into it
+# corrupts the stream for a strict per-line json.loads consumer (httpx logs an
+# INFO line per request, which is exactly the traffic an agent run generates).
+# Note: basicConfig only takes effect on the first call; the application entry
+# point owns any further configuration.
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", stream=sys.stdout
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", stream=sys.stderr
 )
 logger = logging.getLogger(__name__)
 
@@ -680,7 +686,7 @@ def convert_heic_to_png_data_url(file_path: Union[str, Path]) -> Tuple[str, str]
         Exception: If HEIF support is not available or conversion fails
     """
     if not HEIF_SUPPORT or Image is None:
-        raise Exception("HEIF support not available. Please install pillow-heif.")
+        raise Exception(missing_extra_error("images", "HEIC/HEIF conversion"))
 
     try:
         # Open and convert HEIC/HEIF to PNG in memory
@@ -717,7 +723,7 @@ def convert_heic_to_png_file(heic_path: Union[str, Path]) -> Path:
         Exception: If conversion fails or HEIF support is not available
     """
     if not HEIF_SUPPORT or Image is None:
-        raise Exception("HEIF support not available. Please install pillow-heif.")
+        raise Exception(missing_extra_error("images", "HEIC/HEIF conversion"))
 
     heic_path = Path(heic_path)
 

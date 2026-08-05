@@ -28,6 +28,7 @@ package exports only the manager surface; consumers must drive lifecycle.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import logging
 import os
 import re
@@ -35,13 +36,20 @@ import shutil
 import subprocess
 import sys
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict, TypeVar
 
-from local_operator.harness.types import AgentTool, TextContent, ToolResult
+from local_operator.harness.types import (
+    AbortSignal,
+    AgentTool,
+    AgentToolUpdate,
+    TextContent,
+    ToolContext,
+    ToolResult,
+)
 from local_operator.mcp.config import (
     MCPHttpServerConfig,
     MCPServerConfig,
@@ -58,8 +66,37 @@ from local_operator.mcp.tool_bridge import (
     prepare_outbound_args,
 )
 from local_operator.mcp.tool_cache import McpToolCache
+from local_operator.optional import missing_extra_error
+
+if TYPE_CHECKING:
+    # Annotation-only SDK references: the extra may be absent, and even when
+    # it is installed the real imports stay at their call sites so config-only
+    # callers never pay for the transport machinery.
+    from mcp.client.auth import OAuthClientProvider
+    from mcp.client.session import IncomingMessage
+    from mcp.client.streamable_http import TransportStreams
+    from mcp.types import CallToolResult, ListToolsResult, PaginatedRequestParams, Tool
+
+    from local_operator.mcp.auth import ManagedAuthStore
 
 logger = logging.getLogger(__name__)
+
+# Result of one tool call raced against an abort; ``_race_abort`` is
+# transparent to whatever the call itself resolves to.
+_RaceT = TypeVar("_RaceT")
+
+
+def _sdk_available() -> bool:
+    """Whether the MCP client SDK is importable.
+
+    The SDK is an optional extra: it drags in a TLS stack, a JSON Schema
+    validator, and (on Windows) the pywin32 bundle, none of which the core
+    agent needs. Probing with :func:`importlib.util.find_spec` avoids paying
+    the import cost just to answer the question — the real imports stay at
+    their call sites.
+    """
+    return importlib.util.find_spec("mcp") is not None
+
 
 # Fast-startup gate: how long discovery blocks before deferring slow servers.
 STARTUP_GATE_MS = 250
@@ -83,8 +120,13 @@ class McpConnectionError(RuntimeError):
     """Raised when a server cannot be reached (deferred execute path)."""
 
 
-def _settle_future_error(future: asyncio.Future[Any], exc: Exception) -> None:
-    """Set an exception on ``future`` and consume it so waiters raise cleanly."""
+def _settle_future_error(future: asyncio.Future[ServerConnection] | None, exc: Exception) -> None:
+    """Set an exception on ``future`` and consume it so waiters raise cleanly.
+
+    ``None`` is a no-op on purpose: every caller reaches for the waiter with
+    ``dict.get``/``dict.pop``, and "there was nobody parked on this server"
+    is the ordinary case, not an error.
+    """
     if future is not None and not future.done():
         future.set_exception(exc)
         future.exception()  # mark retrieved; waiters still see the raise
@@ -223,7 +265,9 @@ def stdio_start_new_session() -> bool:
 
 
 @asynccontextmanager
-async def _stdio_transport(cfg: MCPStdioServerConfig, on_close: Callable[[], None]):
+async def _stdio_transport(
+    cfg: MCPStdioServerConfig, on_close: Callable[[], None]
+) -> AsyncIterator[TransportStreams]:
     """Spawn an MCP stdio server and pump newline-delimited JSON-RPC.
 
     An SDK-shaped transport context manager (yields ``(read_stream,
@@ -312,8 +356,10 @@ async def _stdio_transport(cfg: MCPStdioServerConfig, on_close: Callable[[], Non
 
     async def _stop() -> None:
         """Close stdin, give the server a grace window, then kill the tree."""
-        with suppress(Exception):
-            await process.stdin.aclose()
+        stdin = process.stdin
+        if stdin is not None:
+            with suppress(Exception):
+                await stdin.aclose()
         exited = False
         for _ in range(20):
             if process.returncode is not None:
@@ -321,9 +367,9 @@ async def _stdio_transport(cfg: MCPStdioServerConfig, on_close: Callable[[], Non
                 break
             await asyncio.sleep(0.1)
         if not exited:
-            for signal_name in ("terminate", "kill"):
+            for stop_process in (process.terminate, process.kill):
                 with suppress(Exception):
-                    getattr(process, signal_name)()
+                    stop_process()
                 for _ in range(20):
                     if process.returncode is not None:
                         break
@@ -350,17 +396,51 @@ async def _stdio_transport(cfg: MCPStdioServerConfig, on_close: Callable[[], Non
 # ---------------------------------------------------------------------------
 
 
+class McpSession(Protocol):
+    """The ``ClientSession`` slice this manager drives.
+
+    Structural on purpose: the SDK's ``ClientSession`` satisfies it, and so
+    do the in-process fakes that stand in for a server in tests, without
+    either side depending on the other. Only the two request methods the
+    manager actually issues are declared.
+    """
+
+    async def list_tools(self, *, params: PaginatedRequestParams | None = None) -> ListToolsResult:
+        """One page of ``tools/list``."""
+        ...
+
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        read_timeout_seconds: float | None = None,
+    ) -> CallToolResult:
+        """Invoke one tool and wait for its result."""
+        ...
+
+
 @dataclass
 class ServerConnection:
     """One live MCP connection: session plus the resources that own it."""
 
     name: str
     config: MCPServerConfig
-    session: Any  # mcp ClientSession (Any keeps fakes viable in tests)
-    tools: list[Any] = field(default_factory=list)
+    # ``None`` only during the window in which the transport callbacks close
+    # over this object while its session is still being constructed; use
+    # :attr:`live_session` everywhere else.
+    session: McpSession | None = None
+    tools: list[Tool] = field(default_factory=list)
     stack: AsyncExitStack | None = None
     closed_event: asyncio.Event = field(default_factory=asyncio.Event)
     source: str = ""
+
+    @property
+    def live_session(self) -> McpSession:
+        """The session, which every caller past the open handshake has."""
+        session = self.session
+        if session is None:
+            raise McpConnectionError(f"MCP server {self.name!r} has no live session")
+        return session
 
 
 @dataclass
@@ -375,23 +455,31 @@ class McpLoadResult:
 ToolsChangedCallback = Callable[[list[AgentTool]], Awaitable[None] | None]
 
 
+class McpToolMeta(TypedDict, total=False):
+    """Origin bookkeeping for one minted tool name.
+
+    ``agent_name`` is filled in by :meth:`McpManager._rebuild_agent_names`
+    once collision suffixing has resolved, so it is absent from the entry a
+    tool is first registered with.
+    """
+
+    server_name: str
+    mcp_tool_name: str
+    deferred: bool
+    agent_name: str
+
+
 # Abort semantics: an abort racing a tool call raises ``asyncio.CancelledError``
 # (MCP-16, "abort stays abort") so it propagates like any outer cancellation and
 # is NEVER mapped to a tool error result by the call path.
 
 
-def _tool_to_cache_entry(tool: Any) -> dict[str, Any]:
-    """Serialize one SDK ``Tool`` (or dict) into the cache JSON shape."""
-    if isinstance(tool, dict):
-        return {
-            "name": tool.get("name", ""),
-            "description": tool.get("description", "") or "",
-            "inputSchema": tool.get("inputSchema") or tool.get("input_schema") or {},
-        }
+def _tool_to_cache_entry(tool: Tool) -> dict[str, Any]:
+    """Serialize one SDK ``Tool`` into the cache JSON shape."""
     return {
-        "name": getattr(tool, "name", ""),
-        "description": getattr(tool, "description", "") or "",
-        "inputSchema": getattr(tool, "input_schema", None) or {},
+        "name": tool.name,
+        "description": tool.description or "",
+        "inputSchema": tool.input_schema or {},
     }
 
 
@@ -406,7 +494,7 @@ class McpManager:
         self,
         cwd: str | os.PathLike[str],
         tool_cache: McpToolCache | None = None,
-        auth_store: Any = None,
+        auth_store: ManagedAuthStore | None = None,
     ) -> None:
         self.cwd = str(cwd)
         self.tool_cache = tool_cache
@@ -415,7 +503,7 @@ class McpManager:
         # connection (which nothing closed — one leaked WAL handle per
         # reconnect). None means the manager constructs and owns one, closed
         # in disconnect_all.
-        self.auth_store = auth_store
+        self.auth_store: ManagedAuthStore | None = auth_store
         self._owns_auth_store = auth_store is None
         self._configs: dict[str, MCPServerConfig] = {}
         self._sources: dict[str, str] = {}
@@ -440,10 +528,9 @@ class McpManager:
         self._on_tools_changed: ToolsChangedCallback | None = None
         # Tool-name collision state keyed by stable origin key (MCP-09):
         # (server name, original tool name), never registration order.
-        self._tool_meta: dict[str, dict[str, Any]] = {}
-        self._name_claimants: dict[str, set[tuple[str, str]]] = {}
+        self._tool_meta: dict[str, McpToolMeta] = {}
         self._tool_by_origin: dict[tuple[str, str], AgentTool] = {}
-        self._meta_by_origin: dict[tuple[str, str], dict[str, Any]] = {}
+        self._meta_by_origin: dict[tuple[str, str], McpToolMeta] = {}
         self._origins_by_server: dict[str, set[tuple[str, str]]] = {}
         # First-connect security surface (MCP-12): one warning per server.
         self._security_logged: set[str] = set()
@@ -552,6 +639,15 @@ class McpManager:
         self._disposed = False
 
         result = McpLoadResult()
+        if configs and not _sdk_available():
+            # One actionable line instead of the same opaque
+            # "No module named 'mcp'" repeated per configured server. The
+            # session treats MCP as enrichment, so this surfaces as a warning
+            # and the turn proceeds with zero MCP tools.
+            message = missing_extra_error("mcp", "Connecting to MCP servers")
+            result.errors.update({name: message for name in configs})
+            return result
+
         tasks: dict[str, asyncio.Task[ServerConnection]] = {}
         for name, cfg in configs.items():
             errors = validate_server_config(name, cfg)
@@ -629,7 +725,7 @@ class McpManager:
         if conn is None:
             return
         try:
-            tools = await self._list_all_tools(conn.session)
+            tools = await self._list_all_tools(conn.live_session)
         except Exception as exc:
             logger.warning("MCP tools refresh failed for %r: %s", name, exc)
             return
@@ -729,7 +825,7 @@ class McpManager:
             raise
 
         try:
-            tools = await self._list_all_tools(conn.session)
+            tools = await self._list_all_tools(conn.live_session)
         except BaseException:
             await stack.aclose()
             raise
@@ -753,7 +849,6 @@ class McpManager:
         conn = ServerConnection(
             name=name,
             config=cfg,
-            session=None,
             stack=stack,
             source=self._sources.get(name, ""),
         )
@@ -780,8 +875,8 @@ class McpManager:
 
         read_stream, write_stream = await stack.enter_async_context(streams_cm)
 
-        def _message_handler(message: Any) -> Awaitable[None]:
-            return self._on_session_message(name, conn, message)
+        async def _message_handler(message: IncomingMessage) -> None:
+            await self._on_session_message(name, conn, message)
 
         session = ClientSession(
             read_stream=read_stream,
@@ -795,7 +890,7 @@ class McpManager:
         conn.session = session
         return conn
 
-    def _effective_auth_store(self) -> Any:
+    def _effective_auth_store(self) -> ManagedAuthStore | None:
         """The injected session store, or one this manager owns and closes."""
         if self.auth_store is not None:
             return self.auth_store
@@ -809,9 +904,9 @@ class McpManager:
             logger.debug("providers.auth_store unavailable", exc_info=True)
             return None
 
-    def _build_oauth_auth(self, url: str, cfg: MCPServerConfig) -> Any | None:
+    def _build_oauth_auth(self, url: str, cfg: MCPServerConfig) -> OAuthClientProvider | None:
         """Build an ``OAuthClientProvider`` for configs with ``auth.type=oauth``."""
-        auth = getattr(cfg, "auth", None)
+        auth = cfg.auth
         if auth is None or auth.type != "oauth":
             return None
         try:
@@ -828,7 +923,9 @@ class McpManager:
             )
             return None
 
-    async def _on_session_message(self, name: str, conn: ServerConnection, message: Any) -> None:
+    async def _on_session_message(
+        self, name: str, conn: ServerConnection, message: IncomingMessage
+    ) -> None:
         """Session message_handler: notifications + transport faults.
 
         ``tools/list_changed`` refreshes the server's tools; transport-level
@@ -839,8 +936,7 @@ class McpManager:
                 conn.closed_event.set()
                 self._handle_disconnect(name)
             return
-        method = getattr(message, "method", "")
-        if method == "notifications/tools/list_changed":
+        if message.method == "notifications/tools/list_changed":
             # NEVER await a tools/list round trip inline here: the SDK invokes
             # this handler while holding its read loop (mcp/client/session.py
             # ~1430-1453), so an inline refresh deadlocks in-process servers.
@@ -925,7 +1021,7 @@ class McpManager:
             source,
         )
 
-    def _register_tools(self, name: str, tools: list[Any]) -> None:
+    def _register_tools(self, name: str, tools: list[Tool]) -> None:
         """Build AgentTools for one server's tool list (live, not deferred)."""
         self._unregister_origins(name)
         self._tools_by_server[name] = [
@@ -933,7 +1029,9 @@ class McpManager:
         ]
         self._rebuild_agent_names()
 
-    def _build_tool(self, server_name: str, tool: Any, *, deferred: bool) -> AgentTool:
+    def _build_tool(
+        self, server_name: str, tool: Tool | dict[str, Any], *, deferred: bool
+    ) -> AgentTool:
         """Wrap one tool (SDK model or cached dict) with the manager call path.
 
         The tool is recorded under its stable origin key ``(server_name,
@@ -942,17 +1040,17 @@ class McpManager:
         suffixing) are resolved centrally in :meth:`_rebuild_agent_names`.
         """
         if isinstance(tool, dict):
-            mcp_tool_name = tool.get("name", "") or ""
+            mcp_tool_name: str = tool.get("name", "") or ""
         else:
-            mcp_tool_name = getattr(tool, "name", "") or ""
+            mcp_tool_name = tool.name
         origin = (server_name, mcp_tool_name)
 
         async def _call(
             tool_call_id: str,
             args: dict[str, Any],
-            signal: Any,
-            on_update: Any,
-            context: Any,
+            signal: AbortSignal | None,
+            on_update: Callable[[AgentToolUpdate], None] | None,
+            context: ToolContext,
         ) -> ToolResult:
             return await self._execute_tool_call(
                 server_name, mcp_tool_name, tool_call_id, args, signal, deferred=deferred
@@ -1007,8 +1105,7 @@ class McpManager:
                 )
             owners[name] = origin
             agent_tool.name = name
-            meta = dict(self._meta_by_origin.get(origin, {}))
-            meta["agent_name"] = name
+            meta: McpToolMeta = {**self._meta_by_origin.get(origin, {}), "agent_name": name}
             self._tool_meta[name] = meta
 
     async def _execute_tool_call(
@@ -1017,7 +1114,7 @@ class McpManager:
         mcp_tool_name: str,
         tool_call_id: str,
         args: dict[str, Any],
-        signal: Any,
+        signal: AbortSignal | None,
         *,
         deferred: bool,
     ) -> ToolResult:
@@ -1039,13 +1136,13 @@ class McpManager:
         properties, required, additional = self._schema_parts(conn, mcp_tool_name)
         outbound = prepare_outbound_args(args, properties, required, additional)
 
-        async def _call_once() -> Any:
+        async def _call_once() -> CallToolResult:
             timeout_s = resolve_mcp_timeout_s(conn.config)
             if timeout_s is not None:
-                return await conn.session.call_tool(
+                return await conn.live_session.call_tool(
                     mcp_tool_name, outbound, read_timeout_seconds=timeout_s
                 )
-            return await conn.session.call_tool(mcp_tool_name, outbound)
+            return await conn.live_session.call_tool(mcp_tool_name, outbound)
 
         try:
             result = await self._race_abort(_call_once(), signal)
@@ -1069,7 +1166,9 @@ class McpManager:
                 return self._error_result(tool_call_id, tool_label, exc)
         return format_mcp_result(result, tool_call_id, tool_label)
 
-    async def _race_abort(self, coro: Awaitable[Any], signal: Any) -> Any:
+    async def _race_abort(
+        self, coro: Coroutine[Any, Any, _RaceT], signal: AbortSignal | None
+    ) -> _RaceT:
         """Run ``coro`` racing the abort signal; abort wins with cancellation.
 
         The call is wrapped in a task; a racing ``signal.wait()`` task decides
@@ -1100,20 +1199,15 @@ class McpManager:
 
     def _schema_parts(
         self, conn: ServerConnection, mcp_tool_name: str
-    ) -> tuple[dict[str, Any], list[str], Any]:
+    ) -> tuple[dict[str, Any], list[str], bool | dict[str, Any] | None]:
         """Extract (properties, required, additionalProperties) for arg hygiene."""
         for tool in conn.tools:
-            name = tool.get("name") if isinstance(tool, dict) else getattr(tool, "name", None)
-            if name != mcp_tool_name:
+            if tool.name != mcp_tool_name:
                 continue
-            schema = (
-                tool.get("inputSchema") or tool.get("input_schema")
-                if isinstance(tool, dict)
-                else getattr(tool, "input_schema", None)
-            ) or {}
-            properties = schema.get("properties") if isinstance(schema, dict) else None
-            required = schema.get("required") if isinstance(schema, dict) else None
-            additional = schema.get("additionalProperties") if isinstance(schema, dict) else None
+            schema = tool.input_schema or {}
+            properties = schema.get("properties")
+            required = schema.get("required")
+            additional = schema.get("additionalProperties")
             return (
                 properties if isinstance(properties, dict) else {},
                 required if isinstance(required, list) else [],
@@ -1133,11 +1227,11 @@ class McpManager:
     # --- pagination ----------------------------------------------------------
 
     @staticmethod
-    async def _list_all_tools(session: Any) -> list[Any]:
+    async def _list_all_tools(session: McpSession) -> list[Tool]:
         """Follow ``tools/list`` pagination (nextCursor) to completion."""
         from mcp.types import PaginatedRequestParams
 
-        tools: list[Any] = []
+        tools: list[Tool] = []
         cursor: str | None = None
         while True:
             params = PaginatedRequestParams(cursor=cursor) if cursor is not None else None
@@ -1183,7 +1277,7 @@ class McpManager:
         """Whether the circuit breaker currently suspends auto-reconnect."""
         return name in self._reconnect_suspended
 
-    def get_tool_meta(self, tool_name: str) -> dict[str, Any] | None:
+    def get_tool_meta(self, tool_name: str) -> McpToolMeta | None:
         """MCP origin metadata for a minted tool name (server, tool, deferred)."""
         return self._tool_meta.get(tool_name)
 
