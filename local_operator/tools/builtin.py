@@ -1408,3 +1408,125 @@ async def execute_wake(
             return _error(tool_call_id, "wake", "'create' requires 'in' or 'at'")
         return await _wake_create(tool_call_id, params, scheduler, now_ms)
     return await _wake_cancel(tool_call_id, params, scheduler)
+
+
+# ---------------------------------------------------------------------------
+# variables — list / read session variables (values never enter the prompt)
+# ---------------------------------------------------------------------------
+
+
+class ListVariablesParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class ReadVariableParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(description="Variable name to read.")
+
+
+#: Safety cap on a single variable value returned to the model. Keeps an
+#: accidental read of a huge value from blowing up context; oversize values
+#: are elided with a marker rather than dumped in full.
+MAX_VARIABLE_VALUE_CHARS = 4000
+
+
+def _variable_store(context: ToolContext | None) -> Any:
+    """The session's VariableStore, or a fresh env-only store as fallback.
+
+    A session attaches its store (config variables + project file + env) to
+    ``context.variables``; when absent (bare tool tests) we fall back to a
+    store over the process environment so the tools still answer."""
+    if context is not None and getattr(context, "variables", None) is not None:
+        return context.variables
+    from local_operator.variables import VariableStore
+
+    return VariableStore(cwd=_safe_cwd(context))
+
+
+@_guard("list_variables")
+async def execute_list_variables(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Return variable NAMES only (never values) so the agent can pick what
+    to read without pulling everything into context. One compact line each."""
+    try:
+        ListVariablesParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "list_variables", exc)
+    names = _variable_store(context).names()
+    shown = names if len(names) <= 100 else names[:100] + ["…"]
+    body = "\n".join(shown) if shown else "(no variables defined)"
+    return _text(
+        tool_call_id,
+        "list_variables",
+        f"{len(names)} variable(s) available:\n{body}",
+        details={"count": len(names)},
+    )
+
+
+@_guard("read_variable")
+async def execute_read_variable(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Read ONE variable value on demand; unknown names return a not-found
+    error (the loop surfaces it, the caller can list_variables)."""
+    try:
+        params = ReadVariableParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "read_variable", exc)
+    if not params.name.strip():
+        return _error(tool_call_id, "read_variable", "name must be a non-empty string")
+    store = _variable_store(context)
+    if params.name not in store.names():
+        return _error(
+            tool_call_id, "read_variable", f"unknown variable: {params.name} (see list_variables)"
+        )
+    try:
+        value = store.read(params.name)
+    except KeyError:
+        return _error(tool_call_id, "read_variable", f"unknown variable: {params.name}")
+    if value is None:
+        value = ""
+    if len(value) > MAX_VARIABLE_VALUE_CHARS:
+        value = value[:MAX_VARIABLE_VALUE_CHARS] + f"\n[… {len(value)} chars elided …]"
+    return _text(
+        tool_call_id,
+        "read_variable",
+        value,
+        details={"name": params.name, "chars": len(value)},
+    )
+
+
+def build_list_variables_tool() -> AgentTool:
+    return AgentTool(
+        name="list_variables",
+        label="List variables",
+        description="List available variable names (never their values).",
+        parameters=ListVariablesParams.model_json_schema(),
+        approval_tier="read",
+        concurrency="shared",
+        interruptible=False,
+        execute=execute_list_variables,
+    )
+
+
+def build_read_variable_tool() -> AgentTool:
+    return AgentTool(
+        name="read_variable",
+        label="Read variable",
+        description="Read the value of one named variable.",
+        parameters=ReadVariableParams.model_json_schema(),
+        approval_tier="read",
+        concurrency="shared",
+        interruptible=False,
+        execute=execute_read_variable,
+    )

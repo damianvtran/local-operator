@@ -28,7 +28,7 @@ class TestCreateMcpToolName:
 
     def test_sanitization_lowercase_runs_edges(self) -> None:
         # Non-[a-z_] runs (incl. digits) collapse to one underscore; edges
-        # trimmed; lowercase — verbatim omp sanitizeMCPToolNamePart.
+        # trimmed; lowercase.
         assert create_mcp_tool_name("My-Server 2", "Do The Thing!") == "mcp__my_server_do_the_thing"
 
     def test_prefix_strip_after_sanitization(self) -> None:

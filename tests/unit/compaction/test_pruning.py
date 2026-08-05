@@ -130,7 +130,7 @@ def test_skill_reads_protected():
     ``provider_payload = {"details": result.details, ...}``, and builtin read
     reports internal-URL targets under ``details['url']`` (tools/builtin.py).
     Protection must match on BOTH ``path`` and ``url`` for read results, in
-    BOTH prune passes (omp protectedTools applies to superseded and useless).
+    BOTH prune passes (protected tools apply to superseded and useless).
     """
     # Internal-URL read: details['url'], not details['path'].
     skill_read = Message(role="tool", tool_call_id="call-s1", tool_name="read")

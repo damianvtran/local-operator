@@ -251,6 +251,11 @@ class ToolContext(BaseModel):
     # Approval callback: returns True when the user approved. Tools with an
     # approval tier call this before mutating side effects.
     request_approval: Callable[[str, str], Awaitable[bool]] | None = None
+    # Session-named variables behind the list_variables / read_variable tools.
+    # Values are never baked into the prompt; the model lists names and reads
+    # single values on demand. ``None`` degrades those tools to the process
+    # environment only.
+    variables: Any | None = None
 
 
 ToolExecuteFn = Callable[
