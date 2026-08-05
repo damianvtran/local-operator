@@ -298,8 +298,9 @@ the STRUCTURE is what we borrow, not the hue.
   `mcp_oauth:<server_url>`).
 - `mcp/manager.py`: 250 ms startup gate (`asyncio.wait(timeout=0.25)`),
   deferred tools awaiting connection inside `execute`, SQLite tool cache
-  (reuse auth.db), reconnect backoff 0.5/1/2/4s, circuit breaker 5 in 30s,
-  epoch counter against post-disconnect resurrection.
+  (`mcp_cache.db`, separate from `auth.db` by design: the cache is disposable,
+  `auth.db` is credential-grade), reconnect backoff 0.5/1/2/4s, circuit
+  breaker 5 in 30s, epoch counter against post-disconnect resurrection.
 - `mcp/config.py`: configs at `~/.local-operator/mcp.json` and
   `<cwd>/.local-operator/mcp.json`; also import `~/.claude.json` /
   `.claude/.mcp.json` / `~/.cursor/mcp.json` / `.vscode/mcp.json` (best

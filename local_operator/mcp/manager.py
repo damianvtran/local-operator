@@ -18,6 +18,11 @@ Ports the omp manager semantics (``src/mcp/manager.ts``) onto the official
 
 SDK imports are lazy where feasible so config-only callers never pay for the
 transport machinery.
+
+NOTE (session integration): this module deliberately does NOT wire itself
+into the harness session loop — the ExecCli stream owns that integration
+(``discover_and_load_mcp_tools`` + ``set_on_tools_changed`` rebinding). This
+package exports only the manager surface; consumers must drive lifecycle.
 """
 
 from __future__ import annotations
@@ -28,11 +33,13 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from collections import deque
+from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from local_operator.harness.types import AgentTool, TextContent, ToolResult
 from local_operator.mcp.config import (
@@ -62,6 +69,11 @@ RECONNECT_BACKOFF_S = (0.5, 1.0, 2.0, 4.0)
 RECONNECT_BURST_WINDOW_S = 30.0
 RECONNECT_BURST_LIMIT = 5
 
+# Reconnect attempts are accounted in one sliding window per server
+# (``_reconnect_history``); the backoff ladder position is separate state
+# (``_backoff_index``) so a successful reconnect resets the LADDER but never
+# clears the window — a flapping server still trips the breaker (MCP-07).
+
 # Default per-request timeout; ``LOCAL_OPERATOR_MCP_TIMEOUT_MS`` overrides,
 # config ``timeout`` (ms) refines, ``0`` disables.
 DEFAULT_MCP_TIMEOUT_MS = 30_000.0
@@ -69,6 +81,13 @@ DEFAULT_MCP_TIMEOUT_MS = 30_000.0
 
 class McpConnectionError(RuntimeError):
     """Raised when a server cannot be reached (deferred execute path)."""
+
+
+def _settle_future_error(future: asyncio.Future[Any], exc: Exception) -> None:
+    """Set an exception on ``future`` and consume it so waiters raise cleanly."""
+    if future is not None and not future.done():
+        future.set_exception(exc)
+        future.exception()  # mark retrieved; waiters still see the raise
 
 
 def resolve_mcp_timeout_s(cfg: MCPServerConfig | None) -> float | None:
@@ -179,6 +198,18 @@ def build_stdio_argv(command: str, args: list[str]) -> list[str]:
     return build_cmd_exe_argv(comspec, resolved or command, args)
 
 
+def win32_process_target(argv: list[str]) -> str:
+    """Single-string command line for ``anyio.open_process`` on Windows (MCP-10).
+
+    Passing a STRING (not a list) makes the spawn use the raw command line
+    and skip ``list2cmdline`` re-escaping — the only way the BatBadBut
+    escaping in a ``cmd.exe /c`` payload reaches ``CreateProcess`` verbatim.
+    Tokens needing quotes were already quoted by the escaper; ``argv[0]`` is
+    always quoted defensively.
+    """
+    return f'"{argv[0]}" {" ".join(argv[1:])}'
+
+
 def stdio_start_new_session() -> bool:
     """Whether stdio servers spawn detached (their own session).
 
@@ -212,12 +243,20 @@ async def _stdio_transport(cfg: MCPStdioServerConfig, on_close: Callable[[], Non
     cwd = cfg.cwd or None
 
     kwargs: dict[str, Any] = {"env": env, "stderr": None, "cwd": cwd}
+    target: str | list[str]
     if sys.platform == "win32":
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        # The pre-escaped cmd.exe command line must reach CreateProcess
+        # verbatim: passing a single string bypasses list2cmdline, which
+        # would re-quote the BatBadBut escaping in the ``/c`` payload.
+        # Deferred: npm cmd-shims whose fallback interpreter is node are not
+        # yet bypassed straight to node (omp does that too).
+        target = win32_process_target(argv)
     else:
         kwargs["start_new_session"] = stdio_start_new_session()
+        target = argv
 
-    process = await anyio.open_process(argv, **kwargs)
+    process = await anyio.open_process(target, **kwargs)
     assert process.stdin is not None and process.stdout is not None
 
     read_writer, read_stream = anyio.create_memory_object_stream[SessionMessage | Exception](0)
@@ -247,7 +286,9 @@ async def _stdio_transport(cfg: MCPStdioServerConfig, on_close: Callable[[], Non
                         if not line.strip():
                             continue
                         try:
-                            message = mcp_types.jsonrpc_message_adapter.validate_json(line, by_name=False)
+                            message = mcp_types.jsonrpc_message_adapter.validate_json(
+                                line, by_name=False
+                            )
                             await read_writer.send(SessionMessage(message))
                         except ValueError as exc:
                             await read_writer.send(exc)
@@ -261,7 +302,9 @@ async def _stdio_transport(cfg: MCPStdioServerConfig, on_close: Callable[[], Non
         try:
             async with write_reader:
                 async for session_message in write_reader:
-                    data = session_message.message.model_dump_json(by_alias=True, exclude_unset=True)
+                    data = session_message.message.model_dump_json(
+                        by_alias=True, exclude_unset=True
+                    )
                     await process.stdin.send((data + "\n").encode("utf-8"))
         except Exception:
             logger.debug("stdio stdin pump ended for %r", cfg.command, exc_info=True)
@@ -333,12 +376,10 @@ class McpLoadResult:
 ToolsChangedCallback = Callable[[list[AgentTool]], Awaitable[None] | None]
 
 
-class _AbortedError(Exception):
-    """Raised by ``_race_abort`` when the abort signal beats the tool call.
+# Abort semantics: an abort racing a tool call raises ``asyncio.CancelledError``
+# (MCP-16, "abort stays abort") so it propagates like any outer cancellation and
+# is NEVER mapped to a tool error result by the call path.
 
-    Distinct from ``CancelledError`` so an outer task cancellation (dispose)
-    still propagates instead of being mapped to a tool result.
-    """
 
 def _tool_to_cache_entry(tool: Any) -> dict[str, Any]:
     """Serialize one SDK ``Tool`` (or dict) into the cache JSON shape."""
@@ -371,12 +412,30 @@ class McpManager:
         self._tools_by_server: dict[str, list[AgentTool]] = {}
         self._connect_futures: dict[str, asyncio.Future[ServerConnection]] = {}
         self._pending_reconnects: dict[str, asyncio.Task[None]] = {}
-        self._pending_continuations: set[asyncio.Task[None]] = set()
+        # Gate continuations, per server: (continuation task, raw gate task).
+        self._pending_continuations: dict[
+            str, tuple[asyncio.Task[None], asyncio.Task[ServerConnection]]
+        ] = {}
         self._watchers: set[asyncio.Task[None]] = set()
+        # Fire-and-forget tools/list_changed refreshes (MCP-05): never awaited
+        # inline on the SDK receive path.
+        self._notify_tasks: set[asyncio.Task[None]] = set()
         self._reconnect_history: dict[str, deque[float]] = {}
         self._reconnect_suspended: set[str] = set()
+        # Backoff ladder position is separate from the breaker window (MCP-07):
+        # a successful reconnect resets the ladder but keeps the window intact,
+        # so a flapping server still trips the breaker.
+        self._backoff_index: dict[str, int] = {}
         self._on_tools_changed: ToolsChangedCallback | None = None
+        # Tool-name collision state keyed by stable origin key (MCP-09):
+        # (server name, original tool name), never registration order.
         self._tool_meta: dict[str, dict[str, Any]] = {}
+        self._name_claimants: dict[str, set[tuple[str, str]]] = {}
+        self._tool_by_origin: dict[tuple[str, str], AgentTool] = {}
+        self._meta_by_origin: dict[tuple[str, str], dict[str, Any]] = {}
+        self._origins_by_server: dict[str, set[tuple[str, str]]] = {}
+        # First-connect security surface (MCP-12): one warning per server.
+        self._security_logged: set[str] = set()
         self._epoch = 0
         self._disposed = False
 
@@ -425,6 +484,58 @@ class McpManager:
         the background continuation swaps them in and fires on_tools_changed.
         """
         configs, sources = load_all_mcp_configs(self.cwd)
+        self._drop_removed_servers(configs)
+        return await self._connect_round(configs, sources)
+
+    async def reload(self) -> McpLoadResult:
+        """Re-discover and reconnect in place (``/mcp reload`` semantics).
+
+        Bumps the epoch so in-flight reconnects and gate continuations die,
+        cancels pending reconnects, tears down every live connection, drops
+        servers that left the config (tools, meta, cache), and reconnects the
+        rest from fresh configs. The manager object is reused, so callbacks
+        installed via ``set_on_tools_changed`` survive (MCP-17).
+        """
+        self._epoch += 1
+        for task in list(self._pending_reconnects.values()):
+            task.cancel()
+        self._pending_reconnects.clear()
+        for continuation, gate_task in list(self._pending_continuations.values()):
+            continuation.cancel()
+            gate_task.cancel()
+        self._pending_continuations.clear()
+        configs, sources = load_all_mcp_configs(self.cwd)
+        self._drop_removed_servers(configs)
+        loop = asyncio.get_running_loop()
+        for name in list(self._connections):
+            # Deferred executes must wait out the reconnect, not fail.
+            future = self._connect_futures.get(name)
+            if future is None or future.done():
+                self._connect_futures[name] = loop.create_future()
+            await self._teardown_connection(name)
+        return await self._connect_round(configs, sources)
+
+    def _drop_removed_servers(self, configs: dict[str, MCPServerConfig]) -> None:
+        """Drop all state for servers that left the config (MCP-17)."""
+        gone = (set(self._tools_by_server) | set(self._configs)) - set(configs)
+        for name in gone:
+            self._tools_by_server.pop(name, None)
+            self._unregister_origins(name)
+            self._reconnect_history.pop(name, None)
+            self._reconnect_suspended.discard(name)
+            self._backoff_index.pop(name, None)
+            future = self._connect_futures.pop(name, None)
+            _settle_future_error(
+                future, McpConnectionError(f"MCP server {name!r} removed from config")
+            )
+            if self.tool_cache is not None:
+                with suppress(Exception):
+                    self.tool_cache.delete(name)
+
+    async def _connect_round(
+        self, configs: dict[str, MCPServerConfig], sources: dict[str, str]
+    ) -> McpLoadResult:
+        """Race connects for ``configs`` against the 250 ms startup gate."""
         self._configs = configs
         self._sources = sources
         self._disposed = False
@@ -439,6 +550,7 @@ class McpManager:
             tasks[name] = asyncio.get_running_loop().create_task(self._connect_server(name, cfg))
 
         if not tasks:
+            result.tools = self.get_tools()
             return result
 
         done, _pending = await asyncio.wait(set(tasks.values()), timeout=STARTUP_GATE_MS / 1000.0)
@@ -451,6 +563,9 @@ class McpManager:
             except Exception as exc:
                 result.errors[name] = str(exc)
                 logger.warning("MCP server %r failed to connect: %s", name, exc)
+                # A parked waiter (reload) must fail, not hang (MCP-08).
+                waiter = self._connect_futures.pop(name, None)
+                _settle_future_error(waiter, exc)
                 continue
             self._register_connection(conn)
             result.connected_servers.append(name)
@@ -461,14 +576,28 @@ class McpManager:
             # Still pending at the gate: defer from cache, or contribute nothing.
             cached = self.tool_cache.get(name) if self.tool_cache is not None else None
             if cached:
+                self._unregister_origins(name)
                 self._tools_by_server[name] = [
                     self._build_tool(name, entry, deferred=True) for entry in cached
                 ]
+                self._rebuild_agent_names()
             # Deferred executes await this future; the continuation settles it.
-            self._connect_futures[name] = asyncio.get_running_loop().create_future()
-            continuation = asyncio.get_running_loop().create_task(self._finish_pending(name, task))
-            self._pending_continuations.add(continuation)
-            continuation.add_done_callback(self._pending_continuations.discard)
+            # Reuse a live waiter installed by reload() rather than stranding
+            # its waiters behind a fresh future (MCP-08/MCP-17).
+            future = self._connect_futures.get(name)
+            if future is None or future.done():
+                self._connect_futures[name] = asyncio.get_running_loop().create_future()
+            continuation = asyncio.get_running_loop().create_task(
+                self._finish_pending(name, task, self._epoch)
+            )
+            self._pending_continuations[name] = (continuation, task)
+
+            def _discard_continuation(done: asyncio.Task[None], _name: str = name) -> None:
+                entry = self._pending_continuations.get(_name)
+                if entry is not None and entry[0] is done:
+                    self._pending_continuations.pop(_name, None)
+
+            continuation.add_done_callback(_discard_continuation)
 
         result.tools = self.get_tools()
         return result
@@ -503,6 +632,7 @@ class McpManager:
         """Manual reconnect: resets the breaker history for ``name``."""
         self._reconnect_history.pop(name, None)
         self._reconnect_suspended.discard(name)
+        self._backoff_index.pop(name, None)
         pending = self._pending_reconnects.pop(name, None)
         if pending is not None:
             pending.cancel()
@@ -524,8 +654,17 @@ class McpManager:
         pending = self._pending_reconnects.pop(name, None)
         if pending is not None:
             pending.cancel()
+        continuation = self._pending_continuations.pop(name, None)
+        if continuation is not None:
+            continuation[0].cancel()
+            continuation[1].cancel()  # kill the underlying connect too
+        # A pending deferred-connect waiter must fail, not hang (MCP-19).
+        future = self._connect_futures.pop(name, None)
+        _settle_future_error(future, McpConnectionError(f"MCP server {name!r} disconnected"))
         await self._teardown_connection(name)
         self._tools_by_server.pop(name, None)
+        self._unregister_origins(name)
+        self._rebuild_agent_names()
         self._fire_tools_changed()
 
     async def disconnect_all(self) -> None:
@@ -535,17 +674,23 @@ class McpManager:
         for task in list(self._pending_reconnects.values()):
             task.cancel()
         self._pending_reconnects.clear()
-        for task in list(self._pending_continuations):
-            task.cancel()
+        for continuation, gate_task in list(self._pending_continuations.values()):
+            continuation.cancel()
+            gate_task.cancel()
         self._pending_continuations.clear()
-        for future in self._connect_futures.values():
-            if not future.done():
-                future.cancel()
+        for name, future in self._connect_futures.items():
+            # Settle with an error (never cancel): a cancelled future would
+            # surface as CancelledError in waiters; deferred executes need a
+            # real McpConnectionError they can turn into a tool result (MCP-08).
+            _settle_future_error(future, McpConnectionError("MCP manager disposed"))
         self._connect_futures.clear()
         for name in list(self._connections):
             await self._teardown_connection(name)
         for watcher in list(self._watchers):
             watcher.cancel()
+        for task in list(self._notify_tasks):
+            task.cancel()
+        self._notify_tasks.clear()
         self._watchers.clear()
         self._tools_by_server.clear()
         self._connections.clear()
@@ -599,7 +744,10 @@ class McpManager:
         if isinstance(cfg, MCPStdioServerConfig):
             streams_cm = _stdio_transport(cfg, lambda: conn.closed_event.set())
         elif isinstance(cfg, MCPHttpServerConfig):
-            from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
+            from mcp.client.streamable_http import (
+                create_mcp_http_client,
+                streamable_http_client,
+            )
 
             http_client = create_mcp_http_client(
                 headers=dict(cfg.headers) or None,
@@ -642,7 +790,9 @@ class McpManager:
 
             return OAuthClientProvider(**wire_oauth_auth(url, cfg))
         except Exception:
-            logger.warning("OAuth wiring unavailable for %r; connecting unauthenticated", url, exc_info=True)
+            logger.warning(
+                "OAuth wiring unavailable for %r; connecting unauthenticated", url, exc_info=True
+            )
             return None
 
     async def _on_session_message(self, name: str, conn: ServerConnection, message: Any) -> None:
@@ -658,25 +808,33 @@ class McpManager:
             return
         method = getattr(message, "method", "")
         if method == "notifications/tools/list_changed":
-            await self.refresh_server_tools(name)
+            # NEVER await a tools/list round trip inline here: the SDK invokes
+            # this handler while holding its read loop (mcp/client/session.py
+            # ~1430-1453), so an inline refresh deadlocks in-process servers.
+            task = asyncio.get_running_loop().create_task(self.refresh_server_tools(name))
+            self._notify_tasks.add(task)
+            task.add_done_callback(self._notify_tasks.discard)
 
-    async def _finish_pending(self, name: str, task: asyncio.Task[ServerConnection]) -> None:
+    async def _finish_pending(
+        self, name: str, task: asyncio.Task[ServerConnection], epoch: int
+    ) -> None:
         """Background continuation for a server still connecting at the gate."""
-        future = self._connect_futures.get(name)
         try:
             conn = await task
         except asyncio.CancelledError:
             return
         except Exception as exc:
             logger.warning("MCP server %r failed to connect after the gate: %s", name, exc)
-            if future is not None and not future.done():
-                future.set_exception(exc)
-                future.exception()  # mark retrieved; waiters still see the raise
+            # Re-fetch the waiter: a reload during the await may have swapped
+            # it, and settling the stale one would strand the current waiters.
+            _settle_future_error(self._connect_futures.get(name), exc)
             self._connect_futures.pop(name, None)
             self._tools_by_server.pop(name, None)  # drop the deferred slice
+            self._unregister_origins(name)
+            self._rebuild_agent_names()
             self._fire_tools_changed()
             return
-        if self._disposed:
+        if self._disposed or epoch != self._epoch:
             if conn.stack is not None:
                 with suppress(Exception):
                     await conn.stack.aclose()
@@ -693,6 +851,7 @@ class McpManager:
                 with suppress(Exception):
                     asyncio.get_running_loop().create_task(old.stack.aclose())
         self._connections[conn.name] = conn
+        self._log_first_connect_security(conn)
         self._register_tools(conn.name, conn.tools)
         future = self._connect_futures.pop(conn.name, None)
         if future is not None and not future.done():
@@ -701,17 +860,59 @@ class McpManager:
         self._watchers.add(watcher)
         watcher.add_done_callback(self._watchers.discard)
 
+    def _log_first_connect_security(self, conn: ServerConnection) -> None:
+        """WARNING surface for project-sourced stdio servers (MCP-12).
+
+        Once per server per manager lifetime: name the contributing config
+        file and the command being spawned. A committed ``mcp.json`` is
+        trusted input — stdio entries run arbitrary commands — so the user
+        must have seen exactly what this project is launching.
+        """
+        name = conn.name
+        if name in self._security_logged:
+            return
+        cfg = conn.config
+        if not isinstance(cfg, MCPStdioServerConfig):
+            return
+        source = self._sources.get(name, "")
+        try:
+            project_sourced = bool(source) and Path(source).is_relative_to(Path(self.cwd))
+        except (ValueError, OSError):
+            project_sourced = False
+        if not project_sourced:
+            return
+        self._security_logged.add(name)
+        logger.warning(
+            "MCP: spawning project-configured stdio server %r: command=%r args=%r "
+            "(configured by %s) — a project's mcp.json is trusted input; "
+            "review it before opening a repo under a credentialed profile",
+            name,
+            cfg.command,
+            list(cfg.args),
+            source,
+        )
+
     def _register_tools(self, name: str, tools: list[Any]) -> None:
         """Build AgentTools for one server's tool list (live, not deferred)."""
-        self._tools_by_server[name] = [self._build_tool(name, tool, deferred=False) for tool in tools]
+        self._unregister_origins(name)
+        self._tools_by_server[name] = [
+            self._build_tool(name, tool, deferred=False) for tool in tools
+        ]
+        self._rebuild_agent_names()
 
     def _build_tool(self, server_name: str, tool: Any, *, deferred: bool) -> AgentTool:
-        """Wrap one tool (SDK model or cached dict) with the manager call path."""
+        """Wrap one tool (SDK model or cached dict) with the manager call path.
 
+        The tool is recorded under its stable origin key ``(server_name,
+        original tool name)`` — never under its minted name — so reconnect
+        ordering cannot flip ownership. Minted names (incl. collision
+        suffixing) are resolved centrally in :meth:`_rebuild_agent_names`.
+        """
         if isinstance(tool, dict):
-            mcp_tool_name = tool.get("name", "")
+            mcp_tool_name = tool.get("name", "") or ""
         else:
             mcp_tool_name = getattr(tool, "name", "") or ""
+        origin = (server_name, mcp_tool_name)
 
         async def _call(
             tool_call_id: str,
@@ -725,12 +926,57 @@ class McpManager:
             )
 
         agent_tool = build_agent_tool(server_name, tool, _call)
-        self._tool_meta[agent_tool.name] = {
+        self._tool_by_origin[origin] = agent_tool
+        self._meta_by_origin[origin] = {
             "server_name": server_name,
             "mcp_tool_name": mcp_tool_name,
             "deferred": deferred,
         }
+        self._origins_by_server.setdefault(server_name, set()).add(origin)
         return agent_tool
+
+    def _unregister_origins(self, server_name: str) -> None:
+        """Drop every origin recorded for ``server_name`` (re-register/reload)."""
+        origins = self._origins_by_server.pop(server_name, set())
+        for origin in origins:
+            self._tool_by_origin.pop(origin, None)
+            self._meta_by_origin.pop(origin, None)
+
+    def _rebuild_agent_names(self) -> None:
+        """Mint collision-free tool names, deterministic by origin key.
+
+        Two distinct origins can sanitize to the same agent name (e.g. server
+        ``my-server`` + tool ``a_b`` and server ``my`` + tool ``server_a_b``
+        both mint ``mcp__my_server_a_b``). The origin that sorts FIRST keeps
+        the base name; each later colliding origin is suffixed ``_2``, ``_3``,
+        ... and logged. Keying by origin (not registration order) means a
+        reconnect or a tools/list_changed can never flip who owns a name.
+        """
+        self._tool_meta.clear()
+        owners: dict[str, tuple[str, str]] = {}
+        for origin in sorted(self._tool_by_origin):
+            agent_tool = self._tool_by_origin[origin]
+            base = create_mcp_tool_name(origin[0], origin[1])
+            name = base
+            if name in owners:
+                suffix = 2
+                while f"{base}_{suffix}" in owners:
+                    suffix += 1
+                name = f"{base}_{suffix}"
+                logger.warning(
+                    "MCP tool-name collision: %r/%r mints %r, already owned by %r/%r; using %r",
+                    origin[0],
+                    origin[1],
+                    base,
+                    owners[base][0],
+                    owners[base][1],
+                    name,
+                )
+            owners[name] = origin
+            agent_tool.name = name
+            meta = dict(self._meta_by_origin.get(origin, {}))
+            meta["agent_name"] = name
+            self._tool_meta[name] = meta
 
     async def _execute_tool_call(
         self,
@@ -763,12 +1009,15 @@ class McpManager:
         async def _call_once() -> Any:
             timeout_s = resolve_mcp_timeout_s(conn.config)
             if timeout_s is not None:
-                return await conn.session.call_tool(mcp_tool_name, outbound, read_timeout_seconds=timeout_s)
+                return await conn.session.call_tool(
+                    mcp_tool_name, outbound, read_timeout_seconds=timeout_s
+                )
             return await conn.session.call_tool(mcp_tool_name, outbound)
+
         try:
             result = await self._race_abort(_call_once(), signal)
-        except _AbortedError:
-            return self._error_result(tool_call_id, tool_label, RuntimeError("aborted"))
+        except asyncio.CancelledError:
+            raise  # abort stays abort (MCP-16): never converted to an error result
         except Exception as exc:
             if is_retriable_connection_error(exc):
                 # One reconnect + one retry at the call site (omp policy).
@@ -777,6 +1026,8 @@ class McpManager:
                     conn = new_conn
                     try:
                         result = await self._race_abort(_call_once(), signal)
+                    except asyncio.CancelledError:
+                        raise  # abort stays abort
                     except Exception as retry_exc:
                         return self._error_result(tool_call_id, tool_label, retry_exc)
                 else:
@@ -790,8 +1041,10 @@ class McpManager:
 
         The call is wrapped in a task; a racing ``signal.wait()`` task decides
         the winner. When the abort lands first the work task is cancelled and
-        the method raises ``CancelledError`` (the caller maps that to an
-        aborted tool result). A ``None`` signal runs the coroutine inline.
+        this method raises ``asyncio.CancelledError`` — real cancellation,
+        which the call path propagates instead of mapping to a tool result
+        ("abort stays abort", MCP-16). A ``None`` signal runs the coroutine
+        inline.
         """
         if signal is None:
             return await coro
@@ -805,14 +1058,16 @@ class McpManager:
                 task.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
-                raise _AbortedError("aborted")
+                raise asyncio.CancelledError("aborted")
             return task.result()
         finally:
             abort_task.cancel()
             with suppress(asyncio.CancelledError):
                 await abort_task
 
-    def _schema_parts(self, conn: ServerConnection, mcp_tool_name: str) -> tuple[dict[str, Any], list[str], Any]:
+    def _schema_parts(
+        self, conn: ServerConnection, mcp_tool_name: str
+    ) -> tuple[dict[str, Any], list[str], Any]:
         """Extract (properties, required, additionalProperties) for arg hygiene."""
         for tool in conn.tools:
             name = tool.get("name") if isinstance(tool, dict) else getattr(tool, "name", None)
@@ -911,9 +1166,24 @@ class McpManager:
         history.append(now)
         return True
 
+    def _abandon_reconnect(self, name: str, reason: str) -> None:
+        """Auto-reconnect is over for ``name``: fail waiters instead of hanging.
+
+        A deferred execute parked on ``_connect_futures[name]`` must get a real
+        ``McpConnectionError`` when the breaker trips (MCP-08); otherwise it
+        awaits a future nobody will ever settle.
+        """
+        future = self._connect_futures.pop(name, None)
+        _settle_future_error(
+            future, McpConnectionError(f"MCP server {name!r} unavailable: {reason}")
+        )
+
     def _schedule_reconnect(self, name: str) -> None:
         """Queue a backoff-delayed reconnect unless the breaker is tripped."""
-        if self._disposed or name in self._reconnect_suspended:
+        if self._disposed:
+            return
+        if name in self._reconnect_suspended:
+            self._abandon_reconnect(name, "auto-reconnect suspended (breaker tripped)")
             return
         if not self._record_reconnect_attempt(name):
             logger.warning(
@@ -923,10 +1193,16 @@ class McpManager:
                 RECONNECT_BURST_LIMIT,
                 int(RECONNECT_BURST_WINDOW_S),
             )
+            self._abandon_reconnect(
+                name,
+                f"reconnect breaker tripped (>{RECONNECT_BURST_LIMIT} in "
+                f"{int(RECONNECT_BURST_WINDOW_S)}s)",
+            )
             return
-        history = self._reconnect_history[name]
-        attempt = len(history) - 1
-        delay = RECONNECT_BACKOFF_S[min(attempt, len(RECONNECT_BACKOFF_S) - 1)]
+        # Backoff ladder position is independent of the breaker window (MCP-07).
+        index = self._backoff_index.get(name, 0)
+        delay = RECONNECT_BACKOFF_S[min(index, len(RECONNECT_BACKOFF_S) - 1)]
+        self._backoff_index[name] = index + 1
         epoch = self._epoch
         task = asyncio.get_running_loop().create_task(self._reconnect(name, delay, epoch))
         previous = self._pending_reconnects.pop(name, None)
@@ -952,8 +1228,12 @@ class McpManager:
         if cfg is None:
             return
         await self._teardown_connection(name)
-        future: asyncio.Future[ServerConnection] = asyncio.get_running_loop().create_future()
-        self._connect_futures[name] = future
+        # Reuse the waiter installed by _handle_disconnect: replacing it
+        # would strand any deferred execute parked on it (MCP-08).
+        future = self._connect_futures.get(name)
+        if future is None or future.done():
+            future = asyncio.get_running_loop().create_future()
+            self._connect_futures[name] = future
         try:
             conn = await self._connect_server(name, cfg)
         except Exception as exc:
@@ -965,21 +1245,45 @@ class McpManager:
             self._schedule_reconnect(name)
             return
         self._register_connection(conn)
-        self._reconnect_history.pop(name, None)
+        # Success resets the backoff LADDER only; the breaker window stays
+        # intact so a flapping server still trips (MCP-07).
+        self._backoff_index[name] = 0
         self._fire_tools_changed()
 
     async def _reconnect_for_call(self, name: str) -> ServerConnection | None:
-        """Synchronous reconnect for the call-site retry (no backoff wait)."""
+        """Synchronous reconnect for the call-site retry (no backoff wait).
+
+        Guarded like every other reconnect path (MCP-06): disposed/epoch
+        mismatch and a tripped breaker short-circuit BEFORE reconnecting, and
+        the attempt is recorded in the breaker window so a call-site retry on
+        a dead server counts against the burst budget instead of resurrecting
+        forever after ``disconnect_all``.
+        """
+        if self._disposed:
+            return None
         cfg = self._configs.get(name)
         if cfg is None:
             return None
+        if name in self._reconnect_suspended:
+            return None
+        if not self._record_reconnect_attempt(name):
+            logger.warning("MCP reconnect breaker tripped for %r (call-site attempt)", name)
+            return None
+        epoch = self._epoch
         await self._teardown_connection(name)
         try:
             conn = await self._connect_server(name, cfg)
         except Exception as exc:
             logger.warning("MCP call-site reconnect failed for %r: %s", name, exc)
             return None
+        if epoch != self._epoch or self._disposed:
+            # disconnect_all ran while we were connecting: never resurrect.
+            if conn.stack is not None:
+                with suppress(Exception):
+                    await conn.stack.aclose()
+            return None
         self._register_connection(conn)
+        self._backoff_index[name] = 0
         return conn
 
     async def _teardown_connection(self, name: str) -> None:
@@ -1010,18 +1314,19 @@ class McpManager:
 
 # Re-export for callers that serialize cache entries.
 __all__ = [
-    "McpManager",
-    "McpLoadResult",
-    "McpConnectionError",
-    "ServerConnection",
-    "STARTUP_GATE_MS",
     "RECONNECT_BACKOFF_S",
-    "RECONNECT_BURST_WINDOW_S",
     "RECONNECT_BURST_LIMIT",
-    "resolve_mcp_timeout_s",
-    "build_stdio_argv",
-    "stdio_start_new_session",
+    "RECONNECT_BURST_WINDOW_S",
+    "STARTUP_GATE_MS",
+    "McpConnectionError",
+    "McpLoadResult",
+    "McpManager",
+    "ServerConnection",
     "build_cmd_exe_argv",
+    "build_stdio_argv",
     "escape_cmd_batch_arg",
     "escape_cmd_quoted_interior",
+    "resolve_mcp_timeout_s",
+    "stdio_start_new_session",
+    "win32_process_target",
 ]

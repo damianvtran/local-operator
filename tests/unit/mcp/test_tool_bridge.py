@@ -23,13 +23,13 @@ class TestCreateMcpToolName:
 
     def test_redundant_server_prefix_stripped(self) -> None:
         assert (
-            create_mcp_tool_name("puppeteer", "puppeteer_screenshot")
-            == "mcp__puppeteer_screenshot"
+            create_mcp_tool_name("puppeteer", "puppeteer_screenshot") == "mcp__puppeteer_screenshot"
         )
 
     def test_sanitization_lowercase_runs_edges(self) -> None:
-        # Non-[a-z_] runs collapse to one underscore; edges trimmed; lowercase.
-        assert create_mcp_tool_name("My-Server 2", "Do The Thing!") == "mcp__my_server_2_do_the_thing"
+        # Non-[a-z_] runs (incl. digits) collapse to one underscore; edges
+        # trimmed; lowercase — verbatim omp sanitizeMCPToolNamePart.
+        assert create_mcp_tool_name("My-Server 2", "Do The Thing!") == "mcp__my_server_do_the_thing"
 
     def test_prefix_strip_after_sanitization(self) -> None:
         # Sanitization must run before the prefix check: 'Git Hub' + 'git_hub_status'.
@@ -67,23 +67,47 @@ class TestPrepareOutboundArgs:
         )
         assert out == {"query": "x"}
 
-    def test_strips_any_undeclared_when_additional_unset(self) -> None:
+    def test_strips_any_undeclared_when_additional_false(self) -> None:
+        """additionalProperties explicitly false: drop every undeclared key."""
         out = prepare_outbound_args(
             {"a": 1, "stray": 2},
             {"a": {"type": "number"}},
             required=[],
-            additional_properties=None,
+            additional_properties=False,
         )
         assert out == {"a": 1}
 
-    def test_keeps_undeclared_when_additional_true(self) -> None:
+    def test_absent_additional_properties_keeps_undeclared(self) -> None:
+        """MCP-04 blocker: absent additionalProperties is OPEN per JSON
+        Schema — arbitrary undeclared keys must survive, or composed/open
+        servers would silently run calls with {}."""
+        out = prepare_outbound_args({"path": "/x", "limit": 5}, {}, [], None)
+        assert out == {"path": "/x", "limit": 5}
+
+    def test_empty_additional_properties_keeps_undeclared(self) -> None:
+        """MCP-14: additionalProperties {} is an open sub-schema."""
+        assert prepare_outbound_args({"a": 1}, {}, [], {}) == {"a": 1}
+
+    def test_open_schema_keeps_undeclared_drops_intent(self) -> None:
+        """Open schema: arbitrary undeclared keys survive; the harness 'i'
+        field still drops unless the server declares it."""
         out = prepare_outbound_args(
             {"a": 1, INTENT_FIELD: "why"},
             {"a": {"type": "number"}},
             required=[],
             additional_properties=True,
         )
-        assert out == {"a": 1, INTENT_FIELD: "why"}
+        assert out == {"a": 1}
+
+    def test_intent_stripped_even_when_open(self) -> None:
+        """'i' is the harness's field: dropped unless the server declares it,
+        regardless of how permissive the schema is."""
+        out = prepare_outbound_args(
+            {INTENT_FIELD: "why", "q": "x"}, {"q": {"type": "string"}}, [], None
+        )
+        assert out == {"q": "x"}
+        out = prepare_outbound_args({INTENT_FIELD: "why"}, {}, [], True)
+        assert out == {}
 
     def test_keeps_declared_intent(self) -> None:
         """A server that declares 'i' as its own parameter is unaffected."""
@@ -106,18 +130,37 @@ class TestPrepareOutboundArgs:
                 "req_empty": {"type": "string"},
             },
             required=["req_empty"],
+            additional_properties=False,
         )
         assert out == {"keep": "v", "req_empty": ""}
 
+    def test_required_placeholder_kept(self) -> None:
+        assert prepare_outbound_args({"r": None}, {"r": {}}, ["r"], True) == {"r": None}
+
+    def test_falsy_is_not_placeholder(self) -> None:
+        assert prepare_outbound_args(
+            {"n": 0, "f": False, "l": []},
+            {"n": {}, "f": {}, "l": {}},
+            [],
+            True,
+        ) == {"n": 0, "f": False, "l": []}
+
     def test_non_dict_input(self) -> None:
         assert prepare_outbound_args(None, {"a": {}}) == {}
-        assert prepare_outbound_args({"a": 1}, None) == {}  # strict w/o properties drops all
+
+    def test_input_not_mutated(self) -> None:
+        args = {"a": 1, INTENT_FIELD: "why"}
+        prepare_outbound_args(args, {"a": {}}, [], False)
+        assert args == {"a": 1, INTENT_FIELD: "why"}
 
 
 class TestFormatMcpResult:
     def test_text_joined(self) -> None:
         result = SimpleNamespace(
-            content=[SimpleNamespace(type="text", text="one"), SimpleNamespace(type="text", text="two")],
+            content=[
+                SimpleNamespace(type="text", text="one"),
+                SimpleNamespace(type="text", text="two"),
+            ],
             is_error=False,
         )
         formatted = format_mcp_result(result, "id1", "mcp__srv_tool")
@@ -135,12 +178,18 @@ class TestFormatMcpResult:
     def test_resource_uri_plus_text(self) -> None:
         result = SimpleNamespace(
             content=[
-                SimpleNamespace(type="resource", resource=SimpleNamespace(uri="file:///a", text="body")),
-                SimpleNamespace(type="resource", resource=SimpleNamespace(uri="file:///b", text=None)),
+                SimpleNamespace(
+                    type="resource", resource=SimpleNamespace(uri="file:///a", text="body")
+                ),
+                SimpleNamespace(
+                    type="resource", resource=SimpleNamespace(uri="file:///b", text=None)
+                ),
             ],
             is_error=False,
         )
-        assert format_mcp_result(result).text == "[Resource: file:///a]\nbody\n\n[Resource: file:///b]"
+        assert (
+            format_mcp_result(result).text == "[Resource: file:///a]\nbody\n\n[Resource: file:///b]"
+        )
 
     def test_is_error_prefix_and_flag(self) -> None:
         result = SimpleNamespace(content=[SimpleNamespace(type="text", text="boom")], is_error=True)

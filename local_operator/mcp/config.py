@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Literal
 
@@ -166,6 +167,27 @@ def _local_operator_servers(doc: dict[str, Any]) -> dict[str, Any]:
     return servers if isinstance(servers, dict) else {}
 
 
+def _claude_json_servers(doc: dict[str, Any], root: Path) -> dict[str, Any]:
+    """Server entries from ``~/.claude.json`` (global + project scope).
+
+    Claude Code keeps global servers under the top-level ``mcpServers`` key
+    and project-scoped servers under ``projects.<absolute-path>.mcpServers``;
+    project scope wins within the file. Best-effort: anything not shaped like
+    that degrades to just the global key (MCP-18).
+    """
+    servers = _local_operator_servers(doc)
+    projects = doc.get("projects")
+    if isinstance(projects, dict):
+        node = projects.get(str(root))
+        if node is None:
+            node = projects.get(str(root.resolve()))
+        if isinstance(node, dict):
+            scoped = node.get("mcpServers")
+            if isinstance(scoped, dict):
+                servers = {**servers, **scoped}
+    return servers
+
+
 def _imported_servers(doc: dict[str, Any], key_path: tuple[str, ...] | None) -> dict[str, Any]:
     """Server entries from a foreign tool config.
 
@@ -191,9 +213,7 @@ def validate_server_config(name: str, cfg: MCPServerConfig | Any) -> list[str]:
     """
     errors: list[str] = []
     if not SERVER_NAME_RE.match(name or ""):
-        errors.append(
-            f"invalid server name {name!r}: must match [A-Za-z0-9_.:-]{{1,100}}"
-        )
+        errors.append(f"invalid server name {name!r}: must match [A-Za-z0-9_.:-]{{1,100}}")
     if not isinstance(cfg, (MCPStdioServerConfig, MCPHttpServerConfig, MCPSseServerConfig)):
         errors.append(f"server {name!r}: invalid config (expected an object)")
         return errors
@@ -228,7 +248,8 @@ def load_all_mcp_configs(
     1. ``<cwd>/.local-operator/mcp.json``
     2. ``<cwd>/.mcp.json``
     3. ``~/.local-operator/mcp.json``
-    4. ``~/.claude.json`` (``mcpServers`` key)
+    4. ``~/.claude.json`` (top-level ``mcpServers`` plus project-scoped
+       ``projects.<cwd>.mcpServers``, project scope winning within the file)
     5. ``<cwd>/.claude/.mcp.json``
     6. ``~/.cursor/mcp.json``
     7. ``<cwd>/.vscode/mcp.json`` (``mcp.servers`` key)
@@ -263,17 +284,20 @@ def load_all_mcp_configs(
     configs: dict[str, MCPServerConfig] = {}
     sources: dict[str, str] = {}
 
+    claude_path = home / ".claude.json"
     for path, key_path in candidates:
         doc = _read_json(path)
         if doc is None:
             continue
         # Local-operator files contribute enable/disable lists.
-        if key_path is None and (
-            path in (project_path, project_dot_path, user_path)
-        ):
+        if key_path is None and (path in (project_path, project_dot_path, user_path)):
             disabled.update(_string_list(doc.get("disabledServers")))
             enabled.update(_string_list(doc.get("enabledServers")))
-        for name, raw in _imported_servers(doc, key_path).items():
+        if path == claude_path:
+            server_entries = _claude_json_servers(doc, root)
+        else:
+            server_entries = _imported_servers(doc, key_path)
+        for name, raw in server_entries.items():
             if name in configs:
                 continue  # first-seen wins; later sources never override
             cfg = _coerce_server_config(raw)
@@ -299,9 +323,24 @@ def load_all_mcp_configs(
 
 
 def _write_json_atomic(path: Path, doc: dict[str, Any]) -> None:
-    """Write JSON with a stable two-space indent, creating parents as needed."""
+    """Write JSON with a stable two-space indent, atomically (MCP-15).
+
+    Temp file in the target directory + ``os.replace``: readers never see a
+    half-written mcp.json (a crash mid-write used to truncate the config).
+    """
+    import tempfile
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    payload = json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        os.replace(tmp_name, path)
+    except BaseException:
+        with suppress(OSError):
+            os.unlink(tmp_name)
+        raise
 
 
 def _local_operator_file_paths(cwd: str | os.PathLike[str]) -> list[Path]:
