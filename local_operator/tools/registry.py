@@ -31,6 +31,7 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     "wake": lambda context: builtin.build_wake_tool(context),
     "list_variables": lambda _context: builtin.build_list_variables_tool(),
     "read_variable": lambda _context: builtin.build_read_variable_tool(),
+    "browser": lambda _context: builtin.build_browser_tool(_context),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -48,6 +49,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "wake",
     "list_variables",
     "read_variable",
+    "browser",
 ]
 
 
