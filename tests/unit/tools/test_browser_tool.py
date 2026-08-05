@@ -9,6 +9,7 @@ what is pinned here.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import local_operator.tools.builtin as builtin
 from local_operator.harness.types import ToolContext
@@ -67,7 +68,8 @@ def test_open_runs_new_surface_and_records_id(monkeypatch) -> None:
 
     async def fake_run(argv, timeout=30.0):
         captured["argv"] = list(argv)
-        return 0, '{"surface": "b-42"}'
+        # The shape real cmux emits — surface_ref, not surface/surface_id/id.
+        return 0, '{"pane_ref":"pane:2","surface_ref":"surface:73","type":"browser"}'
 
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
     monkeypatch.setattr(builtin, "_run_cmux", fake_run)
@@ -86,8 +88,8 @@ def test_open_runs_new_surface_and_records_id(monkeypatch) -> None:
         "--focus",
         "false",
     ]
-    assert "b-42" in result.text
-    assert ctx.browser.surface_id == "b-42"
+    assert "surface:73" in result.text
+    assert ctx.browser.surface_id == "surface:73"
 
 
 def test_goto_reuses_recorded_surface(monkeypatch) -> None:
@@ -102,10 +104,10 @@ def test_goto_reuses_recorded_surface(monkeypatch) -> None:
     tool = builtin.build_browser_tool(_ctx())
     ctx = _ctx()
     ctx.browser = builtin._BrowserSession()
-    ctx.browser.surface_id = "b-9"
+    ctx.browser.surface_id = "surface:9"
     result = _run(tool, "t1", {"action": "goto", "url": "https://foo.bar"}, ctx)
     assert not result.is_error
-    assert captured["surface"] == "b-9"
+    assert captured["surface"] == "surface:9"
     assert "foo.bar" in result.text
 
 
@@ -122,7 +124,11 @@ def test_screenshot_writes_default_path(monkeypatch) -> None:
     captured: dict = {}
 
     async def fake_run(argv, timeout=30.0):
-        captured["path"] = argv[-1]
+        captured["argv"] = list(argv)
+        # cmux writes the file; emulate that so the existence guard passes.
+        out_path = argv[argv.index("--out") + 1]
+        captured["path"] = out_path
+        Path(out_path).write_bytes(b"PNG")
         return 0, "ok"
 
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
@@ -130,11 +136,33 @@ def test_screenshot_writes_default_path(monkeypatch) -> None:
     tool = builtin.build_browser_tool(_ctx())
     ctx = _ctx()
     ctx.browser = builtin._BrowserSession()
-    ctx.browser.surface_id = "b-3"
+    ctx.browser.surface_id = "surface:3"
     result = _run(tool, "t1", {"action": "screenshot"}, ctx)
     assert not result.is_error
+    # The destination MUST be passed as --out; positionally cmux ignores it.
+    assert "--out" in captured["argv"]
     assert captured["path"].endswith(".png")
     assert "Screenshot saved" in result.text
+    Path(captured["path"]).unlink(missing_ok=True)
+
+
+def test_screenshot_exit_zero_without_file_is_an_error(monkeypatch, tmp_path) -> None:
+    """cmux can exit 0 while writing nothing (e.g. an ignored destination).
+    Reporting success then would hand the model a path to a missing file."""
+
+    async def fake_run(argv, timeout=30.0):
+        return 0, "OK file:///somewhere/else.png"
+
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    monkeypatch.setattr(builtin, "_run_cmux", fake_run)
+    tool = builtin.build_browser_tool(_ctx())
+    ctx = _ctx()
+    ctx.browser = builtin._BrowserSession()
+    ctx.browser.surface_id = "surface:3"
+    target = tmp_path / "never-written.png"
+    result = _run(tool, "t1", {"action": "screenshot", "path": str(target)}, ctx)
+    assert result.is_error
+    assert "no file at" in result.text
 
 
 def test_unavailable_reports_clear_error(monkeypatch) -> None:
@@ -160,3 +188,20 @@ def test_unknown_action_errors(monkeypatch) -> None:
     tool = builtin.build_browser_tool(_ctx())
     result = _run(tool, "t1", {"action": "explode"}, _ctx())
     assert result.is_error
+
+
+def test_parse_surface_id_reads_real_cmux_payload() -> None:
+    """Real cmux emits surface_ref; the other spellings are fallbacks only."""
+    real = '{"pane_ref":"pane:2","surface_ref":"surface:73","type":"browser"}'
+    assert builtin._parse_surface_id(real) == "surface:73"
+    assert builtin._parse_surface_id('{"surface":"surface:1"}') == "surface:1"
+    assert builtin._parse_surface_id('{"nothing":"useful"}') == ""
+
+
+def test_parse_surface_id_rejects_banners_and_errors() -> None:
+    """A status banner or error message must never become a --surface value."""
+    assert builtin._parse_surface_id("done") == ""
+    assert builtin._parse_surface_id("error: could not start") == ""
+    assert builtin._parse_surface_id("Created new browser surface.") == ""
+    # Ref-shaped trailing token is still accepted from plain text.
+    assert builtin._parse_surface_id("Opened surface:42") == "surface:42"

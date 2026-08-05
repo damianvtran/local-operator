@@ -33,15 +33,20 @@ from pathlib import Path
 
 
 def check(path: Path) -> list[str]:
-    events = []
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if line:
-            try:
-                events.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
     problems: list[str] = []
+    events = []
+    for number, line in enumerate(path.read_text().splitlines(), start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            # SC-0: stdout is a DATA channel. Silently skipping a junk line
+            # is how a polluted stream (log records, ANSI banners) passes this
+            # checker while breaking every strict per-line consumer — so a
+            # non-JSON line is itself a contract violation.
+            problems.append(f"SC-0: line {number} is not JSON: {line[:80]!r}")
     starts = [e for e in events if e.get("type") == "agent_start"]
     ends = [e for e in events if e.get("type") == "agent_end"]
 

@@ -356,7 +356,11 @@ def test_config_create_command(tmp_home: Path) -> None:
 
 
 def test_serve_command_preserves_uvicorn_call() -> None:
-    with patch("local_operator.cli.uvicorn.run") as mock_run:
+    """uvicorn is imported lazily INSIDE serve_command (so `local-operator`
+    starts without the server extra), so the patch target is the uvicorn
+    module itself, not a `local_operator.cli.uvicorn` attribute that no
+    longer exists."""
+    with patch("uvicorn.run") as mock_run:
         assert serve_command("localhost", 8000, False) == 0
     mock_run.assert_called_once_with(
         "local_operator.server.app:app", host="localhost", port=8000, reload=False
@@ -472,10 +476,14 @@ def test_main_interactive_tty_uses_tui(
     fake_tui = types.ModuleType("local_operator.tui")
 
     async def fake_run_tui(
-        session_factory, theme_name: str = "dark", login_handler=None, provider_controller=None
+        session_factory, theme_name: str = "dark", provider_controller=None
     ) -> int:
         seen["theme"] = theme_name
         seen["session"] = await session_factory()
+        # Recorded so the test can prove the CLI actually WIRED these. A fake
+        # with `=None` defaults passes happily when nothing is passed, which is
+        # how a positionally-bound controller shipped inert once already.
+        seen["provider_controller"] = provider_controller
         return 0
 
     fake_tui.run_tui = fake_run_tui
@@ -498,6 +506,11 @@ def test_main_interactive_tty_uses_tui(
     assert seen["factory_called"] is True
     assert seen["session"] is sentinel_session
     assert seen["theme"] == "light"
+    # The whole provider surface (/provider, /accounts, /usage, /model, /login,
+    # /logout) is inert without a real controller. Asserting non-None is what
+    # catches a parameter that got bound positionally into the wrong slot — a
+    # fake with `=None` defaults otherwise passes while the feature ships dead.
+    assert seen["provider_controller"] is not None
 
 
 def test_main_no_tui_flag_uses_headless_repl(
@@ -634,9 +647,8 @@ def test_main_preflight_env_key_passes(
 
     fake_tui = types.ModuleType("local_operator.tui")
 
-    async def fake_run_tui(
-        session_factory, theme_name="dark", login_handler=None, provider_controller=None
-    ) -> int:
+    async def fake_run_tui(session_factory, theme_name="dark", provider_controller=None) -> int:
+        seen.setdefault("provider_controller", provider_controller)
         await session_factory()
         return 0
 
@@ -666,9 +678,8 @@ def test_tui_flag_forces_tui_on_non_tty(
 
     fake_tui = types.ModuleType("local_operator.tui")
 
-    async def fake_run_tui(
-        session_factory, theme_name="dark", login_handler=None, provider_controller=None
-    ) -> int:
+    async def fake_run_tui(session_factory, theme_name="dark", provider_controller=None) -> int:
+        seen.setdefault("provider_controller", provider_controller)
         seen["ran"] = True
         return 0
 

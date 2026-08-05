@@ -106,3 +106,54 @@ def test_enabled_empty_list_gives_no_tools() -> None:
 def test_default_names_cover_builder_table() -> None:
     """The default surface is the whole table today; drift is deliberate."""
     assert set(DEFAULT_TOOL_NAMES) == set(TOOL_BUILDERS)
+
+
+# --- write/edit diff counters (the TUI's +N/-N indicators) -------------------
+
+
+def test_line_delta_distinguishes_insert_delete_and_rewrite() -> None:
+    """A length diff would call a same-size rewrite "no change"; a real match
+    must report its churn, and a pure insert must not invent removals."""
+    from local_operator.tools.builtin import _line_delta
+
+    assert _line_delta("a\nb\n", "a\nx\nb\n") == (1, 0)
+    assert _line_delta("a\nb\nc\n", "a\nc\n") == (0, 1)
+    assert _line_delta("a\nb\n", "x\ny\n") == (2, 2)
+    assert _line_delta("a\n", "a\n") == (0, 0)
+    assert _line_delta("", "a\nb\n") == (2, 0)
+    assert _line_delta("a\nb\n", "") == (0, 2)
+
+
+def test_write_reports_diff_counts_for_new_and_overwritten_files(tmp_path) -> None:
+    """The tool card renders +N/-N from these keys, so they must always be
+    present on the success path (new file = all additions)."""
+    import asyncio
+
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.builtin import execute_write
+
+    ctx = ToolContext(cwd=str(tmp_path))
+    created = asyncio.run(
+        execute_write("t1", {"path": "f.txt", "content": "a\nb\nc\n"}, context=ctx)
+    )
+    assert created.details["added"] == 3
+    assert created.details["removed"] == 0
+    changed = asyncio.run(
+        execute_write("t2", {"path": "f.txt", "content": "a\nZ\nc\nd\n"}, context=ctx)
+    )
+    assert changed.details["added"] == 2
+    assert changed.details["removed"] == 1
+
+
+def test_edit_reports_diff_counts(tmp_path) -> None:
+    import asyncio
+
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.builtin import execute_edit, execute_write
+
+    ctx = ToolContext(cwd=str(tmp_path))
+    asyncio.run(execute_write("t0", {"path": "f.txt", "content": "a\nb\nc\n"}, context=ctx))
+    result = asyncio.run(
+        execute_edit("t1", {"path": "f.txt", "old_text": "b", "new_text": "B"}, context=ctx)
+    )
+    assert (result.details["added"], result.details["removed"]) == (1, 1)

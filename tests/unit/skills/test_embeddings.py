@@ -67,7 +67,7 @@ class TestLocalEmbedder:
 
     def test_threshold_defaults(self) -> None:
         # Shipped calibration constants — pinned by test_calibration.py.
-        assert LocalEmbedder().default_threshold == 0.27
+        assert LocalEmbedder().default_threshold == 0.18
         assert ApiEmbedder(base_url="http://x", api_key="k").default_threshold == 0.25
 
     def test_satisfies_protocol(self) -> None:

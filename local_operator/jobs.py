@@ -15,7 +15,8 @@ import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from multiprocessing import Process
-from typing import Any, Dict, List, Optional, TypeVar, Union, cast
+from types import TracebackType
+from typing import Any, Dict, List, Optional, TypeVar, Union
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -117,7 +118,12 @@ class JobContext:
         """Enter the context."""
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(
+        self,
+        exc_type: Optional[type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType],
+    ) -> None:
         """Exit the context, restoring the original working directory."""
         os.chdir(self.original_cwd)
 
@@ -223,10 +229,7 @@ class JobManager:
         Raises:
             KeyError: If the job with the specified ID is not found
         """
-        try:
-            job = await self.get_job(job_id)
-        except KeyError:
-            raise
+        job = await self.get_job(job_id)
 
         async with self._lock:
             job.status = status
@@ -259,13 +262,10 @@ class JobManager:
         Raises:
             KeyError: If the job with the specified ID is not found
         """
-        try:
-            job = await self.get_job(job_id)
-        except KeyError:
-            raise
+        job = await self.get_job(job_id)
 
         async with self._lock:
-            job.task = cast(asyncio.Task[Any], task)
+            job.task = task
 
         return job
 
@@ -287,10 +287,7 @@ class JobManager:
         Raises:
             KeyError: If the job with the specified ID is not found
         """
-        try:
-            job = await self.get_job(job_id)
-        except KeyError:
-            raise
+        job = await self.get_job(job_id)
 
         async with self._lock:
             job.current_execution = execution_state
@@ -324,10 +321,7 @@ class JobManager:
         Raises:
             KeyError: If the job with the specified ID is not found
         """
-        try:
-            job = await self.get_job(job_id)
-        except KeyError:
-            raise
+        job = await self.get_job(job_id)
 
         if job.status not in (JobStatus.PENDING, JobStatus.PROCESSING):
             return False
