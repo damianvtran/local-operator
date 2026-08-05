@@ -128,7 +128,10 @@ class Message(BaseModel):
     is_error: bool = False
     stop_reason: str | None = None  # stop | length | toolUse | error | aborted
     usage: "Usage | None" = None
-    # Provider-native replay payload (opaque to the harness).
+    # Provider-native replay payload (opaque to the harness). NOTE: the loop
+    # stores harness bookkeeping under ``provider_payload["details"]`` (tool
+    # result metadata for compaction) — wire clients MUST NOT replay that key
+    # to providers; it is not provider data.
     provider_payload: dict[str, Any] | None = None
     # Stable id for transcript entries and cache memoization.
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
@@ -176,8 +179,15 @@ class CustomMessage(BaseModel):
     (``"compaction_summary"``, ``"skill_prompt"``, ``"wake_prompt"``,
     ``"handoff"``, ...), ``details`` carries the typed payload.
 
+    ``id`` is the stable transcript entry id: the transcript persists it
+    verbatim (never mints a new one) and ``convert_to_llm`` must carry it
+    onto the rendered message, so ``first_kept_entry_id`` can reference a
+    rendered custom entry and replay still finds it.
+
     The two callables are aside commit/discard hooks (see module docstring);
-    they are never serialized.
+    they are never serialized. ``on_commit`` fires when the message is
+    actually injected into context; ``on_discard`` fires when the aside is
+    dropped as stale at injection time.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -185,8 +195,22 @@ class CustomMessage(BaseModel):
     custom_type: str
     attribution: Literal["user", "agent", "system"] = "system"
     details: dict[str, Any] = Field(default_factory=dict)
-    on_commit: Callable[[], None] | None = Field(default=None, exclude=True, compare=False)
-    on_discard: Callable[[], None] | None = Field(default=None, exclude=True, compare=False)
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    on_commit: Callable[[], None] | None = Field(default=None, exclude=True, json_schema_extra={'compare': False})
+    on_discard: Callable[[], None] | None = Field(default=None, exclude=True, json_schema_extra={'compare': False})
+
+
+class StaleAside:
+    """Returned by an aside thunk when its payload is stale at injection
+    time. Carries the originating :class:`CustomMessage` so the loop can fire
+    its ``on_discard`` hook; the message itself is never injected. (A plain
+    ``None`` thunk result is dropped silently — producers that need the
+    discard receipt must return this instead.)"""
+
+    __slots__ = ("message",)
+
+    def __init__(self, message: CustomMessage) -> None:
+        self.message = message
 
 
 AgentMessage = Message | CustomMessage
@@ -268,32 +292,66 @@ class AbortSignal:
     def __init__(self) -> None:
         self._event = asyncio.Event()
         self.reason: str | None = None
+        # Watcher tasks created by ``any_of``; kept so they can be cancelled
+        # when the combined signal fires or is no longer needed (otherwise
+        # they leak for the lifetime of the watched signals).
+        self._watchers: set[asyncio.Task[None]] = set()
 
     def abort(self, reason: str = "aborted") -> None:
         if not self._event.is_set():
             self.reason = reason
             self._event.set()
+        self._cancel_watchers()
+
+    def cancel(self) -> None:
+        """Cancel any watcher tasks without aborting (the combined signal is
+        no longer needed — e.g. the run that wired it has ended)."""
+        self._cancel_watchers()
+
+    def _cancel_watchers(self) -> None:
+        watchers, self._watchers = self._watchers, set()
+        for task in watchers:
+            if not task.done():
+                task.cancel()
 
     @property
     def aborted(self) -> bool:
         return self._event.is_set()
+
+    @property
+    def watchers(self) -> tuple[asyncio.Task[None], ...]:
+        return tuple(self._watchers)
 
     async def wait(self) -> None:
         await self._event.wait()
 
     @staticmethod
     def any_of(*signals: "AbortSignal") -> "AbortSignal":
+        """Combine signals: aborts when any input aborts. Watcher task
+        references live on the combined signal and are cancelled when it
+        fires or :meth:`cancel` is called. With no running event loop the
+        watchers cannot be created — return an already-aborted signal rather
+        than silently dropping aborts."""
         combined = AbortSignal()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            combined.abort("no running event loop")
+            return combined
+
+        for sig in signals:
+            if sig.aborted:
+                combined.abort(sig.reason or "aborted")
+                return combined
 
         async def _watch(sig: "AbortSignal") -> None:
             await sig.wait()
             combined.abort(sig.reason or "aborted")
 
         for sig in signals:
-            if sig.aborted:
-                combined.abort(sig.reason or "aborted")
-                return combined
-            asyncio.get_event_loop().create_task(_watch(sig))
+            task = loop.create_task(_watch(sig))
+            combined._watchers.add(task)
+            task.add_done_callback(combined._watchers.discard)
         return combined
 
 
