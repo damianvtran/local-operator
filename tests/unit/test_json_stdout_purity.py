@@ -116,6 +116,10 @@ def test_background_job_notices_go_to_stderr(tmp_path, monkeypatch) -> None:
     args = exec_mode.ExecArgs(json_mode=True, background=True)
     stdout, stderr = _streams(lambda: exec_mode._spawn_background("say hi", args))
     _assert_stdout_is_json_only(stdout, "_spawn_background notices")
+    # Purity alone would pass if the notices vanished entirely; assert they
+    # actually reached the operator, like every sibling case does.
+    assert "background job" in stderr.lower()
+    assert "Log:" in stderr
 
 
 @pytest.mark.parametrize(
@@ -158,3 +162,38 @@ def test_foreground_exec_preflight_errors_go_to_stderr(monkeypatch) -> None:
     stdout, stderr = _streams(cli.main)
     _assert_stdout_is_json_only(stdout, "foreground exec preflight (Exception)")
     assert "preflight failed" in stderr
+
+
+#: Every way a foreground `exec --json` run can fail before it streams events.
+#: Enumerated deliberately: the defect class recurred three times, each time in
+#: a branch nobody had listed, so the fix is a list that grows rather than an
+#: assurance that the paths were all checked.
+EXEC_FAILURE_ARGVS = [
+    pytest.param(["exec", "--json", "hi"], id="no-hosting"),
+    pytest.param(
+        ["--hosting", "openai", "exec", "--json", "hi"],
+        id="hosting-without-model",
+    ),
+    pytest.param(
+        ["--hosting", "openai", "--model", "gpt-4o", "--run-in", "/nope", "exec", "--json", "hi"],
+        id="invalid-run-in",
+    ),
+    pytest.param(
+        ["--hosting", "openai", "--model", "gpt-4o", "exec", "--json", "--agent-id", "nope", "hi"],
+        id="unknown-agent-id",
+    ),
+]
+
+
+@pytest.mark.parametrize("argv", EXEC_FAILURE_ARGVS)
+def test_every_exec_json_failure_keeps_stdout_clean(argv, monkeypatch, tmp_path) -> None:
+    """No credentials, no network: each of these fails during preflight, which
+    is exactly where a coloured banner used to land on the event stream."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr("sys.argv", ["local-operator", *argv])
+    stdout, stderr = _streams(cli.main)
+    _assert_stdout_is_json_only(stdout, f"exec --json failure {argv}")
+    # A failure with NOTHING on either stream would be undiagnosable, so the
+    # diagnosis has to exist as well as be on the right channel.
+    assert stderr.strip(), "a failing run must say why, on stderr"

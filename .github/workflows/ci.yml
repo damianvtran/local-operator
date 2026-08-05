@@ -98,7 +98,7 @@ jobs:
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-report
+          name: coverage-report-${{ matrix.python-version }}
           path: htmlcov
           retention-days: 7
 
@@ -113,6 +113,10 @@ jobs:
           inputs: .
   cli-sanity:
     runs-on: ubuntu-latest
+    # Live-LLM job: needs a real OpenRouter key. Fork pull requests do not get
+    # repository secrets, so without this gate every external contributor sees a
+    # permanently red check they cannot fix.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     needs:
       - lint
       - type-check
@@ -180,7 +184,12 @@ jobs:
             --model x-ai/grok-4-fast exec --json "hi" > err_out.jsonl 2> err_err.txt
           set -e
           if [ -s err_out.jsonl ]; then
-            while IFS= read -r line; do
+            # `|| [ -n "$line" ]`: bash read returns non-zero at EOF on an
+            # UNTERMINATED final line, so without this the loop body never runs
+            # for it and the gate passes on exactly the shape it exists to
+            # catch — a diagnostic written with end='' or a stream truncated
+            # mid-write by a signal.
+            while IFS= read -r line || [ -n "$line" ]; do
               [ -z "$line" ] && continue
               echo "$line" | python -c 'import json,sys; json.loads(sys.stdin.read())' || {
                 echo "non-JSON on stdout from a failing exec --json run:"; echo "$line"; exit 1; }
@@ -191,6 +200,8 @@ jobs:
 
   server-sanity:
     runs-on: ubuntu-latest
+    # Live-LLM job — same fork-secret gate as cli-sanity.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     needs:
       - lint
       - type-check

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 
+from typing import Any
+
 import pytest
 from pathlib import Path
 
@@ -21,7 +23,7 @@ def _ctx() -> ToolContext:
     return ToolContext(cwd="/tmp")
 
 
-def _run(tool, tool_call_id: str, args: dict, ctx: ToolContext):
+def _run(tool, tool_call_id: str, args: dict[str, Any], ctx: ToolContext):
     return asyncio.run(tool.execute(tool_call_id, args, context=ctx))
 
 
@@ -66,7 +68,7 @@ def test_open_without_url_errors(monkeypatch) -> None:
 
 
 def test_open_runs_new_surface_and_records_id(monkeypatch) -> None:
-    captured: dict = {}
+    captured: dict[str, Any] = {}
 
     async def fake_run(argv, timeout=30.0):
         captured["argv"] = list(argv)
@@ -91,11 +93,12 @@ def test_open_runs_new_surface_and_records_id(monkeypatch) -> None:
         "false",
     ]
     assert "surface:73" in result.text
+    assert ctx.browser is not None
     assert ctx.browser.surface_id == "surface:73"
 
 
 def test_goto_reuses_recorded_surface(monkeypatch) -> None:
-    captured: dict = {}
+    captured: dict[str, Any] = {}
 
     async def fake_run(argv, timeout=30.0):
         captured["surface"] = argv[argv.index("--surface") + 1]
@@ -123,7 +126,7 @@ def test_goto_without_open_errors(monkeypatch) -> None:
 
 
 def test_screenshot_writes_default_path(monkeypatch) -> None:
-    captured: dict = {}
+    captured: dict[str, Any] = {}
 
     async def fake_run(argv, timeout=30.0):
         captured["argv"] = list(argv)
@@ -365,3 +368,52 @@ def test_first_success_across_multiple_objects_is_used() -> None:
         == "surface:73"
     )
     assert builtin._parse_surface_id('{"surface_ref":"surface:73"}\n{"ok":false}') == "surface:73"
+
+
+def test_payload_larger_than_the_scan_window_still_yields_its_handle() -> None:
+    """The 64 KB scan window is a cost bound, not a correctness bound.
+
+    Truncating the head mid-document makes raw_decode fail and the bare-token
+    fallback cannot match (the token still carries its JSON quotes), so without
+    a quoted-key fallback a legitimate oversized response lost EVERY handle at a
+    sharp cliff — total failure rather than degradation. Real cmux sends ~118
+    bytes, so this guards a future response that embeds a snapshot or data URI.
+    """
+    import json
+
+    for filler in (70_000, 5_000_000):
+        payload = json.dumps(
+            {"ok": True, "surface_ref": "surface:73", "result": {"log": "x" * filler}}
+        )
+        assert builtin._parse_surface_id(payload) == "surface:73"
+
+
+def test_quoted_fallback_does_not_invent_a_handle_from_prose() -> None:
+    """The fallback is anchored on a ref-SHAPED value under a known key, so
+    prose that merely mentions the key name must not produce a handle."""
+    assert builtin._parse_surface_id('note: the key is "surface_ref": "not a ref"') == ""
+    assert builtin._parse_surface_id('{"ok":false,"error":"denied","id":"req-1"}') == ""
+    assert builtin._parse_surface_id('{"pane_ref":"pane:2"}') == ""
+
+
+def test_goto_refuses_a_flag_shaped_url(monkeypatch) -> None:
+    """The URL lands in a POSITIONAL argv slot, so cmux parses a flag-shaped
+    value as an option: `goto --help` exits 0 and prints help, which we would
+    otherwise report as a successful navigation."""
+    calls: list[list[str]] = []
+
+    async def fake_run(argv, timeout=30.0):
+        calls.append(list(argv))
+        return 0, "ok"
+
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    monkeypatch.setattr(builtin, "_run_cmux", fake_run)
+    tool = builtin.build_browser_tool(_ctx())
+    ctx = _ctx()
+    ctx.browser = builtin._BrowserSession()
+    ctx.browser.surface_id = "surface:3"
+    for bad in ("--help", "-x", "  --focus"):
+        result = _run(tool, "t1", {"action": "goto", "url": bad}, ctx)
+        assert result.is_error, f"{bad!r} should be refused"
+        assert "flag-shaped" in result.text
+    assert not calls, "a refused URL must never reach the subprocess"

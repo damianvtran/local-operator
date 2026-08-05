@@ -105,10 +105,11 @@ class LocalEmbedder:
     common-English noise floor that pure 3-gram TF carries, without erasing
     the 3-gram recall on short tokens.
 
-    Calibration. The threshold is chosen to sit inside the INTERSECTION of the
-    score gaps of two independent corpora, so it is not tuned to either one.
-    Both are reproducible — the first from the test module, the second with
-    ``scripts/calibrate_skill_threshold.py --skills-dir <dir>``:
+    Calibration. 0.19 sits inside the INTERSECTION of the score gaps of two
+    independent corpora, so it is tuned to neither alone. Both are
+    reproducible — the first from the test module, the second with
+    ``scripts/calibrate_skill_threshold.py --skills-dir <dir> --labelled
+    scripts/calibration_queries.json``:
 
         corpus                              unrelated max   relevant min
         6 skills, pinned in test_calibration      0.1667         0.2606
@@ -116,11 +117,33 @@ class LocalEmbedder:
         ---------------------------------------------------------------
         intersection                              0.1667         0.2134
 
-    Shipped 0.19: the midpoint of that intersection, which maximises the
-    SMALLER of the two margins (+0.0233 above the best false match, +0.0234
-    below the worst true match). Recall is 100% and false positives 0% on both
-    corpora. Queries are the short phrasings people actually type ("deploy this
-    MR to qa", "roll back prod-2"), not keyword-stuffed ideal ones.
+    0.19 is the midpoint, maximising the SMALLER margin (+0.0233 above the best
+    false match, +0.0234 below the worst true match). On those two corpora and
+    those query sets, recall is 100% and false positives 0%.
+
+    HONEST LIMIT, because the sentence above is corpus- and query-set-specific
+    and it would be easy to read as a general guarantee. Against the same real
+    15-skill corpus with an INDEPENDENTLY chosen query set, recall drops to
+    ~71%: a hashed term-frequency embedder matches vocabulary, not meaning, so
+    a query sharing no terms with a description scores near zero however
+    relevant it is. "where do i put my api keys" against a description saying
+    "credential loading and storage" is the shape that fails. Three skills also
+    rank behind a sibling that shares more vocabulary, which no threshold can
+    fix.
+
+    :class:`ApiEmbedder` is the accurate path and is selected automatically
+    whenever an embedding key is configured. This class is the OFFLINE fallback
+    and its ceiling is lexical overlap — that is the trade for needing no key,
+    no network and no compiled dependency.
+
+    A rejected idea, recorded so it is not retried blind: capping the embedded
+    description at 300 chars to reduce the length dilution that L2-normalised
+    TF suffers. It looks good on a small hand-picked query set (recall 57% ->
+    71%) and is WORSE on the shipped labelled set (100% -> 83%, and the score
+    gap disappears entirely), because trimming removes matching vocabulary as
+    often as it removes noise. Measure any such change with
+    ``scripts/calibration_queries.json``, not with a fresh set of queries
+    chosen while looking at the failure.
 
     The earlier 0.27 came from an 8-skill corpus scored only with "clearly
     matching" queries that reached >= 0.42. On realistic input it returned

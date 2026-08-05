@@ -101,16 +101,56 @@ def _encode_len(text: str) -> int:
     return len(text) // _CHARS_PER_TOKEN_FALLBACK
 
 
-def count_text_tokens(text: str) -> int:
+#: Per-model encodings, resolved lazily and cached. Separate from the compaction
+#: singleton on purpose: compaction wants ONE stable ruler for its budget
+#: arithmetic, while an API reporting token stats should answer for the model the
+#: caller actually named.
+_MODEL_ENCODINGS: dict[str, object | None] = {}
+
+
+def _get_model_encoding(model: str) -> object | None:
+    """Encoding for ``model``, or None when tiktoken is unavailable.
+
+    Falls back to the shared cl100k_base encoding for an unknown model name,
+    which is what the previous inline implementation did.
+    """
+    if model in _MODEL_ENCODINGS:
+        return _MODEL_ENCODINGS[model]
+    encoding: object | None = None
+    try:
+        import tiktoken
+
+        try:
+            encoding = tiktoken.encoding_for_model(model)
+        except Exception:  # noqa: BLE001 - unknown model name, not a failure
+            encoding = tiktoken.get_encoding("cl100k_base")
+    except Exception:  # noqa: BLE001 - degrade, never raise
+        encoding = _get_encoding()  # logs the extra hint once
+    _MODEL_ENCODINGS[model] = encoding
+    return encoding
+
+
+def count_text_tokens(text: str, model: str | None = None) -> int:
     """Public token count for a plain string.
 
-    Callers outside compaction (the HTTP API's token stats, for example) need
-    a count without reaching for tiktoken themselves. Going through here means
+    Callers outside compaction (the HTTP API's token stats, for example) need a
+    count without reaching for tiktoken themselves. Going through here means
     they inherit the degradation ladder — exact counts when the ``tokenizer``
     extra is installed, the chars/4 estimate otherwise — instead of raising
     ImportError on an install that never asked for it.
+
+    ``model`` selects the model's own encoding. It matters more than it looks:
+    cl100k_base and o200k_base agree on ASCII prose and code, but differ by
+    ~23% on CJK, so hardcoding one ruler made a reported ``total_tokens``
+    over-report for non-Latin content on every o200k model (gpt-4o and later).
+    Omit it only when any consistent ruler will do.
     """
-    return _encode_len(text)
+    if not text:
+        return 0
+    encoding = _get_model_encoding(model) if model else _get_encoding()
+    if encoding is not None:
+        return len(encoding.encode(text))  # type: ignore[attr-defined]
+    return len(text) // _CHARS_PER_TOKEN_FALLBACK
 
 
 def truncate_to_tokens(text: str, max_tokens: int) -> str:

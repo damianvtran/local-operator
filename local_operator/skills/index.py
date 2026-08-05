@@ -60,6 +60,7 @@ def _content_hash(skills: Sequence[Skill]) -> str:
     different index. Editing a SKILL.md, renaming a skill, swapping roots,
     or reordering invalidates the cache; a pure rescan of identical content
     in identical order reuses it.
+
     """
     digest = hashlib.sha256()
     for skill in skills:

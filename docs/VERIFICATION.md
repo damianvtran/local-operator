@@ -242,12 +242,13 @@ independently of the agent that wrote it:
 Verifying the faiss removal surfaced a separate defect: the correct skill
 ranked FIRST but scored 0.21–0.29 against a 0.27 threshold, so short realistic
 queries selected **nothing** and the agent proceeded without its playbook. The
-threshold is now the max-margin midpoint 0.18:
+threshold is now 0.19, the midpoint of the score-gap INTERSECTION of two
+independent corpora (so it is not tuned to either one):
 
 | threshold | recall | false positives |
 |---|---|---|
 | 0.27 (was) | 56% | 0% |
-| **0.18 (now)** | **100%** | **0%** |
+| **0.19 (now)** | **100%** | **0%** |
 
 Cost: +279 tokens of start context. The old value came from a calibration at
 dim 512, where the noise floor was 0.31; at dim 4096 it is 0.07–0.08. The

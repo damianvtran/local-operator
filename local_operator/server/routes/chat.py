@@ -164,9 +164,10 @@ async def chat_endpoint(
         # import machinery. count_text_tokens is exact when the extra is present
         # and falls back to the chars/4 estimate when it is not.
         prompt_tokens = sum(
-            count_text_tokens(msg.content) for msg in operator.executor.agent_state.conversation
+            count_text_tokens(msg.content, request.model)
+            for msg in operator.executor.agent_state.conversation
         )
-        completion_tokens = count_text_tokens(response_content)
+        completion_tokens = count_text_tokens(response_content, request.model)
         total_tokens = prompt_tokens + completion_tokens
 
         return CRUDResponse(
@@ -276,9 +277,10 @@ async def chat_with_agent(
         # import machinery. count_text_tokens is exact when the extra is present
         # and falls back to the chars/4 estimate when it is not.
         prompt_tokens = sum(
-            count_text_tokens(msg.content) for msg in operator.executor.agent_state.conversation
+            count_text_tokens(msg.content, request.model)
+            for msg in operator.executor.agent_state.conversation
         )
-        completion_tokens = count_text_tokens(response_content)
+        completion_tokens = count_text_tokens(response_content, request.model)
         total_tokens = prompt_tokens + completion_tokens
 
         return CRUDResponse(
