@@ -25,6 +25,7 @@ from typing import Any, Callable
 
 from rich.console import Console
 
+from local_operator.ansi import strip_control_sequences
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
@@ -169,12 +170,19 @@ class PrintRenderer:
                 sys.stdout.write("\n")
                 sys.stdout.flush()
         elif isinstance(event, ToolExecutionStartEvent):
-            summary = event.intent or _args_summary(event.args)
-            line = f"● {event.tool_name} {summary}".rstrip()
+            # Sanitised for the same reason the TUI card is: tool_name, intent
+            # and args are all model-controlled, and an erase-display escape in
+            # any of them clears the operator's terminal. This is the non-JSON
+            # headless renderer, so it writes real text to a real terminal;
+            # `exec --json` is unaffected because json.dumps escapes it.
+            summary = strip_control_sequences(event.intent or _args_summary(event.args))
+            name = strip_control_sequences(event.tool_name)
+            line = f"● {name} {summary}".rstrip()
             self.console.print(f"[dim]{line[:_TOOL_LINE_WIDTH]}[/dim]", highlight=False)
         elif isinstance(event, ToolExecutionEndEvent):
             if event.is_error:
-                self.console.print(f"[red]✗ {event.tool_name} failed[/red]", highlight=False)
+                name = strip_control_sequences(event.tool_name)
+                self.console.print(f"[red]✗ {name} failed[/red]", highlight=False)
         elif isinstance(event, NoticeEvent):
             style = {"error": "red", "warning": "yellow"}.get(event.kind, "dim")
             self.console.print(f"[{style}]{event.text}[/{style}]", highlight=False)

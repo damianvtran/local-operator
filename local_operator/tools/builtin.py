@@ -1766,6 +1766,12 @@ async def execute_browser(
     if action == "goto":
         if not params.url.strip():
             return _error(tool_call_id, "browser", "'goto' requires a URL")
+        if params.url.lstrip().startswith("-"):
+            # The URL goes into a POSITIONAL argv slot, so a flag-shaped value is
+            # parsed by cmux as an option: `goto --help` exits 0 and prints help,
+            # which we would then report as a successful navigation. There is no
+            # legitimate URL starting with "-".
+            return _error(tool_call_id, "browser", f"refusing a flag-shaped URL: {params.url!r}")
         code, out = await _run_cmux(["browser", "--surface", surface, "goto", params.url])
         if code != 0:
             return _error(tool_call_id, "browser", f"cmux goto failed: {out.strip()}")
@@ -1780,9 +1786,13 @@ async def execute_browser(
         # literal "~" directory), relative paths resolved against the operator
         # process CWD instead of the session's, and the approval prompt showed
         # the unresolved string the model typed rather than the real target.
-        # The tool already sits in the `write` approval tier, which always
-        # prompts, so an outside-workspace target is surfaced by that prompt
-        # showing the fully resolved absolute path.
+        # NOTE: the write-tier approval prompt shows the RAW arguments the model
+        # wrote (loop.py builds its summary from call.raw_arguments), not this
+        # resolved path — so a user approving `../../evil.png` sees that string.
+        # That matches the pre-existing `write` tool, so it is consistent rather
+        # than a new hazard, but do not mistake resolution here for disclosure
+        # there. `inside` is deliberately unused: unlike read/grep this tool has
+        # no read-tier to escalate FROM, and `write` already always prompts.
         resolved, _inside = _resolve_workspace_path(params.path, _safe_cwd(context))
         target = str(resolved)
     else:
@@ -1915,10 +1925,24 @@ def _parse_surface_id(out: str) -> str:
         found = _find_surface_ref(payload)
         if found:
             return found
-    # Plain-text fallback: a ref-shaped token anywhere in the output.
+    # Fallbacks, in order of how much structure they assume.
+    #
+    # (a) A ref-shaped bare token — plain-text output, or JSON whose braces the
+    #     scan bound above could not reach.
     for token in head.split():
         if _SURFACE_REF_RE.match(token):
             return token
+    # (b) A QUOTED ref under one of the known keys. This is what saves a
+    #     legitimate payload larger than the scan window: truncating the head
+    #     mid-document makes raw_decode fail, and (a) cannot match because the
+    #     token still carries its JSON quotes and comma. Real cmux sends 118
+    #     bytes so this is not reachable today, but a future response embedding
+    #     a snapshot or a data-URI would otherwise lose EVERY handle at a sharp
+    #     64 KB cliff — a total failure, not a degraded one.
+    for key in _SURFACE_KEYS:
+        match = re.search(rf'"{key}"\s*:\s*"(surface:[0-9A-Za-z_-]+)"', head)
+        if match:
+            return match.group(1)
     return ""
 
 

@@ -29,11 +29,13 @@ Screen {
 }
 
 /* Transcript takes all the space above the input panel. One cell of edge
- * padding left/right; nothing at the top. The scrollbar column is reserved
- * permanently (D27) so the right-aligned columns measure stable width. */
+ * padding on every side INCLUDING the top: the first line of a turn sitting
+ * flush against the terminal's top edge reads as clipped rather than as the
+ * start of the conversation. The scrollbar column is reserved permanently
+ * (D27) so the right-aligned columns measure stable width. */
 TranscriptView {
     height: 1fr;
-    padding: 0 1;
+    padding: 1 1 0 1;
     scrollbar-size-vertical: 1;
     scrollbar-gutter: stable;
     scrollbar-background: $lo-bg;
@@ -112,12 +114,12 @@ ToolCard:hover {
     background: $lo-overlay;
 }
 
-/* The status band is the input panel's FIRST row: it lives inside the input
- * dock so the editor can never overdraw it, and the dock's border-top is the
- * structural rule above it (the ONLY line in the app). One row of text, one
- * row of rule — the minimalism defense pins both to single rows. */
+/* The status band is the LAST row of the input panel, below the editor. It
+ * reads as a footer for the whole app rather than a caption on the input, and
+ * it puts the least volatile information at the screen's least volatile edge.
+ * It sits on the sunken step so it recedes from the input it sits under. */
 #status-band {
-    dock: top;
+    dock: bottom;
     height: 1;
     background: $lo-sunken;
     color: $lo-dim;
@@ -125,13 +127,18 @@ ToolCard:hover {
 }
 
 /* Input panel: docks at the bottom, sits on the surface step, no border box
- * (D4) — only the thin structural top rule (D11). */
+ * (D4) — only the thin structural top rule (D11).
+ *
+ * Padding on all four sides: the editor text used to start flush against the
+ * panel's edges, which read as an unfinished box rather than as a deliberate
+ * borderless field. One cell of breathing room on every side is what makes
+ * "no border" look chosen instead of missing. */
 #input-dock {
     dock: bottom;
     height: auto;
     background: $lo-surface;
     border-top: tall $lo-dim;
-    padding: 0 1 1 1;
+    padding: 1 1 0 1;
 }
 
 /* Focus moves the accent onto the chevron only — the rule stays dim (D23). */
@@ -186,4 +193,56 @@ Editor .text-area--cursor-line {
 
 Editor .text-area--suggestion {
     color: $lo-dim;
+}
+
+/* ---- welcome view (new-session empty state) --------------------------- *
+ *
+ * Lives INSIDE the transcript, so it is handed exactly the region above the
+ * input dock without any arithmetic here. `1fr` rather than `100%` is
+ * load-bearing: /clear empties the transcript, shows this view again, and then
+ * appends its own "history is untouched" notice — under `100%` that notice
+ * would be pushed out of the scroll viewport, while `1fr` simply gives it a
+ * row and re-centers the block in what is left.
+ *
+ * No border, no rule, no fill: the block is the only thing on screen, so the
+ * mandate's "structure from symbols, tint and spacing" is all it gets. The
+ * accent green is NOT spent here — the logo lockup carries its own hierarchy
+ * through the neutral ramp (mark `muted`, wordmark `fg`).
+ *
+ * Centering and vertical placement are computed in the widget, not declared
+ * here: the content it draws depends on the rows and cells it actually has
+ * (the logo drops before the hints, which drop before the status rows), so it
+ * needs the measured size that `content-align` would hide from it. */
+#welcome {
+    width: 1fr;
+    height: 1fr;
+    min-height: 0;
+    color: $lo-dim;
+}
+
+/* ── slash-command picker ────────────────────────────────────────────────
+ *
+ * The suggestion list under the editor, inside the input dock and above the
+ * bottom-docked status band. Borderless like everything else (D4): the list
+ * is held together by the 2-cell selection gutter — which lines up with
+ * `#prompt-chevron`, so a highlighted `❯` sits directly beneath the prompt's
+ * own `❯` and command names start in the editor's text column. Hence NO left
+ * padding here; padding would break that alignment, and a vertical margin is
+ * not an option the sheet has (the adaptive `.gap-above` rule is the only
+ * vertical margin in the file, deliberately).
+ *
+ * `height` is written by the widget on every repaint (one row per visible
+ * suggestion, plus the overflow count when the list is longer). It is NOT
+ * `auto`: a list measured before layout knows its width resolves one row too
+ * tall per item and stays there — the same trap `ToolCard` pins itself
+ * against. Row backgrounds (selection and hover elevation) are painted into
+ * the rich text, since one Static draws every row.
+ *
+ * The accent lives on the selected command NAME only (D23); this rule paints
+ * the ground the unselected rows sit on, which is the dock's own surface so
+ * the list reads as part of the input rather than as a popup over it. */
+CommandPicker {
+    width: 1fr;
+    background: $lo-surface;
+    color: $lo-fg;
 }

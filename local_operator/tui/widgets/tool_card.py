@@ -47,7 +47,6 @@ Widths measured through ``rich.cells.cell_len`` only (one width model).
 from __future__ import annotations
 
 import os
-import re
 import time
 from typing import Any
 
@@ -55,59 +54,14 @@ from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 
+from local_operator.ansi import strip_control_sequences
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.transcript import TranscriptBlock, TranscriptView
 
-#: Terminal control sequences that must never reach the composed frame. Tool
-#: output is arbitrary bytes from arbitrary programs: `ls --color=always`,
-#: `git diff --color`, or pytest/npm/cargo under FORCE_COLOR all emit CSI
-#: sequences, and a bare `\x1b[2J` from a build tool would ERASE the user's
-#: screen mid-render. Two further reasons beyond the obvious one: cell_len
-#: counts "[31m" as four visible cells while ESC is zero, so the background
-#: fill and the right-aligned status column go ragged; and cell-aware
-#: truncation can cut a sequence in half, emitting a corrupt CSI that the
-#: terminal may interpret against the rest of the line.
-#:
-#: Both the 7-bit (ESC-prefixed) and 8-bit (C1, U+0080-U+009F) forms are
-#: covered. The 8-bit form is easy to forget because it does not look like an
-#: escape in a decoded string, but `\x9b31m` is a live CSI to a terminal that
-#: honours C1 — and it survives a 7-bit-only pattern untouched.
-#:
-#: The STRING controls (DCS/SOS/PM/APC and OSC) are removed WITH their payload
-#: up to the terminator: their content is device data, never display text, so
-#: leaving "tmux;xyz" behind after stripping the introducer just turns a
-#: control sequence into wrong text. An unterminated string is dropped to end
-#: of line, which is the conservative direction.
-_CONTROL_RE = re.compile(
-    # OSC / DCS / SOS / PM / APC, 7- and 8-bit, payload included. BEL or ST
-    # terminates; unterminated runs to the end of the string.
-    r"(?:\x1b[\]PX^_]|[\x9d\x90\x98\x9e\x9f])[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c|$)"
-    # CSI, 7- and 8-bit: parameters, intermediates, final byte.
-    r"|(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"
-    # An incomplete CSI at a truncation boundary: strip the tail rather than
-    # emit a fragment the terminal will try to complete with real content.
-    r"|(?:\x1b\[|\x9b)[0-?]*[ -/]*$"
-    # Remaining two-character escapes, then a lone trailing ESC.
-    r"|\x1b[@-Z\\-_]"
-    r"|\x1b$"
-    # Stray C0 controls, DEL, and any other C1 control.
-    r"|[\x00-\x08\x0b-\x1f\x7f-\x9f]"
-)
-
-
-def _strip_control_sequences(text: str) -> str:
-    """Remove ANSI/C1/C0 control sequences, keeping the printable text.
-
-    Stripping rather than interpreting is deliberate: honouring tool colour
-    would let a subprocess paint arbitrary colour into our own transcript, and
-    the card's whole contract is that IT owns the styling (dim body, danger
-    tint on failure). Tabs and newlines are handled before this is called.
-
-    Printable text is preserved exactly, including box drawing, combining
-    marks, ZWJ emoji sequences, CJK and RTL — none of which live in the
-    control ranges.
-    """
-    return _CONTROL_RE.sub("", text)
+#: Control-sequence stripping lives in `local_operator.ansi` because the
+#: headless renderer needs the identical behaviour and must not import a
+#: Textual widget module to get it. Aliased here so the call sites read local.
+_strip_control_sequences = strip_control_sequences
 
 
 #: Status glyphs (no Nerd fonts; plain unicode).
@@ -325,7 +279,12 @@ class ToolCard(TranscriptBlock):
     ) -> None:
         super().__init__()
         self.tool_call_id = tool_call_id
-        self.tool_name = tool_name
+        # tool_name is MODEL-CONTROLLED: the loop takes it from the tool call
+        # itself, so a hallucinated or injected name reaches the frame. It was
+        # the one raw-text entry point the sanitisation pass missed, and it is
+        # the worst one to miss — the name is rendered on every row, so an
+        # erase-display in it clears the terminal without the tool even running.
+        self.tool_name = _strip_control_sequences(tool_name)
         self.add_class("tool-card", "tool-running")
         # Sanitised at the boundary: args and intent can carry escapes too
         # (a bash command containing a colour code, an MCP tool's intent).

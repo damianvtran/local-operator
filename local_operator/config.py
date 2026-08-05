@@ -24,8 +24,10 @@ def _version_tuple(raw: str) -> tuple[int, ...]:
     equal to its release is the right approximation here — this decides one
     advisory message, not resolution.
 
-    Non-numeric or empty segments compare as 0 rather than raising: a version
-    warning must never be the thing that stops the CLI from starting.
+    Empty segments are DROPPED, not zeroed ("1..3" -> (1, 3)), and a segment
+    with no leading digit ENDS the parse rather than contributing a 0
+    ("v1.2.3" -> (0,)). Nothing raises: a version warning must never be the
+    thing that stops the CLI from starting.
     """
     parts: list[int] = []
     for chunk in str(raw).split("."):

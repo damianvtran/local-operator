@@ -6,7 +6,7 @@ History, because this constant has moved twice and both moves had a reason:
   0.31, so 0.18 sat BELOW the noise floor and k=8 selection degenerated
   toward full listing — exactly what blows the <=30k start-of-session token
   budget (docs/REWRITE.md performance contract).
-* 0.27 -> 0.18 (this module). The dim is now **4096**, where the unrelated
+* 0.27 -> 0.19 (this module). The dim is now **4096**, where the unrelated
   noise floor is 0.07-0.08 and the best unrelated score across a real
   15-skill corpus is 0.150. The old 0.27 was additionally derived from
   keyword-rich "clearly matching" queries scoring >=0.42; measured against
@@ -22,7 +22,8 @@ dim changes again, re-measure both ends of the gap and move the midpoint.
 This module ships the recalibration as a TEST: an 8-skill corpus spanning
 unrelated domains for the separation assertions, a realistic short-query set
 for the recall assertion, and the pinned shipped constants (dim 4096,
-threshold 0.18 = midpoint of the measured gap). The test is the contract —
+threshold 0.19 = midpoint of the gap INTERSECTION across two corpora, so it
+is tuned to neither alone). The test is the contract —
 the constants in ``embeddings.py`` exist because these corpora produce them.
 """
 
@@ -277,7 +278,7 @@ OFF_CORPUS_QUERIES: list[str] = [
 
 
 class TestRealisticQueryRecall:
-    """The defect the 0.18 recalibration fixes.
+    """The defect the 0.19 recalibration fixes.
 
     At 0.27 every one of these queries ranked its correct skill FIRST and was
     still dropped, because a short query's cosine lands in the 0.21-0.29 band.
@@ -293,6 +294,9 @@ class TestRealisticQueryRecall:
 
     def test_shipped_threshold_admits_every_realistic_query(self) -> None:
         embedder = LocalEmbedder()
+        # Guard against the vacuous pass: `assert not missed` is satisfied by a
+        # loop that never ran, so an emptied query list would leave this green.
+        assert len(REALISTIC_QUERIES) >= 6, "the realistic query set was emptied"
         missed: list[str] = []
         for query, expected in REALISTIC_QUERIES:
             scores = self._corpus_scores(embedder, query)
@@ -304,6 +308,7 @@ class TestRealisticQueryRecall:
         """Separate from the threshold: if ranking breaks, no threshold saves
         it, so the two failure modes get separate tests."""
         embedder = LocalEmbedder()
+        assert len(REALISTIC_QUERIES) >= 6, "the realistic query set was emptied"
         wrong: list[str] = []
         for query, expected in REALISTIC_QUERIES:
             scores = self._corpus_scores(embedder, query)
@@ -315,6 +320,7 @@ class TestRealisticQueryRecall:
     def test_off_corpus_queries_select_nothing(self) -> None:
         """The other half of the contract: 100% recall must cost 0% noise."""
         embedder = LocalEmbedder()
+        assert len(OFF_CORPUS_QUERIES) >= 5, "the off-corpus query set was emptied"
         leaked: list[str] = []
         for query in OFF_CORPUS_QUERIES:
             scores = self._corpus_scores(embedder, query)
@@ -323,16 +329,27 @@ class TestRealisticQueryRecall:
                 leaked.append(f"{query!r} -> {best} scored {scores[best]:.4f}")
         assert not leaked, "threshold admits unrelated skills:\n  " + "\n  ".join(leaked)
 
-    def test_threshold_sits_inside_the_realistic_gap(self) -> None:
-        """Pins the MARGIN, not just the constant: the shipped threshold must
-        stay strictly between the worst true match and the best false one, so
-        a future embedder change that narrows the gap fails here loudly."""
+    def test_threshold_keeps_a_real_margin_on_both_sides(self) -> None:
+        """Pins the SIZE of the margin, not merely its sign.
+
+        A strict inequality is satisfied by a margin of 0.0001, which is noise
+        rather than headroom: an embedder tweak, or a corpus with one more
+        near-duplicate skill, would cross it silently while this test stayed
+        green. MIN_MARGIN is the smallest separation worth calling a contract.
+        """
         embedder = LocalEmbedder()
+        threshold = embedder.default_threshold
         worst_relevant = min(self._corpus_scores(embedder, q)[exp] for q, exp in REALISTIC_QUERIES)
         best_unrelated = max(
             max(self._corpus_scores(embedder, q).values()) for q in OFF_CORPUS_QUERIES
         )
-        assert best_unrelated < embedder.default_threshold < worst_relevant, (
-            f"threshold {embedder.default_threshold} outside realistic gap "
-            f"({best_unrelated:.4f}, {worst_relevant:.4f})"
+        lower_margin = threshold - best_unrelated
+        upper_margin = worst_relevant - threshold
+        assert lower_margin >= MIN_MARGIN, (
+            f"threshold {threshold} is only {lower_margin:.4f} above the best false "
+            f"match ({best_unrelated:.4f}); MIN_MARGIN is {MIN_MARGIN}"
+        )
+        assert upper_margin >= MIN_MARGIN, (
+            f"threshold {threshold} is only {upper_margin:.4f} below the worst true "
+            f"match ({worst_relevant:.4f}); MIN_MARGIN is {MIN_MARGIN}"
         )

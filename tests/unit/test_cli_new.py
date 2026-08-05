@@ -14,6 +14,7 @@ with the harness rewrite, and the CLI drives ``session_factory`` directly.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import subprocess
 import sys
 import types
@@ -21,6 +22,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
+from local_operator import cli
 from local_operator.cli import (
     agents_create_command,
     agents_delete_command,
@@ -604,8 +606,10 @@ def test_main_preflight_missing_hosting(
 
     with patch("sys.argv", ["program"]):
         assert main() == -1
-    out = capsys.readouterr().out
-    assert "Hosting platform is not configured." in out
+    # stderr, matching its sibling _preflight_api_key: an error message belongs
+    # on the diagnostic channel regardless of which front end asked for it.
+    err = capsys.readouterr().err
+    assert "Hosting platform is not configured." in err
     assert called["factory"] is False
 
 
@@ -804,3 +808,39 @@ def test_golden_legacy_parser_surface() -> None:
                         f"{command}: {key} {field} changed: " f"{spec[field]!r} -> {now[field]!r}"
                     )
     assert not problems, "\n".join(problems)
+
+
+# --- scheduler degradation names the RIGHT cause ----------------------------
+
+
+def _run_scheduler_with_import_error(monkeypatch, capsys, missing: str) -> str:
+    """Drive _run_with_scheduler with a ModuleNotFoundError for `missing`."""
+    import local_operator.jobs as jobs_mod
+
+    def boom(*_args, **_kwargs):
+        raise ModuleNotFoundError(f"No module named {missing!r}", name=missing)
+
+    monkeypatch.setattr(jobs_mod, "JobManager", boom)
+
+    async def front(*_a, **_k):
+        return 0
+
+    assert asyncio.run(cli._run_with_scheduler(front)) == 0
+    return capsys.readouterr().err
+
+
+def test_missing_server_extra_names_the_extra(monkeypatch, capsys) -> None:
+    """A bare install has no apscheduler, and this wraps BOTH front ends, so
+    it fires on the most-travelled path in the product."""
+    err = _run_scheduler_with_import_error(monkeypatch, capsys, "apscheduler")
+    assert 'requires the "server" extra' in err
+    assert 'pip install "local-operator[server]"' in err
+
+
+def test_broken_internal_import_is_not_blamed_on_the_extra(monkeypatch, capsys) -> None:
+    """Catching every ModuleNotFoundError here reported a broken INTERNAL import
+    as a missing extra: the user installs it, nothing changes, and the real
+    defect stays invisible. Strictly less diagnostic than the raw message."""
+    err = _run_scheduler_with_import_error(monkeypatch, capsys, "local_operator.scheduler_service")
+    assert "server" not in err or "extra" not in err
+    assert "local_operator.scheduler_service" in err

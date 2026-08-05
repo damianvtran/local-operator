@@ -68,12 +68,15 @@ def test_unknown_extra_guard_survives_optimization() -> None:
     no assert opcode rather than by trusting the source."""
     import dis
 
-    names = {
-        instruction.argval
-        for instruction in dis.get_instructions(missing_extra_error)
-        if instruction.opname == "LOAD_GLOBAL"
-    }
-    assert "AssertionError" not in names
+    # An `assert` statement compiles to LOAD_ASSERTION_ERROR + RAISE_VARARGS,
+    # and NEVER to `LOAD_GLOBAL AssertionError` — so inspecting LOAD_GLOBAL
+    # argvals (the previous predicate) passed on exactly the implementation it
+    # claimed to reject. Check the opcode that an assert actually emits.
+    opnames = {instruction.opname for instruction in dis.get_instructions(missing_extra_error)}
+    assert "LOAD_ASSERTION_ERROR" not in opnames, (
+        "the extras guard is an `assert`, which `python -O` strips — the drift "
+        "guard would silently vanish in optimized runs"
+    )
 
 
 def test_require_extra_returns_the_module_when_present() -> None:

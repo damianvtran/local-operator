@@ -975,7 +975,12 @@ def _preflight_hosting_model(
 
         hosting, _model_name = resolve_hosting_model(current_agent, args, config_manager)
     except ValueError as exc:
-        print(f"\n\033[1;31mError: {exc}\033[0m")
+        # stderr on principle, not because this path is currently reachable from
+        # `exec --json`: it is an ERROR message, and its sibling
+        # `_preflight_api_key` two functions down already writes there. Keeping
+        # the two consistent is what stops the next person wiring this into the
+        # exec route from reintroducing a stdout leak.
+        print(f"\n\033[1;31mError: {exc}\033[0m", file=sys.stderr)
         return -1
     except Exception:  # noqa: BLE001 — unknown providers pass through
         return None
@@ -1034,6 +1039,24 @@ def _preflight_api_key(hosting: str, credential_manager: CredentialManager) -> i
     return -1
 
 
+#: Third-party modules the `server` extra provides. Used to decide whether a
+#: ModuleNotFoundError from the scheduler wiring really means "install the
+#: extra" — reporting an internal import failure that way sends the user to
+#: install something that will not help, and buries the actual defect.
+_SERVER_EXTRA_MODULES = frozenset(
+    {
+        "apscheduler",
+        "fastapi",
+        "starlette",
+        "uvicorn",
+        "websockets",
+        "multipart",
+        "dill",
+        "tiktoken",
+    }
+)
+
+
 async def _run_with_scheduler(run_fn, *run_args) -> int:
     """Run the interactive front end with the SchedulerService alive (CL-07).
 
@@ -1077,17 +1100,29 @@ async def _run_with_scheduler(run_fn, *run_args) -> int:
             job_manager=JobManager(),
             websocket_manager=WebSocketManager(),  # required by the constructor, unused in CLI
         )
-    except ModuleNotFoundError:  # the [server] extra is absent
-        # This fires on EVERY startup of a bare install, because it wraps both
-        # front ends — `local-operator` with no arguments is the most-travelled
-        # path in the product. Echoing "No module named 'apscheduler'" told the
-        # user nothing actionable; name the extra like every other optional
-        # feature does.
-        print(
-            f"\033[1;33mWarning: {missing_extra_error('server', 'Scheduled tasks')} "
-            f"Continuing without scheduled tasks.\033[0m",
-            file=sys.stderr,
-        )
+    except ModuleNotFoundError as exc:
+        # ONLY claim the extra when the missing module actually belongs to it.
+        # Catching every ModuleNotFoundError from this block reported a broken
+        # internal import (there are six in here) as a missing `server` extra:
+        # the user installs the extra, nothing changes, and the real defect
+        # stays invisible — strictly less diagnostic than the raw
+        # "No module named 'x'" this replaced.
+        root = (exc.name or "").split(".")[0]
+        if root in _SERVER_EXTRA_MODULES:
+            # Fires on every startup of a bare install, because this wraps both
+            # front ends — `local-operator` with no arguments is the
+            # most-travelled path in the product.
+            print(
+                f"\033[1;33mWarning: {missing_extra_error('server', 'Scheduled tasks')} "
+                f"Continuing without scheduled tasks.\033[0m",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"\033[1;33mWarning: scheduler unavailable, continuing without "
+                f"scheduled tasks: {exc}\033[0m",
+                file=sys.stderr,
+            )
         scheduler_service = None
     except Exception as exc:  # noqa: BLE001 — degrade to no scheduler
         print(
