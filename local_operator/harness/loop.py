@@ -45,6 +45,8 @@ from local_operator.harness.types import (
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
+    NoticeEvent,
+    StaleAside,
     StreamEndEvent,
     StreamTextDelta,
     StreamToolCallDelta,
@@ -78,6 +80,12 @@ _TYPE_ADAPTERS: dict[str, TypeAdapter[Any]] = {
 
 ABORTED_RESULT_TEXT = "aborted"
 SKIPPED_RESULT_TEXT = "Tool call skipped: interrupted by steering."
+# Backfill for empty tool results (omp coerceToolResult): Anthropic rejects an
+# empty ``is_error`` tool_result content with a 400, and other providers
+# serialize "" — one placeholder block keeps the wire legal for every client.
+EMPTY_TOOL_RESULT_TEXT = "[tool returned no output]"
+# Steering-interrupt poll interval for ``interruptible`` tools mid-run.
+STEERING_INTERRUPT_POLL_S = 0.25
 
 
 @dataclass
@@ -165,13 +173,25 @@ class AgentLoop:
         context.messages.extend(initial_messages)
         pending: list[AgentMessage] = []
         has_more_tool_calls = True  # forces the first model call
+        reentries = 0  # outer-loop re-entries; capped by config
 
         yield AgentStartEvent(generation=generation)
 
         try:
             while True:
                 # ---- inner loop: model + tools until quiescent -----------
+                first_inner = True
                 while has_more_tool_calls or pending:
+                    # Steering can land between a tool batch and the next
+                    # model call; drain it at the top of every continuation
+                    # iteration so it reaches the next request. Asides keep
+                    # their boundary semantics (collected after batches and
+                    # at the yield edge) so a queued aside still forces its
+                    # own follow-up model call.
+                    if not first_inner:
+                        if config.get_steering_messages is not None:
+                            pending.extend(await config.get_steering_messages())
+                    first_inner = False
                     self._drain_pending(pending, context)
                     pending = []
 
@@ -195,7 +215,8 @@ class AgentLoop:
                             assistant, stop_reason, stream_error = event.message, event.stop_reason, event.error
                         else:
                             yield event
-                    assert assistant is not None
+                    if assistant is None:
+                        raise RuntimeError("model turn produced no assistant message")
                     context.messages.append(assistant)
                     new_messages.append(assistant)
 
@@ -251,6 +272,25 @@ class AgentLoop:
 
                 late = await self._collect_yield_injections(config)
                 if late:
+                    reentries += 1
+                    if reentries > config.max_paused_turn_continuations:
+                        # omp MAX_PAUSED_TURN_CONTINUATIONS guard: a producer
+                        # that never stops (follow-ups arriving faster than
+                        # they are consumed) must not re-enter forever.
+                        logger.warning(
+                            "paused-turn continuation limit (%d) reached; ending run",
+                            config.max_paused_turn_continuations,
+                        )
+                        yield NoticeEvent(
+                            text=(
+                                f"Continuation limit reached "
+                                f"({config.max_paused_turn_continuations}); stopping."
+                            ),
+                            kind="warning",
+                        )
+                        self._discard_pending_custom(late)
+                        yield AgentEndEvent(messages=new_messages, generation=generation)
+                        return
                     pending = late
                     has_more_tool_calls = True
                     continue
@@ -259,6 +299,10 @@ class AgentLoop:
             yield AgentEndEvent(messages=new_messages, generation=generation)
         finally:
             self._unwire_deadline(deadline_task)
+            if signal is not None:
+                # Drop any any_of() watcher tasks (e.g. the deadline combo) so
+                # they do not outlive the run.
+                signal.cancel()
 
     # ------------------------------------------------------------------
     # Model streaming
@@ -272,7 +316,13 @@ class AgentLoop:
     ) -> AsyncIterator[AgentEvent | "_ModelTurnResult"]:
         """One provider call: build the request, stream it, assemble the
         assistant message, emitting message_start/update/end events."""
-        converted = config.convert_to_llm(list(context.messages))
+        shaped = list(context.messages)
+        if config.transform_context is not None:
+            outcome = config.transform_context(shaped)
+            if inspect.isawaitable(outcome):
+                outcome = await outcome
+            shaped = list(outcome)
+        converted = config.convert_to_llm(shaped)
         if inspect.isawaitable(converted):
             converted = await converted
         request = ChatRequest(
@@ -374,13 +424,35 @@ class AgentLoop:
         signal: AbortSignal | None,
         results: list[ToolResult],
     ) -> AsyncIterator[AgentEvent]:
-        """Resolve, validate, approve and schedule one batch of calls.
+        """Resolve, validate and schedule one batch of calls.
 
-        ``shared`` tools run in parallel (asyncio.gather), ``exclusive`` tools
-        run alone. When ``interrupt_mode == "immediate"`` and steering is
-        queued, remaining calls are skipped with synthetic results.
+        ``shared`` tools run in parallel, ``exclusive`` tools run alone. When
+        ``interrupt_mode == "immediate"`` and steering is queued, remaining
+        calls are skipped with synthetic results. Duplicate call ids within
+        the batch are deduplicated (first wins; later duplicates become
+        skipped results so tool_use/tool_result pairing stays legal).
+        Approval prompts happen per-call INSIDE the tool task (after
+        ``tool_execution_start``), so the UI shows the call while waiting and
+        skipped calls never prompt.
         """
-        plan = [await self._plan_call(call, context, config) for call in calls]
+        seen_ids: set[str] = set()
+        plan: list[_PlannedCall] = []
+        for call in calls:
+            if call.id in seen_ids:
+                # Duplicate call id within one batch: first wins; the duplicate
+                # is paired with a skipped result and never executes.
+                logger.warning("duplicate tool call id %s dropped from batch", call.id)
+                plan.append(
+                    _PlannedCall(
+                        call=call,
+                        failure=self._synthetic_result(
+                            call, f"Duplicate call id '{call.id}' skipped."
+                        ),
+                    )
+                )
+                continue
+            seen_ids.add(call.id)
+            plan.append(await self._plan_call(call, context, config))
         index = 0
         first_slot = True
         while index < len(plan):
@@ -394,7 +466,9 @@ class AgentLoop:
                 break
 
             if plan[index].tool is not None and plan[index].tool.concurrency == "exclusive":
-                async for event in self._execute_batch(plan[index : index + 1], context, signal, results):
+                async for event in self._execute_batch(
+                    plan[index : index + 1], context, config, signal, results
+                ):
                     yield event
                 index += 1
             else:
@@ -404,12 +478,15 @@ class AgentLoop:
                     and (plan[end].tool is None or plan[end].tool.concurrency == "shared")
                 ):
                     end += 1
-                async for event in self._execute_batch(plan[index:end], context, signal, results):
+                async for event in self._execute_batch(plan[index:end], context, config, signal, results):
                     yield event
                 index = end
             first_slot = False
 
     async def _plan_call(self, call: ToolCall, context: LoopContext, config: LoopConfig) -> _PlannedCall:
+        """Resolve + validate one call. Approval is deliberately NOT here: it
+        happens inside the runner after ``tool_execution_start`` so skipped
+        calls never prompt (see :meth:`_runner_result`)."""
         tool = next((t for t in context.tools if t.name == call.name), None)
         if tool is None and config.resolve_fallback_tool is not None:
             tool = config.resolve_fallback_tool(call.name)
@@ -428,6 +505,25 @@ class AgentLoop:
                     call, "Invalid arguments: " + "; ".join(errors)
                 ),
             )
+        return _PlannedCall(call=call, tool=tool, args=dict(call.arguments))
+
+    async def _runner_result(
+        self,
+        item: _PlannedCall,
+        context: LoopContext,
+        signal: AbortSignal | None,
+        queue: asyncio.Queue[Any],
+    ) -> ToolResult:
+        """Execute one planned call and return its result.
+
+        Approval (write/exec tiers with a configured callback) runs here —
+        AFTER ``tool_execution_start`` has been emitted — so the UI shows the
+        pending call while the user decides, and a denied call never executed.
+        """
+        call = item.call
+        if item.failure is not None or item.tool is None:
+            return item.failure or self._synthetic_result(call, "Tool not found.")
+        tool = item.tool
 
         tool_context = context.tool_context
         if (
@@ -436,79 +532,167 @@ class AgentLoop:
             and tool_context.request_approval is not None
         ):
             summary = f"{call.name}({call.raw_arguments or json.dumps(call.arguments)})"
-            approved = await tool_context.request_approval(call.name, summary[:500])
+            try:
+                approved = await tool_context.request_approval(call.name, summary[:500])
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("approval callback raised for %s", call.name, exc_info=True)
+                approved = False
             if not approved:
-                return _PlannedCall(
-                    call=call,
-                    tool=tool,
-                    failure=self._synthetic_result(call, f"User denied approval for '{call.name}'."),
+                return self._synthetic_result(call, f"User denied approval for '{call.name}'.")
+
+        def on_update(update: AgentToolUpdate) -> None:
+            queue.put_nowait(
+                ToolExecutionUpdateEvent(
+                    tool_call_id=call.id, tool_name=tool.name, partial_result=update
                 )
+            )
 
-        return _PlannedCall(call=call, tool=tool, args=dict(call.arguments))
-
+        try:
+            return await tool.execute(
+                call.id, item.args, signal, on_update, context.tool_context or ToolContext()
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("tool %s raised", tool.name, exc_info=True)
+            return ToolResult(
+                tool_call_id=call.id,
+                tool_name=tool.name,
+                is_error=True,
+                content=[TextContent(text=f"Tool raised: {exc}")],
+            )
 
     async def _execute_batch(
         self,
         batch: list[_PlannedCall],
         context: LoopContext,
+        config: LoopConfig,
         signal: AbortSignal | None,
         results: list[ToolResult],
     ) -> AsyncIterator[AgentEvent]:
         """Run one concurrency batch, streaming start/update/end events out as
-        the tools produce them (order of completion, per-slot results kept)."""
+        the tools produce them (order of completion, per-slot results kept).
+
+        ``interruptible`` tools race against a steering poll (every
+        ``STEERING_INTERRUPT_POLL_S`` while ``interrupt_mode == "immediate"``);
+        on a steering signal the tool task is cancelled and paired with a
+        synthetic skipped result so tool_use/tool_result pairing stays legal.
+        On generator cancellation (GeneratorExit) every runner task is
+        cancelled before this generator returns.
+        """
         queue: asyncio.Queue[Any] = asyncio.Queue()
         results_by_id: dict[str, ToolResult] = {}
-
+        tasks: list[asyncio.Task[ToolResult]] = []
+        poll_interruptible = (
+            config.interrupt_mode == "immediate" and config.has_steering_messages is not None
+        )
         async def runner(item: _PlannedCall) -> None:
-            call = item.call
-            tool_name = item.tool.name if item.tool is not None else call.name
+            tool_name = item.tool.name if item.tool is not None else item.call.name
             await queue.put(
-                ToolExecutionStartEvent(tool_call_id=call.id, tool_name=tool_name, args=call.arguments)
+                ToolExecutionStartEvent(
+                    tool_call_id=item.call.id, tool_name=tool_name, args=item.call.arguments
+                )
             )
-            if item.failure is not None or item.tool is None:
-                result = item.failure or self._synthetic_result(call, "Tool not found.")
-            else:
-                tool = item.tool
-
-                def on_update(update: AgentToolUpdate) -> None:
-                    queue.put_nowait(
-                        ToolExecutionUpdateEvent(
-                            tool_call_id=call.id, tool_name=tool.name, partial_result=update
-                        )
+            try:
+                result = await self._runner_result(item, context, signal, queue)
+            except asyncio.CancelledError:
+                # Cancelled (abort/GeneratorExit): pair the call with a
+                # synthetic aborted result so tool_use/tool_result pairing
+                # stays legal, then propagate the cancellation.
+                result = self._synthetic_result(item.call, ABORTED_RESULT_TEXT)
+                results_by_id[item.call.id] = result
+                queue.put_nowait(
+                    ToolExecutionEndEvent(
+                        tool_call_id=item.call.id,
+                        tool_name=tool_name,
+                        result=result,
+                        is_error=result.is_error,
                     )
-
-                try:
-                    result = await tool.execute(
-                        call.id, item.args, signal, on_update, context.tool_context or ToolContext()
-                    )
-                except asyncio.CancelledError:
-                    result = self._synthetic_result(call, ABORTED_RESULT_TEXT)
-                except Exception as exc:
-                    logger.warning("tool %s raised", tool.name, exc_info=True)
-                    result = ToolResult(
-                        tool_call_id=call.id,
-                        tool_name=tool.name,
-                        is_error=True,
-                        content=[TextContent(text=f"Tool raised: {exc}")],
-                    )
-            results_by_id[call.id] = result
+                )
+                queue.put_nowait(_TOOL_DONE)
+                raise
+            results_by_id[item.call.id] = result
             await queue.put(
                 ToolExecutionEndEvent(
-                    tool_call_id=call.id, tool_name=tool_name, result=result, is_error=result.is_error
+                    tool_call_id=item.call.id,
+                    tool_name=tool_name,
+                    result=result,
+                    is_error=result.is_error,
                 )
             )
             await queue.put(_TOOL_DONE)
 
-        tasks = [asyncio.ensure_future(runner(item)) for item in batch]
-        finished = 0
-        while finished < len(tasks):
-            item = await queue.get()
-            if item is _TOOL_DONE:
-                finished += 1
-                continue
-            yield item
-        await asyncio.gather(*tasks, return_exceptions=True)
-        results.extend(results_by_id[item.call.id] for item in batch)
+        async def interruptible_runner(item: _PlannedCall) -> None:
+            tool_name = item.tool.name if item.tool is not None else item.call.name
+            await queue.put(
+                ToolExecutionStartEvent(
+                    tool_call_id=item.call.id, tool_name=tool_name, args=item.call.arguments
+                )
+            )
+            tool_task = asyncio.ensure_future(self._runner_result(item, context, signal, queue))
+            try:
+                while True:
+                    done, _pending = await asyncio.wait(
+                        {tool_task}, timeout=STEERING_INTERRUPT_POLL_S
+                    )
+                    if tool_task in done:
+                        break
+                    if signal is not None and signal.aborted:
+                        break
+                    if self._peek_steering(config):
+                        tool_task.cancel()
+                        break
+            finally:
+                if not tool_task.done():
+                    tool_task.cancel()
+            try:
+                result = await tool_task
+            except asyncio.CancelledError:
+                # Cancelled for steering (or by the run aborting): synthesize a
+                # skipped/aborted result so the call stays paired.
+                text = (
+                    SKIPPED_RESULT_TEXT
+                    if not (signal is not None and signal.aborted)
+                    else ABORTED_RESULT_TEXT
+                )
+                result = self._synthetic_result(item.call, text)
+            results_by_id[item.call.id] = result
+            await queue.put(
+                ToolExecutionEndEvent(
+                    tool_call_id=item.call.id,
+                    tool_name=tool_name,
+                    result=result,
+                    is_error=result.is_error,
+                )
+            )
+            await queue.put(_TOOL_DONE)
+
+        try:
+            for item in batch:
+                interruptible = item.tool is not None and item.tool.interruptible
+                tasks.append(
+                    asyncio.ensure_future(
+                        interruptible_runner(item) if interruptible and poll_interruptible else runner(item)
+                    )
+                )
+            finished = 0
+            while finished < len(tasks):
+                item = await queue.get()
+                if item is _TOOL_DONE:
+                    finished += 1
+                    continue
+                yield item
+            await asyncio.gather(*tasks, return_exceptions=True)
+            results.extend(results_by_id[item.call.id] for item in batch)
+        finally:
+            # GeneratorExit / abort: never leave runner tasks behind.
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -529,9 +713,16 @@ class AgentLoop:
         context: LoopContext, results: list[ToolResult], new_messages: list[AgentMessage]
     ) -> None:
         for result in results:
+            content = list(result.content)
+            # omp coerceToolResult: an empty tool result serializes as "" on
+            # most wires and Anthropic REJECTS an empty ``is_error`` content
+            # with a 400 — backfill one placeholder block. Image-only results
+            # keep their blocks untouched (never text-flatten).
+            if not content:
+                content = [TextContent(text=EMPTY_TOOL_RESULT_TEXT)]
             message = Message(
                 role="tool",
-                content=list(result.content),
+                content=content,
                 tool_call_id=result.tool_call_id,
                 tool_name=result.tool_name,
                 is_error=result.is_error,
@@ -621,12 +812,25 @@ class AgentLoop:
 
 
 def _materialize_asides(asides: Sequence[Any]) -> list[AgentMessage]:
-    """Invoke aside thunks at injection time; drop ``None`` results and call
-    commit/discard hooks on CustomMessage payloads."""
+    """Invoke aside thunks at injection time and keep the live messages.
+
+    A ``None`` result is dropped silently; a :class:`StaleAside` result is
+    dropped too, but its originating :class:`CustomMessage` gets its
+    ``on_discard`` hook fired here. ``on_commit`` is NOT fired here — it
+    fires in :meth:`AgentLoop._drain_pending` when the message actually
+    enters context, so an aborted run never commits pending asides.
+    """
     out: list[AgentMessage] = []
     for item in asides:
         message = item() if callable(item) else item
         if message is None:
+            continue
+        if isinstance(message, StaleAside):
+            if message.message.on_discard is not None:
+                try:
+                    message.message.on_discard()
+                except Exception:
+                    logger.warning("aside on_discard failed", exc_info=True)
             continue
         out.append(message)
     return out

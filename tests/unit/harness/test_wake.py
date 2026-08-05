@@ -236,7 +236,10 @@ class SchedulerHarness:
     scheduler's OWN timer drives pump() and only real time advances."""
 
     def __init__(self, start: int = NOW, wall_clock: bool = False):
-        self.now_ms = start
+        # Wall-clock mode compares against real time everywhere, so the
+        # synthetic epoch must be real time too or every schedule looks
+        # overdue at load.
+        self.now_ms = int(time.time() * 1000) if wall_clock else start
         self.delivered: list[DueWake] = []
         self.persisted: list[list[WakeSchedule]] = []
         self.retired: list[tuple[WakeSchedule, str]] = []

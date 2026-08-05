@@ -96,14 +96,17 @@ class Transcript:
     # -- append -------------------------------------------------------------
 
     async def append_message(self, message: Message | CustomMessage) -> TranscriptEntry:
-        """Append one LLM-visible message (or a custom transcript message)."""
+        """Append one LLM-visible message (or a custom transcript message).
+
+        BOTH kinds persist the message's own ``id`` as the entry id (never
+        mint a new one): compaction's ``first_kept_entry_id`` must be able to
+        reference a custom entry that renders into LLM context.
+        """
         if isinstance(message, Message):
             payload: dict[str, Any] = {"kind": CUSTOM_KIND_MESSAGE, **message.model_dump()}
-            entry_id = message.id
         else:
             payload = {"kind": CUSTOM_KIND_CUSTOM, **message.model_dump()}
-            entry_id = uuid.uuid4().hex
-        return await self._append(ENTRY_MESSAGE, payload, entry_id)
+        return await self._append(ENTRY_MESSAGE, payload, message.id)
 
     async def append_compaction(
         self,

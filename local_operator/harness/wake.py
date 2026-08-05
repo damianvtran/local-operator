@@ -370,6 +370,12 @@ class WakeScheduler:
         self._on_retire = on_retire
         self._schedules: list[WakeSchedule] = []
         self._timer: asyncio.TimerHandle | None = None
+        # The tick task the armed timer spawns; kept so dispose() can cancel
+        # an in-flight pump instead of leaving it dangling.
+        self._tick_task: asyncio.Task[None] | None = None
+        # Set when ``_arm`` runs without a running loop; the session's async
+        # init re-arms by calling ``pump()`` once.
+        self.needs_rearm = False
         self._disposed = False
 
     @property
@@ -453,10 +459,15 @@ class WakeScheduler:
         return fired
 
     def dispose(self) -> None:
-        """Cancel the armed timer. asyncio has no ``unref``, so this is the only
-        thing that stops a pending wake from keeping the loop alive."""
+        """Cancel the armed timer AND any in-flight tick task. asyncio has no
+        ``unref``, so this is the only thing that stops a pending wake from
+        keeping the loop alive."""
         self._disposed = True
         self._cancel_timer()
+        tick = self._tick_task
+        if tick is not None and not tick.done():
+            tick.cancel()
+        self._tick_task = None
 
     # -- internals ----------------------------------------------------------
 
@@ -473,7 +484,16 @@ class WakeScheduler:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            return  # no running loop; callers drive pump() manually
+            # No running loop (constructed outside async, or called from a
+            # sync callback): we cannot arm; warn and flag so the session's
+            # async init re-arms with one ``pump()``.
+            logger.warning(
+                "wake scheduler armed without a running event loop; "
+                "pending wake(s) will fire only after the next pump()"
+            )
+            self.needs_rearm = True
+            return
+        self.needs_rearm = False
         now = self._now()
         next_due = min(schedule.next_due_at for schedule in self._schedules)
         delay_ms = max(0, next_due - now)
@@ -494,7 +514,8 @@ class WakeScheduler:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(self._tick())
+        # Keep the tick task so dispose() can cancel an in-flight pump.
+        self._tick_task = loop.create_task(self._tick())
 
     async def _tick(self) -> None:
         await self.pump()
