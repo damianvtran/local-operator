@@ -107,7 +107,21 @@ async def run_structural(turns: int) -> float:
             yield ev
 
     tools = create_tools(ToolContext(cwd=str(REPO), session_id="bench"))
-    blocks = build_system_blocks(tools, "", "bench env", "2026-08-04")
+    # The skills block is selected ONCE (the first prompt) and frozen for the
+    # session — per-turn re-selection would invalidate the whole conversation
+    # prefix on every change. The bench models the live contract: the first
+    # provider call carries the selected block, later calls reuse it
+    # byte-identically, so the measured stability is the stability the wire
+    # actually gets.
+    frozen = {"block": None}
+
+    def provider() -> list[str]:
+        if frozen["block"] is None:
+            frozen["block"] = (
+                "<skills>\nminerva-observability: Datadog playbooks\n</skills>"
+            )
+        return build_system_blocks(tools, frozen["block"], "bench env", "2026-08-04")
+
     transcript = Transcript(Path(tempfile.mkdtemp(prefix="lo-bench-")))
     session = Session(
         model=ModelSpec(provider="mock", model_id="mock"),
@@ -116,7 +130,7 @@ async def run_structural(turns: int) -> float:
         transcript=transcript,
         session_id="bench-cache",
         yolo=True,
-        system_blocks_provider=lambda: blocks,
+        system_blocks_provider=provider,
     )
     for prompt in TASK_PROMPTS[:turns]:
         await session.prompt(prompt)

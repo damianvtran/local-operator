@@ -88,14 +88,16 @@ def find_cut_point(messages: Sequence[AgentMessage], keep_recent_tokens: int) ->
     # Backwards walk: accumulate from the newest message until the kept
     # region is large enough. The index where the walk stops is the first
     # cut candidate.
-    accumulated = 0
-    index = 0
-    for i in range(total - 1, -1, -1):
-        accumulated += _message_tokens(messages[i])
-        index = i
-        if accumulated >= keep_recent_tokens:
-            break
-    else:
+    def backwards_walk(start: int) -> int | None:
+        accumulated = 0
+        for i in range(start, -1, -1):
+            accumulated += _message_tokens(messages[i])
+            if accumulated >= keep_recent_tokens:
+                return i
+        return None
+
+    index = backwards_walk(total - 1)
+    if index is None:
         # Never reached the keep budget: everything is "recent".
         return None
 
@@ -106,6 +108,22 @@ def find_cut_point(messages: Sequence[AgentMessage], keep_recent_tokens: int) ->
         index += 1
     if index >= total:
         return None
+
+    # The snap can collapse the kept region far below the budget — one user
+    # message followed by a long tool chain walks into the chain and snaps to
+    # the next user message, keeping a few hundred tokens instead of
+    # keep_recent_tokens. When that happens, retry the walk from BEFORE the
+    # chain so the cut lands ahead of it and the recent working context the
+    # setting protects survives.
+    kept_tokens = sum(_message_tokens(m) for m in messages[index:])
+    if kept_tokens < keep_recent_tokens // 2 and index > 0:
+        retry = backwards_walk(index - 1)
+        if retry is not None:
+            index = retry
+            while index < total and not _is_valid_cut(messages, index):
+                index += 1
+            if index >= total:
+                return None
 
     # Defensive invariant (the predicate already excludes violations; the
     # assertion makes a future regression loud instead of silent). GENERAL

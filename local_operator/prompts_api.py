@@ -219,15 +219,15 @@ def build_system_blocks(
 ) -> list[str]:
     """Build the system prompt blocks; see the module docstring.
 
-    Block 0 is rendered with EMPTY data: ``system.md`` carries no per-turn
-    ``{{#if}}`` sections, so it is a byte-stable instruction block. Block 1
-    is the tool inventory alone. The skills listing rides verbatim in its OWN
-    block — ALWAYS, with a constant placeholder when nothing matched, so the
-    block list is fixed-arity: the wire clients derive the cache-breakpoint
-    count from the block count, and an omitted skills block would move the
-    inventory block between cached and re-written on every selection toggle.
+    Block order is a cache-layout decision: the stable head (instructions,
+    tool inventory, env) is byte-stable for the session, and the per-turn
+    volatile skills block rides LAST. A volatile block mid-prefix would
+    invalidate every message after it on each selection change — the bench
+    measured 40% stability with skills at index 2; at the tail the
+    conversation prefix stays warm. The list is fixed-arity (placeholder when
+    nothing matched) so the wire clients' breakpoint derivation never shifts.
     The env block carries the calendar date — never a timestamp — plus
-    volatile environment facts, and is always last.
+    volatile environment facts.
     """
     instructions = render_template("system.md", {})
     inventory = f"## Available tools\n\n{_render_tool_inventory(tools)}"
@@ -235,4 +235,4 @@ def build_system_blocks(
     if env_details:
         env_block = f"{env_block}\n\n{env_details}"
 
-    return [instructions, inventory, skills_block or "<skills/>", env_block]
+    return [instructions, inventory, env_block, skills_block or "<skills/>"]
