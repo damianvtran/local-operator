@@ -138,3 +138,62 @@ def test_usage_enabled_provider_ids(controller) -> None:
     assert "zai" in ids
     assert "deepseek" not in ids
     assert ids == sorted(ids)
+
+
+# -- catalogue ---------------------------------------------------------------
+
+
+def test_an_env_key_counts_as_a_usable_credential(controller, monkeypatch) -> None:
+    """A key in the environment is what the stream-time cascade resolves, so a
+    session started that way runs perfectly. Reporting the provider as needing a
+    login was both wrong and unactionable — there is no login to perform."""
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    assert not controller.is_usable("openrouter")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    assert controller.is_usable("openrouter")
+    assert not controller.has_any_credential("openrouter"), "still nothing STORED"
+
+
+def test_a_keyless_provider_is_usable_with_no_credential_at_all(controller) -> None:
+    """Which is the whole point of running a local server."""
+    assert controller.is_usable("ollama")
+
+
+def test_the_static_catalogue_needs_no_network_and_carries_real_models(controller) -> None:
+    """The picker paints from this on the keystroke that opens it, so it must be
+    synchronous and must already be useful."""
+    entries = controller.static_catalogue()
+    assert entries
+    selectors = {entry.selector for entry in entries}
+    assert "anthropic/claude-opus-4-20250514" in selectors
+    assert all(entry.provider and entry.model_id for entry in entries)
+
+
+def test_an_unknown_price_is_not_reported_as_free(controller, monkeypatch) -> None:
+    """The picker renders a genuine pair of zeroes as `free`, so an unknown price
+    passed through as zero would advertise a paid model as costing nothing.
+    Anthropic makes this immediate: its listing carries no pricing at all, so every
+    model it discovers that we did not already ship would read `free`."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    entries = {entry.selector: entry for entry in controller.static_catalogue()}
+    priced = entries["anthropic/claude-opus-4-20250514"]
+    assert priced.input_price > 0
+
+    # A provider whose registry rows carry no prices must report unknown (< 0),
+    # never 0.0, unless it needs no credential at all.
+    unknown = [e for e in entries.values() if e.input_price <= 0]
+    for entry in unknown:
+        definition = controller.provider(entry.provider)
+        keyless = definition is not None and definition.allows_missing_api_key
+        assert entry.input_price == (0.0 if keyless else -1.0), entry
+
+
+def test_a_reseller_is_flagged_so_the_picker_can_prefer_the_direct_route(
+    controller, monkeypatch
+) -> None:
+    """`openrouter/anthropic/claude-opus-5` and `anthropic/claude-opus-5` are the
+    same model; the picker ranks the direct one first and needs this flag to know
+    which is which."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    for entry in controller.static_catalogue():
+        assert entry.aggregated == (entry.provider in ("openrouter", "radient")), entry

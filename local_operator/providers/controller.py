@@ -14,6 +14,8 @@ a ``run_worker`` so the Textual message thread never blocks.
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import time
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
@@ -21,11 +23,16 @@ import httpx
 
 from local_operator.harness.types import ModelSpec
 from local_operator.model.configure import build_model_spec  # noqa: F401  (used by callers)
+from local_operator.model.discovery import available_models
+from local_operator.model.registry import static_models
 from local_operator.providers.oauth.callback_server import LoginCallbacks
 from local_operator.providers.registry import (
+    AGGREGATOR_PROVIDERS,
+    PROVIDER_REGISTRY,
     ProviderDefinition,
     get_provider_definition,
     list_login_providers,
+    resolve_env_key,
 )
 from local_operator.providers.usage import (
     USAGE_PROVIDERS,
@@ -39,6 +46,33 @@ if TYPE_CHECKING:  # auth_store stays off this module's runtime import graph
     from local_operator.providers.auth_store import OAuthAccess, StoredCredential
 
 LoginCallbackFactory = Callable[[ProviderDefinition], LoginCallbacks]
+
+
+@dataclasses.dataclass(frozen=True)
+class CatalogueEntry:
+    """One offerable model, provider-qualified, with the provider's auth state.
+
+    Deliberately a flat record of PRESENTABLE values rather than a `ModelInfo`:
+    the TUI's picker needs a display label and two prices and must not have to
+    know that a context window of `-1` means unknown while `0` also does. The
+    normalization happens once, here, where the registry's conventions are known.
+    """
+
+    provider: str
+    model_id: str
+    label: str
+    context_window: int
+    input_price: float
+    output_price: float
+    connected: bool
+    #: This provider RESELLS the model rather than serving it. The picker ranks
+    #: the direct route first when the same model is reachable both ways.
+    aggregated: bool = False
+
+    @property
+    def selector(self) -> str:
+        """``provider/id`` — what ``/model`` accepts."""
+        return f"{self.provider}/{self.model_id}"
 
 
 class ControllerAuthStore(Protocol):
@@ -83,6 +117,17 @@ class ProviderController:
         # callbacks that yield the terminal before the flow runs.
         self._login_callbacks = login_callbacks
 
+    def set_login_callbacks(self, factory: "LoginCallbackFactory | None") -> None:
+        """Install host-specific login callbacks after construction.
+
+        The CLI builds this controller before it knows whether a TUI will run,
+        and a TUI's callbacks are fundamentally different in kind rather than in
+        wording: it renders the authorization URL into its own transcript and
+        must NEVER read from the real stdin, because doing so either fights the
+        app for the terminal or requires suspending it.
+        """
+        self._login_callbacks = factory
+
     # -- discovery ---------------------------------------------------------
     def login_providers(self) -> list[ProviderDefinition]:
         """Providers offering an interactive login, registry order."""
@@ -100,6 +145,25 @@ class ProviderController:
         definition = get_provider_definition(provider)
         storage = (definition.store_credentials_as or provider) if definition else provider
         return any(c.provider == storage for c in self.auth_store.list_credentials(provider=None))
+
+    def is_usable(self, provider: str) -> bool:
+        """Whether ``provider`` has a credential the session could actually run on.
+
+        Wider than :meth:`has_any_credential`, which only sees the AuthStore. A key
+        in the ENVIRONMENT is a working credential by every measure that matters —
+        it is the one the stream-time cascade resolves, so a session started that
+        way runs fine — and reporting such a provider as "needs a login" was both
+        wrong and unactionable, since there is no login to perform.
+
+        ``allows_missing_api_key`` providers (a local Ollama) are usable with no
+        credential at all, which is the whole point of running one.
+        """
+        definition = get_provider_definition(provider)
+        if definition is not None and definition.allows_missing_api_key:
+            return True
+        if self.has_any_credential(provider):
+            return True
+        return bool(resolve_env_key(provider))
 
     def usage_enabled_providers(self) -> list[str]:
         """Provider ids with a live quota endpoint, sorted."""
@@ -205,6 +269,108 @@ class ProviderController:
             ordered.append(provider)
         return ordered
 
+    # -- catalogue ---------------------------------------------------------
+    def static_catalogue(self) -> list[CatalogueEntry]:
+        """Every model the SHIPPED registry knows, with each provider's auth state.
+
+        Synchronous and I/O-free, which is the point: a picker has to paint on the
+        keystroke that opened it. This is the first frame; :meth:`live_catalogue`
+        replaces it when the network answers.
+        """
+        entries: list[CatalogueEntry] = []
+        for definition in PROVIDER_REGISTRY:
+            connected = self.is_usable(definition.id)
+            for model_id, info in static_models(definition.id).items():
+                entries.append(
+                    CatalogueEntry(
+                        provider=definition.id,
+                        model_id=model_id,
+                        label=info.name or model_id,
+                        context_window=max(0, info.context_window or 0),
+                        input_price=_price(info.input_price, definition),
+                        output_price=_price(info.output_price, definition),
+                        connected=connected,
+                        aggregated=definition.id in AGGREGATOR_PROVIDERS,
+                    )
+                )
+        return entries
+
+    async def live_catalogue(
+        self, *, ttl_s: float | None = None
+    ) -> tuple[list[CatalogueEntry], dict[str, str]]:
+        """The catalogue with each provider's LIVE listing layered over the registry.
+
+        Returns ``(entries, statuses)`` where ``statuses`` maps provider id to one
+        of discovery's status strings, so a UI can say "cached" or "login
+        required" instead of implying the catalogue is complete.
+
+        Only providers with a credential are fetched. An unconnected provider still
+        contributes its STATIC models — the question "what would I get if I logged
+        in here" is precisely what a user cannot otherwise answer, and it was the
+        reason a newly released model was undiscoverable.
+
+        Each provider is isolated: discovery never raises by contract, but a
+        credential resolution can (an OAuth refresh against a dead network), and
+        one broken provider must not empty the whole list.
+        """
+        entries: list[CatalogueEntry] = []
+        statuses: dict[str, str] = {}
+        for definition in PROVIDER_REGISTRY:
+            connected = self.is_usable(definition.id)
+            api_key: str | None = None
+            is_oauth = False
+            if connected:
+                try:
+                    api_key, is_oauth = await self._listing_credential(definition.id)
+                except Exception:  # noqa: BLE001 — one provider's auth is not fatal
+                    api_key, is_oauth = None, False
+            kwargs: dict[str, Any] = {"api_key": api_key, "is_oauth": is_oauth}
+            if ttl_s is not None:
+                kwargs["ttl_s"] = ttl_s
+            # Off the event loop: discovery is synchronous httpx by design (it is
+            # also called from the CLI and the server), and a dozen sequential
+            # provider fetches on the loop would freeze a TUI's repaint.
+            models, status = await asyncio.to_thread(available_models, definition.id, **kwargs)
+            statuses[definition.id] = status
+            for model in models:
+                entries.append(
+                    CatalogueEntry(
+                        provider=definition.id,
+                        model_id=model.id,
+                        label=model.name or model.id,
+                        context_window=max(0, model.context_window),
+                        input_price=_price(model.input_price, definition),
+                        output_price=_price(model.output_price, definition),
+                        connected=connected,
+                        aggregated=definition.id in AGGREGATOR_PROVIDERS,
+                    )
+                )
+        return entries, statuses
+
+    async def _listing_credential(self, provider: str) -> tuple[str | None, bool]:
+        """``(secret, is_oauth)`` for a model LISTING call.
+
+        Separate from the usage path because the two want different things from the
+        same store: usage needs a billing key and gives up without one, while a
+        listing is happy with either an OAuth access token or an API key and is
+        worth attempting with whichever exists. The OAuth branch is reported as
+        such because Anthropic switches header shape on it — `x-api-key` for keys,
+        `Authorization: Bearer` for tokens — and sending the wrong one is a 401.
+        """
+        access = await self.auth_store.get_oauth_access(provider)
+        if access is not None and access.kind == "oauth" and access.access_token:
+            return access.access_token, True
+        if access is not None and access.access_token:
+            return access.access_token, False
+        try:
+            stored = await self.auth_store.get_api_key(provider)
+        except Exception:  # noqa: BLE001 — a refresh failure just means no listing
+            stored = None
+        # The environment is the last tier of the same cascade the stream uses, so
+        # a key set there has to reach the listing too: otherwise the provider a
+        # session is ACTUALLY RUNNING ON is the one whose catalogue stays empty.
+        return stored or resolve_env_key(provider), False
+
     async def _fetch_one(self, client: httpx.AsyncClient, provider: str) -> UsageReport | None:
         if not usage_supported(provider):
             return None
@@ -231,3 +397,21 @@ class ProviderController:
         if not api_key:
             return None
         return await fetch_usage(client, provider, api_key=api_key)
+
+
+def _price(value: float | None, definition: ProviderDefinition) -> float:
+    """A per-million price, with UNKNOWN kept distinct from FREE.
+
+    Discovery and the static registry both use ``0`` for "no price known", and the
+    picker renders a genuine pair of zeroes as ``free`` — so passing an unknown
+    through as zero advertises a paid model as costing nothing. Anthropic makes
+    this immediate rather than theoretical: its listing carries no pricing at all,
+    so every model it discovers that we did not already ship would read ``free``.
+
+    ``-1`` is the unknown sentinel the picker blanks. Zero is preserved only for
+    providers that need no credential — a local Ollama really is free per token,
+    and blanking that would hide the one thing that makes it interesting.
+    """
+    if value is not None and value > 0:
+        return float(value)
+    return 0.0 if definition.allows_missing_api_key else -1.0

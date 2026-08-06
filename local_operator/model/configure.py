@@ -22,7 +22,6 @@ import functools
 import logging
 import os
 import time
-from pathlib import Path
 from collections.abc import AsyncIterator, Mapping
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -30,11 +29,11 @@ import requests
 from pydantic import BaseModel, SecretStr
 
 from local_operator.harness.types import AbortSignal, ChatRequest, ModelSpec, StreamEvent
+from local_operator.paths import config_dir
 from local_operator.model.catalogue import (
     DEFAULT_TTL_S,
     LISTING_PROVIDERS,
     cached_listing,
-    invalidate,
 )
 from local_operator.model.registry import ModelInfo, get_model_info
 
@@ -324,6 +323,19 @@ def _extra_mapping(model: BaseModel, key: str) -> Mapping[str, Any]:
     return {}
 
 
+class _UnmappableEntry(ValueError):
+    """A catalogue entry that validated but whose fields could not be read.
+
+    A subclass of ``ValueError`` on purpose. The legacy public helpers
+    (:func:`get_model_info_from_openrouter` and friends) have always raised
+    ``ValueError`` for "no usable answer", and callers outside this module catch
+    exactly that; a fresh exception hierarchy would break them for no gain.
+    Inside the module the subclass is what lets the two causes be told apart —
+    "this model is not in this catalogue" is routine, while "this document says
+    a context window is a dictionary" is a provider defect worth a warning.
+    """
+
+
 def _info_from_listing(
     listing: ListingResponse, model_name: str, template: ModelInfo, source: str
 ) -> ModelInfo:
@@ -348,49 +360,76 @@ def _info_from_listing(
     for model in listing.data:
         if model.id != model_name:
             continue
-        info = template.model_copy(deep=True)
-        # The template is the PROVIDER's placeholder entry, so its id and name
-        # describe the aggregator ("openrouter" / "OpenRouter") rather than the
-        # model. Nothing in-tree reads them today, which is exactly why it is
-        # worth correcting now: the next reader will reasonably expect
-        # `info.id` to identify the model it just resolved.
-        info.id = model.id
-        info.name = getattr(model, "name", None) or model.id
-        # Providers quote price per token here; normalize to per-million.
-        info.input_price = float(model.pricing.prompt) * 1_000_000
-        info.output_price = float(model.pricing.completion) * 1_000_000
-        info.description = model.description
-
-        top = _extra_mapping(model, "top_provider")
-        windows = [
-            int(w) for w in (_extra(model, "context_length"), top.get("context_length")) if w
-        ]
-        if windows:
-            info.context_window = min(windows)
-        max_out = top.get("max_completion_tokens")
-        if max_out:
-            info.max_tokens = int(max_out)
-
-        modalities = _extra_mapping(model, "architecture").get("input_modalities") or []
-        if modalities:
-            info.supports_images = "image" in modalities
-
-        pricing_extra = model.pricing.model_extra or {}
-        cache_read = pricing_extra.get("input_cache_read")
-        cache_write = pricing_extra.get("input_cache_write")
-        # OpenRouter quotes "input_cache_read": "0" for models with no prompt
-        # caching; presence alone would flip the flag and change request shape
-        # for no benefit. Require a positive price.
-        if cache_read is not None and float(cache_read) > 0:
-            info.supports_prompt_cache = True
-            info.cache_reads_price = float(cache_read) * 1_000_000
-            # Providers with implicit caching quote no write price; the read
-            # price is the only signal that caching exists at all.
-            info.cache_writes_price = (
-                float(cache_write) * 1_000_000 if cache_write is not None else info.input_price
-            )
-        return info
+        try:
+            return _map_entry(model, template)
+        except (TypeError, ValueError, OverflowError) as exc:
+            # Validation is NOT a guarantee that the mapping will succeed: the
+            # listing schemas set ``extra="allow"``, so a payload whose extra
+            # fields are the wrong shape validates cleanly and then blows up
+            # inside `float()`/`int()`. All three types are real and reachable
+            # from one upstream document:
+            #
+            #   {"context_length": {"max": 1000}}  -> TypeError
+            #   {"context_length": "not-a-number"} -> ValueError
+            #   {"context_length": NaN}            -> ValueError, since
+            #                                         json.loads accepts the
+            #                                         bare literal
+            #   {"context_length": Infinity}       -> OverflowError, likewise
+            #
+            # Letting any of them escape fails session start outright — the
+            # exact outcome this module exists to prevent.
+            raise _UnmappableEntry(f"{source} entry for {model_name} did not map: {exc}") from exc
     raise ValueError(f"Model not found from {source} models API: {model_name}")
+
+
+def _map_entry(model: Any, template: ModelInfo) -> ModelInfo:
+    """One catalogue entry as a :class:`ModelInfo`, or raise on bad field shapes.
+
+    Split out from the search loop so the conversions live inside ONE guarded
+    region. Inline, the guard would have had to wrap the loop, which would make
+    a legitimate "not in this catalogue" ValueError indistinguishable from a
+    payload that cannot be read.
+    """
+    info = template.model_copy(deep=True)
+    # The template is the PROVIDER's placeholder entry, so its id and name
+    # describe the aggregator ("openrouter" / "OpenRouter") rather than the
+    # model. Nothing in-tree reads them today, which is exactly why it is
+    # worth correcting now: the next reader will reasonably expect
+    # `info.id` to identify the model it just resolved.
+    info.id = model.id
+    info.name = getattr(model, "name", None) or model.id
+    # Providers quote price per token here; normalize to per-million.
+    info.input_price = float(model.pricing.prompt) * 1_000_000
+    info.output_price = float(model.pricing.completion) * 1_000_000
+    info.description = model.description
+
+    top = _extra_mapping(model, "top_provider")
+    windows = [int(w) for w in (_extra(model, "context_length"), top.get("context_length")) if w]
+    if windows:
+        info.context_window = min(windows)
+    max_out = top.get("max_completion_tokens")
+    if max_out:
+        info.max_tokens = int(max_out)
+
+    modalities = _extra_mapping(model, "architecture").get("input_modalities") or []
+    if modalities:
+        info.supports_images = "image" in modalities
+
+    pricing_extra = model.pricing.model_extra or {}
+    cache_read = pricing_extra.get("input_cache_read")
+    cache_write = pricing_extra.get("input_cache_write")
+    # OpenRouter quotes "input_cache_read": "0" for models with no prompt
+    # caching; presence alone would flip the flag and change request shape
+    # for no benefit. Require a positive price.
+    if cache_read is not None and float(cache_read) > 0:
+        info.supports_prompt_cache = True
+        info.cache_reads_price = float(cache_read) * 1_000_000
+        # Providers with implicit caching quote no write price; the read
+        # price is the only signal that caching exists at all.
+        info.cache_writes_price = (
+            float(cache_write) * 1_000_000 if cache_write is not None else info.input_price
+        )
+    return info
 
 
 def get_model_info_from_openrouter(client: ModelListingClient, model_name: str) -> ModelInfo:
@@ -464,10 +503,7 @@ def _catalogue_api_key(provider: str) -> str:
     try:
         from local_operator.credentials import CredentialManager
 
-        config_dir = Path(
-            os.environ.get("LOCAL_OPERATOR_CONFIG_DIR") or Path.home() / ".local-operator"
-        )
-        manager = CredentialManager(config_dir)
+        manager = CredentialManager(config_dir())
         for name in names:
             secret = manager.get_credential(name)
             if secret is not None and secret.get_secret_value():
@@ -540,26 +576,28 @@ def _info_from_catalogue(provider: str, model_name: str, fallback: ModelInfo) ->
         return fallback
     try:
         return _info_from_listing(listing, model_name, fallback, provider)
+    except _UnmappableEntry as exc:
+        # The provider's document validated but this entry cannot be read. WARN,
+        # because unlike a missing model this is upstream data the operator may
+        # want to hear about: the session runs on fallback numbers, which means
+        # the wrong context window and the wrong cost.
+        #
+        # The document is deliberately NOT purged. An earlier revision dropped it
+        # here, reasoning that a payload which cannot be mapped should not be
+        # served for the whole TTL — but the failure is scoped to the ONE entry
+        # whose id matched, out of a listing that routinely carries several
+        # hundred. Purging threw away metadata that was correct for all of them,
+        # and since the upstream document is unchanged the refetch re-poisons the
+        # cache immediately, so the only lasting effect was an extra HTTP call per
+        # process start plus a refetch for every other model. Falling back for the
+        # one bad entry costs nothing and keeps the rest of the catalogue.
+        logger.warning("%s catalogue: %s; using static model metadata", provider, exc)
+        return fallback
     except ValueError:
         # Not in the catalogue: a brand-new id, or a typo the provider will
-        # reject anyway. The static fallback is the honest answer.
-        return fallback
-    except TypeError:
-        # TypeError, not just ValueError, because validation is NOT a guarantee
-        # that the mapping will succeed: the listing schemas set
-        # ``extra="allow"``, so a payload whose extra fields are non-scalar
-        # (``"context_length": {"max": 1000}``, a cache price as an object)
-        # validates cleanly and then blows up inside `float()`/`int()`. Letting
-        # that escape failed session start outright — the exact outcome this
-        # module exists to prevent.
-        #
-        # The poisoned document is also DROPPED. `cached_listing` writes before
-        # the mapping runs, so a payload that cannot be mapped would otherwise
-        # be served as a fresh cache hit on every start for the whole TTL,
-        # repeating the failure for a day with no refetch. Deleting it costs one
-        # HTTP call and makes the next start able to recover on its own.
-        logger.debug("%s catalogue payload did not map; dropping the cache entry", provider)
-        invalidate(provider)
+        # reject anyway. The static fallback is the honest answer, and this one is
+        # routine enough to stay at debug.
+        logger.debug("%s catalogue has no entry for %s", provider, model_name)
         return fallback
 
 
@@ -596,10 +634,18 @@ def resolve_model_info(provider: str, model_id: str) -> ModelInfo:
 
     Memoized in-process because callers are per-turn: the disk cache alone still
     costs a JSON parse (~25ms) per call, which is real latency inside a render.
-    The memo expires on the same TTL as the disk cache (see ``_bucket`` above),
-    so it can never serve numbers older than the file it is standing in for.
-    Bounded at 64 entries because model ids are user-supplied — a typo per turn
-    must not grow the map without limit.
+
+    The memo's staleness is BOUNDED by one TTL window rather than pinned to the
+    disk file's own age, and the distinction is worth being precise about. The
+    file expires on AGE — 24h since its own ``fetched_at`` — while the memo
+    expires on a wall-clock window aligned to epoch multiples of the TTL, i.e.
+    at 00:00 UTC for the default. So when ANOTHER process refreshes the file
+    mid-window, this process keeps serving the pre-refresh numbers until its
+    window rolls. That is the same order of staleness as the disk cache, which is
+    all this needs to be; what it replaces is a bare ``lru_cache`` whose
+    staleness was unbounded, pinning boot-time metadata in a server for as long
+    as it ran. Bounded at 64 entries because model ids are user-supplied — a
+    typo per turn must not grow the map without limit.
 
     A switch to a DIFFERENT model needs no invalidation: the id is part of the
     key, so it simply misses.

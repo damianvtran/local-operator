@@ -390,15 +390,22 @@ async def test_tab_preserves_leading_whitespace() -> None:
 
 @pytest.mark.asyncio
 async def test_enter_completes_then_submits() -> None:
+    """An unambiguous Enter completes the word AND runs it.
+
+    `/us` is used rather than `/mo`: `model` is a command whose ARGUMENT drives its
+    own list, so completing it deliberately stops there — the trailing space opens
+    the model picker, and submitting as well would run a command whose whole
+    outcome the keystroke had already produced.
+    """
     app = PickerHarnessApp()
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        await pilot.press("slash", "m", "o")
-        assert app.editor.picker.highlighted_name() == "model"
+        await pilot.press("slash", "u", "s")
+        assert app.editor.picker.highlighted_name() == "usage"
         await pilot.press("enter")
         await pilot.pause()
-        assert app.submissions == ["/model "]
+        assert app.submissions == ["/usage "]
         assert app.editor.text == ""
         assert not app.editor.picker.is_open()
 
@@ -516,15 +523,15 @@ def test_a_bare_slash_still_lists_everything() -> None:
 
 
 @pytest.mark.asyncio
-async def test_enter_does_not_run_an_ambiguous_fuzzy_pick() -> None:
-    """Enter COMPLETES but does not SEND when the query could mean several
-    commands, because the registry's blast radius is not uniform.
+async def test_an_ambiguous_enter_grows_the_common_prefix_and_never_a_command() -> None:
+    """Enter on an ambiguous query extends to the matches' longest COMMON prefix
+    and leaves the list open. It never sends, and it never inserts a command name.
 
-    `/lo` highlights `loop` while `login` and `logout` also match, so
-    "Enter runs whatever the matcher picked" started autonomous work for a user
-    reaching for login — rewriting their text and running it in one keystroke.
-    A second Enter sends it, so the extra press only appears where the intent
-    genuinely is not clear.
+    `/lo` highlights `loop` while `login` and `logout` also match. An earlier
+    design completed to the highlighted row, which put the most destructive
+    candidate in the buffer ready to run — so a reflex double-Enter started
+    autonomous work for a user reaching for `/login`. The common prefix cannot be
+    the wrong command by construction: it is the part every candidate agrees on.
     """
     app = PickerHarnessApp()
     async with app.run_test(size=(100, 30)) as pilot:
@@ -537,28 +544,37 @@ async def test_enter_does_not_run_an_ambiguous_fuzzy_pick() -> None:
         await pilot.press("enter")
         await pilot.pause()
         assert app.submissions == [], "an ambiguous pick must not be sent"
-        assert app.editor.text == "/loop ", "…but it must still be completed"
+        assert app.editor.text == "/lo", "the common prefix of loop/login/logout is 'lo'"
+        assert app.editor.picker.is_open(), "the list must stay up to keep narrowing"
 
-        # The user can see what was chosen and confirm it.
+        # Narrowing by hand still resolves it: `g` leaves login and logout, whose
+        # common prefix is `log`, and one more character settles it outright.
+        await pilot.press("g", "i")
+        await pilot.pause()
+        assert app.editor.picker.suggestions()[0][0] == "login"
         await pilot.press("enter")
         await pilot.pause()
-        assert app.submissions == ["/loop "]
+        assert app.submissions == ["/login "]
 
 
 @pytest.mark.asyncio
 async def test_enter_sends_immediately_when_there_is_only_one_match() -> None:
-    """The common case must not cost a second keystroke."""
+    """The common case must not cost a second keystroke.
+
+    `/us` rather than `/mo`, because `model` completes without running — its
+    argument drives its own list, and the completion is what opens it.
+    """
     app = PickerHarnessApp()
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        await pilot.press("slash", "m", "o")
+        await pilot.press("slash", "u", "s")
         await pilot.pause()
-        assert len(app.editor.picker.suggestions()) == 1, "premise: /mo is unambiguous"
+        assert len(app.editor.picker.suggestions()) == 1, "premise: /us is unambiguous"
 
         await pilot.press("enter")
         await pilot.pause()
-        assert app.submissions == ["/model "]
+        assert app.submissions == ["/usage "]
 
 
 @pytest.mark.asyncio
@@ -588,3 +604,92 @@ async def test_tab_never_sends_however_unambiguous() -> None:
         await pilot.pause()
         assert app.submissions == []
         assert app.editor.text == "/model "
+
+
+def test_a_short_query_with_no_prefix_match_still_offers_the_fuzzy_tail() -> None:
+    """The short-query gate is a PREFERENCE, not a filter.
+
+    An empty suggestion list closes the picker, and a closed picker takes the
+    editor's Tab and Enter guards down with it — Tab then indents the user's
+    message and Enter submits the raw text. So a two-letter query that no command
+    starts with must still answer with its fuzzy matches, which is exactly the
+    set of natural abbreviations the matcher exists for.
+    """
+    for query, expected in (("lg", "login"), ("qt", "quit"), ("md", "model")):
+        names = [name for name, _ in command_suggestions(query, SLASH_COMMANDS)]
+        assert names, f"/{query} left the picker with nothing to show"
+        assert expected in names, f"/{query} should still reach {expected}: {names}"
+
+
+def test_a_short_query_still_prefers_its_prefix_matches() -> None:
+    """When prefix matches DO exist the gate holds: the arbitrary fuzzy tail is
+    what it was added to suppress."""
+    names = [name for name, _ in command_suggestions("mo", SLASH_COMMANDS)]
+    assert names == [name for name in names if name.startswith("mo")], names
+
+
+@pytest.mark.asyncio
+async def test_tab_still_completes_a_short_fuzzy_query() -> None:
+    """The gate must not cost Tab its completion. Tab never sends, so it carries
+    none of the blast-radius risk the ambiguity rules manage."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.press("slash", "l", "g")
+        assert app.editor._picker.is_open(), "the picker closed on a fuzzy-only query"
+        await pilot.press("tab")
+        assert app.editor.text in ("/login ", "/logout "), app.editor.text
+        assert app.submissions == [], "Tab must never send"
+
+
+@pytest.mark.asyncio
+async def test_arrowing_onto_a_row_lets_enter_send_it() -> None:
+    """An explicit move answers the very ambiguity the two-Enter rule guards.
+
+    The rule exists because the MATCHER may have chosen the row; a user who
+    arrowed onto it chose it themselves, which is also the muscle memory every
+    comparable picker has taught (move, Enter, done).
+    """
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.press("slash", "l", "o")
+        assert len(app.editor._picker.suggestions()) > 1
+        await pilot.press("down")
+        chosen = app.editor._picker.highlighted_name()
+        await pilot.press("enter")
+        assert app.submissions == [f"/{chosen} "], app.submissions
+
+
+@pytest.mark.asyncio
+async def test_a_matcher_chosen_row_still_needs_the_second_enter() -> None:
+    """The protection stays where it was argued for: no explicit move, no send."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.press("slash", "l", "o")
+        assert len(app.editor._picker.suggestions()) > 1
+        await pilot.press("enter")
+        assert app.submissions == [], "a fuzzy pick must not run on one keystroke"
+
+
+@pytest.mark.asyncio
+async def test_completing_a_list_opening_command_does_not_run_it() -> None:
+    """`/model` is completed, not submitted.
+
+    Its trailing space is exactly what opens the model picker, so submitting as
+    well produced a round trip with three visible costs: the transcript echoed a
+    `/model` that did nothing, the buffer was cleared, and the app had to put the
+    query BACK to reopen a list the same keystroke had already opened.
+    """
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        await pilot.press("slash", "m", "o", "d", "e", "l")
+        assert app.editor.picker.highlighted_name() == "model"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.submissions == [], "completing a list-opening command must not run it"
+        assert app.editor.text == "/model ", app.editor.text
+        assert not app.editor.picker.is_open(), "the command list gives way"

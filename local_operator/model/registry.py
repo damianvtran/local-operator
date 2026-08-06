@@ -289,6 +289,37 @@ def get_model_info(hosting: str, model: str) -> ModelInfo:
     return model_info
 
 
+def static_models(hosting: str) -> Dict[str, "ModelInfo"]:
+    """Every model this module knows for ``hosting``, keyed by model id.
+
+    :func:`get_model_info` answers "describe THIS model" and cannot answer "what
+    models exist", because its dispatch is a chain of `if hosting ==` branches
+    with the maps closed inside it. Live discovery needs the second question: it
+    merges a provider's API listing over what we shipped, and the shipped side has
+    to be enumerable for that merge to have a left-hand side.
+
+    Returns a COPY, so a caller that annotates rows in place — which a merge does
+    by construction — cannot mutate the process-wide catalogue.
+
+    Aggregators (openrouter, radient) and local runtimes (ollama) return ``{}``
+    rather than their one placeholder entry. Their placeholder describes the
+    ROUTER, not a model: offering `openrouter/openrouter` as a choice would be
+    offering a model that does not exist, and for exactly those providers the live
+    listing is authoritative anyway.
+    """
+    maps: Dict[str, Dict[str, ModelInfo]] = {
+        "anthropic": anthropic_models,
+        "openai": openai_models,
+        "google": google_models,
+        "deepseek": deepseek_models,
+        "alibaba": qwen_models,
+        "mistral": mistral_models,
+        "kimi": kimi_models,
+        "xai": xai_models,
+    }
+    return dict(maps.get(hosting, {}))
+
+
 unknown_model_info: ModelInfo = ModelInfo(
     id="unknown",
     name="Unknown",

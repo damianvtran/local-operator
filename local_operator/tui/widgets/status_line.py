@@ -45,9 +45,31 @@ from local_operator.tui.widgets.tool_card import truncate_cells
 _SPINNER_FRAMES = ("⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷")
 _SPINNER_INTERVAL_S = 0.08
 
-#: The brand glyph leading the band (π — the operator's own mark).
-BRAND_GLYPH = "π"
+#: Segment icons. Every one is a SINGLE cell in ``rich.cells.cell_len`` — this
+#: is a hard requirement, not a preference: the band's whole layout is measured
+#: arithmetic, and a glyph that renders two cells wide on one terminal and one
+#: on another makes the right group's edge alignment drift. Emoji are excluded
+#: for exactly that reason (the omp reference uses them; it can afford to).
+#: Geometric and technical symbols only, so no Nerd font is required.
+ICON_MODEL = "◆"
+ICON_EFFORT = "◐"
+ICON_CWD = "⌂"
+ICON_AGENTS = "◍"
+ICON_JOBS = "⊞"
+ICON_CONTEXT = "▦"
+ICON_COST = "◈"
+ICON_DURATION = "◷"
 
+#: Separators point INWARD: the left group's chevrons aim right and the right
+#: group's aim left, so both runs converge on the centre gap and frame it. A
+#: symmetric separator (the middot this replaced) left the two groups reading as
+#: one long run once the gap narrowed.
+_SEP_LEFT = "›"
+_SEP_RIGHT = "‹"
+
+#: Legacy separator, still used by nothing in the band. Kept only because the
+#: intra-group width arithmetic in :data:`_MIN_GROUP_GAP` is stated relative to
+#: it in the comments below.
 _SEPARATOR = " · "
 
 #: Minimum cells between the left and right groups. Deliberately WIDER than the
@@ -76,21 +98,24 @@ _MIN_GROUP_GAP = 4
 #:   it OUTLIVING context usage, which meant a band could show `high` but not
 #:   `49.6%/1M`: it kept the field nobody re-reads and dropped the one that
 #:   says compaction is coming.
-#: * ``cost``, then ``context``: context usage is the last number standing
-#:   because it is the one an operator acts on.
+#: * ``cost``, then ``cwd``, then ``context``: context usage is the last segment
+#:   standing beside the model, because it is the one an operator acts on.
 #:
-#: The model label, the brand glyph and the streaming spinner are NEVER
-#: dropped. When even the irreducible row overflows, ``_render`` truncates the
-#: label rather than shedding it: `deepse…` still answers which model is
-#: replying, and a band reduced to a bare glyph on an empty tinted strip reads
-#: as broken rather than as compressed.
+#: The brand glyph, the streaming spinner and the model label are NEVER dropped.
+#: When even the irreducible row overflows, ``_render`` emits spinner, glyph and a
+#: TRUNCATED label rather than shedding any of them: `deepse…` still answers which
+#: model is replying, a band reduced to a bare glyph on an empty tinted strip
+#: reads as broken rather than as compressed, and a streaming band that renders
+#: identically to an idle one is the one thing the colour budget must never allow.
 _DROP_LADDER: tuple[str, ...] = (
     # A label the user typed and already knows.
     "name",
     # Re-derivable from the transcript.
     "duration",
-    # A counter, but one the operator cannot re-derive without scrolling, so it
-    # outlasts the two above.
+    # Counters. Not re-derivable without scrolling, so they outlast the two
+    # above; jobs go before agents because a backgrounded shell command is
+    # visible in the transcript as a tool card, while a subagent is not.
+    "jobs",
     "subagents",
     # Shorten before dropping: a basename still answers "where am I" and a bare
     # model id still answers "who is replying".
@@ -100,10 +125,13 @@ _DROP_LADDER: tuple[str, ...] = (
     # watch, so it goes before either live number.
     "effort",
     "cost",
-    # Context usage is the last number to go: it is the one that predicts
-    # compaction, which is the thing an operator actually acts on.
-    "context",
+    # The working directory goes before the context number. Its shorten step has
+    # already reduced it to a basename by now, so what remains is ~7 cells of
+    # "where am I" against ~9 cells of "how close is compaction" — and the second
+    # is the one that predicts the operator's next action. An earlier version had
+    # these the other way round, which contradicted this very ladder's rationale.
     "cwd",
+    "context",
 )
 
 
@@ -191,6 +219,19 @@ def format_agents(count: int) -> str:
     return f"{count} agent" if count == 1 else f"{count} agents"
 
 
+def format_jobs(count: int) -> str:
+    """``2 jobs`` — backgrounded shell work, empty at zero.
+
+    Separate from the agent counter because they are different things an
+    operator tracks: a subagent is delegated reasoning, a job is a process this
+    session started and can outlive the turn. omp shows both, and collapsing
+    them into one number would hide which kind is running.
+    """
+    if count <= 0:
+        return ""
+    return f"{count} job" if count == 1 else f"{count} jobs"
+
+
 def format_cwd(cwd: str, *, short: bool) -> str:
     """The working dir as ``~/rel/path``, or just its basename when ``short``.
 
@@ -257,6 +298,7 @@ class StatusLine:
         self._context_tokens: int = 0
         self._context_window: int = 0
         self._subagents: int = 0
+        self._jobs: int = 0
         self._streaming: bool = False
         self._cost: str = ""
         self._conversation_name: str = ""
@@ -279,6 +321,7 @@ class StatusLine:
         context_tokens: int | None = None,
         context_window: int | None = None,
         subagents: int | None = None,
+        jobs: int | None = None,
         streaming: bool | None = None,
         cost: str | None = None,
         conversation_name: str | None = None,
@@ -296,6 +339,8 @@ class StatusLine:
             self._context_window = context_window
         if subagents is not None:
             self._subagents = subagents
+        if jobs is not None:
+            self._jobs = jobs
         if cost is not None:
             self._cost = cost
         if conversation_name is not None:
@@ -373,11 +418,29 @@ class StatusLine:
         # replying, whereas the ladder's old final rung dropped the label and
         # left a bare glyph on an empty tinted strip, which reads as broken
         # rather than as compressed.
+        #
+        # The SPINNER comes first and is never dropped, so "green means a turn is
+        # live" holds at every width. Without it this path emitted glyph + label
+        # for both states, making the streaming band byte-identical to the idle
+        # one — the exact confusion the band's colour budget exists to prevent,
+        # reintroduced at the narrow end. One cell of the label is a cheaper loss
+        # than the liveness signal.
         tail = Text()
-        tail.append(BRAND_GLYPH + " ", style=muted)
+        if self._streaming:
+            from local_operator.tui.shimmer import shimmer_enabled
+
+            # Same gate the wide path uses: with animation off the band states
+            # itself in words instead of leaning on a moving glyph.
+            if shimmer_enabled():
+                tail.append(_SPINNER_FRAMES[self._spinner_index], style=accent)
+                tail.append(" ", style=dim)
         label = format_model_label(self._model_label, short=True) if self._model_label else ""
         if label:
-            tail.append(truncate_cells(label, max(1, width - cell_len(tail.plain))), style=muted)
+            tail.append(f"{ICON_MODEL} ", style=dim)
+            tail.append(
+                truncate_cells(label, max(1, width - cell_len(tail.plain))),
+                style=Style(color=theme_mod.semantic_color("fg")),
+            )
         tail.truncate(width, overflow="ellipsis")
         return tail
 
@@ -390,74 +453,99 @@ class StatusLine:
         seam: Style,
         accent: Style,
     ) -> Text:
-        """Brand glyph · provider/model · effort · cwd (+ working indicator)."""
-        left = Text()
-        # The brand glyph is MUTED, not accent (D1). It is always on screen, so
-        # painting it green spent the accent on "the app is running at all" and
-        # left nothing for the one glyph that means "a turn is in flight" — the
-        # band rendered identically working and idle, while the tool card and the
-        # working line both put their running signal in accent. The accent moves
-        # to the spinner below.
-        left.append(BRAND_GLYPH + " ", style=muted)
-        parts: list[tuple[str, Style]] = []
+        """model › effort › cwd (+ the working indicator).
+
+        Each segment is ``icon value``, the icon a step dimmer than its value so
+        it frames the number rather than competing with it. Separators point
+        RIGHT here and LEFT in the other group, so the two chevron runs aim at
+        the centre gap and frame it — which is what makes a borderless band read
+        as two groups instead of one long run.
+        """
+        parts: list[tuple[str, str, Style]] = []
         if self._model_label and "model" not in dropped:
-            parts.append((format_model_label(self._model_label, short="model" in short), muted))
+            parts.append(
+                (
+                    ICON_MODEL,
+                    format_model_label(self._model_label, short="model" in short),
+                    Style(color=theme_mod.semantic_color("fg")),
+                )
+            )
         if self._effort and "effort" not in dropped:
-            parts.append((self._effort, dim))
+            parts.append(
+                (ICON_EFFORT, self._effort, Style(color=theme_mod.semantic_color("label")))
+            )
         if self._cwd and "cwd" not in dropped:
             rendered = format_cwd(self._cwd, short="cwd" in short)
             if rendered:
-                parts.append((rendered, dim))
-        for index, (text, style) in enumerate(parts):
+                parts.append((ICON_CWD, rendered, Style(color=theme_mod.semantic_color("signal"))))
+
+        left = Text()
+        for index, (icon, text, style) in enumerate(parts):
             if index:
-                left.append(_SEPARATOR, style=seam)
+                left.append(f" {_SEP_LEFT} ", style=seam)
+            left.append(f"{icon} ", style=dim)
             left.append(text, style=style)
         if self._streaming:
-            # The aggregate working LINE (WorkingBlock) carries the shimmer;
-            # the band keeps a quiet activity glyph so a still frame still
-            # reads "live" (D26). With shimmer off, that line is static too,
-            # so the band spells the state out rather than relying on a
-            # glyph the eye may read as decoration.
+            # The aggregate working LINE (WorkingBlock) carries the shimmer; the
+            # band keeps a quiet activity glyph so a still frame still reads
+            # "live". With shimmer off that line is static too, so the band
+            # spells the state out rather than relying on a glyph the eye may
+            # read as decoration.
             from local_operator.tui.shimmer import shimmer_enabled
 
             if parts:
-                left.append(_SEPARATOR, style=seam)
-            # ACCENT: this is the band's running indicator, and the accent
-            # budget's whole point is that seeing green means a turn is live.
-            # The trailing " working" word stays dim so the colour is the signal
-            # and the word is only the caption.
+                left.append(f" {_SEP_LEFT} ", style=seam)
+            # ACCENT: the band's running indicator, and the accent budget's whole
+            # point is that seeing green means a turn is live. The trailing
+            # " working" word stays dim so the colour is the signal and the word
+            # is only the caption.
             left.append(_SPINNER_FRAMES[self._spinner_index], style=accent)
             if not shimmer_enabled():
                 left.append(" working", style=dim)
         return left
 
     def _right_text(self, dropped: set[str], dim: Style, seam: Style) -> Text:
-        """Subagents · context usage · cost · duration · conversation name."""
-        parts: list[str] = []
+        """agents ‹ jobs ‹ context ‹ cost ‹ duration ‹ name.
+
+        Colour groups by KIND rather than giving every field its own hue, which
+        would be a rainbow: counters share `label`, the two numbers an operator
+        acts on take `signal` (context) and `warning` (cost, because spend is a
+        caution), and the least volatile fields stay neutral. Green is not used
+        at all — it belongs to the running indicator.
+        """
+        parts: list[tuple[str, str, Style]] = []
         if "subagents" not in dropped:
             agents = format_agents(self._subagents)
             if agents:
-                parts.append(agents)
+                parts.append((ICON_AGENTS, agents, Style(color=theme_mod.semantic_color("label"))))
+        if "jobs" not in dropped:
+            jobs = format_jobs(self._jobs)
+            if jobs:
+                parts.append((ICON_JOBS, jobs, Style(color=theme_mod.semantic_color("label"))))
         if "context" not in dropped:
             usage = format_context_usage(self._context_tokens, self._context_window)
             if usage:
-                parts.append(usage)
+                parts.append((ICON_CONTEXT, usage, Style(color=theme_mod.semantic_color("signal"))))
         if self._cost and "cost" not in dropped:
-            parts.append(self._cost)
+            parts.append((ICON_COST, self._cost, Style(color=theme_mod.semantic_color("warning"))))
         if "duration" not in dropped:
             elapsed = self._elapsed()
-            # Zero means "nothing has run yet" — an idle band should not
-            # claim a 0s task. Any real turn banks at least a few ms.
+            # Zero means "nothing has run yet" — an idle band should not claim a
+            # 0s task. Any real turn banks at least a few ms.
             if elapsed > 0:
-                parts.append(format_duration(elapsed))
+                parts.append((ICON_DURATION, format_duration(elapsed), dim))
         if self._conversation_name and "name" not in dropped:
-            parts.append(self._conversation_name)
+            parts.append(
+                ("", self._conversation_name, Style(color=theme_mod.semantic_color("muted")))
+            )
 
         right = Text()
-        for index, text in enumerate(parts):
+        for index, (icon, text, style) in enumerate(parts):
             if index:
-                right.append(_SEPARATOR, style=seam)
-            right.append(text, style=dim)
+                right.append(f" {_SEP_RIGHT} ", style=seam)
+            if icon:
+                right.append(f"{icon} ", style=dim)
+            right.append(text, style=style)
         return right
 
     def _compose(self, left: Text, right: Text, width: int, dim: Style) -> Text:

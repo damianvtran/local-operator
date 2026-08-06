@@ -25,6 +25,7 @@ from typing import Any
 import httpx
 
 from local_operator.harness.types import AbortSignal
+from local_operator.paths import config_dir as _app_config_dir
 from local_operator.providers.oauth.callback_server import (
     LoginCallbacks,
     LoginError,
@@ -57,10 +58,7 @@ def auth_host() -> str:
 
 
 def _config_dir() -> Path:
-    override = os.environ.get("LOCAL_OPERATOR_CONFIG_DIR")
-    if override:
-        return Path(override)
-    return Path.home() / ".local-operator"
+    return _app_config_dir()
 
 
 def get_or_create_device_id(config_dir: Path | None = None) -> str:

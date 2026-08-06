@@ -265,6 +265,18 @@ def list_login_providers() -> list[ProviderDefinition]:
     return [p for p in PROVIDER_REGISTRY if p.login is not None]
 
 
+#: Providers that RESELL other providers' models rather than serving their own.
+#:
+#: Their catalogues overlap the direct providers almost entirely, so the same model
+#: is reachable two ways and something has to decide which the user meant. The
+#: direct route wins: it is one hop instead of two, it is the credential the user
+#: just created when they logged in, and provider-native behaviour (Anthropic's
+#: cache-control breakpoints, OpenAI's reasoning effort) is only reliable there.
+#: An aggregator remains the right answer for models with no direct route, which is
+#: most of its list.
+AGGREGATOR_PROVIDERS = frozenset({"openrouter", "radient"})
+
+
 def resolve_env_key(provider_id: str) -> str | None:
     """Resolve the provider's API key from the environment.
 

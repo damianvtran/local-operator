@@ -172,19 +172,32 @@ def test_exit_quit_collapsed_to_one_command() -> None:
 
 
 @pytest.mark.asyncio
-async def test_help_and_model_notices() -> None:
-    """``/model`` posts a notice; it never prompts (D15 echoes the slash)."""
+async def test_model_opens_the_picker_instead_of_reporting_a_label() -> None:
+    """``/model`` opens the model list, and still never prompts.
+
+    Typing ``/model`` and pressing Enter goes through the command picker, whose
+    completion adds the terminating space — and that space is exactly the handover
+    that opens the model list. So the keystrokes a user actually presses reach the
+    catalogue without ``/model`` ever being submitted as a command.
+
+    Reporting the current label here was a dead end: the status band already shows
+    it, while "which models could I switch to" had no way to be asked at all.
+    """
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
-        app.query_one(Editor).focus()
+        editor = app.query_one(Editor)
+        editor.focus()
         await pilot.pause()
         await pilot.press("slash", "m", "o", "d", "e", "l", "enter")
         await pilot.pause()
-        transcript = app.query_one(TranscriptView)
-        # D15: the slash command echoes as a UserBlock before the notice.
-        assert len(transcript.blocks()) == 2
+        assert editor.text == "/model ", editor.text
+        assert editor.model_picker.is_open()
+        # NOTHING was submitted: completing a command whose argument drives its
+        # own list is not running it, so there is no echoed UserBlock and no
+        # notice — just the list.
+        assert app.query_one(TranscriptView).blocks() == []
     assert session.prompts == []
 
 
@@ -483,6 +496,31 @@ class FakeProviderController:
             if d.id == pid:
                 return d
         return None
+
+    def is_usable(self, provider):
+        # An env key counts, so this is wider than has_any_credential. The fake
+        # answers both because the app asks the narrow one for "logged in" and the
+        # wide one for "would a turn work".
+        return self.has_any_credential(provider)
+
+    def static_catalogue(self):
+        from local_operator.providers.controller import CatalogueEntry
+
+        return [
+            CatalogueEntry(
+                provider="openrouter",
+                model_id="deepseek/deepseek-chat",
+                label="DeepSeek Chat",
+                context_window=64_000,
+                input_price=0.14,
+                output_price=0.28,
+                connected=True,
+                aggregated=True,
+            )
+        ]
+
+    async def live_catalogue(self, *, ttl_s=None):
+        return self.static_catalogue(), {"openrouter": "ok"}
 
     def has_any_credential(self, provider):
         return provider in ("openrouter",)

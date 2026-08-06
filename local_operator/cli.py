@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from local_operator.config import ConfigManager
+from local_operator.paths import config_dir
 from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config
 from local_operator.optional import missing_extra_error
@@ -467,20 +468,20 @@ def _propagate_yolo(parser: argparse.ArgumentParser) -> None:
 
 
 def credential_update_command(args: argparse.Namespace) -> int:
-    credential_manager = CredentialManager(Path.home() / ".local-operator")
+    credential_manager = CredentialManager(config_dir())
     credential_manager.prompt_for_credential(args.key, reason="update requested")
     return 0
 
 
 def credential_delete_command(args: argparse.Namespace) -> int:
-    credential_manager = CredentialManager(Path.home() / ".local-operator")
+    credential_manager = CredentialManager(config_dir())
     credential_manager.set_credential(args.key, "")
     return 0
 
 
 def config_create_command() -> int:
     """Create a new configuration file."""
-    config_manager = ConfigManager(Path.home() / ".local-operator")
+    config_manager = ConfigManager(config_dir())
     config_manager._write_config(vars(config_manager.config))
     print("Created new configuration file at ~/.local-operator/config.yml")
     return 0
@@ -488,7 +489,7 @@ def config_create_command() -> int:
 
 def config_open_command() -> int:
     """Open the configuration file using the default system editor."""
-    config_path = Path.home() / ".local-operator" / "config.yml"
+    config_path = config_dir() / "config.yml"
     if not config_path.exists():
         print(
             "\n\033[1;31mError: Configuration file does not exist.  Create one with "
@@ -512,7 +513,7 @@ def config_open_command() -> int:
 
 def config_edit_command(args: argparse.Namespace) -> int:
     """Edit a configuration value."""
-    config_manager = ConfigManager(Path.home() / ".local-operator")
+    config_manager = ConfigManager(config_dir())
     try:
         # Parse the value to the appropriate type
         value = args.value
@@ -552,7 +553,7 @@ def config_edit_command(args: argparse.Namespace) -> int:
 
 def config_list_command() -> int:
     """List available configuration options and their descriptions."""
-    config_manager = ConfigManager(Path.home() / ".local-operator")
+    config_manager = ConfigManager(config_dir())
     config = config_manager.get_config()
 
     # Configuration descriptions. conversation_length / detail_length /
@@ -771,7 +772,7 @@ def login_command(args: argparse.Namespace) -> int:
     except ImportError:
         print("\n\033[1;31mError: provider login support is not available in this build\033[0m")
         return -1
-    auth_store, credential_manager = _build_auth_stack(Path.home() / ".local-operator")
+    auth_store, credential_manager = _build_auth_stack(config_dir())
     try:
         return run_login(getattr(args, "provider", None), credential_manager, auth_store)
     finally:
@@ -785,7 +786,7 @@ def logout_command(args: argparse.Namespace) -> int:
     except ImportError:
         print("\n\033[1;31mError: provider login support is not available in this build\033[0m")
         return -1
-    auth_store, _credential_manager = _build_auth_stack(Path.home() / ".local-operator")
+    auth_store, _credential_manager = _build_auth_stack(config_dir())
     try:
         return run_logout(args.provider, auth_store)
     finally:
@@ -799,7 +800,7 @@ def login_status_command() -> int:
     except ImportError:
         print("\n\033[1;31mError: provider login support is not available in this build\033[0m")
         return -1
-    auth_store, credential_manager = _build_auth_stack(Path.home() / ".local-operator")
+    auth_store, credential_manager = _build_auth_stack(config_dir())
     try:
         return list_logins(auth_store, credential_manager)
     finally:
@@ -1077,12 +1078,12 @@ async def _run_with_scheduler(run_fn, *run_args) -> int:
         from local_operator.server.utils.websocket_manager import WebSocketManager
         from local_operator.types import OperatorType
 
-        config_dir = Path.home() / ".local-operator"
-        config_manager = ConfigManager(config_dir)
-        credential_manager = CredentialManager(config_dir)
+        base_dir = config_dir()
+        config_manager = ConfigManager(base_dir)
+        credential_manager = CredentialManager(base_dir)
         from local_operator.agents import AgentRegistry  # lazy: heavy module
 
-        agent_registry = AgentRegistry(config_dir)
+        agent_registry = AgentRegistry(base_dir)
 
         from local_operator.console import VerbosityLevel
 
@@ -1163,7 +1164,7 @@ def main() -> int:
         # (CL-12) No env_config binding here: the scheduler wrapper resolves its
         # own env config and the session factory does the same lazily — a
         # dead local would only invite drift.
-        config_dir = Path.home() / ".local-operator"
+        base_dir = config_dir()
         agent_home_dir = Path.home() / "local-operator-home"
 
         # Create the agent home directory if it doesn't exist
@@ -1191,25 +1192,25 @@ def main() -> int:
         elif args.subcommand == "agents":
             from local_operator.agents import AgentRegistry  # lazy: heavy module
 
-            agent_registry = AgentRegistry(config_dir)
+            agent_registry = AgentRegistry(base_dir)
             if args.agents_command == "list":
                 return agents_list_command(args, agent_registry)
             elif args.agents_command == "create":
                 return agents_create_command(args.name, agent_registry)
             elif args.agents_command == "delete":
-                return agents_delete_command(args, agent_registry, config_dir)
+                return agents_delete_command(args, agent_registry, base_dir)
             elif args.agents_command == "push":
                 # Push agent to Radient
                 from local_operator.clients.radient import RadientClient  # lazy
 
-                credential_manager = CredentialManager(config_dir)
+                credential_manager = CredentialManager(base_dir)
                 api_key = credential_manager.get_credential("RADIENT_API_KEY")
                 if not api_key:
                     print(
                         "\n\033[1;31mError: RADIENT_API_KEY is required to push to Radient\033[0m"
                     )
                     return -1
-                config_manager = ConfigManager(config_dir)
+                config_manager = ConfigManager(base_dir)
                 base_url = config_manager.get_config_value(
                     "radient_base_url", "https://api.radienthq.com"
                 )
@@ -1257,7 +1258,7 @@ def main() -> int:
 
                 agent_id = args.id
                 # Get Radient base URL from config or use default
-                config_manager = ConfigManager(config_dir)
+                config_manager = ConfigManager(base_dir)
                 base_url = config_manager.get_config_value(
                     "radient_base_url", "https://api.radientlabs.ai"
                 )
@@ -1323,13 +1324,13 @@ def main() -> int:
                         file=sys.stderr,
                     )
                     return -1
-                key_result = _preflight_api_key(hosting, CredentialManager(config_dir))
+                key_result = _preflight_api_key(hosting, CredentialManager(base_dir))
                 if key_result is not None:
                     return key_result
             return run_exec(args.command, exec_args)
 
-        config_manager = ConfigManager(config_dir)
-        credential_manager = CredentialManager(config_dir)
+        config_manager = ConfigManager(base_dir)
+        credential_manager = CredentialManager(base_dir)
 
         # Override config with CLI args where provided
         config_manager.update_config_from_args(args)
@@ -1341,7 +1342,7 @@ def main() -> int:
 
         from local_operator.agents import AgentData, AgentEditFields, AgentRegistry  # lazy
 
-        agent_registry = AgentRegistry(config_dir)
+        agent_registry = AgentRegistry(base_dir)
 
         # Get agent if name provided
         current_agent: Optional[AgentData] = None  # Use AgentData type hint

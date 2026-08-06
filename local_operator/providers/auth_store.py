@@ -39,6 +39,7 @@ import zlib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from local_operator.paths import config_dir
 from local_operator.providers.registry import (
     ProviderDefinition,
     RefreshFn,
@@ -119,9 +120,7 @@ class OAuthAccess:
 
 
 def default_db_path() -> Path:
-    override = os.environ.get("LOCAL_OPERATOR_CONFIG_DIR")
-    base = Path(override) if override else Path.home() / ".local-operator"
-    return base / "auth.db"
+    return config_dir() / "auth.db"
 
 
 def _identity_key_for(provider: str, credential: dict[str, Any]) -> str | None:
@@ -744,11 +743,9 @@ def _load_legacy_credential_manager() -> "CredentialManager | None":
     try:
         from local_operator.credentials import CredentialManager
 
-        config_dir = Path(
-            os.environ.get("LOCAL_OPERATOR_CONFIG_DIR", "~/.local-operator")
-        ).expanduser()
-        if (config_dir / "credentials.env").exists():
-            return CredentialManager(config_dir)
+        base = config_dir()
+        if (base / "credentials.env").exists():
+            return CredentialManager(base)
     except Exception:
         pass
     return None

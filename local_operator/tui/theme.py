@@ -51,6 +51,10 @@ BRAND_TOKENS: dict[str, dict[str, str]] = {
         # gave a mouse user almost nothing (D8). A green cast at roughly
         # surface's luminance reads immediately without shouting.
         "tint-select": "#16221a",  # picker's highlighted row (cool green cast)
+        # Hover ON the selected row. Hover is additive, so pointing at the
+        # highlighted row has to read as MORE than selection alone; reusing a
+        # plain elevation step there erased the selection instead.
+        "tint-select-hi": "#1b2a1f",
     },
     # Warm paper ramp (D22: real kit semantics; danger is NEVER the green).
     "light": {
@@ -74,6 +78,7 @@ BRAND_TOKENS: dict[str, dict[str, str]] = {
         "label": "#7c5a9e",
         "tint-danger": "#f6e2dd",
         "tint-select": "#dfeadf",
+        "tint-select-hi": "#d2e3d2",
     },
 }
 
@@ -102,6 +107,7 @@ _SEMANTIC_ALIASES: dict[str, dict[str, str]] = {
         "label": "label",
         "tint-danger": "tint-danger",
         "tint-select": "tint-select",
+        "tint-select-hi": "tint-select-hi",
     },
     "light": {
         "bg": "paper",
@@ -124,6 +130,7 @@ _SEMANTIC_ALIASES: dict[str, dict[str, str]] = {
         "label": "label",
         "tint-danger": "tint-danger",
         "tint-select": "tint-select",
+        "tint-select-hi": "tint-select-hi",
     },
 }
 

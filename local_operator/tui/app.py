@@ -22,7 +22,7 @@ error`` status and can be retried with ``/reload`` (TUI-012).
 from __future__ import annotations
 
 import os
-from typing import Any, Awaitable, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol
 
 from local_operator.tui.widgets.welcome import MODEL_PENDING
 from local_operator.tui.widgets.transcript import (
@@ -42,6 +42,7 @@ from textual.containers import Container, Horizontal
 from textual.widgets import Static
 
 from local_operator.session import naming
+from local_operator.providers.oauth.callback_server import LoginCallbacks
 from local_operator.session.protocol import SessionProtocol
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import SlashCommand
@@ -67,14 +68,19 @@ from local_operator.tui.events import (
 from local_operator.tui.markdown_theme import brand_markdown_theme, install_markdown_theme
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import (
+    ModelQueryOpened,
     Editor,
     EditorQuit,
     EditorSubmitted,
     InterruptRequested,
 )
+from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.status_line import StatusLine, format_cost
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.welcome import WelcomeView, session_welcome_info
+
+if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
+    from local_operator.providers.controller import CatalogueEntry
 
 #: Slash commands handled synchronously before any prompt is sent. One
 #: registry entry per command; aliases live on the entry (TUI-014).
@@ -170,7 +176,8 @@ class OperatorApp(App[None]):
         self._name_requested: bool = False
         # Last subagent count painted, so the 1 Hz poll repaints only on a
         # real change instead of every tick.
-        self._subagents_shown: int = 0
+        # (task jobs, bash jobs) last painted, so a repaint only happens on change.
+        self._subagents_shown: tuple[int, int] = (0, 0)
         # Serializes interactive login flows so two /login commands can never
         # race the one suspended terminal.
         self._login_lock: Any | None = None
@@ -205,6 +212,10 @@ class OperatorApp(App[None]):
             # bottom-docked status band — under the text it completes, above
             # the footer — and it claims zero rows while closed.
             yield editor.picker
+            # Same placement rule, same reason. The two are mutually exclusive —
+            # the buffer parse that opens one closes the other — so they can share
+            # the row band without ever competing for it.
+            yield editor.model_picker
 
     def get_css_variables(self) -> dict[str, str]:
         """Brand tokens as the stylesheet's single source of truth."""
@@ -230,7 +241,13 @@ class OperatorApp(App[None]):
 
         self._status = StatusLine(self.query_one("#status-band", Static))
         self._status.update(model_label=MODEL_PENDING, cwd=os.getcwd())
-        self.query_one(Editor).focus()
+        editor = self.query_one(Editor)
+        # Installed here rather than in the Editor's constructor: the editor is
+        # built inside `compose`, before the app has anything for it to call, and a
+        # widget that reached back into its host would invert the dependency this
+        # whole module is arranged around.
+        editor.set_model_handler(self._on_model_row_chosen)
+        editor.focus()
         # The count has no event to hang off (see JOB_POLL_INTERVAL_S).
         self.set_interval(JOB_POLL_INTERVAL_S, self._poll_subagents)
 
@@ -416,26 +433,28 @@ class OperatorApp(App[None]):
 
     # -- background jobs ------------------------------------------------------
     def _poll_subagents(self) -> None:
-        """Repaint the subagent segment only when the running count changes."""
-        count = self._subagent_count()
-        if count == self._subagents_shown:
+        """Repaint the counter segments only when a running count changes."""
+        agents = self._job_count("task")
+        jobs = self._job_count("bash")
+        if (agents, jobs) == self._subagents_shown:
             return
-        self._subagents_shown = count
+        self._subagents_shown = (agents, jobs)
         if self._status is not None:
-            self._status.update(subagents=count)
+            self._status.update(subagents=agents, jobs=jobs)
 
-    def _subagent_count(self) -> int:
-        """Running ``task`` jobs — the ones that carry a subagent.
+    def _job_count(self, kind: str) -> int:
+        """Running jobs of one ``kind`` — ``task`` (subagents) or ``bash``.
 
-        ``bash`` jobs are the operator's own backgrounded shell work, not
-        agents, so counting them would inflate the badge with something the
-        tool cards already show.
+        The two are counted separately because they are different things an
+        operator tracks: a subagent is delegated reasoning with no other
+        representation on screen, while a backgrounded shell command already has
+        a tool card. Summing them would hide which kind is running.
 
         ``queued`` is excluded to match ``AsyncJobManager``'s own running count
         (``harness/jobs.py``): a job admitted to the ledger but held behind the
         capacity gate carries ``status == "running"`` and has not started, so
-        counting it would report agents that are not yet doing anything — and
-        disagree with the number the harness itself reports.
+        counting it would report work that is not yet happening — and disagree
+        with the number the harness itself reports.
 
         Never raises: a status segment must not be able to take the app down.
         """
@@ -447,7 +466,7 @@ class OperatorApp(App[None]):
                 1
                 for job in manager.list()
                 if job.status == "running"
-                and job.type == "task"
+                and job.type == kind
                 and not getattr(job, "queued", False)
             )
         except Exception:
@@ -461,14 +480,25 @@ class OperatorApp(App[None]):
         self.query_one(TranscriptView).append_block(block)
 
     # -- slash commands -----------------------------------------------------
+    def _notice(self, body: str, kind: str = "info") -> None:
+        """Append a notice block.
+
+        A METHOD rather than the local closure it used to be, because the picker's
+        worker and its choose-callback both need to report and neither runs inside
+        a dispatch. One implementation means every path renders notices the same.
+        """
+        self._append_block(NoticeBlock(body, kind))
+
+    def _editor(self) -> Editor:
+        """The input editor. Queried rather than held: Textual owns the widget."""
+        return self.query_one(Editor)
+
     def _run_slash_command(self, text: str) -> None:
         """Dispatch a typed slash command (with arguments) to its handler."""
         parts = text.split(maxsplit=1)
         command = parts[0].lower()
         arg = parts[1].strip() if len(parts) > 1 else ""
-
-        def notice(body: str, kind: str = "info") -> None:
-            self._append_block(NoticeBlock(body, kind))
+        notice = self._notice
 
         if command in ("/exit", "/quit"):
             self.exit()
@@ -514,11 +544,17 @@ class OperatorApp(App[None]):
 
     # -- model --------------------------------------------------------------
     def _cmd_model(self, arg: str, notice: NoticeFn) -> None:
-        """``/model`` — show the current spec, or switch with ``provider/id``."""
+        """``/model`` — open the picker; ``/model provider/id`` — switch directly.
+
+        A bare ``/model`` OPENS THE LIST rather than printing the current label.
+        Printing it was a dead end: the answer to "which model am I on" is already
+        on the status band, and the question a user actually has at that moment is
+        "which models can I switch to", which they had no way to ask. The label is
+        still reported, as the picker's current-row marker.
+        """
         session = self._session
         if not arg:
-            label = session.model_label if session else "no session"
-            notice(f"model: {label}")
+            self._open_model_picker()
             return
         if session is None or not hasattr(session, "set_model"):
             notice("session is still starting…", "warning")
@@ -560,6 +596,108 @@ class OperatorApp(App[None]):
         notice(f"model: {old_label} → {session.model_label} (next turn)")
         if old_label.partition("/")[0] != provider:
             notice("switched provider — make sure you are logged in", "warning")
+
+    # -- model picker -------------------------------------------------------
+    def on_model_query_opened(self, message: ModelQueryOpened) -> None:
+        """The buffer just entered ``/model …`` — fill the list.
+
+        Populating on the MESSAGE rather than only from the command handler is what
+        makes every route into the list identical: typing `/model ` by hand, being
+        completed into it by the command picker, or dispatching `/model` all end up
+        here. Before this, only the dispatched route had rows.
+        """
+        message.stop()
+        self._populate_model_picker()
+
+    def _open_model_picker(self) -> None:
+        """Reopen the model list after ``/model`` was dispatched as a command.
+
+        Writes the BUFFER rather than opening the widget, because the buffer is the
+        single authority on which picker is showing — that is what keeps the two
+        lists mutually exclusive without either knowing about the other, so a picker
+        opened behind its back would be closed again by the next keystroke's resync.
+        It also leaves the query editable, which is the point: the user keeps typing
+        to filter.
+
+        Writing it posts ``ModelQueryOpened``, which is what fills the rows, so this
+        method deliberately does nothing else. It exists because the keystroke route
+        (the command picker completes `/model ` and stops) never clears the buffer,
+        while a dispatched `/model` does — and the list has to come back.
+        """
+        self._editor().begin_model_query()
+
+    def _populate_model_picker(self) -> None:
+        """Paint the catalogue immediately, then refresh it from the providers.
+
+        Stale-then-update, not load-then-show. The shipped registry is already in
+        memory, so the list appears on the keystroke that asked for it; a spinner
+        over an empty list would be slower AND less useful, because the model the
+        user wants is usually one we already know about. The live fetch then adds
+        what shipped too late to be in the registry — which is the whole reason this
+        exists: after logging in to Anthropic, `claude-opus-5` has to be findable
+        without the user already knowing its id.
+        """
+        self._editor().model_picker.set_rows(
+            self._catalogue_rows(self._providers.static_catalogue() if self._providers else []),
+            current=self._current_selector(),
+            status="checking providers…" if self._providers else "",
+        )
+        if self._providers is not None:
+            self.run_worker(self._refresh_catalogue(), thread=False, group="catalogue")
+
+    async def _refresh_catalogue(self) -> None:
+        """Worker: replace the picker's rows with the live catalogue."""
+        if self._providers is None:
+            return
+        try:
+            entries, statuses = await self._providers.live_catalogue()
+        except Exception as error:  # noqa: BLE001 — a picker must not take the app down
+            self._editor().model_picker.set_rows(
+                self._catalogue_rows(self._providers.static_catalogue()),
+                current=self._current_selector(),
+                status=f"live model list unavailable: {error}",
+            )
+            return
+        self._editor().model_picker.set_rows(
+            self._catalogue_rows(entries),
+            current=self._current_selector(),
+            status=_catalogue_status(statuses),
+        )
+
+    def _catalogue_rows(self, entries: list["CatalogueEntry"]) -> list[ModelRow]:
+        return [
+            ModelRow(
+                provider=entry.provider,
+                model_id=entry.model_id,
+                label=entry.label,
+                context_window=entry.context_window,
+                input_price=entry.input_price,
+                output_price=entry.output_price,
+                connected=entry.connected,
+                aggregated=entry.aggregated,
+            )
+            for entry in entries
+        ]
+
+    def _current_selector(self) -> str | None:
+        """The session's model as ``provider/id``, or None before it starts."""
+        session = self._session
+        return session.model_label if session is not None else None
+
+    def _on_model_row_chosen(self, row: ModelRow) -> None:
+        """Switch to a chosen model, or start a login when it needs one.
+
+        The two outcomes share one keystroke on purpose. A user who opens the list
+        to find a model they cannot yet run has already told us what they want; the
+        useful response is to begin the login, not to refuse and make them retype
+        the provider name into a different command.
+        """
+        notice = self._notice
+        if not row.connected:
+            notice(f"{row.provider} needs a login first — starting it now", "warning")
+            self._cmd_login(row.provider, notice)
+            return
+        self._cmd_model(row.selector, notice)
 
     # -- goal / loop --------------------------------------------------------
     def _cmd_goal(self, arg: str, notice: NoticeFn) -> None:
@@ -665,7 +803,17 @@ class OperatorApp(App[None]):
         try:
             items: list[tuple[str, str]] = []
             for definition in self._providers.login_providers():
-                state = "logged in" if self._providers.has_any_credential(definition.id) else "—"
+                # Three states, not two. An environment key is a WORKING credential
+                # — it is the tier the stream cascade resolves — but it is not a
+                # login, so reporting it as one would suggest a stored account that
+                # `/logout` could remove, and reporting it as "—" would tell a user
+                # whose session runs fine that they have no credential.
+                if self._providers.has_any_credential(definition.id):
+                    state = "logged in"
+                elif self._providers.is_usable(definition.id):
+                    state = "env key"
+                else:
+                    state = "—"
                 marker = "*" if definition.store_credentials_as else " "
                 items.append((f"{marker}{definition.id}", f"{definition.name} · {state}"))
             use = self._provider_usage_state()
@@ -686,7 +834,8 @@ class OperatorApp(App[None]):
         return [
             p
             for p in self._providers.usage_enabled_providers()
-            if self._providers.has_any_credential(p)
+            # An env key reaches the quota endpoint exactly like a stored one.
+            if self._providers.is_usable(p)
         ]
 
     def _cmd_accounts(self, notice: NoticeFn) -> None:
@@ -759,7 +908,12 @@ class OperatorApp(App[None]):
         """Render one or more usage reports as a compact table."""
         dim = Style(color=theme_mod.semantic_color("dim"))
         muted = Style(color=theme_mod.semantic_color("muted"))
-        accent = Style(color=theme_mod.semantic_color("accent"))
+        # `label`, NOT accent. Green in this app means "a turn is live" — the
+        # band's always-on brand glyph was moved off it for exactly that reason,
+        # and a static section heading painted the same green teaches the user
+        # that green also means "heading", which weakens the liveness signal
+        # everywhere else.
+        heading = Style(color=theme_mod.semantic_color("label"))
         lines: list[Text] = []
         if not reports:
             lines.append(
@@ -770,7 +924,7 @@ class OperatorApp(App[None]):
             )
         for report in reports:
             head = Text()
-            head.append(report.provider, style=accent)
+            head.append(report.provider, style=heading)
             if report.identity:
                 head.append(f"  ({report.identity})", style=muted)
             head.append(" —", style=dim)
@@ -828,12 +982,45 @@ class OperatorApp(App[None]):
         notice(f"logging in to {provider}…")
         self.run_worker(self._login_flow(provider), thread=False, group="login")
 
-    async def _login_flow(self, provider: str) -> None:
-        """Yield the terminal to the interactive login flow, then report back.
+    def _login_callbacks(self, definition: object) -> LoginCallbacks:
+        """Login hooks that render into the transcript instead of the terminal.
 
-        The flow prints the authorization URL and reads the pasted code/code
-        against the real terminal; ``App.suspend()`` hands control back for
-        the duration. A lock serializes concurrent /login commands.
+        The CLI's hooks print with ``print()`` and read with ``input()``, which
+        a Textual app cannot host: the previous implementation wrapped the whole
+        flow in ``App.suspend()`` and so tore the UI down mid-login, then blocked
+        on a paste prompt the user had no reason to expect.
+
+        ``on_manual_code_input`` is deliberately ABSENT. The loopback callback
+        server is the real path — it is already listening before the URL is
+        shown, and the browser redirect completes the flow with no typing. A
+        paste prompt is a fallback for a browser on a different machine, which
+        is a CLI situation; offering it here would mean reading stdin while the
+        app owns it.
+        """
+
+        def on_auth_url(url: str, instructions: str | None = None) -> None:
+            lines = [
+                Text(
+                    "opening your browser to authorize…",
+                    style=Style(color=theme_mod.semantic_color("muted")),
+                ),
+                Text(url, style=Style(color=theme_mod.semantic_color("signal"))),
+            ]
+            if instructions:
+                lines.append(Text(instructions, style=Style(color=theme_mod.semantic_color("dim"))))
+            self._append_block(RichBlock(Group(*lines)))
+
+        def on_progress(message: str) -> None:
+            self._append_block(NoticeBlock(message, "info"))
+
+        return LoginCallbacks(on_auth_url=on_auth_url, on_progress=on_progress)
+
+    async def _login_flow(self, provider: str) -> None:
+        """Run the login on the event loop, reporting into the transcript.
+
+        No ``App.suspend()``: the flow needs the terminal only if it reads from
+        it, and with the loopback server doing the capture it does not. A lock
+        serializes concurrent /login commands.
         """
 
         async def notice(body: str, kind: str = "info") -> None:
@@ -847,18 +1034,13 @@ class OperatorApp(App[None]):
             return
         self._login_lock.acquire()
         try:
-            # ``App.suspend`` is a synchronous context manager (Textual 8.x):
-            # it yields the terminal synchronously, so it must be entered with
-            # a plain ``with`` even though the body awaits (we are already on
-            # the event loop inside run_worker). ``async with`` here is a
-            # TypeError caught and swallowed by the except below — keep them
-            # matched.
-            with self.suspend():
-                # Inside the suspended terminal, plain print()/input() on the
-                # CLI callbacks are safe; the flow drives the loopback server
-                # and/or paste prompt entirely on the event loop.
-                message = await self._providers.login(provider)
-            await notice(message)
+            self._providers.set_login_callbacks(self._login_callbacks)
+            message = await self._providers.login(provider)
+            await notice(message, "success")
+            # Nothing else needs poking: the splash re-polls its credential
+            # warning whenever it becomes visible again (`set_visible(True)`
+            # calls `_poll`), and it is hidden right now because the notice
+            # above is a transcript block.
         except Exception as error:
             await notice(f"login failed: {error}", "error")
         finally:
@@ -1235,3 +1417,24 @@ async def create_app(
         theme_name,
         provider_controller=provider_controller,
     )
+
+
+def _catalogue_status(statuses: dict[str, str]) -> str:
+    """One line summarising what the catalogue does NOT know.
+
+    Silence when every provider answered, because a footer that always says
+    something is a footer nobody reads. The interesting cases are the ones where a
+    user hunting for a model released last week would otherwise conclude it does
+    not exist: a cached list, a provider that failed, or one that needs a login.
+    """
+    cached = sorted(p for p, s in statuses.items() if s == "cached")
+    stale = sorted(p for p, s in statuses.items() if s in ("unavailable", "empty"))
+    locked = sorted(p for p, s in statuses.items() if s == "unauthenticated")
+    bits: list[str] = []
+    if cached:
+        bits.append(f"cached: {', '.join(cached)}")
+    if stale:
+        bits.append(f"no live list: {', '.join(stale)}")
+    if locked:
+        bits.append(f"{len(locked)} provider(s) need a login")
+    return " · ".join(bits)

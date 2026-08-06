@@ -16,13 +16,19 @@
  *   - one line per tool action while collapsed; each action is a subtle
  *     background-filled card (elevation = a background step, never a border
  *     or shadow) whose FILL carries the outcome
- *   - the accent green is spent ONLY on: the running indicators (the working
- *     line's shimmer crest, a running tool's glyph, the status band's
- *     spinner), the focused input chevron, and the picker's highlighted
- *     command NAME. Everything else is warm neutrals. Links and file paths
- *     are the `signal` blue and deliberately NOT green — see theme.py. If
- *     you are about to add a fifth green thing, take one away first: an
- *     accent spent everywhere is an accent spent nowhere.
+ *   - the accent green means ONE thing: a turn is live. It is spent on exactly
+ *     five sites, and the list is exhaustive — `grep -rn 'semantic_color("accent")'
+ *     local_operator/tui` plus `$lo-accent` in this file should find no others:
+ *       1. the working line's shimmer crest      (shimmer.py)
+ *       2. a running tool's glyph                (widgets/tool_card.py)
+ *       3. the status band's streaming spinner   (widgets/status_line.py)
+ *       4. the focused input chevron             (this file, #input-row)
+ *       5. the picker's highlighted command NAME (widgets/command_picker.py)
+ *     Everything else is warm neutrals. Links and file paths are the `signal`
+ *     blue and deliberately NOT green; `/usage` provider headings are `label`;
+ *     the brand glyph in the band is `muted`, because a mark that is always on
+ *     screen cannot also mean "running" — see theme.py. Before adding a sixth,
+ *     take one away: an accent spent everywhere is an accent spent nowhere.
  *
  * Edge spacing: one cell at the left, right, and bottom screen edges; NONE
  * along the top while scrolling (content meets the top edge).
@@ -31,6 +37,12 @@
 Screen {
     background: $lo-bg;
     color: $lo-fg;
+    /* Outer inset for the WHOLE app, matching the omp reference: the chrome is
+     * borderless, so the breathing room at the terminal's edges is what makes
+     * it read as a deliberate surface rather than text that ran out of room.
+     * One row top and bottom, one cell left and right. Children then only
+     * manage spacing BETWEEN themselves. */
+    padding: 1;
 }
 
 /* Transcript takes all the space above the input panel. One cell of edge
@@ -131,36 +143,50 @@ ToolCard:hover {
     background: $lo-overlay;
 }
 
-/* The status band is the LAST row of the input panel, below the editor. It
- * reads as a footer for the whole app rather than a caption on the input, and
- * it puts the least volatile information at the screen's least volatile edge.
- * It sits on the sunken step so it recedes from the input it sits under. */
+/* The status band is the LAST row of the input panel, below the editor. It reads
+ * as a footer for the whole app rather than a caption on the input, and it puts
+ * the least volatile information at the screen's least volatile edge.
+ *
+ * SAME fill as the input panel, not a step down. A second elevation inside one
+ * panel read as two stacked bars — a strip of chrome bolted under the input
+ * rather than part of it. The panel is one surface; the band is simply its last
+ * row, and the blank row above separates them.
+ *
+ * That blank row is PADDING rather than a vertical margin — the stylesheet
+ * permits exactly one such declaration (the adaptive `.gap-above` rule) and a
+ * second source of it is how adaptive spacing decays into "a blank row between
+ * everything". Because the band and the panel share a fill, a padded row is
+ * visually identical to a gap. */
 #status-band {
     dock: bottom;
-    height: 1;
-    background: $lo-sunken;
+    height: 2;
+    background: $lo-surface;
     color: $lo-dim;
-    /* Left padding 0 (D22). The dock already insets this panel by one cell, so
-     * a symmetric `0 1` stacked a second cell on and put the band's brand
-     * glyph at column 2 while the input chevron directly above it, the tool
-     * glyphs and the prose all start at column 1. The app has one strong left
-     * rail and the bottom row was the only thing missing it. */
-    padding: 0 1 0 0;
+    /* Left padding 0: the dock already insets this panel by one cell, so a
+     * symmetric `0 1` stacked a second cell on and put the band's leading glyph
+     * at column 2 while the input chevron directly above it, the tool glyphs and
+     * the prose all start at column 1. The app has one strong left rail and the
+     * bottom row was the only thing missing it. */
+    padding: 1 1 0 0;
 }
 
-/* Input panel: docks at the bottom, sits on the surface step, no border box
- * (D4) — only the thin structural top rule (D11).
+/* Input panel: docks at the bottom and is a FILL, not a box.
+ *
+ * No border of any kind. The elevation step from the transcript's `bg` to this
+ * panel's `surface` is the whole separation — a `border-top` rule read as a
+ * bottom border on the app, which is exactly the bordered-chrome look the kit
+ * exists to avoid. If the panel ever stops reading as separate, the answer is
+ * another elevation step, never a line.
  *
  * Padding on all four sides: the editor text used to start flush against the
- * panel's edges, which read as an unfinished box rather than as a deliberate
- * borderless field. One cell of breathing room on every side is what makes
- * "no border" look chosen instead of missing. */
+ * panel's edges, which read as an unfinished box rather than a deliberate
+ * borderless field. One cell of breathing room is what makes "no border" look
+ * chosen instead of missing. */
 #input-dock {
     dock: bottom;
     height: auto;
     background: $lo-surface;
-    border-top: tall $lo-dim;
-    padding: 1 1 0 1;
+    padding: 1;
 }
 
 #input-row {
@@ -227,7 +253,7 @@ Editor .text-area--suggestion {
  * No border, no rule, no fill: the block is the only thing on screen, so the
  * mandate's "structure from symbols, tint and spacing" is all it gets. The
  * accent green is NOT spent here — the logo lockup carries its own hierarchy
- * through the neutral ramp (mark `muted`, wordmark `fg`).
+ * through the neutral ramp (mark `dim`, wordmark `fg`).
  *
  * Centering and vertical placement are computed in the widget, not declared
  * here: the content it draws depends on the rows and cells it actually has

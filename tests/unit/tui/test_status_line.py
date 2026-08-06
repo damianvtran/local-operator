@@ -19,7 +19,7 @@ from rich.cells import cell_len
 
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.status_line import (
-    BRAND_GLYPH,
+    ICON_MODEL,
     StatusLine,
     _MIN_GROUP_GAP,
     format_agents,
@@ -184,10 +184,16 @@ def test_band_is_one_row_while_streaming_too() -> None:
         assert cell_len(row.plain) <= width, (width, row.plain)
 
 
-def test_the_brand_glyph_survives_a_terminal_far_too_narrow() -> None:
+def test_the_model_segment_survives_a_terminal_far_too_narrow() -> None:
+    """At any width the band still names the model, led by its icon.
+
+    There is no brand glyph any more: `π` is omp's mark, not local-operator's,
+    and a logo is the one thing on a status band that never tells the operator
+    anything. The model icon leads instead, which is information.
+    """
     status, _clock = _full_band()
     row = status.render_text(10)
-    assert row.plain.startswith("π")
+    assert row.plain.startswith(ICON_MODEL)
     assert cell_len(row.plain) <= 10
 
 
@@ -272,8 +278,11 @@ def test_segments_disappear_in_the_declared_ladder_order(monkeypatch) -> None:
         "model-full",  # shortened to the bare model id, not dropped
         "effort",  # a static setting: it does not change while they watch
         "cost",
-        "context",  # the last number standing — it predicts compaction
+        # The shortened cwd goes BEFORE the context number. By this rung it is a
+        # basename — ~7 cells of "where am I" against ~9 cells of "how close is
+        # compaction" — and the second is what predicts the operator's next move.
         "cwd-short",
+        "context",  # the last number standing beside the model
         # The model label is never DROPPED; it survives to width 17, where the
         # irreducible-row path truncates it to `kimi-k2-t…` rather than leaving
         # a bare glyph on an empty strip.
@@ -404,7 +413,7 @@ def test_the_accent_marks_a_live_turn_not_the_brand_glyph() -> None:
     greens = [text for text, hex_ in live.items() if hex_ == accent]
     assert greens, "a streaming band must show its running indicator in accent"
     # …and that green is the spinner, not the brand glyph.
-    assert all(BRAND_GLYPH not in text for text in greens), greens
+    assert all(ICON_MODEL not in text for text in greens), greens
 
 
 def test_the_two_groups_never_crowd_closer_than_their_own_separator() -> None:
@@ -436,7 +445,7 @@ def test_a_terminal_too_narrow_for_anything_still_names_the_model() -> None:
     for width in (30, 20, 17, 12, 8):
         plain = status.render_text(width).plain.rstrip()
         assert cell_len(plain) <= width
-        body = plain.replace(BRAND_GLYPH, "").strip()
+        body = plain.replace(ICON_MODEL, "").strip()
         assert body, f"width {width} rendered an empty band: {plain!r}"
         # Some recognisable part of the model id survives, not just the ellipsis.
         assert body.strip("…").strip(), f"width {width} kept only an ellipsis: {plain!r}"
