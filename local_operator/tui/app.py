@@ -22,10 +22,11 @@ error`` status and can be retried with ``/reload`` (TUI-012).
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple, Protocol
 
 from local_operator.tui.widgets.welcome import MODEL_PENDING
 from local_operator.tui.widgets.transcript import (
+    GAP_CLASS,
     NoticeBlock,
     RichBlock,
     TranscriptView,
@@ -41,6 +42,7 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.widgets import Static
 
+from local_operator.logger import current_log_file
 from local_operator.session import naming
 from local_operator.session.protocol import SessionProtocol
 from local_operator.tui import theme as theme_mod
@@ -132,6 +134,50 @@ JOB_POLL_INTERVAL_S = 1.0
 #: exactly one place — see ``OperatorApp._set_welcome_visible``.
 BOOT_LAYOUT_CLASS = "boot"
 
+#: Class the Screen carries, on top of ``BOOT_LAYOUT_CLASS``, while the terminal
+#: is wide enough for the boot input to read as a CARD rather than as a bar. It
+#: is a measurement, not a mode — see ``OperatorApp._sync_boot_card``.
+BOOT_CARD_CLASS = "boot-card"
+
+#: The boot card's clamp, duplicated from the stylesheet's
+#: ``Screen.boot.boot-card #input-shell`` rule because the app has to know the
+#: width the sheet WOULD resolve in order to decide whether to apply it at all.
+BOOT_CARD_FRACTION = (7, 10)
+BOOT_CARD_MIN_WIDTH = 75
+
+#: Widest the card ever gets. The proportion alone has no upper bound: on a
+#: 190-column terminal `70%` resolves to 131 cells, which is a bar again — a
+#: borderless surface reads as a card only while the ground beside it is legible
+#: as margin, and past a hundred cells the fill is the frame. Still comfortably
+#: wider than the widest thing above it (the logo lockup, 59 cells).
+BOOT_CARD_MAX_WIDTH = 100
+
+#: Smallest total inset (both sides together) that reads as a card. Below it the
+#: panel keeps the full width: 1 to 3 cells of ground beside a borderless fill
+#: reads as a misaligned full-width bar, because there is no edge to attribute
+#: the offset to. 8 cells is 4 a side — four times the app's own gutter, which is
+#: the smallest offset that is unambiguously a margin.
+BOOT_CARD_MIN_INSET = 8
+
+#: Spare rows the boot composition needs before it spends any on chrome: one for
+#: the ground row above the card, and at least one still unspent — otherwise the
+#: separator comes straight out of the splash, whose degradation ladder pays in
+#: whole sections (the mark, the hints), never in single rows.
+BOOT_COMPOSITION_MIN_SPARE = 2
+
+
+def boot_card_width(box: int) -> int:
+    """Width the card's clamp resolves to inside a content box of ``box`` cells.
+
+    The stylesheet's three declarations, in one expression, so the app can ask what
+    the sheet would do before deciding whether to let it: ``min(box, cap,
+    max(floor, proportion))``. The box wins over the floor, which is what keeps a
+    20-cell terminal from being handed a 75-cell panel.
+    """
+    numerator, denominator = BOOT_CARD_FRACTION
+    proportion = box * numerator // denominator
+    return min(box, BOOT_CARD_MAX_WIDTH, max(BOOT_CARD_MIN_WIDTH, proportion))
+
 
 class NoticeFn(Protocol):
     """The `notice` callback every slash-command handler is handed.
@@ -142,6 +188,20 @@ class NoticeFn(Protocol):
     """
 
     def __call__(self, body: str, kind: str = "info") -> None: ...
+
+
+class _ProviderRows(NamedTuple):
+    """The provider list's rows, plus what to say when it could not be built.
+
+    Two fields rather than an exception or a bare empty list, because "there is
+    nothing to log out of" and "the credential store cannot be read" produce the
+    same empty list and are not the same news. The caller says exactly one of
+    them, so the user is never told they have no credentials by a store that
+    never answered.
+    """
+
+    choices: list[ArgumentChoice]
+    problem: str
 
 
 class OperatorApp(App[None]):
@@ -300,7 +360,17 @@ class OperatorApp(App[None]):
         self._report_mcp_startup(session)
 
     def _on_boot_failed(self, error: Exception) -> None:
-        self._append_block(NoticeBlock(f"session failed to start: {error}", "error"))
+        """Report a session that never constructed, WITHOUT retiring the splash.
+
+        A :meth:`_system_notice`, by the same predicate every other
+        infrastructure report uses: the conversation has not started just because
+        the harness has something to say. Here that matters more than anywhere
+        else — the splash is where the credential warning and the boot hints
+        live, so a plain ``_append_block`` retired the one block that tells the
+        user what to do next at exactly the moment they need it, leaving a single
+        red line over an empty screen.
+        """
+        self._system_notice(f"session failed to start: {error}", "error")
         assert self._status is not None
         self._status.update(model_label="session error", streaming=False)
 
@@ -340,9 +410,15 @@ class OperatorApp(App[None]):
         indicator claiming it is still there. ``set_on_tools_changed`` fires on
         connect, disconnect and list-changed, which is exactly the set of events
         that can move the count.
+
+        With NO manager there is nothing to subscribe to, but the segment is still
+        painted once: discovery may have failed, and that state comes from the boot
+        record rather than from the manager that does not exist. Returning without
+        painting left the band identical to a machine that never configured MCP.
         """
         manager = getattr(session, "mcp_manager", None)
         if manager is None:
+            self._refresh_mcp_status()
             return
         # CHAIN, never replace: the incumbent callback is the composition root's,
         # and it is what keeps the agent's tool inventory in step with MCP state.
@@ -351,14 +427,23 @@ class OperatorApp(App[None]):
         incumbent = manager.on_tools_changed
 
         def on_tools_changed(tools: list[Any]) -> Any:
-            outcome = incumbent(tools) if incumbent is not None else None
-            # Hop onto the message pump rather than mutating widgets from the
-            # manager's task: this module's whole arrangement is that widget
-            # mutation happens on the Textual thread.
-            self.call_later(self._refresh_mcp_status)
-            # Hand the incumbent's return value back so an async incumbent is
-            # still awaited by the manager (it task-ifies a returned coroutine).
-            return outcome
+            # The refresh is scheduled in a `finally`, so the band is repainted
+            # even when the incumbent raises. `refresh_tools` is not documented
+            # infallible and `McpManager._fire_tools_changed` swallows and logs
+            # whatever comes out of here — so without this the one event that
+            # moves the count would leave the band asserting a count that is no
+            # longer true, which is the exact staleness the live segment exists
+            # to remove. Ordering costs nothing: `call_later` only queues.
+            # The incumbent's return value is handed straight back so an async
+            # incumbent is still awaited by the manager (it task-ifies a returned
+            # coroutine).
+            try:
+                return incumbent(tools) if incumbent is not None else None
+            finally:
+                # Hop onto the message pump rather than mutating widgets from the
+                # manager's task: this module's whole arrangement is that widget
+                # mutation happens on the Textual thread.
+                self.call_later(self._refresh_mcp_status)
 
         manager.set_on_tools_changed(on_tools_changed)
         self._refresh_mcp_status()
@@ -371,24 +456,40 @@ class OperatorApp(App[None]):
     def _mcp_status(self) -> McpStatus:
         """The band's MCP segment state, read LIVE from the manager.
 
-        Nothing here is taken from the boot record on purpose. A boot failure
-        that later reconnects must clear the danger tint, and a record of what
-        happened at startup can never say that — the manager's per-server status
-        is the only thing that knows the current truth. ``connecting`` is not a
-        failure: the startup gate leaves slow servers in that state on every
+        Live per-server state is taken from the manager and nothing else. A boot
+        failure that later reconnects must clear the danger tint, and a record of
+        what happened at startup can never say that — the manager's per-server
+        status is the only thing that knows the current truth. ``connecting`` is
+        not a failure: the startup gate leaves slow servers in that state on every
         launch, and tinting it danger would make a red lamp the normal boot.
+
+        The ONE thing the manager cannot report is its own absence. When discovery
+        raised, there is no manager and no server list, so a bare ``McpStatus()``
+        would render exactly like a machine that never configured MCP — and the
+        toast saying so dismisses itself after ten seconds. That single fact comes
+        from the boot record, which is the only thing that knows it.
+
+        Exception-safe like its sibling ``_mcp_block``: three manager methods are
+        called here, none of them ours, and this runs from a manager callback on
+        every tools-changed event. A raise would take out the repaint of a band
+        that reports nine other segments — an empty MCP segment is a far cheaper
+        failure than a frozen status line.
         """
         manager = getattr(self._session, "mcp_manager", None)
         if manager is None:
+            startup = getattr(self._session, "mcp_startup", None)
+            return McpStatus(discovery_failed=bool(getattr(startup, "failed", False)))
+        try:
+            configured = manager.get_all_server_names()
+            return McpStatus(
+                configured=len(configured),
+                connected=len(manager.get_connected_servers()),
+                failed=any(
+                    manager.get_connection_status(name) == "disconnected" for name in configured
+                ),
+            )
+        except Exception:
             return McpStatus()
-        configured = manager.get_all_server_names()
-        return McpStatus(
-            configured=len(configured),
-            connected=len(manager.get_connected_servers()),
-            failed=any(
-                manager.get_connection_status(name) == "disconnected" for name in configured
-            ),
-        )
 
     def _report_mcp_startup(self, session: SessionProtocol) -> None:
         """Raise the startup toast, and leave a DURABLE record of any failure.
@@ -430,6 +531,104 @@ class OperatorApp(App[None]):
         """Re-fit width-sensitive chrome after a terminal resize."""
         if self._status is not None:
             self.call_after_refresh(self._status.refresh)
+        # The EVENT's width, not the app's: during a resize `self.size` is still the
+        # previous frame's, and one stale cell is enough to put the card threshold on
+        # the wrong side of itself — at 85 columns it decided "bar" for a box that was
+        # about to be exactly wide enough for the card.
+        self._sync_boot_layout(width=event.size.width)
+
+    def _sync_boot_layout(self, *, width: int | None = None) -> None:
+        """Re-measure everything about the boot layout that the sheet cannot.
+
+        Called from ``on_resize`` and from ``_set_welcome_visible``: a resize is not
+        the only way the answers change — the layout itself comes and goes with the
+        splash, and on the first frame no resize event has happened yet. ``width``
+        is the resize event's, when there is one.
+        """
+        self._sync_boot_card(self.size.width if width is None else width)
+        # The card's width is a function of the terminal, so it resolves from the
+        # event itself. The composition is a function of how tall the SPLASH turned
+        # out, which is only knowable from a laid-out frame — and neither caller has
+        # one yet (a mount has not arranged, a resize is arranging). So it measures
+        # one refresh later, and re-measures itself until it stops changing.
+        self.call_after_refresh(self._sync_boot_composition)
+
+    def _sync_boot_card(self, terminal_width: int) -> None:
+        """Decide whether this terminal is wide enough for the boot CARD.
+
+        The stylesheet cannot ask how wide the terminal is, so the width the card
+        WOULD take is resolved here and the class only goes on when the ground left
+        beside it is wide enough to read as a margin. Computing a width in Python
+        for want of a media query is the same move ``Toast._refit`` already makes.
+        """
+        # The content box, not the terminal: `Screen`'s one-cell inset is outside
+        # the percentage the sheet resolves.
+        box = max(0, terminal_width - 2)
+        card = boot_card_width(box)
+        self.screen.set_class(box - card >= BOOT_CARD_MIN_INSET, BOOT_CARD_CLASS)
+
+    def _sync_boot_composition(self) -> None:
+        """Centre the boot composition — splash, separator, card — in the screen.
+
+        The splash and the card are ONE block to the eye, and on a tall terminal
+        resting that block on the bottom of the screen left the upper two thirds
+        empty. The stylesheet cannot fix it: the card is DOCKED, so no alignment
+        reaches it, and how many rows to reserve below it depends on how tall the
+        splash turned out at this width. So the composition's two chrome
+        quantities — the ground row above the card and the slack below it — are
+        measured here, the same way ``Toast._refit`` measures a width the sheet
+        cannot ask for.
+
+        Both are CONDITIONAL, and on the same measurement. Every row this reserves
+        comes out of the splash's budget (WelcomeView.get_content_height), and the
+        splash pays in whole sections — a 28-row terminal that reserved rows to
+        centre a block that already fills the region would trade the mark for air.
+        So they are only spent out of rows that are empty anyway, which is why a
+        96x28 frame is untouched and a 190x48 one is centred.
+
+        The spare count adds back what this method has already spent, which makes
+        it invariant under its own change: re-running converges instead of halving
+        the reserve every pass.
+        """
+        dock = self.query_one("#input-dock", Container)
+        welcome = self._welcome
+        if not self.screen.has_class(BOOT_LAYOUT_CLASS) or welcome is None or not welcome.display:
+            # The conversation layout is a full-width bar with nothing under it.
+            # Rows left reserved here would be a hole below a populated transcript.
+            self._reserve_boot_rows(dock, gap=False, lift=0)
+            return
+        region = self.query_one(TranscriptView).content_region
+        # The empty rows ABOVE the block, read off the frame rather than derived:
+        # the region's content is bottom-aligned, so the block's own offset inside
+        # it IS the slack — and unlike `region.height - welcome.height` it does not
+        # count a notice mounted under the splash as spare.
+        spare = welcome.region.y - region.y + dock.styles.padding.bottom
+        if dock.has_class(GAP_CLASS):
+            spare += 1
+        if spare < BOOT_COMPOSITION_MIN_SPARE:
+            self._reserve_boot_rows(dock, gap=False, lift=0)
+            return
+        self._reserve_boot_rows(dock, gap=True, lift=(spare - 1) // 2)
+
+    def _reserve_boot_rows(self, dock: Container, *, gap: bool, lift: int) -> None:
+        """Apply the composition's separator row and its lift, once.
+
+        The separator is the app's ONE vertical separator class rather than a second
+        spacing rule: a receipt under the splash and the card under the hints are
+        the same rhythm case, one row of ground where a block change needs reading
+        as a block change. The lift is padding INSIDE the dock — the dock is the
+        positioner, so reserving rows in it moves the panel it holds without
+        anything else in the layout knowing.
+        """
+        if dock.has_class(GAP_CLASS) == gap and dock.styles.padding.bottom == lift:
+            return
+        dock.set_class(gap, GAP_CLASS)
+        dock.styles.padding = (0, 0, lift, 0)
+        # The measurement above read a laid-out height that this change invalidates,
+        # so it runs again once the new frame exists. The equality gate above is
+        # what ends the chain — the total it measures does not move, so the second
+        # pass agrees with the first.
+        self.call_after_refresh(self._sync_boot_composition)
 
     # -- input --------------------------------------------------------------
     def on_editor_submitted(self, message: EditorSubmitted) -> None:
@@ -499,10 +698,17 @@ class OperatorApp(App[None]):
         live in the stylesheet (`Screen.boot`); this only flips the flag that
         selects between them, so there is no second layout written in Python to
         keep in step with the first.
+
+        The width class and the vertical reserve are re-measured here rather than
+        being second conditions: they answer "how wide is this terminal" and "how
+        many rows are going spare", which are facts about the frame, not about the
+        session — and they have to be right on the FIRST boot frame, before any
+        resize event has happened.
         """
         if self._welcome is not None:
             self._welcome.set_visible(visible)
         self.screen.set_class(visible, BOOT_LAYOUT_CLASS)
+        self._sync_boot_layout()
 
     async def on_unmount(self) -> None:
         if self._status is not None:
@@ -758,9 +964,41 @@ class OperatorApp(App[None]):
                 effort=_effort_label(session),
                 context_window=_context_window(session),
             )
-        notice(f"model: {old_label} → {session.model_label} (next turn)")
-        if old_label.partition("/")[0] != provider:
-            notice("switched provider — make sure you are logged in", "warning")
+        suffix, warning = self._model_access_note(provider)
+        notice(f"model: {old_label} → {session.model_label} (next turn){suffix}")
+        if warning:
+            notice(warning, "warning")
+
+    def _model_access_note(self, provider: str) -> tuple[str, str | None]:
+        """``(suffix, warning)`` answering "can I actually run this model now".
+
+        Replaces "switched provider — make sure you are logged in", which asked
+        the user to go and check something the app already knew, fired on every
+        provider change including the ones that were fine, and — because it was
+        the last thing on screen when the next turn died on an unrelated HTTP 400
+        — read as the diagnosis for a failure that had nothing to do with auth.
+
+        Credential state ONLY. Proving access with a live completion would spend
+        money and a second of latency on a keystroke, and the turn the user is
+        about to send is the real proof anyway: when that fails, the transcript
+        prints the provider's own error (:meth:`_submit_prompt`), which is the
+        message worth reading.
+
+        The three states are :meth:`_credential_state`'s, not a fourth vocabulary
+        invented here, so `/model`, `/provider` and the `/login` picker keep
+        describing one situation with one set of words.
+        """
+        providers = self._providers
+        assert providers is not None
+        try:
+            state = self._credential_state(provider, providers.has_any_credential(provider))
+        except Exception as error:  # the STORE failed, not the provider
+            # Named rather than swallowed or guessed at: "I could not check" is a
+            # real answer, where a confirmation would claim access nobody verified.
+            return "", f"cannot check {provider} credentials: {error}"
+        if state == "needs login":
+            return "", f"{provider} needs login — /login {provider}"
+        return f" · {provider} {state}", None
 
     # -- model picker -------------------------------------------------------
     def on_model_query_opened(self, message: ModelQueryOpened) -> None:
@@ -802,10 +1040,17 @@ class OperatorApp(App[None]):
         exists: after logging in to Anthropic, `claude-opus-5` has to be findable
         without the user already knowing its id.
         """
+        rows, note = self._catalogue_rows(
+            self._providers.static_catalogue() if self._providers else []
+        )
         self._editor().model_picker.set_rows(
-            self._catalogue_rows(self._providers.static_catalogue() if self._providers else []),
+            rows,
             current=self._current_selector(),
-            status="checking providers…" if self._providers else "",
+            # The access note leads. The footer truncates at the picker's width and
+            # every other clause is background — "cached: anthropic, openrouter,
+            # radient" pushed `/login <provider>` off the end at 100 columns, which
+            # cost the one clause the user can act on.
+            status=_status_line(note, "checking providers…" if self._providers else ""),
         )
         if self._providers is not None:
             self.run_worker(self._refresh_catalogue(), thread=False, group="catalogue")
@@ -817,20 +1062,44 @@ class OperatorApp(App[None]):
         try:
             entries, statuses = await self._providers.live_catalogue()
         except Exception as error:  # noqa: BLE001 — a picker must not take the app down
+            rows, note = self._catalogue_rows(self._providers.static_catalogue())
             self._editor().model_picker.set_rows(
-                self._catalogue_rows(self._providers.static_catalogue()),
+                rows,
                 current=self._current_selector(),
-                status=f"live model list unavailable: {error}",
+                status=_status_line(note, f"live model list unavailable: {error}"),
             )
             return
+        rows, note = self._catalogue_rows(entries)
         self._editor().model_picker.set_rows(
-            self._catalogue_rows(entries),
+            rows,
             current=self._current_selector(),
-            status=_catalogue_status(statuses),
+            status=_status_line(note, _catalogue_status(statuses)),
         )
 
-    def _catalogue_rows(self, entries: list["CatalogueEntry"]) -> list[ModelRow]:
-        return [
+    def _catalogue_rows(self, entries: list["CatalogueEntry"]) -> tuple[list[ModelRow], str]:
+        """``(rows, note)`` — the models this user can actually run, and what was cut.
+
+        HIDDEN, not demoted. The list used to be the whole registry with the
+        unreachable models tinted and sorted last, and the demotion still lost:
+        the window shows fourteen rows, so `/model opus` filled the screen with
+        four providers' opus rows of which exactly one could run, and every miss
+        cost a keystroke that turned into a login prompt instead of a switch. A
+        picker is a list of choices; a row that cannot be chosen is not one.
+
+        Discoverability is what the old behaviour was protecting, so the count
+        goes to the footer instead of into the rows: "42 hidden — /login
+        <provider>" answers "is there more" without spending the visible list on
+        models the user cannot use.
+
+        Two rows survive the filter regardless. The session's CURRENT model stays,
+        because its `●` is what answers "what am I on" and dropping it would make a
+        broken configuration invisible rather than obvious. And when the credential
+        store cannot be read at all, EVERY row stays: an empty picker claims the
+        user owns no models, which is precisely what the app failed to find out.
+        """
+        usable = self._usable_providers()
+        current = self._current_selector()
+        rows = [
             ModelRow(
                 provider=entry.provider,
                 model_id=entry.model_id,
@@ -842,7 +1111,31 @@ class OperatorApp(App[None]):
                 aggregated=entry.aggregated,
             )
             for entry in entries
+            if usable is None or entry.provider in usable or entry.selector == current
         ]
+        if usable is None:
+            return rows, "credential check unavailable — showing every model"
+        hidden = len(entries) - len(rows)
+        return rows, (f"{hidden} hidden — /login <provider>" if hidden else "")
+
+    def _usable_providers(self) -> set[str] | None:
+        """Providers a turn could run on, or ``None`` when that cannot be read.
+
+        Re-read on every populate rather than cached, which is what makes a login
+        take effect without a restart: `/login anthropic` stores a credential and
+        the next `/model` rebuilds its rows from this call.
+
+        Guarded even though the controller already swallows a store failure — the
+        facade is duck-typed and an embedding host supplies its own — because the
+        one thing this must never do is take the picker down with it.
+        """
+        providers = self._providers
+        if providers is None:
+            return None
+        try:
+            return providers.usable_providers()
+        except Exception:  # noqa: BLE001 — a credential read never costs the list
+            return None
 
     def _current_selector(self) -> str | None:
         """The session's model as ``provider/id``, or None before it starts."""
@@ -968,17 +1261,14 @@ class OperatorApp(App[None]):
         try:
             items: list[tuple[str, str]] = []
             for definition in self._providers.login_providers():
-                # Three states, not two. An environment key is a WORKING credential
-                # — it is the tier the stream cascade resolves — but it is not a
-                # login, so reporting it as one would suggest a stored account that
-                # `/logout` could remove, and reporting it as "—" would tell a user
-                # whose session runs fine that they have no credential.
-                if self._providers.has_any_credential(definition.id):
-                    state = "logged in"
-                elif self._providers.is_usable(definition.id):
-                    state = "env key"
-                else:
-                    state = "—"
+                # ONE state vocabulary, resolved in ONE place. This line and the
+                # `/login` picker answer the same question on two surfaces, and
+                # they had already drifted: the picker said "needs login" where
+                # this said "—", so a user with no credential read a dash and had
+                # to guess whether it meant unknown, unsupported or absent.
+                state = self._credential_state(
+                    definition.id, self._providers.has_any_credential(definition.id)
+                )
                 marker = "*" if definition.store_credentials_as else " "
                 items.append((f"{marker}{definition.id}", f"{definition.name} · {state}"))
             use = self._provider_usage_state()
@@ -1012,7 +1302,10 @@ class OperatorApp(App[None]):
         try:
             rows = self._providers.credentials()
             if not rows:
-                notice("no stored credentials.")
+                # No terminal period: the app's short notices do not carry one
+                # (`/provider`'s warning does not), and two spellings of the same
+                # register read as two different kinds of message.
+                notice("no stored credentials")
                 return
             now_ms = int(self._clock_ms())
             items: list[tuple[str, str]] = []
@@ -1148,73 +1441,189 @@ class OperatorApp(App[None]):
         picker) then arrives at one place with one set of rows.
         """
         message.stop()
-        picker = self._editor().picker
+        editor = self._editor()
+        picker = editor.picker
+        if editor.provider_command != message.command:
+            # The message is one message-loop tick old, and a tick is enough for
+            # the user to have deleted the command or typed over it. Verified:
+            # setting the buffer to `/logout ` and then to a sentence still
+            # appended the notice below, attaching it to a command that no longer
+            # exists. The buffer is the authority on which list is open, here as
+            # much as in the editor's own resync.
+            return
         if self._providers is None:
             # Same degradation as the handlers themselves: no controller means no
             # credential store to read, so the list is empty and the user is
             # pointed at the CLI rather than left watching nothing happen.
             picker.set_choices([])
-            self._system_notice(
-                f"provider controller unavailable — run: local-operator {message.command}",
-                "warning",
+            picker.set_notice(
+                f"provider controller unavailable — run: local-operator {message.command}"
             )
             return
-        choices = self._provider_choices(message.command)
+        choices, problem = self._provider_choices(message.command)
         picker.set_choices(choices)
+        # An empty list and "no match for what you typed" render identically — as
+        # nothing at all. Only one of them is worth saying, and this is it: there is
+        # no credential to remove, so no query would have helped. `/login` always
+        # has rows, so an empty one there IS the query, which the user can read
+        # back off their own buffer.
+        reason = ""
         if not choices and message.command == "logout":
-            # An empty list and "no match for what you typed" render identically —
-            # as nothing at all. Only one of them is worth saying, and this is it:
-            # there is no credential to remove, so no query would have helped.
-            #
-            # A SYSTEM notice: opening a list is not the conversation starting, and
-            # on a fresh session this would otherwise collapse the boot composition
-            # to report that a command the user has not even run has nothing to do.
-            self._system_notice("no stored credentials — nothing to log out of.")
+            reason = problem or "no stored credentials — nothing to log out of."
+        # Said WHERE THE LIST WOULD HAVE BEEN, not in the transcript. This answers a
+        # UI event, so it fires again every time the buffer re-enters the argument
+        # state — `/logout `, backspace, space, and four identical rows have stacked
+        # up in what is supposed to be a record of the conversation, each one also
+        # taking a row off the splash that shares that region (see D-01). In the
+        # picker it is in the user's eye-line, self-clearing, unrepeatable, and it
+        # costs the transcript nothing.
+        picker.set_notice(reason)
 
-    def _provider_choices(self, command: str) -> list[ArgumentChoice]:
-        """Provider rows for ``/login`` or ``/logout``, in registry order."""
+    def _provider_choices(self, command: str) -> _ProviderRows:
+        """Provider rows for ``/login`` or ``/logout``, in registry order.
+
+        The registry is in memory and cannot fail; the credential store is SQLite
+        and can — one other local-operator process holding a write lock is enough
+        for `database is locked`, and this method runs on a KEYSTROKE, so an
+        exception out of it takes the whole TUI down. The moment the store is
+        unreadable is exactly the moment a user reaches for `/login`, so the state
+        column degrades and the catalogue survives.
+        """
         providers = self._providers
         assert providers is not None
         logout = command == "logout"
+        if not logout:
+            return _ProviderRows(self._login_choices(), "")
+        # ONE store read for the KINDS, up front: `/logout` needs the kind of every
+        # credential it offers to remove, and reading them per row would re-scan
+        # the store once per provider.
+        stored_kinds = self._stored_credential_kinds()
+        if stored_kinds is None:
+            # `/logout` asks a question only the store can answer — which
+            # credentials exist. There is no degraded list to offer, so say what
+            # is wrong instead of rendering an empty one that reads as "you have
+            # no credentials".
+            return _ProviderRows([], "credential store unreadable — /logout cannot list anything")
         choices: list[ArgumentChoice] = []
         seen_storage: set[str] = set()
         for definition in providers.login_providers():
-            stored = providers.has_any_credential(definition.id)
-            if logout:
+            storage = definition.store_credentials_as or definition.id
+            # BOTH reads have to agree before a destructive row is offered: the
+            # facade's predicate (whose rule about storage aliasing and disabled
+            # rows is not the UI's to re-derive) and the credential map, which is
+            # the record of what would actually be deleted. Either one alone can
+            # produce a row that promises to remove something that is not there.
+            #
+            # Guarded per row: one provider whose read blows up must not delete
+            # the rest of a list that is otherwise answerable.
+            kinds = stored_kinds.get(storage)
+            if kinds is None or not self._has_credential(definition.id):
                 # Only what can actually be removed. Offering a provider the user
                 # never logged into is a row whose only outcome is a no-op notice.
-                if not stored:
-                    continue
-                # `xai` and `xai-oauth` (and openai/openai-device) share one
-                # credential row, so both would log the same account out. Two rows
-                # for one outcome is a choice the user cannot make correctly.
-                storage = definition.store_credentials_as or definition.id
-                if storage in seen_storage:
-                    continue
-                seen_storage.add(storage)
+                continue
+            # `xai` and `xai-oauth` (and openai/openai-device) share one credential
+            # row, so both would log the same account out. Two rows for one outcome
+            # is a choice the user cannot make correctly.
+            if storage in seen_storage:
+                continue
+            seen_storage.add(storage)
             choices.append(
                 ArgumentChoice(
                     name=definition.id,
-                    description=definition.name,
+                    description=_provider_summary(definition.id, definition.name),
                     # `claude` finds anthropic, `qwen` finds alibaba. The alias only
                     # makes the row FINDABLE — the completion is still the id.
                     aliases=tuple(definition.search_aliases),
-                    detail=self._credential_state(definition.id, stored),
+                    detail=_removal_detail(kinds),
+                    # Every row on THIS list destroys a credential, so the danger
+                    # tint is a property of the command rather than of a row that
+                    # went wrong — the same red the tool card spends on a failed
+                    # outcome, saying the same thing. Never set for `/login`, where
+                    # the identical treatment would paint an ordinary catalogue as
+                    # a wall of failures.
+                    alert=True,
                 )
             )
-        return choices
+        return _ProviderRows(choices, "")
+
+    def _login_choices(self) -> list[ArgumentChoice]:
+        """Every loginable provider, with where the user stands on each."""
+        providers = self._providers
+        assert providers is not None
+        return [
+            ArgumentChoice(
+                name=definition.id,
+                description=_provider_summary(definition.id, definition.name),
+                aliases=tuple(definition.search_aliases),
+                # Blank when the store could not be read: the catalogue is still
+                # entirely answerable from the registry, and a row with no state
+                # claims nothing, where any of the three states would claim
+                # something the app does not know. With every detail blank the
+                # column collapses to nothing and the descriptions take the cells.
+                detail=self._stored_state(definition.id) or "",
+            )
+            for definition in providers.login_providers()
+        ]
+
+    def _stored_state(self, provider_id: str) -> str | None:
+        """:meth:`_credential_state` for one provider, or ``None`` when it failed.
+
+        Guarded per ROW, not per list: one provider whose read blows up must not
+        delete the other eleven from a catalogue that is otherwise answerable.
+        """
+        providers = self._providers
+        assert providers is not None
+        try:
+            return self._credential_state(provider_id, providers.has_any_credential(provider_id))
+        except Exception:  # a credential read never costs the user the list
+            return None
+
+    def _has_credential(self, provider_id: str) -> bool:
+        """``has_any_credential``, guarded — a failed read offers nothing.
+
+        False rather than True on failure: `/logout` acts on what this returns,
+        and offering a row the store could not confirm invites a keystroke whose
+        only outcome is an error.
+        """
+        providers = self._providers
+        assert providers is not None
+        try:
+            return providers.has_any_credential(provider_id)
+        except Exception:  # a credential read never costs the user the list
+            return False
+
+    def _stored_credential_kinds(self) -> dict[str, tuple[str, ...]] | None:
+        """Storage id -> the ``credential_type`` of each credential filed under it.
+
+        ``None`` — distinct from an empty map — when the store could not be read
+        at all, because "you have no credentials" and "I cannot tell" are
+        different answers and only one of them is true when SQLite is locked.
+
+        A tuple per id, not one value: nothing stops a provider holding both a
+        pasted key and an OAuth login, and `/logout` removes the lot — a row that
+        named only the first would understate what the keystroke does.
+        """
+        providers = self._providers
+        assert providers is not None
+        try:
+            rows = providers.credentials()
+        except Exception:  # never crash the app on a provider read
+            return None
+        kinds: dict[str, tuple[str, ...]] = {}
+        for row in rows:
+            kinds[row.provider] = (*kinds.get(row.provider, ()), row.credential_type)
+        return kinds
 
     def _credential_state(self, provider_id: str, stored: bool) -> str:
         """Where the user stands with ``provider_id``, in three states not two.
 
         An environment key is a WORKING credential — it is the tier the stream
         cascade resolves — but it is not a login, so reporting it as one would
-        suggest a stored account that `/logout` could remove. Wording matched to
-        `/provider`, which answers the same question in the transcript.
+        suggest a stored account that `/logout` could remove. `/provider` renders
+        the same three strings from this same method, so the two surfaces cannot
+        drift into answering one question two ways.
 
-        None of the three sets ``ArgumentChoice.alert``: an un-logged-in provider
-        is the ordinary reason to be reading this list, and painting it in the
-        danger tint would make `/login` read as a wall of broken rows.
+        `/logout` does NOT use this: see :func:`_removal_detail`.
         """
         providers = self._providers
         assert providers is not None
@@ -1347,6 +1756,18 @@ class OperatorApp(App[None]):
             line.append(names.ljust(14), style=muted)
             line.append(command.description, style=dim)
             lines.append(line)
+        # Where the logs went. Console logging is off while the TUI owns the
+        # terminal (see `local_operator.logger.file_logging`), so without this
+        # line the file is unfindable without reading the source. `/help` and
+        # not the transcript: a path printed on every launch is noise, a path
+        # in the help the user already opens when lost is not.
+        log_file = current_log_file()
+        if log_file is not None:
+            footer = Text()
+            footer.append("logs".ljust(14), style=muted)
+            footer.append(str(log_file), style=dim)
+            lines.append(Text())
+            lines.append(footer)
         return RichBlock(Group(*lines))
 
     def _skills_block(self) -> RichBlock | None:
@@ -1374,6 +1795,13 @@ class OperatorApp(App[None]):
         configured command alone answered "what did I ask for" and never "did it
         work", which is the only question a user runs ``/mcp`` to settle.
 
+        Both fields are padded into COLUMNS. Crammed straight into the detail
+        string, the status landed wherever the server name happened to end —
+        `connected` at column 15 under a long name, `disconnected` at column 11
+        under a short one — so the shorter name pushed the longer status left and
+        the two facts a reader scans for (which server, is it up) formed no
+        column at all. Padding is the whole fix: no glyph and no colour added.
+
         Still exception-safe end to end: introspection that crashes the app is
         worse than introspection that declines to answer.
         """
@@ -1386,7 +1814,7 @@ class OperatorApp(App[None]):
             manager = getattr(self._session, "mcp_manager", None)
             startup = getattr(self._session, "mcp_startup", None)
             failures = dict(startup.failures) if startup is not None else {}
-            items: list[tuple[str, str]] = []
+            rows: list[tuple[str, str, str]] = []
             for name, cfg in configs.items():
                 target = getattr(cfg, "command", None) or getattr(cfg, "url", None) or ""
                 status = manager.get_connection_status(name) if manager is not None else "unknown"
@@ -1394,7 +1822,13 @@ class OperatorApp(App[None]):
                 # server that has since reconnected must not keep reporting the
                 # failure it recovered from, or /mcp becomes a permanent accusation.
                 error = failures.get(name, "") if status != "connected" else ""
-                items.append((name, f"{status}  {error or target}".strip()))
+                rows.append((name, status, error or target))
+            name_column = max(len(name) for name, _, _ in rows)
+            status_column = max(len(status) for _, status, _ in rows)
+            items = [
+                (name.ljust(name_column), f"{status.ljust(status_column)}  {detail}".rstrip())
+                for name, status, detail in rows
+            ]
             return RichBlock(_tree_listing(items))
         except Exception:
             return None
@@ -1671,6 +2105,73 @@ def _tree_listing(items: list[tuple[str, str]]) -> Group:
     return Group(*lines)
 
 
+#: How a stored credential's ``credential_type`` reads to a user about to lose
+#: it. The same two words `/accounts` prints, so one credential does not have
+#: two names across two surfaces.
+#:
+#: Short on purpose. The whole string is `remove <kind>`, and the detail column
+#: is dropped whole once reserving it would squeeze the provider id — measured
+#: on the 40-cell boot card, `remove oauth login` (18 cells) took the column
+#: away from every row while `remove oauth` (12) keeps it. Losing the column at
+#: the width where the description has ALREADY collapsed would leave the row
+#: saying nothing but its id, which is the state D-06 exists to fix.
+_CREDENTIAL_KINDS = {"oauth": "oauth", "api_key": "api key"}
+
+
+def _removal_detail(kinds: tuple[str, ...]) -> str:
+    """What `/logout <id>` will REMOVE, for the picker's detail column.
+
+    Not "logged in". `/logout` offers only providers that HAVE a credential, so
+    that state is true of every row by construction — a column carrying no bits
+    at all, holding cells the description needs at narrow widths. The KIND is
+    what differs between rows and what the user is about to lose, so the row
+    states its own consequence instead of restating its own precondition.
+
+    ``kinds`` is non-empty by construction: the caller only builds a row once the
+    credential map has an entry for its storage id, so there is no such thing
+    here as a removal with nothing to remove.
+    """
+    labels = {_CREDENTIAL_KINDS.get(kind, kind) for kind in kinds}
+    if len(labels) == 1:
+        return f"remove {labels.pop()}"
+    # Both a pasted key and an OAuth login under one id: `/logout` takes the lot,
+    # and a row naming only the first would understate the keystroke.
+    return f"remove {len(kinds)} credentials"
+
+
+def _provider_summary(provider_id: str, name: str) -> str:
+    """The part of a provider's registry name the id does not already say.
+
+    The registry name is written for a CLI listing where the id is not adjacent:
+    `OpenAI (ChatGPT Plus/Pro)`, `DeepSeek`, `OpenRouter`. Printed next to the id
+    in a picker it restated it on twelve rows out of twelve, with the only
+    disambiguating part parenthesised at the end of each — while `openai` vs
+    `openai-device` and `xai` vs `xai-oauth` are told apart by NOTHING ELSE.
+
+    So: the parenthetical when there is one, empty when the name is just the id
+    in title case, the name itself otherwise. An empty cell is the correct answer
+    for `deepseek` — there is nothing more to say about it than its id already
+    says, and saying it twice is what cost the four near-duplicate rows their
+    distinguishing text below 41 cells.
+    """
+    name = name.strip()
+    if name.endswith(")") and "(" in name:
+        return name[name.index("(") + 1 : -1].strip()
+    if _squashed(name) == _squashed(provider_id):
+        return ""
+    return name
+
+
+def _squashed(value: str) -> str:
+    """``value`` reduced to its letters and digits, lowercased.
+
+    So `OpenRouter` and `openrouter` compare equal, and so do `xAI OAuth` and
+    `xai-oauth` — punctuation and case are exactly the difference between a name
+    and the id it restates.
+    """
+    return "".join(char for char in value.lower() if char.isalnum())
+
+
 class _LoginLock:
     """A tiny async-free reentrancy guard for interactive login flows.
 
@@ -1749,16 +2250,28 @@ def _catalogue_status(statuses: dict[str, str]) -> str:
     Silence when every provider answered, because a footer that always says
     something is a footer nobody reads. The interesting cases are the ones where a
     user hunting for a model released last week would otherwise conclude it does
-    not exist: a cached list, a provider that failed, or one that needs a login.
+    not exist: a cached list, or a provider whose live fetch failed.
+
+    An ``unauthenticated`` provider is deliberately NOT reported here. Its models
+    are the ones the picker now hides, and `_catalogue_rows` already counts them
+    — two footers counting one fact ("3 provider(s) need a login · 42 hidden")
+    reads as two separate problems.
     """
     cached = sorted(p for p, s in statuses.items() if s == "cached")
     stale = sorted(p for p, s in statuses.items() if s in ("unavailable", "empty"))
-    locked = sorted(p for p, s in statuses.items() if s == "unauthenticated")
     bits: list[str] = []
     if cached:
         bits.append(f"cached: {', '.join(cached)}")
     if stale:
         bits.append(f"no live list: {', '.join(stale)}")
-    if locked:
-        bits.append(f"{len(locked)} provider(s) need a login")
     return " · ".join(bits)
+
+
+def _status_line(*bits: str) -> str:
+    """Join the picker's footer clauses, dropping the empty ones.
+
+    The separator matches the one the footer itself uses between the row count
+    and the status, so a two-clause status does not read as a different kind of
+    seam from the one beside it.
+    """
+    return " · ".join(bit for bit in bits if bit)

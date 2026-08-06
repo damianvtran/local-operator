@@ -17,7 +17,6 @@ import os
 import platform
 import re
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
@@ -61,15 +60,16 @@ def _heif_image_module() -> Optional[Any]:
         return None
 
 
-# Logging goes to STDERR, never stdout. stdout is a DATA channel: `exec --json`
-# writes one JSON event per line there, and any log record interleaved into it
-# corrupts the stream for a strict per-line json.loads consumer (httpx logs an
-# INFO line per request, which is exactly the traffic an agent run generates).
-# Note: basicConfig only takes effect on the first call; the application entry
-# point owns any further configuration.
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", stream=sys.stderr
-)
+# NO logging configuration here. This module used to call `logging.basicConfig`
+# at import, which installed a stderr StreamHandler as a side effect of merely
+# importing a helper — so the effective configuration depended on import order,
+# and no entry point could turn it off. The full-screen TUI needs it off (a
+# record written to stderr lands on top of the Textual frame), and a
+# StreamHandler built here holds the pre-redirect stderr object, so Textual's
+# own `redirect_stderr` cannot save it. `local_operator.logger` owns the
+# configuration now and the entry points call it explicitly:
+# `configure_cli_logging()` in `cli.main`, `configure_console_logging()` in
+# `server.app`, `file_logging()` around the TUI.
 logger = logging.getLogger(__name__)
 
 

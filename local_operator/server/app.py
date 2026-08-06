@@ -20,7 +20,7 @@ from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config
 from local_operator.helpers import setup_cross_platform_environment
 from local_operator.jobs import JobManager
-from local_operator.logger import get_logger
+from local_operator.logger import configure_console_logging, get_logger
 from local_operator.scheduler_service import SchedulerService
 from local_operator.server.routes import (
     agents,
@@ -38,6 +38,13 @@ from local_operator.server.routes import (
 )
 from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import OperatorType
+
+# The server is its own entry point: uvicorn imports this module by name, so
+# there is no `main()` above it to configure logging. Importing
+# `local_operator.logger` used to do it as a side effect; now it is stated
+# here, with the same level (LOG_LEVEL, default WARNING) and format the module
+# import installed.
+configure_console_logging()
 
 logger = get_logger("local_operator.server")
 

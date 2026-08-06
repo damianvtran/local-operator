@@ -252,13 +252,18 @@ class WorkingBlock(TranscriptBlock):
             self._timer = None
 
 
-def needs_gap_above(previous: "TranscriptBlock | None", block: "TranscriptBlock") -> bool:
+def needs_gap_above(
+    previous: "TranscriptBlock | None", block: "TranscriptBlock", *, splash_above: bool = False
+) -> bool:
     """Whether ``block`` opens with one blank row given what preceded it.
 
     The whole adaptive-spacing rule, in one pure function so it can be
     reasoned about (and tested) without a running app:
 
     - nothing above → no gap; the transcript meets the top edge
+    - nothing above but the VISIBLE empty state → a gap; the splash is a block
+      too, and a receipt flush against its last hint row reads as a line that
+      fell out of the lockup rather than as the answer to what the user just did
     - either side transient (the working line) → no gap; it will vanish
     - a turn-leading block (a user prompt) → always a gap
     - a different KIND of block → a gap; the change of subject is the cue
@@ -268,7 +273,7 @@ def needs_gap_above(previous: "TranscriptBlock | None", block: "TranscriptBlock"
       the next block reads as its continuation
     """
     if previous is None:
-        return False
+        return splash_above
     if block.SPACING_TRANSIENT or previous.SPACING_TRANSIENT:
         return False
     if block.SPACING_LEAD:
@@ -316,8 +321,25 @@ class TranscriptView(ScrollableContainer):
         self._blocks.append(block)
         stick_to_bottom = self._is_near_bottom()
         self.mount(block)
+        self._remeasure_empty_state()
         if stick_to_bottom:
             self.call_after_refresh(self.scroll_end, animate=False)
+
+    def _remeasure_empty_state(self) -> None:
+        """Re-measure the empty state after the block count in this region changed.
+
+        The empty state budgets its height against the rows its siblings take
+        (WelcomeView.get_content_height), and it reads those from their PLACED
+        sizes — which the block mounted a line above this does not have yet. So
+        the measurement is asked for again once the mount has been laid out;
+        without it the splash keeps the height it was measured at when it was
+        alone in the region, and overdraws it by the new block's rows.
+        """
+        for child in self.children:
+            if not isinstance(child, TranscriptBlock) and child.display:
+                # `layout=True`: a measured height is cached per container size, so
+                # a plain repaint would redraw the new block into the old count.
+                self.call_after_refresh(child.refresh, layout=True)
 
     def refresh_gap_after(self, block: TranscriptBlock) -> None:
         """Re-decide the gap for the first real block below ``block``.
@@ -348,9 +370,23 @@ class TranscriptView(ScrollableContainer):
                 return candidate
         return None
 
-    @staticmethod
-    def _apply_gap(previous: TranscriptBlock | None, block: TranscriptBlock) -> None:
-        block.set_class(needs_gap_above(previous, block), GAP_CLASS)
+    def _apply_gap(self, previous: TranscriptBlock | None, block: TranscriptBlock) -> None:
+        block.set_class(
+            needs_gap_above(previous, block, splash_above=self._empty_state_visible()), GAP_CLASS
+        )
+
+    def _empty_state_visible(self) -> bool:
+        """True when the empty-state view is showing above the blocks.
+
+        Identified by what it is NOT — every other child of this container is a
+        transcript block — rather than by importing the view, which imports this
+        module for its notice glyphs. It is also the more honest predicate: what
+        spacing needs to know is whether something is drawn above the first block,
+        not which widget that something happens to be.
+        """
+        return any(
+            child.display for child in self.children if not isinstance(child, TranscriptBlock)
+        )
 
     def remove_block(self, block: TranscriptBlock) -> None:
         """Remove one block (used to lift the boot hint, D9)."""

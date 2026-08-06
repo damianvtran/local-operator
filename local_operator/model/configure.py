@@ -21,6 +21,7 @@ import dataclasses
 import functools
 import logging
 import os
+import re
 import time
 from collections.abc import AsyncIterator, Mapping
 from typing import TYPE_CHECKING, Any, Optional
@@ -161,6 +162,34 @@ class ModelConfiguration:
         self.spec = spec or build_model_spec(hosting, name, self.info)
 
 
+#: Model families that reject ``temperature``/``top_p`` outright.
+#:
+#: Anthropic's Claude 5 generation answers HTTP 400 ``` `temperature` is
+#: deprecated for this model.``` — and then the same for ``top_p`` once
+#: ``temperature`` is dropped, so both have to go together. Verified live
+#: against ``api.anthropic.com/v1/messages``: ``claude-opus-5`` and
+#: ``claude-sonnet-5`` 400 on either parameter and 200 with neither, while
+#: ``claude-opus-4-5``/``claude-sonnet-4-5``/``claude-haiku-4-5`` accept both —
+#: hence the generation digit must sit directly after the tier, or the trailing
+#: ``-5`` of the 4.5 models would match and silently lose their sampling
+#: settings. ``[5-9]|\d{2,}`` reads forward rather than pinning to 5: a future
+#: ``claude-opus-6`` is far likelier to keep the deprecation than to revert it,
+#: and the two failure directions are not symmetric — a false negative makes
+#: the model unusable on every single turn, a false positive only falls back to
+#: the provider's own sampling defaults.
+#:
+#: OpenAI's o-series and ``gpt-5`` reject the same pair on both
+#: ``/chat/completions`` and ``/responses``. This is deliberately NOT keyed on
+#: the ``reasoning`` flag below even though it overlaps: ``reasoning`` also
+#: matches the ``thinking``/``reasoner`` suffixes, and Gemini and DeepSeek
+#: happily accept ``temperature`` on those variants. Dropping it there would
+#: trade a loud 400 for a silent loss of a real setting, which is the worse
+#: bug. Only families with observed rejection belong in this pattern.
+_NO_SAMPLING_PARAMS = re.compile(
+    r"claude-(?:opus|sonnet|haiku)-(?:[5-9]|\d{2,})(?!\d)" r"|(?:^|[/:-])o[1-9](?:-|$)" r"|gpt-5"
+)
+
+
 def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = None) -> ModelSpec:
     """Derive a harness ``ModelSpec`` from the model's resolved metadata.
 
@@ -204,6 +233,13 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     reasoning = any(
         marker in lowered for marker in ("o1", "o3", "reasoner", "thinking", "deep-research")
     )
+    # Keyed on the model, not on the provider that fronts it. `claude-opus-5`
+    # returns 200 through OpenRouter only because the aggregator strips the
+    # parameters before forwarding — the model never honoured them on either
+    # route, so omitting them everywhere loses nothing that was ever real,
+    # while a provider-keyed rule would keep shipping a value that is provably
+    # discarded and would start 400ing the day an aggregator stops normalising.
+    supports_sampling_params = _NO_SAMPLING_PARAMS.search(lowered) is None
 
     return ModelSpec(
         provider=canonical,
@@ -215,6 +251,7 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         supports_prompt_cache=supports_cache,
         base_url=definition.base_url if definition else None,
         reasoning=reasoning,
+        supports_sampling_params=supports_sampling_params,
     )
 
 

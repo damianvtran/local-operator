@@ -178,6 +178,21 @@ def _replayed_user_message(content: list[Content], entry_id: str | None) -> Mess
     return message
 
 
+def _pruned_ids(messages: Sequence[AgentMessage]) -> set[str]:
+    """Ids of messages already carrying the pruning pass's ``pruned`` marker.
+
+    Taken BEFORE a prune pass so the pass's effect is a set difference. The
+    pass reports only a boolean ``changed``, and re-journalling every
+    already-blanked message on every turn would grow the transcript with
+    duplicate entries faster than the blanking shrinks it.
+    """
+    return {
+        message.id
+        for message in messages
+        if isinstance(message, Message) and (message.provider_payload or {}).get("pruned")
+    }
+
+
 def _render_compaction_marker(marker: CustomMessage, entry_id: str | None = None) -> Message:
     """Render one compaction marker into an LLM-visible message. ``entry_id``
     (the marker's transcript entry id) rides onto the rendered message.
@@ -800,6 +815,36 @@ class Session:
 
     # -- compaction ------------------------------------------------------------
 
+    async def _journal_prunes(
+        self, llm_history: Sequence[AgentMessage], pruned_before: set[str]
+    ) -> None:
+        """Persist the blanking that ``prune_tool_outputs`` just did in memory.
+
+        Pruning is the one place where the live context and the transcript
+        drift apart: the session throws away a multi-kilobyte tool output,
+        the transcript keeps it, and the next resume replays the original
+        back into the prompt — so a resumed session costs MORE per turn than
+        the session it resumed. Journalling closes that gap and, once the
+        dead bytes are worth a rewrite, ``compact_file`` takes them off disk
+        too. Best-effort: a transcript write that fails must never abort the
+        turn's compaction, which is load-bearing where this is an optimisation.
+        """
+        newly = [
+            message
+            for message in llm_history
+            if isinstance(message, Message)
+            and message.id not in pruned_before
+            and (message.provider_payload or {}).get("pruned")
+        ]
+        if not newly:
+            return
+        try:
+            for message in newly:
+                await self._transcript.append_prune(message.id, message.text)
+            await self._transcript.compact_file()
+        except OSError as exc:
+            logger.warning("could not journal pruned tool outputs: %s", exc)
+
     async def _maybe_compact(self) -> None:
         """Post-turn compaction check; lazy-imports the compaction API so a
         missing module degrades to no-compaction.
@@ -841,10 +886,12 @@ class Session:
         # The idle flush compares against the last PROVIDER request, not turn
         # bookkeeping, so a genuinely idle session reclaims the warm region.
         now_ms = int(time.time() * 1000)
+        pruned_before = _pruned_ids(llm_history)
         try:
             compaction_api.prune_tool_outputs(llm_history, now_ms, self._last_provider_request_ms)
         except (ImportError, AttributeError):
             pass  # optional pruning hook absent; degrade to no pruning
+        await self._journal_prunes(llm_history, pruned_before)
 
         # (2) Trigger math: prefer the provider's ground-truth context size.
         provider_reported = (

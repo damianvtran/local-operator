@@ -990,3 +990,48 @@ def test_the_memo_can_be_dropped_when_the_cause_of_a_bad_answer_is_fixed(monkeyp
 
     configure_mod.invalidate_model_info_cache()
     assert configure_mod.resolve_model_info("anthropic", "claude-opus-5").name == "Claude Opus 5"
+
+
+@pytest.mark.parametrize(
+    "provider, model_id, supported",
+    [
+        # Verified live against api.anthropic.com/v1/messages: these 400 on
+        # either parameter and 200 with neither.
+        ("anthropic", "claude-opus-5", False),
+        ("anthropic", "claude-sonnet-5", False),
+        # ...and these answer 200 WITH both, so the boundary is the generation
+        # digit straight after the tier. A trailing "-5" match would have taken
+        # the whole 4.5 family down with it.
+        ("anthropic", "claude-opus-4-5", True),
+        ("anthropic", "claude-sonnet-4-5", True),
+        ("anthropic", "claude-haiku-4-5", True),
+        ("anthropic", "claude-3-5-sonnet-latest", True),
+        # The aggregator returns 200 either way because it strips the pair
+        # before forwarding, so the model — not the wire — decides. Same
+        # answer on both routes, or the flag would be untestable and the fix
+        # would evaporate the moment OpenRouter stopped normalising.
+        ("openrouter", "anthropic/claude-opus-5", False),
+        ("openrouter", "anthropic/claude-sonnet-4.5", True),
+        # OpenAI's o-series and gpt-5 reject the same pair.
+        ("openai", "o1", False),
+        ("openai", "o3-mini", False),
+        ("openai", "gpt-5", False),
+        ("openai", "gpt-4o", True),
+        # `thinking`/`reasoner` set ModelSpec.reasoning but NOT this flag:
+        # Gemini and DeepSeek accept temperature on those variants, and
+        # silently dropping a working setting is worse than the 400 it avoids.
+        ("google", "gemini-2.5-flash-thinking", True),
+        ("deepseek", "deepseek-reasoner", True),
+    ],
+)
+def test_the_spec_knows_which_models_reject_sampling_parameters(
+    provider, model_id, supported
+) -> None:
+    """`claude-opus-5` answered HTTP 400 "`temperature` is deprecated for this
+    model." on every single turn because the wire clients sent the pair
+    unconditionally. The capability is derived here, once, so the clients stay
+    free of model-name knowledge."""
+    from local_operator.model import configure as configure_mod
+
+    spec = configure_mod.build_model_spec(provider, model_id)
+    assert spec.supports_sampling_params is supported

@@ -343,6 +343,13 @@ async def test_boot_failure_posts_error_and_reload_retries() -> None:
         assert "NoticeBlock" in kinds
         assert "provider is down" in texts
         assert app._session is None
+        # And the splash SURVIVES it. A session that never constructed is the most
+        # infrastructure-y report in the app, and the worst moment to lose the one
+        # block that says what to do next: the credential warning and the boot
+        # hints both live there. Retiring the empty state here left a single red
+        # line over an empty screen.
+        assert app.query_one(WelcomeView).display is True
+        assert app.screen.has_class(BOOT_LAYOUT_CLASS)
         # /reload re-runs boot and succeeds this time.
         app.query_one(Editor).focus()
         await pilot.pause()
@@ -442,9 +449,14 @@ async def test_a_search_alias_reaches_the_provider_it_names() -> None:
 
 
 @pytest.mark.asyncio
-async def test_logout_list_offers_only_stored_credentials() -> None:
-    """Logging out of a provider you never logged into is a no-op, so the list
-    does not offer it."""
+async def test_logout_rows_name_the_credential_they_will_remove() -> None:
+    """`/logout` offers only what can be removed, and each row says what goes.
+
+    Not "logged in": this list is FILTERED to providers holding a credential, so
+    that state is true of every row by construction — a column with no bits in
+    it, holding cells the description needs at narrow widths. The kind is what
+    differs between rows and what the keystroke destroys.
+    """
     app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=FakeProviderController())
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
@@ -452,18 +464,25 @@ async def test_logout_list_offers_only_stored_credentials() -> None:
         await pilot.pause()
         app.query_one(Editor).text = "/logout "
         await pilot.pause()
-        assert _provider_rows(app) == [("openrouter", "logged in")]
+        assert _provider_rows(app) == [("openrouter", "remove api key")]
 
 
 @pytest.mark.asyncio
-async def test_logout_with_nothing_stored_says_so_instead_of_showing_nothing() -> None:
+async def test_logout_with_nothing_stored_says_so_where_the_list_would_have_been() -> None:
     """An empty set and "nothing matched your query" render identically — as
     nothing at all. Only the first is worth a sentence, because no amount of
-    retyping would have produced a row."""
+    retyping would have produced a row.
+
+    It is said in the PICKER, not the transcript. The sentence answers a UI event,
+    so a transcript line repeats on every re-entry into the argument state (see the
+    test below) — and a transcript is a record, while an empty list is a transient
+    state of the input. The row is dim and unselectable: `is_open()` stays False, so
+    Enter still submits the buffer and no click can action a sentence.
+    """
 
     class NoCredentials(FakeProviderController):
-        def has_any_credential(self, provider):
-            return False
+        def credentials(self):
+            return []
 
     app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=NoCredentials())
     async with app.run_test(size=(100, 30)) as pilot:
@@ -472,8 +491,12 @@ async def test_logout_with_nothing_stored_says_so_instead_of_showing_nothing() -
         await pilot.pause()
         app.query_one(Editor).text = "/logout "
         await pilot.pause()
-        assert not app.query_one(Editor).picker.is_open()
-        assert "nothing to log out of" in _transcript_text(app)
+        picker = app.query_one(Editor).picker
+        assert not picker.is_open(), "a sentence is not a suggestion"
+        assert picker.display is True, "and it is on screen anyway"
+        assert "log out of" in picker.render_text(60).plain
+        assert picker._index_at(0) is None, "the row cannot be clicked into a command"
+        assert "log out of" not in _transcript_text(app), "the transcript is a record"
         # And it did NOT end the empty state. Opening a list is not the
         # conversation starting: a fresh session that collapsed its boot
         # composition to report that a command the user has not run yet has
@@ -483,8 +506,71 @@ async def test_logout_with_nothing_stored_says_so_instead_of_showing_nothing() -
 
 
 @pytest.mark.asyncio
+async def test_re_entering_an_empty_argument_state_leaves_the_transcript_alone() -> None:
+    """Ten re-entries, zero transcript blocks.
+
+    The sentence is raised from a UI event, so every route back into the argument
+    state raises it again: typing `/logout `, backspacing, typing the space. As a
+    transcript notice that stacked four identical rows in as many keystrokes, each
+    one also taking a row off the splash that shares the region. In the picker the
+    tenth re-entry looks exactly like the first.
+    """
+
+    class NoCredentials(FakeProviderController):
+        def credentials(self):
+            return []
+
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=NoCredentials())
+    async with app.run_test(size=(96, 28)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        transcript = app.query_one(TranscriptView)
+        for _ in range(10):
+            editor.text = "/logout"
+            await pilot.pause()
+            editor.text = "/logout "
+            await pilot.pause()
+            await pilot.pause()
+            assert transcript.blocks() == []
+        assert "log out of" in editor.picker.render_text(60).plain
+        # One row, however many times it was set: the picker holds a string, not a
+        # list it appends to.
+        assert editor.picker.styles.height is not None
+        assert editor.picker.region.height == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_credential_store_says_that_instead() -> None:
+    """ "You have no credentials" and "I cannot tell" are different answers, and the
+    informational row carries whichever one is true."""
+
+    class RaisingStore(FakeProviderController):
+        def credentials(self):
+            raise RuntimeError("database is locked")
+
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=RaisingStore())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        app.query_one(Editor).text = "/logout "
+        await pilot.pause()
+        rendered = app.query_one(Editor).picker.render_text(80).plain
+        assert "unreadable" in rendered
+        assert "no stored credentials" not in rendered
+
+
+@pytest.mark.asyncio
 async def test_choosing_a_row_runs_the_existing_logout_path() -> None:
-    """The list is a way to reach `_cmd_logout`, not a second implementation."""
+    """The list is a way to reach `_cmd_logout`, not a second implementation.
+
+    Two Enters, even with a single row: on a destructive list "there is only one
+    match" is not evidence that the user meant it — an empty query matches
+    everything, and here everything happens to be one credential. The first
+    Enter names it in the buffer, the second removes it.
+    """
     controller = FakeProviderController()
     app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=controller)
     async with app.run_test(size=(100, 30)) as pilot:
@@ -494,6 +580,10 @@ async def test_choosing_a_row_runs_the_existing_logout_path() -> None:
         app.query_one(Editor).text = "/logout "
         await pilot.pause()
         assert len(app.query_one(Editor).picker.suggestions()) == 1, "premise: one match"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert controller.logouts == [], "an unnamed row is completed, not removed"
+        assert app.query_one(Editor).text == "/logout openrouter"
         await pilot.press("enter")
         await pilot.pause()
         await pilot.pause()
@@ -517,12 +607,143 @@ async def test_choosing_a_row_runs_the_existing_login_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_login_still_lists_every_provider_when_the_store_cannot_be_read() -> None:
+    """An unreadable credential store costs the STATE column, not the app.
+
+    The handler runs on a keystroke, so an exception out of it takes the whole
+    TUI down — and the moment the store is unreadable is exactly the moment a
+    user reaches for `/login`. The catalogue comes from the in-memory registry
+    and is still entirely answerable, so every provider is still offered; only
+    the state is blank, because a blank claims nothing and any of the three
+    states would claim something the app cannot know.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=RaisingStoreController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        app.query_one(Editor).text = "/login "
+        await pilot.pause()
+        assert app.is_running, "a locked credential store must not take the app down"
+        assert _provider_rows(app) == [
+            ("openrouter", ""),
+            ("deepseek", ""),
+            ("xai-oauth", ""),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_logout_says_the_store_is_unreadable_rather_than_claiming_it_is_empty() -> None:
+    """`/logout` asks a question only the store can answer, so there is no
+    degraded list — but "you have no credentials" is a different answer from "I
+    cannot tell", and only one of them is true when the file is locked."""
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=RaisingStoreController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        app.query_one(Editor).text = "/logout "
+        await pilot.pause()
+        assert app.is_running
+        assert _provider_rows(app) == []
+        picker = app.query_one(Editor).picker
+        rendered = picker.render_text(60).plain
+        assert "store unreadable" in rendered, rendered
+        assert "no stored credentials" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_logout_offers_one_row_per_credential_not_per_provider() -> None:
+    """`openai` and `openai-device` share one stored credential, so logging out
+    of either removes the same account. Two rows for one outcome is a choice the
+    user cannot make correctly — while `/login` must still offer both, because
+    they are two different ways to sign in."""
+    app = OperatorApp(
+        lambda: _factory(FakeSession()), provider_controller=CollidingStorageController()
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        app.query_one(Editor).text = "/logout "
+        await pilot.pause()
+        assert _provider_rows(app) == [("openai", "remove oauth")]
+
+        app.query_one(Editor).text = "/login "
+        await pilot.pause()
+        assert [name for name, _ in _provider_rows(app)] == ["openai", "openai-device"]
+
+
+@pytest.mark.asyncio
+async def test_a_provider_row_describes_what_its_id_does_not_already_say() -> None:
+    """The registry name restated the id on twelve rows out of twelve.
+
+    `openai / OpenAI (ChatGPT Plus/Pro)` spent half the description column
+    re-spelling the id in title case and parenthesised the only part that
+    distinguishes the row. That parenthetical is also the ONLY thing telling
+    `openai` from `openai-device` and `xai` from `xai-oauth` apart, so it is
+    what makes those four near-duplicates choosable. Where the name says nothing
+    the id does not, the cell is blank — that is the honest answer.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=RealRegistryController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        app.query_one(Editor).text = "/login "
+        await pilot.pause()
+        described = {
+            name: choice.description for name, choice in app.query_one(Editor).picker.suggestions()
+        }
+    assert described["openai"] == "ChatGPT Plus/Pro"
+    assert described["openai-device"] == "ChatGPT device code"
+    assert described["xai"] == "Grok API key"
+    assert described["xai-oauth"] == "Grok OAuth"
+    assert described["anthropic"] == "Claude Pro/Max"
+    assert described["deepseek"] == ""
+    assert described["openrouter"] == ""
+    assert described["radient"] == ""
+
+
+@pytest.mark.asyncio
+async def test_a_provider_query_the_user_typed_over_is_not_answered() -> None:
+    """The opening message is one message-loop tick old, and a tick is enough to
+    abandon the command. Answering it anyway attached a notice — and a list — to
+    a command that no longer exists in the buffer."""
+
+    class NoCredentials(FakeProviderController):
+        def has_any_credential(self, provider):
+            return False
+
+        def credentials(self):
+            return []
+
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=NoCredentials())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.text = "/logout "
+        editor.text = "how do I write a parser?"
+        await pilot.pause()
+        await pilot.pause()
+        picker = editor.picker
+        assert not picker.is_open()
+        assert picker.display is False, "nothing is said about an abandoned command"
+        assert "log out" not in _transcript_text(app)
+
+
+@pytest.mark.asyncio
 async def test_login_without_controller_points_at_the_cli() -> None:
     """Degrading to a pointer notice is the contract when the TUI is embedded
     without a controller — it must never crash or silently do nothing.
 
-    Both routes degrade the same way: opening the provider list has nothing to
-    read the credential store with, and so does dispatching the bare command.
+    The two routes degrade to different PLACES, because they answer different
+    things. Opening the list is a UI event that repeats on every re-entry into the
+    argument state, so it says why the list is empty inside the list. Running the
+    bare command is something the user did once, so it lands in the transcript,
+    which is the record of what they did.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))  # no controller
     async with app.run_test(size=(80, 24)) as pilot:
@@ -531,14 +752,17 @@ async def test_login_without_controller_points_at_the_cli() -> None:
         await pilot.pause()
         await pilot.press("slash", "l", "o", "g", "i", "n", "enter")  # opens the list
         await pilot.pause()
-        assert "local-operator login" in _transcript_text(app)
-        assert not app.query_one(Editor).picker.is_open(), "no controller, no rows"
+        picker = app.query_one(Editor).picker
+        assert not picker.is_open(), "no controller, no rows"
+        assert "local-operator login" in picker.render_text(70).plain
+        assert "local-operator login" not in _transcript_text(app)
 
         # No Esc needed: with no rows the list never opened, so Enter on the
-        # completed `/login ` goes straight to the command dispatch.
+        # completed `/login ` goes straight to the command dispatch — and THAT is
+        # a command the user ran, so it is recorded.
         await pilot.press("enter")
         await pilot.pause()
-        assert _transcript_text(app).count("local-operator login") == 2
+        assert _transcript_text(app).count("local-operator login") == 1
 
 
 @pytest.mark.asyncio
@@ -648,6 +872,12 @@ class FakeProviderController:
         # wide one for "would a turn work".
         return self.has_any_credential(provider)
 
+    def usable_providers(self):
+        # The set shape the picker's filter asks for: one answer for the whole
+        # registry instead of one probe per provider. `None` would mean the store
+        # could not be read at all, which this fake never simulates.
+        return {d.id for d in self.login_providers() if self.is_usable(d.id)}
+
     def static_catalogue(self):
         from local_operator.providers.controller import CatalogueEntry
 
@@ -723,6 +953,66 @@ class _FakeCred:
         self.credential_type = ctype
         self.data = data
         self.identity_key = None
+
+
+class RaisingStoreController(FakeProviderController):
+    """A controller whose credential store cannot be read.
+
+    `database is locked` is one other local-operator process away, and every
+    read below goes to the same SQLite file.
+    """
+
+    def has_any_credential(self, provider):
+        raise RuntimeError("database is locked")
+
+    def is_usable(self, provider):
+        raise RuntimeError("database is locked")
+
+    def credentials(self):
+        raise RuntimeError("database is locked")
+
+
+class CollidingStorageController(FakeProviderController):
+    """Two providers that file their credential under ONE storage id.
+
+    The real registry has two such pairs (openai/openai-device and
+    xai/xai-oauth); the default fake had a `store_credentials_as` provider with
+    nothing to collide with, so the dedupe branch never ran.
+    """
+
+    def login_providers(self):
+        return [
+            _FakeDef("openai", "OpenAI (ChatGPT Plus/Pro)", None, ("gpt",)),
+            _FakeDef("openai-device", "OpenAI (ChatGPT device code)", "openai", ("gpt",)),
+        ]
+
+    def has_any_credential(self, provider):
+        return provider in ("openai", "openai-device")
+
+    def credentials(self):
+        return [_FakeCred(1, "openai", "oauth", {})]
+
+
+class RealRegistryController(FakeProviderController):
+    """The fake controller over the REAL provider registry.
+
+    The descriptions are derived from registry names, so the only test that can
+    fail when a name changes is one that reads the actual registry.
+    """
+
+    def login_providers(self):
+        from local_operator.providers.registry import list_login_providers
+
+        return list_login_providers()
+
+    def has_any_credential(self, provider):
+        return False
+
+    def is_usable(self, provider):
+        return False
+
+    def credentials(self):
+        return []
 
 
 @pytest.mark.asyncio
@@ -986,6 +1276,39 @@ def test_all_three_usage_surfaces_agree_for_an_api_key_only_install(monkeypatch)
     notices: list[tuple[str, str]] = []
     app._cmd_usage("anthropic", lambda body, kind="info": notices.append((body, kind)))
     assert notices == [("anthropic reports usage only after /login anthropic", "warning")]
+
+
+@pytest.mark.asyncio
+async def test_provider_and_the_login_list_report_credentials_in_the_same_words() -> None:
+    """Two surfaces, one question, one vocabulary.
+
+    `/provider` rendered a provider with no credential as `—` while the `/login`
+    picker called the same provider `needs login`. A dash is not an answer: a
+    user with no credential reads a dash and cannot tell "none", "unknown" and
+    "not supported" apart.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        app.query_one(Editor).text = "/provider"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        listed = [
+            line
+            for line in _transcript_text(app).split("\n")
+            if "deepseek" in line or "xai-oauth" in line
+        ]
+        app.query_one(Editor).text = "/login "
+        await pilot.pause()
+        states = dict(_provider_rows(app))
+
+    assert listed, "premise: /provider rendered its listing"
+    assert all("needs login" in line for line in listed), listed
+    assert all("—" not in line for line in listed), listed
+    assert states["deepseek"] == "needs login", "and the picker says the same thing"
 
 
 @pytest.mark.asyncio
@@ -1335,3 +1658,416 @@ async def test_mcp_command_reports_per_server_state_not_just_the_config() -> Non
         assert "slack" in listing
         assert "disconnected" in listing
         assert "command not found: slack-mcp" in listing
+
+
+@pytest.mark.asyncio
+async def test_mcp_command_puts_the_status_in_a_column() -> None:
+    """Crammed into the detail string the status landed wherever the name ended,
+    so the shorter name pushed the longer status LEFT and the two facts a reader
+    scans for formed no column. Both fields are padded to their widest."""
+    from local_operator.mcp.config import MCPStdioServerConfig
+
+    manager = FakeMcpManager(["github", "gh"], ["github"])
+    startup = McpStartupOutcome(
+        configured=("github", "gh"),
+        connected=("github",),
+        failures={"gh": "command not found: gh"},
+    )
+    session = McpSession(manager=manager, startup=startup)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+        configs = {
+            "github": MCPStdioServerConfig(command="npx -y server-github"),
+            "gh": MCPStdioServerConfig(command="gh mcp serve"),
+        }
+        with patch("local_operator.mcp.config.load_all_mcp_configs", return_value=(configs, {})):
+            block = app._mcp_block()
+        assert block is not None
+        rows = [row for row in _renderable_plain(block.renderable).split("\n") if row.strip()]
+        assert len(rows) == 2
+        # `connected` is a substring of `disconnected`, so each row is located by
+        # its own status word and the two start columns compared directly. Before
+        # the fix the SHORTER name pushed the LONGER status four cells left.
+        connected_at = next(row.index("connected") for row in rows if "disconnected" not in row)
+        disconnected_at = next(row.index("disconnected") for row in rows if "disconnected" in row)
+        assert connected_at == disconnected_at, rows
+        # The detail after the status column lines up too, or the padding only
+        # moved the ragged edge one field to the right.
+        assert rows[0].index("npx") == rows[1].index("command not found"), rows
+
+
+@pytest.mark.asyncio
+async def test_a_discovery_failure_keeps_an_alarm_in_the_band() -> None:
+    """Discovery raising leaves no manager and no server list, so the band used
+    to render exactly like a machine that never configured MCP — while the toast
+    saying otherwise dismissed itself ten seconds later."""
+    startup = McpStartupOutcome(failures={"discovery": "config unreadable"})
+    session = McpSession(manager=None, startup=startup)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        band = _band(app)
+        assert "⊙ MCP" in band, band
+        # No count: the config layer never produced one, so any number is a lie.
+        assert "0 MCP" not in band
+        app.query_one(Toast).dismiss_toast()
+        await pilot.pause()
+        assert "⊙ MCP" in _band(app)
+
+
+@pytest.mark.asyncio
+async def test_the_band_refreshes_even_when_the_incumbent_callback_raises() -> None:
+    """The chained wrapper calls the composition root's subscriber first, and
+    ``McpManager._fire_tools_changed`` swallows and logs whatever comes out of
+    it — so a raising incumbent used to leave the band asserting a count that was
+    no longer true, which is the exact staleness the live segment exists to
+    remove. The repaint is scheduled in a ``finally``."""
+    manager = FakeMcpManager(["github", "linear"], ["github", "linear"])
+
+    def exploding_incumbent(tools: list[Any]) -> None:
+        raise RuntimeError("refresh_tools blew up")
+
+    manager.set_on_tools_changed(exploding_incumbent)
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        assert "⊙ 2 MCP" in _band(app)
+        manager._connected.remove("linear")
+        # The manager swallows the incumbent's exception; the app must not lose
+        # the repaint with it.
+        with pytest.raises(RuntimeError):
+            manager.fire()
+        for _ in range(4):
+            await pilot.pause()
+        assert "⊙ 1 MCP" in _band(app)
+
+
+@pytest.mark.asyncio
+async def test_a_toast_erases_no_transcript_row_outside_its_own_columns() -> None:
+    """A/B on the COMPOSITED frame, which is the only place this was visible.
+
+    The toast host was ``width: 1fr``: a widget owns its whole region and Textual
+    blanks all of it, so a 35-cell card on a 96-cell screen erased the other 59
+    cells of every row it covered — the transcript row read
+    `· line 0 ABCDEFGHIJ…` out to column 90 before the toast and nothing at all
+    after it. The layer keeps the toast out of the LAYOUT; it does not keep it
+    off the screen.
+    """
+    session = McpSession(manager=None, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(96, 28)) as pilot:
+        for _ in range(4):
+            await pilot.pause()
+        transcript = app.query_one(TranscriptView)
+        # ONE tall block rather than many: scrolled to the bottom, a block taller
+        # than the viewport fills every row of it with text, including the row the
+        # card lands on. Separate blocks put their adaptive gap row there instead,
+        # which would make this A/B pass by having nothing to lose.
+        transcript.append_block(
+            NoticeBlock(
+                "\n".join(f"line {index} " + "ABCDEFGHIJ" * 8 for index in range(40)), "info"
+            )
+        )
+        app._set_welcome_visible(False)
+        for _ in range(4):
+            await pilot.pause()
+
+        def rows() -> list[str]:
+            return [
+                "".join(segment.text for segment in strip)
+                for strip in app.screen._compositor.render_strips()
+            ]
+
+        before = rows()
+        toast = app.query_one(Toast)
+        toast.show(
+            "⊙ MCP: 1 of 2 servers up, 9 tools\nfailed: b — spawn ENOENT", duration_ms=60_000
+        )
+        for _ in range(4):
+            await pilot.pause()
+        after = rows()
+
+        card = toast.region
+        assert card.height == 2, card
+        # NOT vacuous: at least one row the card covers carries transcript text to
+        # the left of it, which is exactly what the full-width host used to wipe.
+        # Only SOME of them — the transcript's own top padding row is blank by
+        # design and the card starts on it.
+        assert any(
+            before[y][: card.x].strip() for y in range(card.y, card.bottom)
+        ), f"nothing to lose on rows {card.y}..{card.bottom - 1}"
+        # The DAMAGE: every column outside the card is byte-identical.
+        for y in range(card.y, card.bottom):
+            for column in range(len(before[y])):
+                if card.x <= column < card.right:
+                    continue
+                assert before[y][column] == after[y][column], (
+                    f"row {y} column {column} was erased outside the card "
+                    f"{card}: {before[y]!r} -> {after[y]!r}"
+                )
+        # …then the mechanism that guarantees it, and proof the card really is
+        # showing there, so this is not a vacuous pass.
+        assert app.query_one("#toast-host").region == card
+        assert "MCP: 1 of 2 servers up" in after[card.y]
+
+
+# --- model access: what the picker offers, what a switch confirms ------------
+
+
+class _AccessController(FakeProviderController):
+    """A catalogue spanning the three credential situations the picker must tell
+    apart: a stored credential, none at all, and a local server that needs none.
+
+    ``store_error`` is the store failing to answer — SQLite locked, file gone —
+    which the real controller reports as ``None`` from ``usable_providers`` rather
+    than as an empty set, because "I cannot tell" and "you have nothing" are
+    different answers.
+    """
+
+    def __init__(
+        self, stored: tuple[str, ...] = ("openrouter",), store_error: bool = False
+    ) -> None:
+        super().__init__()
+        self.stored = set(stored)
+        self.store_error = store_error
+
+    def login_providers(self):
+        return [
+            _FakeDef("openrouter", "OpenRouter", None, ("router",)),
+            _FakeDef("anthropic", "Anthropic", None, ("claude",)),
+            _FakeDef("ollama", "Ollama", None, ()),
+        ]
+
+    def has_any_credential(self, provider):
+        if self.store_error:
+            raise RuntimeError("credential store locked")
+        return provider in self.stored
+
+    def is_usable(self, provider):
+        # Ollama stands in for `allows_missing_api_key`: a local server runs with
+        # no credential at all, so a filter keyed on credentials alone would hide
+        # the one provider that always works.
+        return provider == "ollama" or self.has_any_credential(provider)
+
+    def usable_providers(self):
+        if self.store_error:
+            return None
+        return {d.id for d in self.login_providers() if self.is_usable(d.id)}
+
+    def static_catalogue(self):
+        from local_operator.providers.controller import CatalogueEntry
+
+        usable = self.usable_providers()
+        return [
+            CatalogueEntry(
+                provider=provider,
+                model_id=model_id,
+                label=model_id,
+                context_window=200_000,
+                input_price=3.0,
+                output_price=15.0,
+                connected=usable is None or provider in usable,
+                aggregated=provider == "openrouter",
+            )
+            for provider, model_id in (
+                ("openrouter", "deepseek/deepseek-chat"),
+                ("anthropic", "claude-opus-5"),
+                ("ollama", "qwen3:8b"),
+            )
+        ]
+
+    async def live_catalogue(self, *, ttl_s=None):
+        return self.static_catalogue(), {}
+
+
+async def _open_model_picker(app, pilot):
+    """Type ``/model `` the way a user does and settle the live refresh."""
+    editor = app.query_one(Editor)
+    editor.focus()
+    await pilot.pause()
+    await pilot.press("slash", "m", "o", "d", "e", "l", "space")
+    # Twice: the first frame is the static catalogue, the second is the worker's
+    # live one. Asserting on the first would test the wrong list.
+    await pilot.pause()
+    await pilot.pause()
+    return editor.model_picker
+
+
+@pytest.mark.asyncio
+async def test_the_model_list_offers_what_the_user_can_actually_run() -> None:
+    """The list is a set of choices. A row whose only outcome is a login prompt is
+    not one, and it costs a line of a fourteen-row window."""
+    ctrl = _AccessController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        picker = await _open_model_picker(app, pilot)
+        offered = {row.selector for row in picker.rows()}
+    # openrouter has a credential; ollama needs none by definition; anthropic has
+    # neither and is the one the user cannot act on.
+    assert offered == {"openrouter/deepseek/deepseek-chat", "ollama/qwen3:8b"}, offered
+
+
+@pytest.mark.asyncio
+async def test_the_hidden_models_are_counted_with_the_command_that_reveals_them() -> None:
+    """Discoverability was the whole argument for the old show-everything list.
+    The count keeps it, at one footer line instead of the visible catalogue."""
+    ctrl = _AccessController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        picker = await _open_model_picker(app, pilot)
+        footer = picker.render_text(90).plain.split("\n")[-1]
+    assert "1 hidden" in footer, footer
+    assert "/login <provider>" in footer, footer
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_credential_store_shows_every_model_not_none() -> None:
+    """An empty picker claims the user owns no models, which is exactly what the
+    app failed to find out. Showing an unfiltered list is the recoverable error."""
+    ctrl = _AccessController(store_error=True)
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        picker = await _open_model_picker(app, pilot)
+        offered = {row.selector for row in picker.rows()}
+        footer = picker.render_text(90).plain.split("\n")[-1]
+    assert "anthropic/claude-opus-5" in offered, offered
+    assert len(offered) == 3, offered
+    # …and it says so, rather than quietly presenting a list it could not filter.
+    assert "credential check unavailable" in footer, footer
+
+
+@pytest.mark.asyncio
+async def test_a_new_credential_reaches_the_list_without_a_restart() -> None:
+    """`/login anthropic` then `/model` is one continuous action. Rows built once
+    at boot would make the user restart the app to see what they just unlocked."""
+    ctrl = _AccessController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        picker = await _open_model_picker(app, pilot)
+        assert not any(row.provider == "anthropic" for row in picker.rows())
+
+        ctrl.stored.add("anthropic")  # what a completed /login stores
+        editor = app.query_one(Editor)
+        editor.text = ""  # close the list; the next `/model` rebuilds it
+        await pilot.pause()
+        picker = await _open_model_picker(app, pilot)
+        offered = {row.selector for row in picker.rows()}
+    assert "anthropic/claude-opus-5" in offered, offered
+
+
+class _SwitchableSession(FakeSession):
+    """A session whose label follows ``set_model``, as the real one's does — the
+    confirmation names the model, so a frozen label would not test it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._label = "openrouter/deepseek/deepseek-chat"
+
+    @property
+    def model_label(self) -> str:
+        return self._label
+
+    def set_model(self, spec) -> None:
+        self._label = f"{spec.provider}/{spec.model_id}"
+
+
+@pytest.mark.asyncio
+async def test_switching_confirms_access_instead_of_warning_about_it() -> None:
+    """The old line told the user to go and check something the app knew, on every
+    provider change including the ones that were fine."""
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/model anthropic/claude-opus-5")
+        await pilot.pause()
+        text = _transcript_text(app)
+    assert "anthropic/claude-opus-5" in text, text
+    assert "anthropic logged in" in text, text
+    assert "make sure you are logged in" not in text, text
+
+
+@pytest.mark.asyncio
+async def test_switching_without_a_credential_names_the_one_fix() -> None:
+    """ "needs login" is the same word `/provider` and the `/login` picker use, and
+    the command is the entire remedy — no second surface to go and consult."""
+    session = _SwitchableSession()
+    ctrl = _AccessController()
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/model anthropic/claude-opus-5")
+        await pilot.pause()
+        text = _transcript_text(app)
+    assert "anthropic needs login — /login anthropic" in text, text
+    assert "make sure you are logged in" not in text, text
+
+
+@pytest.mark.asyncio
+async def test_a_hidden_model_is_still_reachable_by_typing_its_selector() -> None:
+    """Filtering the LIST is not a lock on the command. A user who knows the id —
+    from `/provider`, from docs, from the model they used yesterday — types it and
+    gets the switch plus the one thing they are missing, not a refusal."""
+    session = _SwitchableSession()
+    ctrl = _AccessController()
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.text = "/model anthropic/claude-opus-5"
+        await pilot.pause()
+        assert editor.model_picker.suggestions() == [], "premise: the row is hidden"
+        await pilot.press("enter")
+        await pilot.pause()
+        text = _transcript_text(app)
+    assert session.model_label == "anthropic/claude-opus-5"
+    assert "anthropic needs login — /login anthropic" in text, text
+
+
+@pytest.mark.asyncio
+async def test_a_failed_credential_check_is_reported_as_itself() -> None:
+    """Neither a confirmation the app cannot make nor the old blanket warning: the
+    store is what broke, and naming it is what makes it fixable."""
+    session = _SwitchableSession()
+    ctrl = _AccessController(store_error=True)
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/model anthropic/claude-opus-5")
+        await pilot.pause()
+        text = _transcript_text(app)
+    assert "cannot check anthropic credentials: credential store locked" in text, text
+    assert "logged in" not in text, text
+
+
+@pytest.mark.asyncio
+async def test_a_failing_turn_shows_the_providers_own_error() -> None:
+    """The 400 that started this: a switch-time guess about logins was on screen
+    while the real reason — a rejected parameter — came from the provider. Only
+    the provider's own words tell the user what to change."""
+    session = FakeSession()
+
+    async def prompt(text, attachments=None):
+        raise RuntimeError("HTTP 400: `temperature` is deprecated for this model.")
+
+    session.prompt = prompt  # type: ignore[assignment]
+    app = OperatorApp(lambda: _factory(session), provider_controller=_AccessController())
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.press("h", "i", "enter")
+        await pilot.pause()
+        text = _transcript_text(app)
+    assert "HTTP 400: `temperature` is deprecated for this model." in text, text

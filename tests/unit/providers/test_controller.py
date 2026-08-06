@@ -280,3 +280,49 @@ def test_a_reseller_is_flagged_so_the_picker_can_prefer_the_direct_route(
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     for entry in controller.static_catalogue():
         assert entry.aggregated == (entry.provider in ("openrouter", "radient")), entry
+
+
+def test_usable_providers_agrees_with_is_usable_in_one_store_read(
+    controller, store, monkeypatch
+) -> None:
+    """The picker asks about the whole registry on one keystroke, so it asks once.
+    Two predicates answering the same question is how surfaces drift apart."""
+    for name in _USAGE_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    store.upsert_credential("anthropic", {"access": "tok", "refresh": "ref"})
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds-test")
+
+    usable = controller.usable_providers()
+    assert usable is not None
+    assert "anthropic" in usable, "stored credential"
+    assert "deepseek" in usable, "env key"
+    assert "ollama" in usable, "needs no credential at all"
+    assert "openrouter" not in usable, "neither"
+    for definition in controller.login_providers():
+        assert (definition.id in usable) == controller.is_usable(definition.id), definition.id
+
+
+def test_an_unreadable_store_answers_none_rather_than_empty(controller, store) -> None:
+    """ "You have no credentials" and "I could not look" are different answers, and
+    a caller that filters a model list on the first would show an empty picker."""
+
+    def boom(provider=None):
+        raise RuntimeError("database is locked")
+
+    store.list_credentials = boom  # type: ignore[assignment]
+    assert controller.usable_providers() is None
+
+
+def test_a_catalogue_survives_a_store_that_cannot_be_read(controller, store) -> None:
+    """The catalogue is what the picker paints; a locked SQLite file must cost the
+    auth ANNOTATION, never the list. Unknown reads as connected because the
+    alternative marks every model as needing a login the app never checked for."""
+
+    def boom(provider=None):
+        raise RuntimeError("database is locked")
+
+    store.list_credentials = boom  # type: ignore[assignment]
+    entries = controller.static_catalogue()
+    assert entries
+    assert all(entry.connected for entry in entries)

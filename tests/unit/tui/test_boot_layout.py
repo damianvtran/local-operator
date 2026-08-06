@@ -26,9 +26,14 @@ import pytest
 from rich.cells import cell_len
 
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.app import BOOT_LAYOUT_CLASS, OperatorApp
+from local_operator.tui.app import (
+    BOOT_CARD_CLASS,
+    BOOT_CARD_MIN_INSET,
+    BOOT_LAYOUT_CLASS,
+    OperatorApp,
+)
 from local_operator.tui.widgets.editor import Editor
-from local_operator.tui.widgets.transcript import TranscriptView
+from local_operator.tui.widgets.transcript import GAP_CLASS, NoticeBlock, TranscriptView
 from local_operator.tui.widgets.welcome import WelcomeView
 
 TCSS = Path(__file__).parent.parent.parent.parent / "local_operator" / "tui" / "local_operator.tcss"
@@ -96,18 +101,29 @@ def _make_app() -> OperatorApp:
 
 
 async def _settle(pilot, ticks: int = 24) -> None:  # type: ignore[no-untyped-def]
-    """Pause until the splash's poll timer retires (see test_snapshot._settle).
+    """Pause until the boot frame stops moving, not for a fixed count.
 
-    A fixed pause count races that timer, and the race changes the frame's
-    segmentation rather than its characters — invisible here, but the same flake
-    the snapshot suite had to fix.
+    Two things settle here and both are timing-dependent: the splash's poll timer
+    (see test_snapshot._settle) and the composition's vertical reserve, which is
+    measured off a laid-out frame and re-measured until it agrees with itself
+    (OperatorApp._sync_boot_composition). A fixed pause count races both, and the
+    race changes the frame's geometry rather than only its segmentation.
     """
     welcome = pilot.app.query_one(WelcomeView)
+    previous: tuple[bool, int] | None = None
     for _ in range(ticks):
         await pilot.pause()
-        if welcome._timer is None:
+        current = _reserve(pilot.app)
+        if welcome._timer is None and current == previous:
             break
+        previous = current
     await pilot.pause()
+
+
+def _reserve(app: OperatorApp) -> tuple[bool, int]:
+    """The composition's chrome: the ground row above the card, and the lift."""
+    dock = app.query_one("#input-dock")
+    return dock.has_class(GAP_CLASS), dock.styles.padding.bottom
 
 
 def _rows(app: OperatorApp) -> list[str]:
@@ -115,29 +131,39 @@ def _rows(app: OperatorApp) -> list[str]:
     return [strip.text for strip in app.screen._compositor.render_strips()]
 
 
-def _clamp() -> tuple[float, int]:
-    """The card's clamp, read from the sheet that implements it.
+def _clamp() -> tuple[int, int, int]:
+    """The card's clamp — proportion, floor and cap — read from the sheet.
 
     Parsed rather than duplicated as a constant: the stylesheet is the only place
-    the numbers live, so a change to the proportion or the floor lands here as an
-    arithmetic failure instead of quietly agreeing with a stale copy. The
-    ``max-width`` is asserted, not read — it carries no number, it is what makes
-    the floor yield on a terminal narrower than 75 cells.
+    the numbers live, so a change to any of the three lands here as an arithmetic
+    failure instead of quietly agreeing with a stale copy. Read off the
+    ``.boot-card`` selector, because the clamp is CONDITIONAL — a plain
+    ``Screen.boot`` panel is the full-width bar the base rule gives it, and the
+    app applies the class only where the resolved width leaves a real margin.
     """
-    rule = re.search(r"^Screen\.boot #input-shell\s*\{([^}]*)\}", TCSS.read_text(), re.MULTILINE)
+    rule = re.search(
+        r"^Screen\.boot\.boot-card #input-shell\s*\{([^}]*)\}", TCSS.read_text(), re.MULTILINE
+    )
     assert rule is not None, "the boot card's clamp rule is gone from the stylesheet"
     body = rule.group(1)
-    fraction = int(re.search(r"width:\s*(\d+)%", body).group(1)) / 100  # type: ignore[union-attr]
+    percent = int(re.search(r"width:\s*(\d+)%", body).group(1))  # type: ignore[union-attr]
     floor = int(re.search(r"min-width:\s*(\d+)", body).group(1))  # type: ignore[union-attr]
-    assert "max-width: 100%;" in body, "without this the floor overflows a narrow terminal"
-    return fraction, floor
+    cap = int(re.search(r"max-width:\s*(\d+)\s*;", body).group(1))  # type: ignore[union-attr]
+    return percent, floor, cap
 
 
 def _expected_card_width(terminal_width: int) -> int:
-    """``max(floor, fraction of the content box)``, never wider than the box."""
-    fraction, floor = _clamp()
-    content = terminal_width - 2  # the screen's one-cell left and right inset
-    return min(content, max(floor, int(content * fraction)))
+    """The width the panel actually renders at, clamp AND threshold.
+
+    ``min(box, cap, max(floor, proportion))`` when that leaves at least
+    ``BOOT_CARD_MIN_INSET`` cells of ground, else the full box: an inset of one to
+    three cells is not a card, so the app does not ask for one (see
+    ``OperatorApp._sync_boot_card``).
+    """
+    percent, floor, cap = _clamp()
+    box = terminal_width - 2  # the screen's one-cell left and right inset
+    card = min(box, cap, max(floor, box * percent // 100))
+    return card if box - card >= BOOT_CARD_MIN_INSET else box
 
 
 @pytest.mark.asyncio
@@ -177,14 +203,18 @@ async def test_layout_flips_on_the_first_conversation_block_and_back_on_clear() 
 
 
 @pytest.mark.asyncio
-async def test_the_splash_rests_on_the_card_when_the_terminal_has_room() -> None:
-    """Every spare row goes ABOVE the block, none between it and the card.
+async def test_the_splash_stays_attached_to_the_card_when_the_terminal_has_room() -> None:
+    """The pair travels together: exactly ONE row between them, whatever the slack.
 
-    Pinned at 40 rows rather than 28 on purpose: at 28 the block fills the region
-    it is given, so any vertical rule at all produces the same frame and the test
-    would pass with the alignment deleted. The slack only exists to be misplaced
-    on a tall terminal, which is where a gap between the splash and the input
-    turns the composition back into a logo adrift over a bar.
+    Pinned at 40 rows rather than 28 on purpose: at 28 the block fills the region it
+    is given, so any vertical rule at all produces the same frame and the test would
+    pass with the placement deleted. The slack only exists to be misplaced on a tall
+    terminal, which is where rows opening up between the splash and the input turn
+    the composition back into a logo adrift over a bar.
+
+    Where the slack GOES is the centring test below; this is the invariant that
+    survived it — the separator is one row, and the row above the block is empty
+    because the block starts where the slack ends, at either end of it.
     """
     app = _make_app()
     async with app.run_test(size=(100, 40)) as pilot:
@@ -192,8 +222,12 @@ async def test_the_splash_rests_on_the_card_when_the_terminal_has_room() -> None
         await _settle(pilot)
         welcome = app.query_one(WelcomeView).region
         region = app.query_one(TranscriptView).content_region
-        assert region.height - welcome.height >= 8, "premise: this size has real slack"
-        assert welcome.bottom == app.query_one("#input-dock").region.y
+        dock = app.query_one("#input-dock").region
+        assert region.height - welcome.height >= 1, "premise: this size has slack to place"
+        # The separator is the dock's own top margin, which sits OUTSIDE its region:
+        # the block ends one row above the dock, and the card is the dock's first row.
+        assert welcome.bottom == dock.y - 1
+        assert app.query_one("#input-shell").region.y == dock.y
         rows = _rows(app)
         assert not rows[welcome.y - 1].strip(), "slack above"
         assert rows[welcome.y].strip(), "the block starts where the slack ends"
@@ -322,3 +356,217 @@ async def test_the_command_picker_opens_inside_the_boot_card() -> None:
         welcome = app.query_one(WelcomeView)
         assert welcome.region.bottom <= app.query_one("#input-dock").region.y
         assert welcome.region.height <= app.query_one(TranscriptView).content_region.height
+
+
+@pytest.mark.asyncio
+async def test_the_card_is_a_card_or_a_bar_and_never_a_sliver() -> None:
+    """Swept one column at a time, because the defect only existed in a band.
+
+    ``max(75, 70%)`` with no lower guard put 1 to 3 cells of ground beside the
+    panel between 78 and 84 columns — at 80, the commonest terminal, 2 on the left
+    and 3 on the right. A borderless fill offset by less than the app's own gutter
+    does not read as a card; it reads as a full-width bar that is misaligned, and
+    there is no edge for the eye to attribute the offset to. So every width is one
+    of exactly two things: a bar that meets both walls of the content box, or a
+    card with a real margin either side.
+
+    One app RESIZED rather than sixty booted: the resize is also the event the
+    threshold is decided on, so this exercises the path a user actually takes when
+    they drag their terminal across the band.
+    """
+    app = _make_app()
+    async with app.run_test(size=(72, 28)) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        for width in list(range(72, 131)) + [160, 190, 200]:
+            await pilot.resize_terminal(width, 28)
+            await _settle(pilot)
+            card = app.query_one("#input-shell").region
+            left = card.x - 1  # minus the screen's own one-cell inset
+            right = (width - 1) - card.right
+            if not app.screen.has_class(BOOT_CARD_CLASS):
+                assert (left, right) == (0, 0), (width, "not a card, so it is the honest bar")
+            else:
+                assert left >= BOOT_CARD_MIN_INSET // 2, (width, left, right)
+                assert right >= BOOT_CARD_MIN_INSET // 2, (width, left, right)
+                assert abs(left - right) <= 1, (width, "centred, give or take an odd cell")
+            assert card.width == _expected_card_width(width), width
+            for row in _rows(app):
+                assert cell_len(row) <= width, (width, repr(row))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(190, 48), (160, 48), (120, 40)])
+async def test_a_wide_terminal_gets_a_card_and_not_a_wide_bar(size: tuple[int, int]) -> None:
+    """The proportion needs a ceiling as much as a floor.
+
+    Unbounded, ``70%`` resolves to 131 cells at 190 columns, which is a bar again:
+    what makes a borderless surface read as a card is the ground around it, and a
+    fill that wide has none to speak of. The cap also has to leave the card clearly
+    wider than the block above it, or the composition inverts and the input starts
+    reading as a caption to the splash.
+    """
+    _percent, _floor, cap = _clamp()
+    app = _make_app()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        card = app.query_one("#input-shell").region
+        assert card.width <= cap
+        rows = _rows(app)
+        widest_above = max(
+            (len(row.rstrip()) - (len(row) - len(row.lstrip())) for row in rows[: card.y]),
+            default=0,
+        )
+        assert card.width > widest_above, (card.width, widest_above)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("notices", [1, 2, 3])
+async def test_notices_under_the_splash_never_scroll_the_region(notices: int) -> None:
+    """The splash shares its region, so it may only budget for what is LEFT.
+
+    Budgeting the whole region overdrew it by exactly the siblings' rows, and the
+    boot layout bottom-aligns the column — so what scrolled out of sight was the top
+    of the logo, with a scrollbar thumb appearing beside it. Both triggers are
+    ordinary: the ``/clear`` receipt is one row, and a failing MCP server is another
+    each. Measured at 96x28, where the block wants every row the region has.
+    """
+    app = _make_app()
+    async with app.run_test(size=(96, 28)) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        for index in range(notices):
+            app._system_notice(f"MCP srv{index} failed: command not found", "error")
+        await _settle(pilot)
+
+        transcript = app.query_one(TranscriptView)
+        assert transcript.scroll_offset.y == 0, "the top of the block is what scrolls away"
+        assert transcript.show_vertical_scrollbar is False
+        assert transcript.virtual_size.height <= transcript.size.height
+        welcome = app.query_one(WelcomeView)
+        region = transcript.content_region
+        assert welcome.region.y >= region.y, "the block starts inside the region"
+        assert welcome.region.bottom <= region.bottom
+        # And the splash still owns the rows it did not give away.
+        assert welcome.region.height > 0
+
+
+@pytest.mark.asyncio
+async def test_the_mark_survives_two_failed_servers_at_the_tightest_size() -> None:
+    """96x28 is where the block wants the whole region, so it is where the budget
+    shows: two failing servers cost three rows (a row each plus the separator), and
+    the ladder spends the version number rather than the product's own mark."""
+    app = _make_app()
+    async with app.run_test(size=(96, 28)) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        app._system_notice("MCP one failed: command not found", "error")
+        app._system_notice("MCP two failed: command not found", "error")
+        await _settle(pilot)
+        frame = "\n".join(_rows(app))
+        assert "l o c a l   o p e r a t o r" in frame, "the wordmark"
+        assert "▄█████▄" in frame, "the mark's first row — the one that scrolled away"
+        assert frame.count("failed: command not found") == 2
+
+
+@pytest.mark.asyncio
+async def test_the_first_block_under_a_visible_splash_opens_with_one_blank_row() -> None:
+    """A receipt flush against ``ctrl+d  quit`` reads as a line that fell out of the
+    block, not as the answer to what the user just did. One blank row, from the
+    app's one vertical separator class — and left-aligned, because a centred notice
+    would be a second alignment convention.
+    """
+    app = _make_app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        app._clear_transcript()  # its receipt is the one-row block
+        await _settle(pilot)
+
+        blocks = app.query_one(TranscriptView).blocks()
+        assert len(blocks) == 1 and isinstance(blocks[0], NoticeBlock)
+        assert blocks[0].has_class(GAP_CLASS)
+        rows = _rows(app)
+        receipt = blocks[0].region
+        assert "transcript cleared" in rows[receipt.y]
+        assert not rows[receipt.y - 1].strip(), "one blank row between the two blocks"
+        welcome = app.query_one(WelcomeView)
+        assert rows[welcome.region.bottom - 1].strip(), "and the splash's last row is drawn"
+        assert receipt.y == welcome.region.bottom + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(190, 48), (160, 48), (120, 40)])
+async def test_the_composition_is_centred_when_the_rows_are_there(size: tuple[int, int]) -> None:
+    """Splash, separator and card are ONE block, centred in the screen.
+
+    Resting the pair on the bottom of the screen left the upper two thirds of a
+    48-row terminal empty. The slack is split instead — above the splash and below
+    the card — and the card keeps one row of ground above it so the hints are not
+    flush against the fill.
+    """
+    width, height = size
+    app = _make_app()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        region = app.query_one(TranscriptView).content_region
+        welcome = app.query_one(WelcomeView).region
+        card = app.query_one("#input-shell").region
+        above = welcome.y - region.y
+        below = (height - 1) - card.bottom  # the screen's own inset is not slack
+        assert above >= 1, "premise: this size has rows to spare"
+        assert abs(above - below) <= 1, (above, below)
+        rows = _rows(app)
+        assert not rows[card.y - 1].strip(), "a ground row above the card, not a fill row"
+        assert rows[welcome.bottom - 1].strip(), "and the splash ends where it ends"
+        assert welcome.bottom == card.y - 1, "one row, not two"
+
+
+@pytest.mark.asyncio
+async def test_a_short_terminal_keeps_resting_the_splash_on_the_card() -> None:
+    """Centring is CONDITIONAL, and 96x28 is why.
+
+    Every row the composition reserves comes out of the splash's budget, and the
+    splash pays in whole sections: reserving rows to centre a block that already
+    fills the region would trade the mark for air. With nothing spare, the pair
+    rests on the card exactly as it did before — which is the same graceful answer
+    as the docked bar at 40 columns.
+    """
+    app = _make_app()
+    async with app.run_test(size=(96, 28)) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        assert _reserve(app) == (False, 0)
+        welcome = app.query_one(WelcomeView).region
+        assert welcome.bottom == app.query_one("#input-dock").region.y, "rests on the card"
+        assert "▄█████▄" in "\n".join(_rows(app)), "and it kept the mark"
+
+
+@pytest.mark.asyncio
+async def test_the_conversation_layout_reserves_nothing_and_clear_puts_it_back() -> None:
+    """The centred composition is the EMPTY state's, and only the empty state's.
+
+    A reserve left behind after the first block would be a hole under a populated
+    transcript, and the lift lives on the dock — which the conversation layout still
+    docks full-width at the bottom of the screen.
+    """
+    app = _make_app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        assert _reserve(app) != (False, 0), "premise: this size centres"
+
+        app.query_one(Editor).text = "hello"
+        await pilot.press("enter")
+        await _settle(pilot)
+        assert _reserve(app) == (False, 0)
+        shell = app.query_one("#input-shell").region
+        assert shell.width == 118 and shell.x == 1, "full-width bar"
+        assert shell.bottom == 39, "docked against the screen's bottom inset"
+
+        app._clear_transcript()
+        await _settle(pilot)
+        assert app.screen.has_class(BOOT_LAYOUT_CLASS)
+        assert _reserve(app) != (False, 0), "and the centring comes back"

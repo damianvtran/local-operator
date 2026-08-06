@@ -133,6 +133,13 @@ DEFAULT_CONFIG = Config(
             "hosting": "",
             "model_name": "",
             "auto_save_conversation": False,
+            # Ceilings on the ephemeral session store (see
+            # local_operator.session.retention). Any of the three set to 0
+            # disables that dimension; all three at 0 restores the unbounded
+            # behaviour, which is why none of them defaults there.
+            "session_retention_max_sessions": 200,
+            "session_retention_max_bytes": 128 * 1024 * 1024,
+            "session_retention_max_age_days": 30,
         },
     }
 )

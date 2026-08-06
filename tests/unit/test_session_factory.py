@@ -475,6 +475,68 @@ async def test_no_configured_servers_records_a_silent_outcome(monkeypatch) -> No
     assert session.mcp_startup.failed is False
 
 
+@pytest.mark.asyncio
+async def test_a_missing_mcp_sdk_is_reported_once_not_once_per_server(monkeypatch, capsys) -> None:
+    """Without the SDK the manager fails EVERY configured server with the same
+    install instruction, so a three-server machine used to get three identical
+    90-character notices per launch (one toast name, one transcript error and one
+    stderr line each) and a toast reading ``failed: gh, linear, slack`` — which
+    accuses the servers of a fault that is the install's.
+
+    The ``except ImportError`` arm above this path never fires for it: every SDK
+    import in ``local_operator.mcp`` is ``TYPE_CHECKING`` or function-local, so
+    the package imports fine with the SDK absent.
+    """
+    from local_operator.mcp.manager import MCP_SDK_MISSING_ERROR
+    from local_operator.session.mcp_status import MCP_DISCOVERY_KEY
+
+    names = ["gh", "linear", "slack"]
+    manager = FakeMcpManager(configured=names, connected=[])
+
+    async def fake_discover(cwd, auth_store=None):
+        # Exactly what McpManager._connect_round produces with no SDK installed.
+        errors = [{"path": f"mcp:{name}", "error": MCP_SDK_MISSING_ERROR} for name in names]
+        return manager, [], errors
+
+    monkeypatch.setattr("local_operator.mcp.discover_and_load_mcp_tools", fake_discover)
+
+    session = FakeSessionShell()
+    await wire_mcp_into_session(session, [], ".", has_ui=False)
+
+    assert session.mcp_startup.failures == {MCP_DISCOVERY_KEY: MCP_SDK_MISSING_ERROR}
+    # The server tally stays honest: three ARE configured and none came up.
+    assert session.mcp_startup.configured == ("gh", "linear", "slack")
+    # One stderr line for one cause, and its SUBJECT is the layer rather than any
+    # of the three servers (the install hint itself says "MCP servers", so the
+    # subject is what is checked).
+    stderr = capsys.readouterr().err.strip().split("\n")
+    assert len(stderr) == 1, stderr
+    assert "Warning: MCP discovery:" in stderr[0]
+    for name in names:
+        assert f"MCP server {name}" not in stderr[0]
+    assert "local-operator[mcp]" in stderr[0]
+
+
+@pytest.mark.asyncio
+async def test_a_layer_failure_keys_on_the_layer_not_on_a_filename(monkeypatch) -> None:
+    """The discovery wrapper reports a hard failure as ``.mcp.json``, which a
+    front end rendering ``MCP {name} failed`` turns into a sentence about a file
+    that is not a server. One synthetic key for "not a server", the same one the
+    raising arm uses."""
+    from local_operator.session.mcp_status import MCP_DISCOVERY_KEY
+
+    manager = FakeMcpManager(configured=["gh"], connected=[])
+
+    async def fake_discover(cwd, auth_store=None):
+        return manager, [], [{"path": ".mcp.json", "error": "invalid json at line 3"}]
+
+    monkeypatch.setattr("local_operator.mcp.discover_and_load_mcp_tools", fake_discover)
+
+    session = FakeSessionShell()
+    await wire_mcp_into_session(session, [], ".", has_ui=True)
+    assert session.mcp_startup.failures == {MCP_DISCOVERY_KEY: "invalid json at line 3"}
+
+
 # --- CL-08: dispose closes the auth store ---------------------------------------------
 
 

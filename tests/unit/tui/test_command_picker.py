@@ -22,6 +22,7 @@ from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import SLASH_COMMANDS
 from local_operator.tui.autocomplete import ArgumentChoice, SlashCommand
 from local_operator.tui.widgets.command_picker import (
+    MAX_VISIBLE_ROWS,
     CommandPicker,
     PickerMode,
     argument_suggestions,
@@ -54,8 +55,18 @@ PROVIDER_CHOICES = [
 
 
 def _logout_choices() -> list[ArgumentChoice]:
-    """What `/logout` may offer: only providers holding a stored credential."""
-    return [choice for choice in PROVIDER_CHOICES if choice.detail == "logged in"]
+    """What `/logout` offers, shaped as the app builds it.
+
+    Only providers holding a stored credential, and each row states the KIND it
+    will remove rather than the "logged in" that is true of every row on this
+    list by construction — in the danger tint, because every row here destroys
+    something.
+    """
+    return [
+        ArgumentChoice(choice.name, choice.description, choice.aliases, "remove api key", True)
+        for choice in PROVIDER_CHOICES
+        if choice.detail == "logged in"
+    ]
 
 
 class PickerHarnessApp(App[None]):
@@ -999,10 +1010,31 @@ async def test_escape_closes_the_provider_list_and_leaves_the_text() -> None:
 
 
 @pytest.mark.asyncio
-async def test_clicking_a_provider_row_runs_it() -> None:
+async def test_clicking_a_login_row_runs_it() -> None:
     """A click names one exact row with a pointer — that is not the matcher's
     guess the keyboard gate protects against, and a click that only filled the
     field would leave the user finishing a choice they already made."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/login "
+        await pilot.pause()
+        await pilot.click(CommandPicker, offset=(4, 1))
+        await pilot.pause()
+        assert app.submissions == ["/login alibaba"]
+
+
+@pytest.mark.asyncio
+async def test_clicking_a_logout_row_fills_the_field_and_waits_for_enter() -> None:
+    """The one list where a click must not act on its own.
+
+    The picker sits directly above the input row — the row a user clicks to put
+    the caret in the field — so a click that ran the row put "one misclick, one
+    credential gone" a single pixel away, with no gate at all: the keyboard path
+    asks `/logout` for the id in full, and the mouse path went straight to the
+    handler. An OAuth credential costs another browser login to get back.
+    """
     app = PickerHarnessApp()
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
@@ -1011,4 +1043,303 @@ async def test_clicking_a_provider_row_runs_it() -> None:
         await pilot.pause()
         await pilot.click(CommandPicker, offset=(4, 1))
         await pilot.pause()
+        assert app.submissions == [], "a click must not remove a credential"
+        assert app.editor.text == "/logout alibaba", "the row is filled in, not run"
+
+        # And the confirmation is one keystroke: the buffer now names the id in
+        # full, which is exactly what the destructive gate asks for.
+        await pilot.press("enter")
+        await pilot.pause()
         assert app.submissions == ["/logout alibaba"]
+
+
+# ---------------------------------------------------------------------------
+# the state COLUMN — the thing the list is scanned by
+# ---------------------------------------------------------------------------
+
+#: What `/logout` offers: the credential KIND being removed, in the danger tint.
+#: Two widths and a row with no description, which is the shape the real
+#: catalogue produces (`openrouter`'s name says nothing its id does not).
+LOGOUT_CHOICES = [
+    ArgumentChoice("anthropic", "Claude Pro/Max", ("claude",), "remove oauth", True),
+    ArgumentChoice("xai", "Grok API key", ("grok",), "remove api key", True),
+    ArgumentChoice("openrouter", "", ("router",), "remove api key", True),
+]
+
+
+def _column_starts(rows: list[str], probes: tuple[str, ...]) -> set[int]:
+    """Where each probe begins, asserted PRESENT first so the set is not vacuous.
+
+    A comparison over probes that never rendered is trivially satisfied — one
+    surviving string makes ``len(starts) == 1`` true and an empty set makes the
+    loop never run at all.
+    """
+    text = "\n".join(rows)
+    missing = [probe for probe in probes if probe not in text]
+    assert missing == [], f"probe strings absent, so the comparison is vacuous: {missing}"
+    return {row.rindex(probe) for row in rows for probe in probes if probe in row}
+
+
+@pytest.mark.parametrize("width", [41, 60, 80, 200])
+def test_the_state_column_starts_at_one_x_for_every_login_row(width: int) -> None:
+    """Three states of three different lengths, one left edge to scan.
+
+    Right-aligning each state to its OWN row's trailing edge started them at
+    three different columns, so answering "which of these am I logged into"
+    meant reading every string instead of running an eye down one edge. The
+    column is right-aligned; the strings inside it are not.
+    """
+    rows = [row.plain for row in _argument_picker(list(PROVIDER_CHOICES)).render_rows(width)]
+    starts = _column_starts(rows, ("logged in", "env key", "needs login"))
+    assert len(starts) == 1, f"states start at different columns: {sorted(starts)}"
+    # And the COLUMN is still pinned to the trailing edge: the widest state ends
+    # exactly one edge margin short of the row's last cell.
+    assert starts.pop() + cell_len("needs login") == width - 2
+
+
+@pytest.mark.parametrize("width", [41, 60, 80, 200])
+def test_the_state_column_starts_at_one_x_for_every_logout_row(width: int) -> None:
+    """Same for `/logout`, whose two kinds differ in length by two cells."""
+    rows = [row.plain for row in _argument_picker(list(LOGOUT_CHOICES)).render_rows(width)]
+    starts = _column_starts(rows, ("remove oauth", "remove api key"))
+    assert len(starts) == 1, f"kinds start at different columns: {sorted(starts)}"
+    assert starts.pop() + cell_len("remove api key") == width - 2
+
+
+def test_the_column_survives_the_description_collapse_and_stays_aligned() -> None:
+    """Below 41 cells the description goes and the state stays — still a column.
+
+    This is the width where the rag was worst: with no description left, the
+    states were the only thing on the row and they still did not line up.
+    """
+    rows = [row.plain for row in _argument_picker(list(PROVIDER_CHOICES)).render_rows(40)]
+    assert "Anthropic" not in "\n".join(rows), "premise: the description has collapsed"
+    starts = _column_starts(rows, ("logged in", "env key", "needs login"))
+    assert len(starts) == 1, f"states start at different columns: {sorted(starts)}"
+
+
+@pytest.mark.parametrize("width", [16, 20, 40, 80, 200])
+def test_a_logout_row_fills_exactly_the_render_width(width: int) -> None:
+    """The exact-width rule holds for the reserved column and the alert tint too:
+    a column sized from the WIDEST detail must not push the longest row past the
+    edge, and the danger style must not change the cell count."""
+    rows = _argument_picker(list(LOGOUT_CHOICES)).render_rows(width)
+    assert len(rows) == len(LOGOUT_CHOICES)
+    for row in rows:
+        assert "\n" not in row.plain
+        assert cell_len(row.plain) == width
+
+
+def test_the_alert_tint_paints_the_detail_in_danger() -> None:
+    """`/logout`'s rows are destructive by construction, so the state column is
+    the tool card's outcome red — not a second accent, and never on `/login`."""
+    danger = theme_mod.semantic_color("danger").lower()
+    muted = theme_mod.semantic_color("muted").lower()
+
+    def detail_colour(row, detail: str) -> str:
+        spans = [s for s in row.spans if row.plain[s.start : s.end] == detail]
+        assert spans, f"no span covers {detail!r} exactly"
+        return spans[-1].style.color.triplet.hex.lower()
+
+    alerted = _argument_picker(list(LOGOUT_CHOICES)).render_rows(80)
+    assert detail_colour(alerted[1], "remove api key") == danger
+
+    ordinary = _argument_picker(list(PROVIDER_CHOICES)).render_rows(80)
+    assert detail_colour(ordinary[3], "needs login") == muted
+
+
+@pytest.mark.parametrize("width", range(20, 121))
+def test_no_render_width_ever_clips_a_provider_id(width: int) -> None:
+    """The detail yields before the NAME does, at every width.
+
+    A fixed twelve-cell floor answered "would a twelve-cell name fit" for a list
+    whose longest id is thirteen, so exactly one width rendered
+    `openai-devi…` while keeping an intact `needs login` beside it — the state
+    column taking cells from the only text on the row the user can type.
+    """
+    choices = [
+        ArgumentChoice("openai", "ChatGPT Plus/Pro", (), "needs login"),
+        ArgumentChoice("openai-device", "ChatGPT device code", (), "needs login"),
+        ArgumentChoice("xai-oauth", "Grok OAuth", (), "logged in"),
+    ]
+    rows = [row.plain for row in _argument_picker(choices).render_rows(width)]
+    for choice, row in zip(choices, rows):
+        assert choice.name in row, f"id clipped at width {width}: {row!r}"
+
+
+# ---------------------------------------------------------------------------
+# the destructive gate
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query,row", [("aib", "alibaba"), ("anthrpic", "anthropic")])
+async def test_a_single_fuzzy_survivor_never_removes_a_credential(query: str, row: str) -> None:
+    """One match is not evidence on a list that DELETES.
+
+    The matcher is a subsequence matcher, so a query that spells nothing can
+    still leave exactly one row standing — and "there is only one match" then
+    read as "the user must have meant it". A typo one letter off a real id lands
+    in this shape, and the outcome was an unrecoverable OAuth credential gone on
+    a single Enter.
+    """
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = f"/logout {query}"
+        await pilot.pause()
+        assert [name for name, _ in app.editor.picker.suggestions()] == [row], "premise: one match"
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.submissions == [], "a query the user never spelled must not act"
+        assert app.editor.text == f"/logout {row}", "it completes instead"
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.submissions == [f"/logout {row}"], "and the named id runs"
+
+
+@pytest.mark.asyncio
+async def test_a_single_fuzzy_survivor_still_runs_on_a_login_list() -> None:
+    """The harder rule is `/logout`'s alone: `/login` puts nothing at risk, and
+    making every list ask twice would spend a keystroke to protect nothing."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/login aib"
+        await pilot.pause()
+        assert [name for name, _ in app.editor.picker.suggestions()] == ["alibaba"]
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.submissions == ["/login alibaba"]
+
+
+@pytest.mark.asyncio
+async def test_arrowing_onto_a_logout_row_still_runs_it_on_one_enter() -> None:
+    """Deliberately kept, not overlooked.
+
+    Arrowing IS the user reading the list and choosing, and requiring a second
+    Enter after an explicit move would break the symmetry the shared picker
+    leans on — the same keys mean the same thing on both lists. What makes it
+    safe is that the arrowed row states its own consequence: the detail column
+    names the credential kind about to be removed, in the danger tint, so the
+    row the highlight lands on says what Enter will do.
+    """
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/logout "
+        await pilot.pause()
+        await pilot.press("down")
+        await pilot.pause()
+        picker = app.editor.picker
+        assert picker.highlighted_name() == "alibaba"
+
+        _name, choice = picker.suggestions()[picker.selected_index]
+        assert choice.detail, "the arrowed row must state what Enter destroys"
+        assert choice.alert, "and state it in the destructive tint"
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.submissions == ["/logout alibaba"]
+
+
+@pytest.mark.asyncio
+async def test_escape_lands_in_the_tick_before_the_rows_arrive() -> None:
+    """The rows are one message-loop tick behind the keystroke that opens the
+    list, and Esc inside that window was dropped: the user dismissed a list and
+    then watched it appear anyway."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/logout "
+        picker = app.editor.picker
+        assert not picker.is_open(), "premise: the rows have not arrived yet"
+        assert picker.is_pending()
+
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+        assert not picker.is_open(), "the dismissal survives the rows landing"
+        assert app.editor.text == "/logout ", "and the typed text is untouched"
+
+
+# ---------------------------------------------------------------------------
+# how many rows an argument list is worth
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "height,visible",
+    [(28, 10), (20, 6), (12, 3)],
+)
+async def test_an_argument_list_is_budgeted_from_the_rows_available(
+    height: int, visible: int
+) -> None:
+    """A COMMAND row is a described one-liner you read; an argument row is one
+    item in a set you SCAN. Eight was reasoned from the first and applied to the
+    second, which hid four of twelve providers while seven rows above the list
+    sat empty — on the one surface whose whole job is "what is supported".
+
+    The floor still holds at 12 rows, where there genuinely is no room.
+    """
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, height)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/login "
+        await pilot.pause()
+        # AFTER the buffer opened the list: the harness answers the opening
+        # message with its own four rows, so a set made before would be replaced.
+        app.editor.picker.set_choices(
+            [ArgumentChoice(f"provider-{index:02d}", "", (), "needs login") for index in range(12)]
+        )
+        await pilot.pause()
+        start, end, total = app.editor.picker.visible_window()
+        assert (start, end, total) == (0, visible, 12)
+
+
+@pytest.mark.asyncio
+async def test_the_command_list_keeps_its_own_smaller_budget() -> None:
+    """Unchanged: the command list's cap is reasoned from the editor's own
+    max-height, and a picker that towered over the field would be the trade the
+    argument budget is careful not to make everywhere."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 28)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/"
+        await pilot.pause()
+        start, end, total = app.editor.picker.visible_window()
+        assert (start, end) == (0, MAX_VISIBLE_ROWS)
+        assert total > MAX_VISIBLE_ROWS, "premise: the registry overflows the cap"
+
+
+@pytest.mark.asyncio
+async def test_the_names_align_with_the_text_the_editor_is_completing() -> None:
+    """The picker's gutter is the prompt's own indent, so a name sits under the
+    text it completes rather than one cell to its left.
+
+    Both columns are MEASURED off the rendered frame — nothing here is keyed to
+    a hard-coded x, because the dock's position depends on the layout around it.
+    """
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/login "
+        await pilot.pause()
+        await pilot.pause()
+        lines = [
+            "".join(segment.text for segment in strip)
+            for strip in app.screen._compositor.render_strips()
+        ]
+        typed = next(line for line in lines if "/login" in line)
+        row = next(line for line in lines if "alibaba" in line)
+        assert typed.index("/login") == row.index("alibaba")

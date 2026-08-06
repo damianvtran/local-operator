@@ -76,11 +76,42 @@ MAX_VISIBLE_ROWS = 8
 #: which is the floor omp clamps its own picker to.
 _SCREEN_HEIGHT_DIVISOR = 3
 
+#: An ARGUMENT list gets its own, larger budget: half the screen, less the rows
+#: that are never the list's to take.
+#:
+#: ``MAX_VISIBLE_ROWS`` is reasoned from the COMMAND list, where every row is a
+#: described one-liner the user READS. An argument list is a set they SCAN, and
+#: `/login` is the one surface whose entire job is answering "what is
+#: supported" — capping the twelve providers at eight hid a third of the answer
+#: (openrouter, which this app's catalogue is built around, among it) while
+#: seven rows of the region above the list sat empty. The splash degrades to
+#: make the room, which is the right trade for as long as the list is open.
+#:
+#: The three subtracted rows are the ones BELOW the list inside the screen box
+#: (``Screen.size`` already excludes the app's one-cell edge padding): the
+#: prompt row the picker hangs off, the status band, and the blank line between
+#: them. At the 28-row default this resolves to 10 of the 12 providers, and at
+#: 20 rows to 6.
+_ARGUMENT_HEIGHT_DIVISOR = 2
+_ARGUMENT_CHROME_ROWS = 3
+
+#: Floor for the argument budget on a short terminal, matching the floor the
+#: command list clamps to.
+_ARGUMENT_ROWS_MIN = 3
+
 #: The selection mark. The app's prompt and user blocks already speak ``❯``
 #: (SPINE_INDENT is 2 cells for exactly this reason); the picker reuses that
 #: vocabulary rather than introducing a second cursor glyph.
 _CURSOR = "❯"
-_GUTTER_CELLS = 2
+
+#: Gutter width. THREE, not two: the prompt occupies ``❯`` plus a space and the
+#: editor's own text starts in the third cell, so a two-cell gutter left every
+#: suggestion one cell to the LEFT of the text it completes into — while the
+#: tcss beside it claimed the two columns agreed. On the boot card, where the
+#: prompt rail is the only structure on screen, that one cell is the whole
+#: composition. The cursor still lands in the gutter's first cell, directly
+#: under the prompt chevron.
+_GUTTER_CELLS = 3
 
 #: Primary column: fit-to-content, clamped. Below 12 the names of short
 #: commands stop forming a column at all; above 32 a single long name pushes
@@ -105,10 +136,12 @@ _EDGE_MARGIN = 2
 #: the following Resize corrects — never a list that silently doubles height.
 _MIN_RENDER_WIDTH = 20
 
-#: Floor for the NAME column of an argument row before its ``detail`` is
-#: dropped. The name is the text Tab types into the buffer, so a truncated one
-#: is unusable — the user cannot read what to complete to. ``detail`` is worth
-#: a lot (it is what `/logout` is chosen by) but never worth that.
+#: FLOOR for the NAME column of an argument row before its ``detail`` is
+#: dropped — the minimum, not the answer: see :meth:`CommandPicker._name_floor`,
+#: which raises it to the widest id actually offered. The name is the text Tab
+#: types into the buffer, so a truncated one is unusable — the user cannot read
+#: what to complete to. ``detail`` is worth a lot (at `/logout` it names the
+#: credential being removed) but never worth that.
 _MIN_NAME_CELLS = _PRIMARY_COLUMN_MIN
 
 
@@ -313,6 +346,10 @@ class CommandPicker(Static):
         self._hovered: int | None = None
         self._query = ""
         self._dismissed_query: str | None = None
+        # Set when an ARGUMENT list has nothing to offer AND that is worth saying.
+        # Not a match: it is never selectable, so it lives beside the rows rather
+        # than among them (see set_notice).
+        self._notice = ""
         # Set by an arrow press, cleared whenever the candidate set changes: the
         # difference between "the matcher put the highlight here" and "I moved it
         # here", which is what the editor's Enter gate needs to know.
@@ -339,6 +376,35 @@ class CommandPicker(Static):
             matches = argument_suggestions(self._query, self._choices)
             self._apply(PickerMode.ARGUMENT, self._query, matches)
 
+    def set_notice(self, text: str) -> None:
+        """Say why an ARGUMENT list is empty, IN THE LIST'S OWN PLACE.
+
+        One dim row where the rows would have been, in the overflow marker's
+        vocabulary. The alternative — reporting it into the transcript — repeats
+        without bound: the message answers a UI event, so every re-entry into the
+        argument state (type `/logout `, backspace, space again) appended another
+        identical line to what is supposed to be a record of the conversation.
+        Said here it is in the user's eye-line, self-clearing, unrepeatable, and it
+        costs the transcript nothing.
+
+        NOT a match. ``_matches`` stays empty, so ``is_open()`` is False,
+        ``_index_at`` returns None for the row — a click or a hover cannot action
+        it, exactly as for the overflow count — and every key the editor routes at
+        an open picker still goes to the buffer. Passing ``""`` withdraws it.
+        """
+        text = text.strip()
+        if text == self._notice:
+            return
+        self._notice = text
+        if self._matches:
+            # Rows are showing: they answer the question the notice would.
+            return
+        if text:
+            self.display = True
+            self._repaint()
+        else:
+            self._close()
+
     @property
     def mode(self) -> PickerMode:
         """Whether the rows are commands or one command's argument values."""
@@ -347,6 +413,24 @@ class CommandPicker(Static):
     def is_open(self) -> bool:
         """True when suggestions are showing."""
         return bool(self._matches)
+
+    def is_pending(self) -> bool:
+        """True for an ARGUMENT list that is open in principle but has no rows yet.
+
+        The app fills an argument list in answer to a posted message, so for one
+        message-loop tick the picker is in argument mode holding nothing —
+        showing as closed while being, from the user's point of view, a list they
+        just opened. A key that only reaches an ``is_open()`` picker is silently
+        dropped in that window.
+
+        False once :meth:`dismiss` has recorded the query, so a dismissed list
+        stops swallowing the key that dismissed it.
+        """
+        return (
+            self._mode is PickerMode.ARGUMENT
+            and not self._matches
+            and self._dismissed_query is None
+        )
 
     def suggestions(self) -> list[_Suggestion]:
         """All current matches, best first (not just the visible window)."""
@@ -417,12 +501,14 @@ class CommandPicker(Static):
         if mode is not self._mode:
             # A mode change is a different list of different things. Carrying the
             # highlight, the window or Esc's "not now" across it would point them
-            # at rows that no longer exist.
+            # at rows that no longer exist. The notice goes with them: it was about
+            # THAT list.
             self._mode = mode
             self._dismissed_query = None
             self._selected = 0
             self._window_start = 0
             self._chosen_by_hand = False
+            self._notice = ""
         self._query = query
         if query == self._dismissed_query:
             self._close()
@@ -432,6 +518,15 @@ class CommandPicker(Static):
         # Esc once with no way to get the list back while still typing.
         self._dismissed_query = None
         if not matches:
+            if mode is PickerMode.ARGUMENT and self._notice:
+                # No rows, but something to say in their place. The list stays up
+                # holding the one informational row, and holds it across every
+                # re-derivation — the user editing the argument of a command with
+                # nothing to offer does not make the answer any less true.
+                self._reset_rows()
+                self.display = True
+                self._repaint()
+                return
             self._close()
             return
         if [name for name, _ in matches] != [name for name, _ in self._matches]:
@@ -502,7 +597,7 @@ class CommandPicker(Static):
 
     def on_resize(self, event: events.Resize) -> None:
         """Re-truncate every row against the new width."""
-        if self._matches:
+        if self._matches or self._notice:
             self._repaint()
 
     # -- rendering ----------------------------------------------------------
@@ -512,7 +607,13 @@ class CommandPicker(Static):
         return [self._row(index, width) for index in range(start, end)]
 
     def render_text(self, width: int) -> Text:
-        """The full renderable: the visible rows plus the overflow marker."""
+        """The full renderable: the visible rows plus the overflow marker.
+
+        With no rows at all it is the informational row, or nothing — the two
+        states the picker can be VISIBLE in without a single suggestion.
+        """
+        if not self._matches:
+            return self._notice_row(width) if self._notice else Text()
         rows = self.render_rows(width)
         overflow = self._overflow_row(width)
         if overflow is not None:
@@ -529,9 +630,15 @@ class CommandPicker(Static):
         # a screen, so the state machine is fully exercisable (and testable)
         # off-app; only PAINTING needs one, because Static.update has to reach
         # the app console to build its visual.
-        if not self._matches or not self.is_mounted:
+        if not self.is_mounted or not (self._matches or self._notice):
             return
         width = max(self.size.width, _MIN_RENDER_WIDTH)
+        if not self._matches:
+            # The informational row stands alone: one row, no window and no
+            # overflow count, because there is nothing to count.
+            self.styles.height = 1
+            self.update(self._notice_row(width))
+            return
         rows = self.render_rows(width)
         overflow = self._overflow_row(width)
         row_count = len(rows) + (0 if overflow is None else 1)
@@ -607,8 +714,11 @@ class CommandPicker(Static):
         )
 
     def _gutter(self, styles: _RowStyles) -> Text:
+        # Padded from the constant rather than written out: a hard-coded two-cell
+        # mark under a three-cell gutter would shift only the SELECTED row, which
+        # is the one row a misalignment is guaranteed to be noticed on.
         row = Text()
-        mark = f"{_CURSOR} " if styles.selected else " " * _GUTTER_CELLS
+        mark = (_CURSOR if styles.selected else "").ljust(_GUTTER_CELLS)
         row.append(mark, style=styles.cursor)
         return row
 
@@ -659,13 +769,22 @@ class CommandPicker(Static):
 
         span = max(1, width - _GUTTER_CELLS - _EDGE_MARGIN)
         detail = choice.detail.strip()
-        # Reserve `detail` BEFORE the description, and drop the description first
-        # when only one of the two fits: for `/logout` the state is the thing being
-        # chosen by ("which of these am I logged into"), while the description only
-        # restates a provider name the id already carries.
-        reserved = cell_len(detail) + _PRIMARY_COLUMN_GAP if detail else 0
-        if reserved and span - reserved < _MIN_NAME_CELLS:
-            detail = ""
+        # Reserve the widest detail in the MATCH SET, not this row's own. The
+        # state is a column, and a column the user can scan has one left edge;
+        # right-aligning each string to its own row's trailing edge started the
+        # three credential states at three different x, so "which of these am I
+        # logged into" meant reading eight strings instead of scanning an edge.
+        #
+        # Reserved BEFORE the description, and the description dropped first when
+        # only one of the two fits: at `/logout` the detail names the credential
+        # about to be REMOVED, which no other column on the row says.
+        column_cells = self._detail_column()
+        reserved = column_cells + _PRIMARY_COLUMN_GAP if column_cells else 0
+        if reserved and span - reserved < self._name_floor():
+            # Uniform by construction: every row reserves the same width against
+            # the same floor, so the column is dropped for the whole list at once
+            # and can never leave a ragged half of one behind.
+            column_cells = 0
             reserved = 0
         body = span - reserved
 
@@ -680,25 +799,32 @@ class CommandPicker(Static):
             if remaining > _MIN_DESCRIPTION_CELLS:
                 row.append(" " * gap, style=row_bg)
                 row.append(truncate_cells(description, remaining), style=s.description)
-                return self._append_detail(row, width, detail, detail_style, row_bg)
+                return self._append_detail(row, width, detail, column_cells, detail_style, row_bg)
             # Not enough room after the name column to say anything useful:
             # rebuild as a name-only row rather than ship a stub description.
             row = self._gutter(s)
 
         row.append(truncate_cells(name, max(1, body)), style=s.name)
-        return self._append_detail(row, width, detail, detail_style, row_bg)
+        return self._append_detail(row, width, detail, column_cells, detail_style, row_bg)
 
     def _append_detail(
-        self, row: Text, width: int, detail: str, detail_style: Style, row_bg: Style
+        self,
+        row: Text,
+        width: int,
+        detail: str,
+        column_cells: int,
+        detail_style: Style,
+        row_bg: Style,
     ) -> Text:
-        """Right-align ``detail`` at the row's trailing edge and pad to ``width``.
+        """Left-align ``detail`` inside the reserved column and pad to ``width``.
 
-        Its cells were reserved out of the body budget above, so padding to the
-        detail's own start can only ever ADD space — never truncate content that
-        has already been appended.
+        The COLUMN is right-aligned to the row's trailing edge; the string inside
+        it is not, so every row's detail begins at the same x. Its cells were
+        reserved out of the body budget above, so padding to the column's start
+        can only ever ADD space — never truncate content already appended.
         """
-        if detail:
-            _pad_to(row, width - _EDGE_MARGIN - cell_len(detail), row_bg)
+        if column_cells and detail:
+            _pad_to(row, width - _EDGE_MARGIN - column_cells, row_bg)
             row.append(detail, style=detail_style)
         return _pad_to(row, width, row_bg)
 
@@ -742,6 +868,26 @@ class CommandPicker(Static):
         )
         return _pad_to(row, width, dim)
 
+    def _notice_row(self, width: int) -> Text:
+        """The informational row: why this list is empty, in the marker's voice.
+
+        Deliberately the overflow marker's exact treatment — dim on the dock's own
+        surface, text starting at the name column — because the two say the same
+        KIND of thing: a fact about the list rather than a row in it. A second
+        style here would advertise it as something the user can act on.
+        """
+        dim = Style(
+            color=theme_mod.semantic_color("dim"),
+            bgcolor=theme_mod.semantic_color("surface"),
+        )
+        row = Text()
+        row.append(" " * _GUTTER_CELLS, style=dim)
+        row.append(
+            truncate_cells(self._notice, max(1, width - _GUTTER_CELLS - _EDGE_MARGIN)),
+            style=dim,
+        )
+        return _pad_to(row, width, dim)
+
     def _primary_column(self) -> int:
         """Fit-to-content name column, clamped to the 12..32 cell band."""
         widest = 0
@@ -758,6 +904,36 @@ class CommandPicker(Static):
             widest = max(widest, cells + _PRIMARY_COLUMN_GAP)
         return max(_PRIMARY_COLUMN_MIN, min(_PRIMARY_COLUMN_MAX, widest))
 
+    def _detail_column(self) -> int:
+        """Fit-to-content DETAIL column: the widest detail in the match set.
+
+        Unclamped, unlike :meth:`_primary_column`. The detail is generated by the
+        app from a closed vocabulary (three credential states, two credential
+        kinds), not typed by a user, and the row already drops the column whole
+        when reserving it would squeeze the name past :meth:`_name_floor`.
+        """
+        widest = 0
+        for _name, item in self._matches:
+            if isinstance(item, ArgumentChoice):
+                widest = max(widest, cell_len(item.detail.strip()))
+        return widest
+
+    def _name_floor(self) -> int:
+        """Cells the NAME column keeps before ``detail`` is dropped.
+
+        The widest id ACTUALLY offered, not a constant. A fixed floor of twelve
+        answers "would a twelve-cell name fit" for a list whose longest name is
+        thirteen, which is how `openai-device` rendered as `openai-devi…` beside
+        an intact `needs login` at one exact render width — the detail column
+        keeping cells from the only text on the row the user can type.
+
+        Clamped at ``_PRIMARY_COLUMN_MAX``: past that the name column truncates
+        anyway, so letting the floor run away would drop the detail at every
+        width and buy nothing.
+        """
+        widest = max((cell_len(name) for name, _ in self._matches), default=0)
+        return max(_MIN_NAME_CELLS, min(_PRIMARY_COLUMN_MAX, widest))
+
     # -- window -------------------------------------------------------------
     def _row_budget(self) -> int:
         try:
@@ -766,6 +942,14 @@ class CommandPicker(Static):
             screen_height = 0
         if screen_height <= 0:
             return MAX_VISIBLE_ROWS
+        if self._mode is PickerMode.ARGUMENT:
+            # The screen-height guard stays — a picker that squeezed the
+            # transcript to nothing is the failure this whole method exists for —
+            # but the ceiling does not: see ``_ARGUMENT_HEIGHT_DIVISOR``.
+            return max(
+                _ARGUMENT_ROWS_MIN,
+                screen_height // _ARGUMENT_HEIGHT_DIVISOR - _ARGUMENT_CHROME_ROWS,
+            )
         return max(1, min(MAX_VISIBLE_ROWS, screen_height // _SCREEN_HEIGHT_DIVISOR))
 
     def _scroll_to_selection(self) -> None:
@@ -779,8 +963,10 @@ class CommandPicker(Static):
     def _index_at(self, y: int) -> int | None:
         """Suggestion index at content row ``y``, or ``None``.
 
-        Returns ``None`` for the overflow marker row: it is a count, not a
-        choice, and clicking a count must not run a command.
+        Returns ``None`` for the overflow marker row and for the informational row
+        of an empty list: both are facts about the list, not choices in it, and
+        clicking a fact must not run a command. The informational case falls out of
+        the window being empty — there is no index for any ``y``.
         """
         start, end, _total = self.visible_window()
         index = self._window_start + y
@@ -788,9 +974,17 @@ class CommandPicker(Static):
             return None
         return index
 
-    def _close(self) -> None:
+    def _reset_rows(self) -> None:
+        """Drop every row and the state that pointed into them, but not the
+        notice: a list can be showing its informational row with no rows at all."""
         self._matches = []
         self._selected = 0
         self._window_start = 0
         self._hovered = None
+
+    def _close(self) -> None:
+        self._reset_rows()
+        # The notice belonged to the list that is now gone. Esc, a completion and a
+        # submission all arrive here, and each one is the user done with it.
+        self._notice = ""
         self.display = False

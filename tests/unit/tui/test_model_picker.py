@@ -192,9 +192,12 @@ def test_usable_models_outrank_ones_needing_a_login() -> None:
     assert connected == sorted(connected, reverse=True), [row.selector for row in rows]
 
 
-def test_an_unconnected_provider_is_listed_rather_than_hidden() -> None:
-    """Hiding it is what made a model undiscoverable: "which models would I get if
-    I logged in to this provider" has no other way to be asked."""
+def test_the_widget_hides_nothing_it_is_given() -> None:
+    """Which rows are OFFERED is the app's call — it holds the credential state and
+    filters unreachable models out before they get here (see `_catalogue_rows`).
+    The widget renders what it is handed, so an unconnected row that survived that
+    filter (the current model, or every row when the store could not be read) still
+    appears, dimmed and marked, rather than vanishing."""
     assert any(row.provider == "kimi" for row in rank_rows(_rows(), ""))
 
 

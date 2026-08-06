@@ -29,8 +29,10 @@ for exactly that once.
 
 from __future__ import annotations
 
+from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
+from textual.screen import Screen
 from textual.widgets import Static
 
 from local_operator.session.mcp_status import McpStartupOutcome
@@ -60,10 +62,29 @@ TOAST_MIN_WIDTH = 20
 #: cells actually available to text.
 TOAST_PADDING_CELLS = 2
 
+#: The screen's own edge padding (one cell each side, see the `Screen` rule), so
+#: the card's outer width can be clamped to the box it is actually painted in.
+TOAST_SCREEN_PADDING_CELLS = 2
+
 
 def toast_max_width(terminal_width: int) -> int:
-    """The card's outer width for a terminal of ``terminal_width`` cells."""
-    return max(TOAST_MIN_WIDTH, min(TOAST_MAX_WIDTH, terminal_width - TOAST_WIDTH_RESERVE))
+    """The card's outer width for a terminal of ``terminal_width`` cells.
+
+    The FLOOR is clamped by the box, not just by the reserve. A bare
+    ``max(MIN, …)`` made the card 20 cells wide on a 16-cell terminal, and a
+    card wider than the screen is hard-clipped by the compositor — which eats
+    the ellipsis ``truncate_cells`` put there, so the one cue that text was cut
+    is the first thing lost. Nothing may paint outside the screen's own edge
+    padding, so that is the last word on width.
+    """
+    return max(
+        1,
+        min(
+            TOAST_MAX_WIDTH,
+            max(TOAST_MIN_WIDTH, terminal_width - TOAST_WIDTH_RESERVE),
+            terminal_width - TOAST_SCREEN_PADDING_CELLS,
+        ),
+    )
 
 
 def format_mcp_startup(
@@ -116,7 +137,12 @@ def format_mcp_startup(
     if outcome.failures:
         names = sorted(outcome.failures)
         if len(names) == 1:
-            detail = f"{names[0]} — {outcome.failures[names[0]]}"
+            # Says FAILED, like the multi-server variant: `gh — command not
+            # found: gh` never named the state, so the reader had to infer which
+            # server the head line meant and read the name twice to do it. Both
+            # variants now open on the same word, which is what makes the second
+            # line scannable as a failure list rather than as prose.
+            detail = f"failed: {names[0]} — {outcome.failures[names[0]]}"
         else:
             detail = "failed: " + ", ".join(names)
         text.append("\n")
@@ -136,6 +162,11 @@ def _semantic(outcome: McpStartupOutcome) -> str:
             configured=len(outcome.configured),
             connected=len(outcome.connected),
             failed=outcome.failed,
+            # No configured servers but a recorded failure IS the discovery
+            # failure: the config layer never produced a list. Passing it keeps
+            # the derivation total — the band reaches this state through the same
+            # flag, so neither surface can tint it differently.
+            discovery_failed=not outcome.configured and outcome.failed,
         )
     )
 
@@ -213,8 +244,63 @@ class Toast(Static):
         """Teardown must not leave a live timer behind (see the module note)."""
         self._stop_timer()
 
+    def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
+        """A click dismisses the card early.
+
+        The timer is a floor on how long the notice is READABLE, not a sentence
+        the user has to serve: the failure variant holds ten seconds over the
+        transcript, and a reader who is done with it should get their screen
+        back. The mouse rather than a key: ``CommandPicker.on_click`` already
+        establishes click-to-act as this app's affordance, and Esc is already
+        spoken for as the picker's "not now".
+
+        ``event.stop()`` because the toast floats on its own layer over the
+        transcript — letting the click through would scroll or focus whatever
+        happens to sit beneath it, which is not what the user aimed at.
+        """
+        event.stop()
+        self.dismiss_toast()
+
+    def _card_width(self) -> int:
+        """The card's outer width for the message it is currently showing.
+
+        Measured from the TEXT rather than read back from ``outer_size``: the
+        offset below is applied in the same pass that shows the card, and at
+        that point the layout has not run, so ``outer_size`` still describes the
+        previous message. The card is ``width: auto``, so this is the same
+        arithmetic Textual will do — longest line plus the padding, capped.
+        """
+        cap = toast_max_width(self.app.size.width)
+        if not self._message:
+            return cap
+        longest = max(cell_len(line) for line in self._message.split("\n"))
+        return max(1, min(cap, longest + TOAST_PADDING_CELLS))
+
     def _refit(self) -> None:
+        """Clamp the card, then pull its HOST over to hug it.
+
+        The host used to be ``width: 1fr``. A widget owns its whole region, so a
+        full-width host on the toast layer blanked every column of every row it
+        covered — the card painted 35 cells of notice and the host erased the
+        other 59 cells of transcript with it. Sizing the host to the card and
+        offsetting it to the right edge is what confines the damage to the cells
+        the notice actually occupies.
+        """
+        width = self._card_width()
         self.styles.max_width = toast_max_width(self.app.size.width)
+        parent = self.parent
+        # The HOST is offset, never the screen: a Toast mounted straight onto the
+        # screen would otherwise shift the whole app sideways, which is a far
+        # louder bug than a left-aligned toast.
+        if parent is not None and not isinstance(parent, Screen):
+            # Right-aligned by offset rather than by `align-horizontal`, which
+            # cannot right-align a host that is only as wide as its child.
+            # ``- TOAST_SCREEN_PADDING_CELLS`` lands the card's right edge on the
+            # screen's own inset instead of on the terminal's last column.
+            parent.styles.offset = (
+                max(0, self.app.size.width - TOAST_SCREEN_PADDING_CELLS - width),
+                0,
+            )
 
     def _stop_timer(self) -> None:
         if self._timer is not None:

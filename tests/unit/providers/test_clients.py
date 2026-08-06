@@ -739,3 +739,137 @@ def test_openai_compat_markers_gate_on_cache_support():
         ChatRequest(model=spec_nocache, messages=[Message.user("a"), Message.user("b")])
     )
     assert "cache_control" not in str(plain["messages"])
+
+
+# ---------------------------------------------------------------------------
+# Sampling parameters — omitted for models that reject them
+# ---------------------------------------------------------------------------
+
+#: (wire name, that wire's spelling of top_p). Every wire is exercised for
+#: every case on purpose: the pair was written into four bodies independently,
+#: and a fix that lands on one leaves the others 400ing — the anthropic wire,
+#: the one the bug report was filed against, was the easiest to miss.
+WIRES = [
+    ("openai-completions", "top_p"),
+    ("openai-responses", "top_p"),
+    ("anthropic", "top_p"),
+    ("google", "topP"),
+]
+
+
+def _bodies(request: ChatRequest) -> dict[str, dict[str, Any]]:
+    """Every wire's request body for one request, keyed by wire name."""
+    from local_operator.providers.clients import GoogleClient
+
+    openai = OpenAICompatClient("https://x")
+    return {
+        "openai-completions": openai._build_body(request),
+        "openai-responses": openai._build_responses_body(request),
+        "anthropic": AnthropicClient()._build_body(request),
+        "google": GoogleClient()._build_body(request)["generationConfig"],
+    }
+
+
+@pytest.mark.parametrize("wire,top_p_key", WIRES)
+def test_sampling_params_omitted_when_model_rejects_them(wire: str, top_p_key: str) -> None:
+    """``claude-opus-5`` answers HTTP 400 "``temperature`` is deprecated for
+    this model." — and the same for ``top_p`` once temperature is gone, so both
+    have to go. The keys must be ABSENT, not null: a provider that rejects the
+    key rejects it with a null value just as hard."""
+    spec = ModelSpec(provider="anthropic", model_id="claude-opus-5", supports_sampling_params=False)
+    body = _bodies(ChatRequest(model=spec, messages=[Message.user("hi")]))[wire]
+    assert "temperature" not in body
+    assert top_p_key not in body
+    serialised = json.dumps(body)
+    assert '"temperature"' not in serialised and f'"{top_p_key}"' not in serialised
+
+
+@pytest.mark.parametrize("wire,top_p_key", WIRES)
+def test_sampling_params_still_sent_when_model_accepts_them(wire: str, top_p_key: str) -> None:
+    """The regression guard for the fix itself: sampling is a real feature, and
+    dropping it everywhere would be worse than the 400 it avoids."""
+    spec = ModelSpec(provider="anthropic", model_id="claude-sonnet-4-5", temperature=0.7, top_p=0.4)
+    body = _bodies(ChatRequest(model=spec, messages=[Message.user("hi")]))[wire]
+    assert body["temperature"] == 0.7
+    assert body[top_p_key] == 0.4
+
+
+@pytest.mark.parametrize("wire,top_p_key", WIRES)
+def test_explicit_request_sampling_loses_to_the_capability(wire: str, top_p_key: str) -> None:
+    """A per-request override cannot resurrect a parameter the model rejects —
+    honouring it would only move the 400 from the spec default to the caller."""
+    spec = ModelSpec(provider="anthropic", model_id="claude-opus-5", supports_sampling_params=False)
+    request = ChatRequest(model=spec, messages=[Message.user("hi")], temperature=0.9, top_p=0.1)
+    body = _bodies(request)[wire]
+    assert "temperature" not in body
+    assert top_p_key not in body
+
+
+@pytest.mark.parametrize("wire,top_p_key", WIRES)
+def test_request_sampling_overrides_reach_the_wire_when_supported(wire: str, top_p_key: str):
+    """...and the override path still works for a model that accepts them."""
+    spec = ModelSpec(provider="openai", model_id="gpt-4o")
+    request = ChatRequest(model=spec, messages=[Message.user("hi")], temperature=0.05, top_p=0.15)
+    body = _bodies(request)[wire]
+    assert body["temperature"] == 0.05
+    assert body[top_p_key] == 0.15
+
+
+def test_anthropic_oauth_prepends_the_claude_code_identity() -> None:
+    """A subscription credential MUST carry the Claude Code identity block first.
+
+    Anthropic gates OAuth credentials to Claude Code and refuses anything else with
+    an opaque `HTTP 429 Error` — not a 401 — so the failure reads as rate limiting
+    and sends the operator to look at their quota. Measured against the live
+    endpoint with a valid subscription token and `claude-opus-5`: no system block
+    and an ordinary system block both 429, this block first returns 200.
+    """
+    request = ChatRequest(
+        model=_spec("anthropic", "claude-opus-5"),
+        messages=[Message.user("hi")],
+        system_blocks=["instructions", "tools", "env"],
+    )
+    access = OAuthAccess(access_token="oauth-token-1", credential_id=1, org_id=None, kind="oauth")
+    client = AnthropicClient()
+
+    oauth_body = client._build_body(request, oauth=client._is_oauth(access))
+    texts = [block["text"] for block in oauth_body["system"]]
+    assert texts[0] == AnthropicClient.CLAUDE_CODE_IDENTITY
+    # The app's own blocks survive, in order, after it.
+    assert texts[1:] == ["instructions", "tools", "env"]
+
+
+def test_anthropic_api_key_does_not_get_the_claude_code_identity() -> None:
+    """An API-key caller is not gated, and an identity line changes how the model
+    answers — so a paying key user must not silently be told they are a CLI."""
+    request = ChatRequest(
+        model=_spec("anthropic", "claude-opus-5"),
+        messages=[Message.user("hi")],
+        system_blocks=["instructions", "tools", "env"],
+    )
+    client = AnthropicClient()
+
+    assert client._is_oauth(None) is False
+    key_body = client._build_body(request, oauth=client._is_oauth(None))
+    texts = [block["text"] for block in key_body["system"]]
+    assert AnthropicClient.CLAUDE_CODE_IDENTITY not in texts
+    assert texts == ["instructions", "tools", "env"]
+
+
+def test_anthropic_oauth_identity_keeps_the_cached_prefix_byte_stable() -> None:
+    """The identity block is a constant, so two turns must render an identical
+    system prefix — otherwise every turn would re-write the prompt cache instead
+    of reading it (measured live: 3,911 cache-read vs 130 cache-write tokens)."""
+    access = OAuthAccess(access_token="oauth-token-1", credential_id=1, org_id=None, kind="oauth")
+    client = AnthropicClient()
+
+    def system_for(user_text: str) -> list[dict[str, object]]:
+        request = ChatRequest(
+            model=_spec("anthropic", "claude-opus-5"),
+            messages=[Message.user(user_text)],
+            system_blocks=["instructions", "tools", "env"],
+        )
+        return client._build_body(request, oauth=client._is_oauth(access))["system"]
+
+    first, second = system_for("turn one"), system_for("turn two different length")
+    assert first == second, "the system prefix must not vary with the conversation"

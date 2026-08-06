@@ -14,11 +14,11 @@ import sys
 from local_operator.server.app import app
 from local_operator.server.openapi import get_openapi_schema_path, save_openapi_schema
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+# No logging configuration here. `server.app`, imported two lines above,
+# configures the root logger — which made this `basicConfig` a no-op from the
+# day it was written (basicConfig defers when handlers already exist). Calling
+# the real configure function instead would silently CHANGE this script's
+# output rather than preserve it, so the dead call is simply gone.
 logger = logging.getLogger("local_operator.server.generate_openapi")
 
 
