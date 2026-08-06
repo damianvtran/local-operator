@@ -1,7 +1,7 @@
 """New-session welcome view — the transcript's EMPTY STATE, not a banner.
 
-A fresh session (and every ``/clear``) shows one centered, BORDERLESS block in
-the space above the input dock:
+A fresh session (and every ``/clear``) shows one horizontally centered,
+BORDERLESS block resting on the input card:
 
     ██      ▄████▄
     ██      ██  ██
@@ -50,6 +50,7 @@ from rich.cells import cell_len
 from rich.console import Group, RenderableType
 from rich.style import Style
 from rich.text import Text
+from textual.geometry import Size
 from textual.widgets import Static
 
 from local_operator.tui import theme as theme_mod
@@ -410,7 +411,16 @@ def build_welcome_lines(info: WelcomeInfo, width: int, height: int) -> list[Text
     """Render the welcome block as exactly the lines it occupies.
 
     Pure, so the geometry is testable without a running app. Returns at most
-    ``height`` lines, none wider than ``width``.
+    ``height`` lines, none wider than ``width``, and NO padding rows: the block
+    starts on its first line and ends on its last.
+
+    ``height`` is a row BUDGET, not a canvas to fill. VERTICAL PLACEMENT IS NOT
+    THIS FUNCTION'S — the boot layout rests this block on the input card
+    (``Screen.boot TranscriptView { align-vertical: bottom }`` in the tcss), and
+    an alignment can only place a block that reports its true size. The top pad
+    this used to compute was a second opinion about the same rows: it centred the
+    block in the region while the alignment put it against the card, and the two
+    disagreed by half the region's spare rows.
 
     Height degradation sheds whole sections in a fixed order — decoration,
     then teaching, then information:
@@ -419,11 +429,6 @@ def build_welcome_lines(info: WelcomeInfo, width: int, height: int) -> list[Text
     2. the hints (with the blank row above them),
     3. status rows, lowest priority first (version, then cwd, then model),
        which stops at one row so the credential warning always survives.
-
-    Vertical placement floors the top pad, which lands the block on the upper
-    of the two centre positions when the free rows are odd. That is deliberate:
-    the input dock sits below this region, so a block nudged up reads as
-    centered while a block nudged down reads as crowding the prompt.
     """
     if width <= 0 or height <= 0:
         return []
@@ -439,43 +444,33 @@ def build_welcome_lines(info: WelcomeInfo, width: int, height: int) -> list[Text
         # One blank row joins each visible section to the status rows.
         return rows + (len(logo) + 1 if show_logo else 0) + (len(hints) + 1 if show_hints else 0)
 
-    # A row is held back so the block never touches the dock below it. Opening
-    # the picker shrinks this region to about the block's own height, so the
-    # earlier arithmetic centered at pad 0 and rendered edge to edge: the mark
-    # looked like it was sliding off the top and `ctrl+d  quit` sat directly on
-    # the panel. That is reachable in ONE keystroke from the state the splash
-    # itself teaches, since a hint row says "/  command picker".
+    # The block may fill its budget to the last row. It used to hold one row
+    # back so it never touched the input panel below it, and that reserve is now
+    # the panel's own top padding row — an always-present blank row inside the
+    # panel's fill, which is a gap the block cannot spend on content and cannot
+    # accidentally lose. Asking for `height - 1` here would just buy a second
+    # copy of that gap at the price of the version row.
     #
-    # The margin is a nicety and yields to content, so the first pass asks for it
-    # and the second gives it up rather than lose anything else.
-    for usable in (max(1, height - 1), height):
-        show_logo = True
-        show_hints = True
-        logo = _logo_lines(width)
-        status = list(status_full)
-        # Escalate by what each step COSTS THE USER, which is not the same as
-        # decoration-before-information:
-        #
-        # 1. tighten the lockup — costs one row of air.
-        # 2. drop the weakest status row — the version number, which is the
-        #    least actionable thing on the screen. Spending it to keep the mark
-        #    is a better trade than losing the product's identity on the one
-        #    screen that exists to show it, and at a 28-row terminal (a 20-row
-        #    region) this single row is exactly the difference.
-        # 3. drop the mark.
-        # 4. drop the hints — a first-time user's way in, so it goes last.
-        if total(len(status)) > usable:
-            logo = _logo_lines(width, flush=True)
-        if total(len(status)) > usable and len(status) > 1:
-            status.pop(min(range(len(status)), key=lambda index: status[index][0]))
-        if total(len(status)) > usable:
-            show_logo = False
-        if total(len(status)) > usable:
-            show_hints = False
-        if total(len(status)) <= usable:
-            break
-
-    while len(status) > 1 and total(len(status)) > usable:
+    # Escalate by what each step COSTS THE USER, which is not the same as
+    # decoration-before-information:
+    #
+    # 1. tighten the lockup — costs one row of air.
+    # 2. drop the weakest status row — the version number, which is the least
+    #    actionable thing on the screen. Spending it to keep the mark is a
+    #    better trade than losing the product's identity on the one screen that
+    #    exists to show it, and at a 28-row terminal this single row is exactly
+    #    the difference.
+    # 3. drop the mark.
+    # 4. drop the hints — a first-time user's way in, so it goes last.
+    if total(len(status)) > height:
+        logo = _logo_lines(width, flush=True)
+    if total(len(status)) > height and len(status) > 1:
+        status.pop(min(range(len(status)), key=lambda index: status[index][0]))
+    if total(len(status)) > height:
+        show_logo = False
+    if total(len(status)) > height:
+        show_hints = False
+    while len(status) > 1 and total(len(status)) > height:
         weakest = min(range(len(status)), key=lambda index: status[index][0])
         status.pop(weakest)
 
@@ -484,25 +479,15 @@ def build_welcome_lines(info: WelcomeInfo, width: int, height: int) -> list[Text
     # be. The logo is centred separately because it is centred as a LOCKUP —
     # sharing the pad would left-align the mark against the text blocks.
     status_lines, hints = _center_blocks([[line for _, line in status], hints], width)
-    body: list[Text] = []
+    lines: list[Text] = []
     if show_logo:
-        body.extend(logo)
-        body.append(Text(""))
-    body.extend(status_lines)
+        lines.extend(logo)
+        lines.append(Text(""))
+    lines.extend(status_lines)
     if show_hints:
-        body.append(Text(""))
-        body.extend(hints)
+        lines.append(Text(""))
+        lines.extend(hints)
 
-    # Round the top pad UP, so a single spare row lands above the block rather
-    # than below it. The region's neighbours are not symmetric in what they
-    # already contribute: below sits the input dock, which pads its own top row,
-    # while above sits only the screen's one-row inset. A block flush with row 0
-    # therefore reads as sliding off the top — the exact complaint the picker's
-    # shrunken region produced — whereas a block flush with the last row still
-    # has the dock's air beneath it. Clamped so the last row is never cut.
-    top = min(max(0, (usable - len(body) + 1) // 2), max(0, height - len(body)))
-    lines = [Text("") for _ in range(top)]
-    lines.extend(body)
     for line in lines:
         line.truncate(width, overflow="ellipsis")
     return lines[:height]
@@ -511,10 +496,16 @@ def build_welcome_lines(info: WelcomeInfo, width: int, height: int) -> list[Text
 class WelcomeView(Static):
     """The transcript's empty state: visible while it holds no blocks.
 
-    Mounted INSIDE ``TranscriptView`` at ``height: 1fr``, which is what makes
-    the region arithmetic disappear — the widget is handed exactly the rows
-    above the input dock, and it yields rows to any block mounted under it
-    (the ``/clear`` notice) instead of overflowing the scroll area.
+    Mounted INSIDE ``TranscriptView`` and CONTENT-SIZED (``height: auto`` in the
+    tcss): the widget reports exactly the rows its block occupies, which is what
+    lets the boot layout rest the splash on the input card. It owns its block's
+    horizontal centring and its own height; where that block SITS is the
+    stylesheet's, and only the stylesheet's.
+
+    The region it is measured against already excludes the input panel, because
+    the panel is docked and the layout engine reserves a docked child's rows
+    before offering the rest to the flow — so the height budget here is simply
+    the region, with no arithmetic to keep in step with the panel.
 
     It reads its facts through a callable rather than being pushed updates,
     because the one fact that changes under a visible welcome — the model
@@ -536,7 +527,19 @@ class WelcomeView(Static):
     def on_mount(self) -> None:
         self._poll()
 
+    def get_content_height(self, container: Size, viewport: Size, width: int) -> int:
+        """Rows this block needs, capped at the rows the region offers.
+
+        Textual asks this before the widget is laid out, so the region comes from
+        ``container`` rather than from ``self.size``, which is still the previous
+        frame's at this point.
+        """
+        return len(build_welcome_lines(self._info, width, container.height))
+
     def render(self) -> RenderableType:
+        # `self.size.height` is what `get_content_height` returned, so the block
+        # rebuilt here is the one that was measured: degradation is idempotent
+        # once the budget equals the block's own height.
         lines = build_welcome_lines(self._info, self.size.width, self.size.height)
         # A Group of one Text per row: the lines are already padded and
         # truncated to the widget, so nothing here may re-wrap them.
@@ -548,7 +551,7 @@ class WelcomeView(Static):
 
     def set_visible(self, visible: bool) -> None:
         """Show or hide the view. Hidden means ``display: none`` — zero rows,
-        not an empty block still holding a ``1fr`` share of the region."""
+        not an empty block still holding a share of the region."""
         if visible == bool(self.display):
             return
         self.display = visible
@@ -561,7 +564,11 @@ class WelcomeView(Static):
         info = self._info_source()
         if info != self._info:
             self._info = info
-            self.refresh()
+            # `layout=True`: new facts can change the block's HEIGHT (the
+            # credential warning appears, the model label resolves), and a
+            # measured height is cached per container size — a repaint alone
+            # would draw the new block into the old row count.
+            self.refresh(layout=True)
         self._sync_timer()
 
     def _sync_timer(self) -> None:

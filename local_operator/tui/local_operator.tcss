@@ -43,6 +43,13 @@ Screen {
      * One row top and bottom, one cell left and right. Children then only
      * manage spacing BETWEEN themselves. */
     padding: 1;
+    /* A second layer for the toast overlay. Layers are arranged independently
+     * over the whole region, which is the property that matters: without one,
+     * a toast at the top of the screen would STEAL a row from the transcript
+     * and reflow the conversation for five seconds. Everything else stays on
+     * `default` (Textual's name for the unset layer), so this declaration
+     * changes no existing placement. */
+    layers: default toast;
 }
 
 /* Transcript takes all the space above the input panel. One cell of edge
@@ -170,7 +177,20 @@ ToolCard:hover {
     padding: 1 1 0 0;
 }
 
-/* Input panel: docks at the bottom and is a FILL, not a box.
+/* Input panel: two widgets for one panel, and the split is load-bearing.
+ *
+ * `#input-dock` is a POSITIONER — docked to the bottom, full width, no fill of
+ * its own. It stays docked in both layouts because a docked child's rows are
+ * reserved by the layout engine before anything else is placed: the input is
+ * the one widget on screen that may never be clipped or pushed off, and in the
+ * flow it would be, on any terminal too short for the splash above it.
+ *
+ * `#input-shell` is the panel the user sees: the fill, the padding, and — in the
+ * boot layout — the clamp that turns it into a centred card. It has to be a
+ * separate widget because Textual places a docked child at its edge and its
+ * parent's `align-horizontal` cannot move it, so a clamped DOCK would sit
+ * against the left edge of the terminal rather than centred. The dock centres
+ * this child instead, which in the full-width layout is a no-op.
  *
  * No border of any kind. The elevation step from the transcript's `bg` to this
  * panel's `surface` is the whole separation — a `border-top` rule read as a
@@ -184,6 +204,12 @@ ToolCard:hover {
  * chosen instead of missing. */
 #input-dock {
     dock: bottom;
+    height: auto;
+    align-horizontal: center;
+}
+
+#input-shell {
+    width: 1fr;
     height: auto;
     background: $lo-surface;
     padding: 1;
@@ -241,29 +267,135 @@ Editor .text-area--suggestion {
     color: $lo-dim;
 }
 
+/* ── startup toast ───────────────────────────────────────────────────────
+ *
+ * Top-right transient overlay. The HOST spans the width on the `toast` layer
+ * and right-aligns its one child; the card itself hugs its text (`width:
+ * auto`) with a Python-set `max-width` (see widgets/toast.py — the cap depends
+ * on the terminal width, which a stylesheet cannot ask for).
+ *
+ * Top rather than bottom-right, which is where Textual's own notifications go:
+ * the input dock and status band are docked to the bottom, so a bottom toast
+ * would cover the editor the user is typing into.
+ *
+ * The card is BORDERLESS and FILLED — elevation is a background step, never a
+ * line (D4). It takes `overlay`, the ramp's top step, because it floats above
+ * every other surface; `ToolCard` is the same treatment one step lower. The
+ * one cell of horizontal padding is the app's edge-padding unit, so the text
+ * does not touch the fill's edge.
+ *
+ * `height: auto` because the message is one or two lines and the widget
+ * decides which — unlike the tool card, this content is measured only once per
+ * toast and is never re-flowed mid-life, so the auto-height trap that pins the
+ * card does not apply here. */
+#toast-host {
+    layer: toast;
+    width: 1fr;
+    height: auto;
+    align-horizontal: right;
+}
+
+Toast {
+    width: auto;
+    height: auto;
+    padding: 0 1;
+    background: $lo-overlay;
+    color: $lo-fg;
+}
+
 /* ---- welcome view (new-session empty state) --------------------------- *
  *
  * Lives INSIDE the transcript, so it is handed exactly the region above the
- * input dock without any arithmetic here. `1fr` rather than `100%` is
- * load-bearing: /clear empties the transcript, shows this view again, and then
- * appends its own "history is untouched" notice — under `100%` that notice
- * would be pushed out of the scroll viewport, while `1fr` simply gives it a
- * row and re-centers the block in what is left.
+ * input panel without any arithmetic here.
+ *
+ * `auto`, not `1fr`: in the boot layout below, the splash RESTS ON the input
+ * card, and a stretched block cannot rest on anything — it reports the whole
+ * region as its height, so the block floats in the middle of it with the card
+ * an arbitrary number of rows further down. Content-sized, the widget reports
+ * exactly the rows its block occupies (build_welcome_lines returns no padding
+ * rows) and the alignment below puts that block against the card. It also
+ * settles the /clear case the old `1fr` was chosen for: the "history is
+ * untouched" notice mounted under this view now simply follows the block
+ * instead of competing with it for the region.
+ *
+ * The region it is measured against already excludes the input panel's rows,
+ * because the panel is DOCKED and the layout engine reserves a docked child's
+ * rows before it offers the rest to the flow. That is what keeps the block's
+ * height budget honest without any arithmetic here or in the widget.
  *
  * No border, no rule, no fill: the block is the only thing on screen, so the
  * mandate's "structure from symbols, tint and spacing" is all it gets. The
  * accent green is NOT spent here — the logo lockup carries its own hierarchy
  * through the neutral ramp (mark `dim`, wordmark `fg`).
  *
- * Centering and vertical placement are computed in the widget, not declared
- * here: the content it draws depends on the rows and cells it actually has
- * (the logo drops before the hints, which drop before the status rows), so it
- * needs the measured size that `content-align` would hide from it. */
+ * HORIZONTAL centring is still computed in the widget, not declared here: what
+ * it draws depends on the cells it actually has (the logo tier drops before the
+ * hints, which drop before the status rows), so it needs the measured width
+ * that `content-align` would hide from it. VERTICAL placement is the
+ * stylesheet's alone (`Screen.boot`), so the two can never disagree. */
 #welcome {
     width: 1fr;
-    height: 1fr;
+    height: auto;
     min-height: 0;
     color: $lo-dim;
+}
+
+/* ── boot layout: the input is a centred card until the session has content ──
+ *
+ * Everything above assumes the input panel is a full-width band. Before the
+ * transcript holds a single block it is not: the panel is a clamped card, and
+ * the splash rests directly on it so the two read as ONE column rather than a
+ * logo adrift over a bar. The status band stays the card's last row in both
+ * layouts, so it travels with the input it belongs to instead of stranding
+ * itself at the bottom of the screen, and the pickers keep their place between
+ * the input row and the band — inside the clamp, because they are inside the
+ * card.
+ *
+ * `Screen.boot` is the whole switch, and the app flips it in the same call that
+ * shows or hides the splash (OperatorApp._set_welcome_visible). Two layouts,
+ * ONE condition: a second notion of "the session is empty" is exactly how a
+ * centred boot card ends up on screen beside a populated transcript.
+ *
+ * The clamp is `max(75, 70% of the content box)`, never wider than the content
+ * box. It takes three declarations because tcss has no `max()`: `width` is the
+ * proportion, `min-width` the floor, `max-width` the degradation — and the
+ * degradation BEATS the floor, so at 40 or 20 cells the card is simply as wide
+ * as there is room for rather than overflowing a terminal the minimalism suite
+ * measures. NOTHING is added to make it read as a card: the panel's existing
+ * surface step IS the card (D4), now bounded on both sides instead of running
+ * the width of the terminal.
+ *
+ * `align-vertical: bottom` on the TRANSCRIPT is what puts the splash on the
+ * card: the transcript keeps its `1fr` height, so the region it offers the
+ * splash is still the engine's own "everything the docked panel did not take",
+ * and the content-sized block inside it is pushed to the bottom of that region —
+ * which is the card's top edge. Making the transcript content-sized instead
+ * looks equivalent and is not: its measured height then depends on the block it
+ * contains while the block's budget depends on the region, and the pair settles
+ * one row past the bottom of the screen, where a scrollbar appears and reflows
+ * the width of everything.
+ *
+ * The bottom is also where the pair belongs. The splash needs every row it is
+ * given at the sizes this app is used at — a 28-row terminal leaves it about 20
+ * and the full block wants all of them — so reserving rows below the card to
+ * float the pair in the middle would spend the logo, the one thing that screen
+ * exists to show, to buy air. The slack goes above, where nothing needs it.
+ *
+ * The panel stays DOCKED here. In the flow it would be the last thing placed
+ * and the first thing clipped, and on a terminal too short for the splash above
+ * it, the input — the one widget that may never disappear — is what would walk
+ * off the bottom edge.
+ *
+ * No `transition:` on purpose. The swap is instant: a half-drawn interpolation
+ * of a docked panel reads as a glitch in a terminal, not as motion. */
+Screen.boot TranscriptView {
+    align-vertical: bottom;
+}
+
+Screen.boot #input-shell {
+    width: 70%;
+    min-width: 75;
+    max-width: 100%;
 }
 
 /* ── slash-command picker ────────────────────────────────────────────────

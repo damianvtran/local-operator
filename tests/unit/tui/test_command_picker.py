@@ -20,19 +20,42 @@ from textual.widgets import Static
 
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import SLASH_COMMANDS
-from local_operator.tui.autocomplete import SlashCommand
+from local_operator.tui.autocomplete import ArgumentChoice, SlashCommand
 from local_operator.tui.widgets.command_picker import (
     CommandPicker,
+    PickerMode,
+    argument_suggestions,
     command_suggestions,
     slash_context,
 )
-from local_operator.tui.widgets.editor import Editor, EditorSubmitted
+from local_operator.tui.widgets.editor import Editor, EditorSubmitted, ProviderQueryOpened
 
 from tests.unit.tui.conftest import TCSS_PATH
 
 # ---------------------------------------------------------------------------
 # harness
 # ---------------------------------------------------------------------------
+
+#: Stand-in provider catalogue. Shaped like the real one where it matters: ids
+#: the user types, display names, model-family aliases that must FIND a row
+#: without ever being completed into the buffer, and the three credential
+#: states the detail column reports.
+PROVIDER_CHOICES = [
+    ArgumentChoice(
+        "anthropic",
+        "Anthropic",
+        aliases=("claude", "sonnet", "opus"),
+        detail="logged in",
+    ),
+    ArgumentChoice("alibaba", "Alibaba", aliases=("qwen", "dashscope"), detail="logged in"),
+    ArgumentChoice("openai", "OpenAI", aliases=("gpt", "chatgpt"), detail="env key"),
+    ArgumentChoice("deepseek", "DeepSeek", aliases=("ds",), detail="needs login"),
+]
+
+
+def _logout_choices() -> list[ArgumentChoice]:
+    """What `/logout` may offer: only providers holding a stored credential."""
+    return [choice for choice in PROVIDER_CHOICES if choice.detail == "logged in"]
 
 
 class PickerHarnessApp(App[None]):
@@ -49,6 +72,7 @@ class PickerHarnessApp(App[None]):
     def __init__(self) -> None:
         super().__init__()
         self.submissions: list[str] = []
+        self.provider_queries: list[str] = []
 
     def get_css_variables(self) -> dict[str, str]:
         variables = super().get_css_variables()
@@ -66,6 +90,14 @@ class PickerHarnessApp(App[None]):
 
     def on_editor_submitted(self, message: EditorSubmitted) -> None:
         self.submissions.append(message.text)
+
+    def on_provider_query_opened(self, message: ProviderQueryOpened) -> None:
+        # Stands in for the app's controller-backed answer. The harness keeps the
+        # two sets distinct so `/logout` can be shown to offer strictly less.
+        message.stop()
+        self.provider_queries.append(message.command)
+        choices = _logout_choices() if message.command == "logout" else PROVIDER_CHOICES
+        self.editor.picker.set_choices(list(choices))
 
 
 # ---------------------------------------------------------------------------
@@ -554,7 +586,12 @@ async def test_an_ambiguous_enter_grows_the_common_prefix_and_never_a_command() 
         assert app.editor.picker.suggestions()[0][0] == "login"
         await pilot.press("enter")
         await pilot.pause()
-        assert app.submissions == ["/login "]
+        # `login` is a list-opening command like `model`: the resolved Enter
+        # completes the word and the trailing space opens the provider list, so
+        # the bare command is never run.
+        assert app.submissions == []
+        assert app.editor.text == "/login "
+        assert app.editor.picker.mode is PickerMode.ARGUMENT
 
 
 @pytest.mark.asyncio
@@ -578,9 +615,10 @@ async def test_enter_sends_immediately_when_there_is_only_one_match() -> None:
 
 
 @pytest.mark.asyncio
-async def test_enter_sends_a_fully_typed_name_even_when_others_match() -> None:
-    """`/log` also matches `login`, but a user who typed `logout` in full named
-    it rather than letting the matcher choose."""
+async def test_a_fully_typed_list_command_opens_its_list_instead_of_running() -> None:
+    """A user who typed `logout` in full named it — the ambiguity gate is
+    satisfied — and what that resolves to is the PROVIDER list, not a bare
+    `/logout` echoed into the transcript with no provider to remove."""
     app = PickerHarnessApp()
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
@@ -589,7 +627,10 @@ async def test_enter_sends_a_fully_typed_name_even_when_others_match() -> None:
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()
-        assert app.submissions == ["/logout "]
+        assert app.submissions == []
+        assert app.editor.text == "/logout "
+        assert app.provider_queries == ["logout"]
+        assert [name for name, _ in app.editor.picker.suggestions()] == ["anthropic", "alibaba"]
 
 
 @pytest.mark.asyncio
@@ -649,11 +690,15 @@ async def test_arrowing_onto_a_row_lets_enter_send_it() -> None:
     The rule exists because the MATCHER may have chosen the row; a user who
     arrowed onto it chose it themselves, which is also the muscle memory every
     comparable picker has taught (move, Enter, done).
+
+    `/c` (clear, compact) rather than `/lo`: every candidate under `/lo` opens a
+    list instead of running, so the send this test is about would never happen
+    there for a reason that has nothing to do with the arrow key.
     """
     app = PickerHarnessApp()
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
-        await pilot.press("slash", "l", "o")
+        await pilot.press("slash", "c")
         assert len(app.editor._picker.suggestions()) > 1
         await pilot.press("down")
         chosen = app.editor._picker.highlighted_name()
@@ -693,3 +738,277 @@ async def test_completing_a_list_opening_command_does_not_run_it() -> None:
         assert app.submissions == [], "completing a list-opening command must not run it"
         assert app.editor.text == "/model ", app.editor.text
         assert not app.editor.picker.is_open(), "the command list gives way"
+
+
+# ---------------------------------------------------------------------------
+# argument mode — the SAME picker over a command's provider argument
+# ---------------------------------------------------------------------------
+
+
+def _argument_picker(choices: list[ArgumentChoice], query: str = "") -> CommandPicker:
+    picker = CommandPicker(lambda _name: None)
+    picker.set_choices(choices)
+    picker.sync_argument(query)
+    return picker
+
+
+def test_an_argument_row_shows_the_bare_id_not_a_slash_command() -> None:
+    """`/login /anthropic` is not typeable, so the row must not offer it.
+
+    The slash is command vocabulary. Printing it on an argument row would teach a
+    keystroke that the parser rejects.
+    """
+    picker = _argument_picker(list(PROVIDER_CHOICES))
+    assert picker.mode is PickerMode.ARGUMENT
+    text = "\n".join(row.plain for row in picker.render_rows(80))
+    assert "anthropic" in text
+    assert "/anthropic" not in text
+    assert "/" not in text
+
+
+@pytest.mark.parametrize("width", [16, 20, 40, 80, 200])
+def test_an_argument_row_fills_exactly_the_render_width(width: int) -> None:
+    """The one-row rule is structural for argument rows too: exact width means
+    Textual has nothing to wrap, and the detail column cannot push past the edge
+    however long the state string is."""
+    picker = _argument_picker(list(PROVIDER_CHOICES))
+    rows = picker.render_rows(width)
+    assert len(rows) == len(PROVIDER_CHOICES)
+    for row in rows:
+        assert "\n" not in row.plain
+        assert cell_len(row.plain) == width
+
+
+def test_detail_is_right_aligned_and_survives_the_description_collapse() -> None:
+    """`detail` is what `/logout` is chosen BY, so it outranks the description.
+
+    At 41 cells both columns fit; at 40 the description collapses and the state
+    is what stays, because a row that says only "anthropic" cannot answer the
+    question the user opened the list to ask.
+    """
+    picker = _argument_picker(list(PROVIDER_CHOICES))
+    wide = picker.render_rows(41)[0].plain
+    assert "Anthropic" in wide
+    assert wide.rstrip().endswith("logged in")
+
+    narrow = picker.render_rows(40)[0].plain
+    assert "Anthropic" not in narrow
+    assert "anthropic" in narrow
+    assert narrow.rstrip().endswith("logged in")
+
+
+def test_a_row_too_narrow_for_both_keeps_the_name() -> None:
+    """Below the point where the id itself would be squeezed, the detail goes.
+
+    The name is the text Tab types into the buffer; a truncated one is not a
+    choice the user can act on, whatever it says about their credentials.
+    """
+    row = _argument_picker(list(PROVIDER_CHOICES)).render_rows(20)[0].plain
+    assert "anthropic" in row
+    assert "logged in" not in row
+
+
+def test_an_alias_finds_the_row_but_never_becomes_the_completion() -> None:
+    """`claude` reaches anthropic; the row still says `anthropic`, because that
+    is the only text `/login` accepts."""
+    picker = _argument_picker(list(PROVIDER_CHOICES), "clau")
+    assert [name for name, _ in picker.suggestions()] == ["anthropic"]
+    text = "\n".join(row.plain for row in picker.render_rows(80))
+    assert "claude" not in text
+
+
+def test_choices_arriving_after_the_open_still_fill_the_list() -> None:
+    """The app answers the opening message a tick later, so `set_choices` has to
+    re-derive the rows — otherwise the list sits empty until the next keystroke."""
+    picker = _argument_picker([], "")
+    assert not picker.is_open()
+    picker.set_choices(list(PROVIDER_CHOICES))
+    assert picker.is_open()
+    assert [name for name, _ in picker.suggestions()] == [c.name for c in PROVIDER_CHOICES]
+
+
+def test_an_empty_argument_query_offers_everything() -> None:
+    """`/login ` with nothing typed is the "show me the providers" keystroke."""
+    assert argument_suggestions("", list(PROVIDER_CHOICES)) == [
+        (choice.name, choice) for choice in PROVIDER_CHOICES
+    ]
+
+
+@pytest.mark.asyncio
+async def test_typing_past_the_command_opens_the_provider_list() -> None:
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        for key in ("slash", "l", "o", "g", "i", "n", "space"):
+            await pilot.press(key)
+        await pilot.pause()
+        picker = app.editor.picker
+        assert app.provider_queries == ["login"]
+        assert picker.mode is PickerMode.ARGUMENT
+        assert [name for name, _ in picker.suggestions()] == [c.name for c in PROVIDER_CHOICES]
+        assert app.editor.has_focus
+
+        # And it narrows by model family, not just by id.
+        for key in ("c", "l", "a", "u"):
+            await pilot.press(key)
+        await pilot.pause()
+        assert [name for name, _ in picker.suggestions()] == ["anthropic"]
+        # Still ONE query: the message rides the transition, not the keystroke.
+        assert app.provider_queries == ["login"]
+
+
+@pytest.mark.asyncio
+async def test_logout_offers_only_what_can_be_removed() -> None:
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        for key in ("slash", "l", "o", "g", "o", "u", "t", "space"):
+            await pilot.press(key)
+        await pilot.pause()
+        assert app.provider_queries == ["logout"]
+        names = [name for name, _ in app.editor.picker.suggestions()]
+        assert names == ["anthropic", "alibaba"], "only stored credentials"
+
+
+@pytest.mark.asyncio
+async def test_switching_between_login_and_logout_reasks_for_the_rows() -> None:
+    """The two commands offer different sets, so the rows cannot be carried over —
+    `/logout` must never inherit a provider the user was never logged into."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/login "
+        await pilot.pause()
+        assert [name for name, _ in app.editor.picker.suggestions()] == [
+            c.name for c in PROVIDER_CHOICES
+        ]
+        app.editor.text = "/logout "
+        await pilot.pause()
+        assert app.provider_queries == ["login", "logout"]
+        assert [name for name, _ in app.editor.picker.suggestions()] == ["anthropic", "alibaba"]
+
+
+@pytest.mark.asyncio
+async def test_tab_completes_the_provider_id_without_running_it() -> None:
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/login clau"
+        await pilot.pause()
+        await pilot.press("tab")
+        await pilot.pause()
+        # The ID, not the alias that found it — and no trailing space, which
+        # would terminate the argument and close the list Tab just used.
+        assert app.editor.text == "/login anthropic"
+        assert app.submissions == []
+        assert app.editor.has_focus
+
+
+@pytest.mark.asyncio
+async def test_enter_runs_an_unambiguous_provider() -> None:
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/logout anthropic"
+        await pilot.pause()
+        assert len(app.editor.picker.suggestions()) == 1, "premise: one match"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.submissions == ["/logout anthropic"]
+        assert app.editor.text == ""
+
+
+@pytest.mark.asyncio
+async def test_an_ambiguous_enter_never_logs_anyone_out() -> None:
+    """`/logout` DELETES a credential, so a row the matcher guessed at must not
+    run on one keystroke. The first Enter completes; the buffer then names one
+    provider exactly, and the second Enter acts."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/logout a"
+        await pilot.pause()
+        assert len(app.editor.picker.suggestions()) > 1, "premise: /logout a is ambiguous"
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.submissions == [], "a fuzzy pick must not remove a credential"
+        assert app.editor.text == "/logout anthropic"
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.submissions == ["/logout anthropic"]
+
+
+@pytest.mark.asyncio
+async def test_arrowing_onto_a_provider_lets_enter_run_it() -> None:
+    """An explicit move is the answer to "did the matcher choose this row?" — the
+    same rule the command list applies, so the two lists cannot drift."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/logout a"
+        await pilot.pause()
+        await pilot.press("down")
+        await pilot.pause()
+        assert app.editor.picker.highlighted_name() == "alibaba"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.submissions == ["/logout alibaba"]
+
+
+@pytest.mark.asyncio
+async def test_arrows_move_the_provider_highlight() -> None:
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/login "
+        await pilot.pause()
+        picker = app.editor.picker
+        assert picker.selected_index == 0
+        await pilot.press("down", "down")
+        await pilot.pause()
+        assert picker.selected_index == 2
+        await pilot.press("up")
+        await pilot.pause()
+        assert picker.selected_index == 1
+        assert app.editor.has_focus, "navigation never steals the caret"
+
+
+@pytest.mark.asyncio
+async def test_escape_closes_the_provider_list_and_leaves_the_text() -> None:
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/login clau"
+        await pilot.pause()
+        assert app.editor.picker.is_open()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not app.editor.picker.is_open()
+        assert app.editor.text == "/login clau", "the typed text survives"
+
+
+@pytest.mark.asyncio
+async def test_clicking_a_provider_row_runs_it() -> None:
+    """A click names one exact row with a pointer — that is not the matcher's
+    guess the keyboard gate protects against, and a click that only filled the
+    field would leave the user finishing a choice they already made."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        app.editor.text = "/logout "
+        await pilot.pause()
+        await pilot.click(CommandPicker, offset=(4, 1))
+        await pilot.pause()
+        assert app.submissions == ["/logout alibaba"]

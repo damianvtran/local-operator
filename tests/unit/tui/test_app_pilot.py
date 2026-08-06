@@ -8,13 +8,18 @@ paints first, then awaits the session in a worker.
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
-from local_operator.tui.app import OperatorApp, SLASH_COMMANDS
+from local_operator.session.mcp_status import McpStartupOutcome
+from local_operator.tui.app import BOOT_LAYOUT_CLASS, OperatorApp, SLASH_COMMANDS
+from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.widgets.editor import Editor
+from local_operator.tui.widgets.toast import Toast
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+from local_operator.tui.widgets.welcome import WelcomeView
 
 
 class FakeSession:
@@ -354,13 +359,18 @@ async def test_boot_failure_posts_error_and_reload_retries() -> None:
 @pytest.mark.asyncio
 async def test_login_lists_providers_from_the_controller() -> None:
     """Bare /login lists loginable providers — the controller is the only
-    path now that the CLI login_handler seam is gone."""
+    path now that the CLI login_handler seam is gone.
+
+    Esc before Enter is what makes it BARE: completing `/login` now opens the
+    provider list instead, so dismissing that list is the only way left to run
+    the command with no argument.
+    """
     app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=FakeProviderController())
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         app.query_one(Editor).focus()
         await pilot.pause()
-        await pilot.press("slash", "l", "o", "g", "i", "n", "enter")
+        await pilot.press("slash", "l", "o", "g", "i", "n", "escape", "enter")
         await pilot.pause()
         text = _transcript_text(app)
     assert "openrouter" in text and "deepseek" in text
@@ -382,18 +392,153 @@ async def test_logout_routes_to_the_controller() -> None:
     assert controller.logouts == ["openrouter"]
 
 
+def _provider_rows(app) -> list[tuple[str, str]]:
+    """``(id, detail)`` for every row the provider list is offering."""
+    rows: list[tuple[str, str]] = []
+    for name, choice in app.query_one(Editor).picker.suggestions():
+        assert isinstance(choice, ArgumentChoice), "the picker is not in argument mode"
+        rows.append((name, choice.detail))
+    return rows
+
+
+@pytest.mark.asyncio
+async def test_login_list_reports_all_three_credential_states() -> None:
+    """`/login ` offers every loginable provider with where the user stands.
+
+    Three states, not two: an env key runs a turn but is not a login, so calling
+    it one would promise a stored account `/logout` could remove.
+    """
+
+    class EnvKeyController(FakeProviderController):
+        def is_usable(self, provider):
+            # deepseek has DEEPSEEK_API_KEY in the environment but no stored login.
+            return self.has_any_credential(provider) or provider == "deepseek"
+
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=EnvKeyController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        app.query_one(Editor).text = "/login "
+        await pilot.pause()
+        assert _provider_rows(app) == [
+            ("openrouter", "logged in"),
+            ("deepseek", "env key"),
+            ("xai-oauth", "needs login"),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_a_search_alias_reaches_the_provider_it_names() -> None:
+    """`grok` is how users refer to xAI; the row still completes to the id."""
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        app.query_one(Editor).text = "/login grok"
+        await pilot.pause()
+        assert [name for name, _ in _provider_rows(app)] == ["xai-oauth"]
+
+
+@pytest.mark.asyncio
+async def test_logout_list_offers_only_stored_credentials() -> None:
+    """Logging out of a provider you never logged into is a no-op, so the list
+    does not offer it."""
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        app.query_one(Editor).text = "/logout "
+        await pilot.pause()
+        assert _provider_rows(app) == [("openrouter", "logged in")]
+
+
+@pytest.mark.asyncio
+async def test_logout_with_nothing_stored_says_so_instead_of_showing_nothing() -> None:
+    """An empty set and "nothing matched your query" render identically — as
+    nothing at all. Only the first is worth a sentence, because no amount of
+    retyping would have produced a row."""
+
+    class NoCredentials(FakeProviderController):
+        def has_any_credential(self, provider):
+            return False
+
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=NoCredentials())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        app.query_one(Editor).text = "/logout "
+        await pilot.pause()
+        assert not app.query_one(Editor).picker.is_open()
+        assert "nothing to log out of" in _transcript_text(app)
+        # And it did NOT end the empty state. Opening a list is not the
+        # conversation starting: a fresh session that collapsed its boot
+        # composition to report that a command the user has not run yet has
+        # nothing to offer would spend the whole empty state on that sentence.
+        assert app.query_one(WelcomeView).display is True
+        assert app.screen.has_class(BOOT_LAYOUT_CLASS)
+
+
+@pytest.mark.asyncio
+async def test_choosing_a_row_runs_the_existing_logout_path() -> None:
+    """The list is a way to reach `_cmd_logout`, not a second implementation."""
+    controller = FakeProviderController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=controller)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        app.query_one(Editor).text = "/logout "
+        await pilot.pause()
+        assert len(app.query_one(Editor).picker.suggestions()) == 1, "premise: one match"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+    assert controller.logouts == ["openrouter"]
+
+
+@pytest.mark.asyncio
+async def test_choosing_a_row_runs_the_existing_login_path() -> None:
+    controller = FakeProviderController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=controller)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        app.query_one(Editor).text = "/login deepseek"
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+    assert controller.logins == ["deepseek"]
+
+
 @pytest.mark.asyncio
 async def test_login_without_controller_points_at_the_cli() -> None:
     """Degrading to a pointer notice is the contract when the TUI is embedded
-    without a controller — it must never crash or silently do nothing."""
+    without a controller — it must never crash or silently do nothing.
+
+    Both routes degrade the same way: opening the provider list has nothing to
+    read the credential store with, and so does dispatching the bare command.
+    """
     app = OperatorApp(lambda: _factory(FakeSession()))  # no controller
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         app.query_one(Editor).focus()
         await pilot.pause()
-        await pilot.press("slash", "l", "o", "g", "i", "n", "enter")
+        await pilot.press("slash", "l", "o", "g", "i", "n", "enter")  # opens the list
         await pilot.pause()
         assert "local-operator login" in _transcript_text(app)
+        assert not app.query_one(Editor).picker.is_open(), "no controller, no rows"
+
+        # No Esc needed: with no rows the list never opened, so Enter on the
+        # completed `/login ` goes straight to the command dispatch.
+        await pilot.press("enter")
+        await pilot.pause()
+        assert _transcript_text(app).count("local-operator login") == 2
 
 
 @pytest.mark.asyncio
@@ -486,9 +631,9 @@ class FakeProviderController:
 
     def login_providers(self):
         return [
-            _FakeDef("openrouter", "OpenRouter", None),
-            _FakeDef("deepseek", "DeepSeek", None),
-            _FakeDef("xai-oauth", "xAI OAuth", "xai"),
+            _FakeDef("openrouter", "OpenRouter", None, ("router",)),
+            _FakeDef("deepseek", "DeepSeek", None, ("ds",)),
+            _FakeDef("xai-oauth", "xAI OAuth", "xai", ("grok",)),
         ]
 
     def provider(self, pid):
@@ -542,6 +687,12 @@ class FakeProviderController:
     def resolve_model(self, provider, model_id):
         return FakeModel(provider, model_id)
 
+    def set_login_callbacks(self, factory):
+        # The TUI installs its own transcript-rendering callbacks before every
+        # flow; without this the flow dies on an AttributeError the app catches
+        # and reports as "login failed", which looks exactly like a real failure.
+        self.login_callbacks = factory
+
     async def login(self, provider):
         self.logins.append(provider)
         return f"logged in {provider}"
@@ -555,11 +706,14 @@ class FakeProviderController:
 
 
 class _FakeDef:
-    def __init__(self, pid, name, store_as):
+    def __init__(self, pid, name, store_as, aliases=()):
         self.id = pid
         self.name = name
         self.store_credentials_as = store_as
         self.login = object()  # truthy -> has interactive login
+        # Mirrors ProviderDefinition.search_aliases: the other names a user would
+        # type for this provider, which is what makes `grok` reach `xai-oauth`.
+        self.search_aliases = aliases
 
 
 class _FakeCred:
@@ -989,3 +1143,195 @@ async def test_interrupt_cancels_running_loop() -> None:
         app._loop_running = True
         app.action_interrupt()
         assert app._loop_cancelled is True
+
+
+# -- MCP status band + startup toast -----------------------------------------
+
+
+class FakeMcpManager:
+    """The five methods the app asks of a manager, plus a way to drive a drop."""
+
+    def __init__(self, configured: list[str], connected: list[str]) -> None:
+        self._configured = list(configured)
+        self._connected = list(connected)
+        self._callback: Any = None
+        self.inner_calls: list[list[Any]] = []
+
+    def get_all_server_names(self) -> list[str]:
+        return sorted(self._configured)
+
+    def get_connected_servers(self) -> list[str]:
+        return sorted(self._connected)
+
+    def get_connection_status(self, name: str) -> str:
+        return "connected" if name in self._connected else "disconnected"
+
+    def set_on_tools_changed(self, callback: Any) -> None:
+        self._callback = callback
+
+    @property
+    def on_tools_changed(self) -> Any:
+        return self._callback
+
+    def install_incumbent(self) -> None:
+        """Stand in for the composition root's own subscriber, which the app
+        must chain rather than clobber."""
+        self._callback = self.inner_calls.append
+
+    def fire(self) -> None:
+        """What ``set_on_tools_changed`` does on connect/disconnect."""
+        assert self._callback is not None
+        self._callback([])
+
+    def drop(self, name: str) -> None:
+        self._connected.remove(name)
+        self.fire()
+
+
+class McpSession(FakeSession):
+    """A session carrying the two attributes the composition root records."""
+
+    def __init__(self, manager: Any = None, startup: Any = None) -> None:
+        super().__init__()
+        self.mcp_manager = manager
+        self.mcp_startup = startup
+
+
+def _band(app) -> str:  # type: ignore[no-untyped-def]
+    from textual.widgets import Static
+
+    return app.query_one("#status-band", Static).render().plain
+
+
+@pytest.mark.asyncio
+async def test_no_mcp_means_no_segment_and_no_toast() -> None:
+    """The whole feature is invisible on a machine that does not use MCP. A
+    ``⊙ 0 MCP`` and a "0 servers" toast on every launch would be pure noise."""
+    session = McpSession(manager=None, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        assert "MCP" not in _band(app)
+        assert app.query_one(Toast).display is False
+
+
+@pytest.mark.asyncio
+async def test_the_band_counts_connected_servers_and_the_toast_reports_startup() -> None:
+    manager = FakeMcpManager(["github", "linear", "slack"], ["github", "linear"])
+    startup = McpStartupOutcome(
+        configured=("github", "linear", "slack"),
+        connected=("github", "linear"),
+        failures={"slack": "command not found: slack-mcp"},
+        tool_count=31,
+    )
+    session = McpSession(manager=manager, startup=startup)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        assert "⊙ 2 MCP" in _band(app)
+        toast = app.query_one(Toast)
+        assert toast.display is True
+        assert "2 of 3 servers up, 31 tools" in toast.message
+        assert "slack" in toast.message
+
+
+@pytest.mark.asyncio
+async def test_a_server_dropping_updates_the_count_live() -> None:
+    """The reference snapshots this count at boot and lets it go stale. Here
+    ``set_on_tools_changed`` drives a repaint, so a server dying is visible."""
+    manager = FakeMcpManager(["github", "linear"], ["github", "linear"])
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        assert "⊙ 2 MCP" in _band(app)
+        manager.drop("linear")
+        for _ in range(4):
+            await pilot.pause()
+        band = _band(app)
+        assert "⊙ 1 MCP" in band
+        # …and the surviving server's neighbour being down turns the lamp: the
+        # count alone cannot say whether 1 of 2 is a failure or a config change.
+        assert app._mcp_status().failed is True
+
+
+@pytest.mark.asyncio
+async def test_the_app_chains_the_composition_roots_subscriber() -> None:
+    """Clobbering the incumbent callback would freeze the agent's TOOL LIST at
+    boot — a far worse bug than a stale counter. The app reads the incumbent and
+    calls it from its own wrapper."""
+    manager = FakeMcpManager(["github"], ["github"])
+    manager.install_incumbent()
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        manager.fire()
+        for _ in range(4):
+            await pilot.pause()
+        assert manager.inner_calls, "the incumbent tool-merge callback was dropped"
+
+
+@pytest.mark.asyncio
+async def test_a_failure_survives_the_toast_dismissing() -> None:
+    """A toast that dismisses is not a record. The failure lands in the
+    transcript as a notice AND is reachable through ``/mcp``, so the information
+    outlives the five or ten seconds the overlay is up."""
+    manager = FakeMcpManager(["slack"], [])
+    startup = McpStartupOutcome(
+        configured=("slack",),
+        failures={"slack": "command not found: slack-mcp"},
+    )
+    session = McpSession(manager=manager, startup=startup)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        toast = app.query_one(Toast)
+        assert toast.display is True
+        toast.dismiss_toast()
+        await pilot.pause()
+        assert toast.display is False
+        assert toast.message == ""
+        # The durable half — appended, but WITHOUT ending the empty state: the
+        # conversation has not started just because a server failed to start, and
+        # collapsing the boot composition on launch would mean a user with one
+        # broken server never saw the centred prompt the toast interrupted.
+        text = _transcript_text(app)
+        assert "MCP slack failed: command not found: slack-mcp" in text
+        welcome = app.query_one(WelcomeView)
+        assert welcome.display is True, "an infrastructure notice must not retire the splash"
+
+
+@pytest.mark.asyncio
+async def test_mcp_command_reports_per_server_state_not_just_the_config() -> None:
+    """``/mcp`` used to dump the configured command and never say whether it
+    worked, which is the only question it gets run to answer."""
+    from local_operator.mcp.config import MCPStdioServerConfig
+
+    manager = FakeMcpManager(["slack"], [])
+    startup = McpStartupOutcome(
+        configured=("slack",),
+        failures={"slack": "command not found: slack-mcp"},
+    )
+    session = McpSession(manager=manager, startup=startup)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+        block = None
+        with patch(
+            "local_operator.mcp.config.load_all_mcp_configs",
+            return_value=({"slack": MCPStdioServerConfig(command="slack-mcp")}, {}),
+        ):
+            block = app._mcp_block()
+        assert block is not None
+        listing = _renderable_plain(block.renderable)
+        assert "slack" in listing
+        assert "disconnected" in listing
+        assert "command not found: slack-mcp" in listing

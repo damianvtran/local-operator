@@ -8,7 +8,9 @@ Two layers, because the widget has two independent failure modes:
 - the WIRING: the view exists on boot, retires on the first transcript block,
   returns on ``/clear``, and contributes zero rows while hidden. Tested
   through ``App.run_test`` against the real stylesheet, because ``display``,
-  ``1fr`` shares, and the clear hook only exist once the layout engine runs.
+  the measured content height, and the clear hook only exist once the layout
+  engine runs. The LAYOUT that height feeds — the centred boot card and the
+  class that selects it — is pinned in ``test_boot_layout.py``.
 """
 
 from __future__ import annotations
@@ -194,37 +196,52 @@ def test_height_tiers_shed_in_cost_to_the_user_order() -> None:
     The credential warning survives all of it — see the test below.
     """
     info = _info()
-    # The natural block height, measured the way the widget measures it: at a box
-    # taller than the content the builder top-pads, so the content extent is the
-    # run from the first to the last drawn row.
+    # The natural block height. The builder returns the block and nothing else —
+    # no padding rows — so at a box taller than the content the row count IS the
+    # content extent, and the widget reports exactly this as its height.
     roomy = _lines(info, ROOMY_W, 99)
     drawn = [i for i, row in enumerate(roomy) if row.strip()]
     full_h = drawn[-1] - drawn[0] + 1
     # 12 logo (mark 10 + blank + wordmark) + 1 blank + 4 status + 1 blank + 3 hints
     assert full_h == 21
+    assert len(roomy) == full_h, "no padding rows: the block is all the builder draws"
 
-    # A box of exactly the natural height: one row is held back so the block
-    # never touches the dock, so the lockup goes FLUSH — the mark survives and so
-    # does every fact.
-    flush = _lines(info, ROOMY_W, full_h)
+    # A box of exactly the natural height keeps everything: the budget is what
+    # the block may SPEND, and nothing is held back for a gap the input panel's
+    # own top padding row already provides.
+    exact = _lines(info, ROOMY_W, full_h)
+    assert _has_mark(exact)
+    assert _has_hints(exact)
+    assert f"v{info.version}" in "\n".join(exact)
+    assert len(exact) == full_h
+
+    # One row short: the lockup goes flush — one row of air is the cheapest thing
+    # on the screen, and every fact survives.
+    flush = _lines(info, ROOMY_W, full_h - 1)
     assert _has_mark(flush)
     assert _has_hints(flush)
     assert f"v{info.version}" in "\n".join(flush)
 
     # One row tighter: the version row is spent to keep the mark.
-    traded = _lines(info, ROOMY_W, full_h - 1)
+    traded = _lines(info, ROOMY_W, full_h - 2)
     assert _has_mark(traded), "the mark is worth more than the version number"
     assert f"v{info.version}" not in "\n".join(traded)
     assert _has_hints(traded)
 
     # One row tighter again: there is nothing cheap left, so the mark goes.
-    mid = _lines(info, ROOMY_W, full_h - 2)
+    mid = _lines(info, ROOMY_W, full_h - 3)
     assert not _has_mark(mid)
     assert _has_hints(mid)
     assert _has_any_status(mid, info)
 
-    # Far shorter: hints go last; the status rows stay.
-    short = _lines(info, ROOMY_W, 7)
+    # Far shorter: hints go LAST, after the weak status rows have already been
+    # spent — at seven rows the version row buys them, and only a box too short
+    # for the hint block plus a single status row finally drops them.
+    keeps_hints = _lines(info, ROOMY_W, 7)
+    assert not _has_mark(keeps_hints)
+    assert _has_hints(keeps_hints)
+
+    short = _lines(info, ROOMY_W, 6)
     assert not _has_mark(short)
     assert not _has_hints(short)
     assert _has_any_status(short, info)
@@ -357,8 +374,8 @@ def _welcome(app: OperatorApp) -> WelcomeView:
 
 @pytest.mark.asyncio
 async def test_visible_on_boot() -> None:
-    """Fresh session: the welcome view is mounted, visible, and centered in the
-    transcript region while the transcript holds no blocks."""
+    """Fresh session: the welcome view is mounted, visible, content-sized, and
+    resting on the input card while the transcript holds no blocks."""
     app = _make_app(FakeSession())
     async with app.run_test(size=(100, 28)) as pilot:
         await pilot.pause()
@@ -374,14 +391,13 @@ async def test_visible_on_boot() -> None:
         assert _has_spaced_wordmark(lines)
         assert _has_hints(lines)
 
-        # A 28-row terminal gives this region 20 rows and the full lockup wants
-        # 19 of them, so there is exactly one spare row — and it is deliberately
-        # spent on the BOTTOM. The one row the builder holds back exists so the
-        # block never sits against the input dock, and at this size holding it
-        # back is the whole of the slack. What is pinned, then, is not a top pad
-        # (there is nothing left to pay one with) but that the mark is on screen
-        # at the standard terminal size and the last row stays clear.
-        assert len(lines) < welcome.size.height, "the block must not touch the dock"
+        # CONTENT-SIZED, and that is the whole of the boot composition: the widget
+        # is exactly as tall as the block it draws, so the rows the block does not
+        # need stay above it and its last row is the row above the input card. A
+        # widget taller than its block would put an arbitrary gap there and the
+        # splash would read as floating over a bar instead of resting on a card.
+        assert len(lines) == welcome.size.height
+        assert welcome.region.bottom == app.query_one("#input-dock").region.y
 
         # Centered horizontally: the mark's first row sits at the block's
         # centring offset.

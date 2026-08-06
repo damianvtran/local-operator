@@ -19,7 +19,9 @@ from rich.cells import cell_len
 
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.status_line import (
+    ICON_MCP,
     ICON_MODEL,
+    McpStatus,
     StatusLine,
     _MIN_GROUP_GAP,
     format_agents,
@@ -27,8 +29,10 @@ from local_operator.tui.widgets.status_line import (
     format_cost,
     format_cwd,
     format_duration,
+    format_mcp,
     format_model_label,
     format_window,
+    mcp_semantic,
 )
 
 
@@ -449,3 +453,76 @@ def test_a_terminal_too_narrow_for_anything_still_names_the_model() -> None:
         assert body, f"width {width} rendered an empty band: {plain!r}"
         # Some recognisable part of the model id survives, not just the ellipsis.
         assert body.strip("…").strip(), f"width {width} kept only an ellipsis: {plain!r}"
+
+
+# -- MCP segment -------------------------------------------------------------
+
+
+def test_mcp_segment_counts_connected_servers_and_never_pluralises() -> None:
+    """The count is SERVERS, and ``MCP`` is an initialism, not a noun."""
+    assert format_mcp(McpStatus(configured=3, connected=3)) == "3 MCP"
+    assert format_mcp(McpStatus(configured=1, connected=1)) == "1 MCP"
+    # Configured but nothing up yet — a real state, and it renders.
+    assert format_mcp(McpStatus(configured=2, connected=0)) == "0 MCP"
+
+
+def test_mcp_segment_disappears_when_no_servers_are_configured() -> None:
+    """``⊙ 0 MCP`` on a machine with no ``.mcp.json`` is seven cells asserting
+    the absence of a feature the user never asked for. The segment appearing at
+    all is part of the signal."""
+    assert format_mcp(McpStatus()) == ""
+    status = StatusLine(FakeDock(200))
+    status.update(model_label="test/model", mcp=McpStatus())
+    assert ICON_MCP not in status.render_text(200).plain
+
+
+def test_mcp_glyph_is_a_single_cell_like_every_other_segment_icon() -> None:
+    """The band's layout is measured arithmetic. A two-cell glyph would drift
+    the right group's edge by a column on terminals that render it wide, which
+    is why the reference's ``⊙`` was measured rather than assumed."""
+    assert cell_len(ICON_MCP) == 1
+
+
+def test_a_failed_server_wins_over_the_ones_that_did_connect() -> None:
+    """A PARTIAL failure is the dangerous outcome: green beside a count of 2 on
+    a machine where the third server died reads as "all good", and the user then
+    spends the turn wondering why the agent cannot reach those tools."""
+    assert mcp_semantic(McpStatus(configured=3, connected=2, failed=True)) == "danger"
+    assert mcp_semantic(McpStatus(configured=3, connected=3)) == "success"
+    # Configured, nothing up, nothing failed: the startup gate's normal state on
+    # every launch, so it gets no colour at all.
+    assert mcp_semantic(McpStatus(configured=3, connected=0)) == "dim"
+
+
+def test_only_the_mcp_glyph_carries_the_state_colour() -> None:
+    """Tinting ``2 MCP`` danger reads as "the number 2 is wrong". The glyph is
+    the status lamp; the count beside it stays plain foreground."""
+    status = StatusLine(FakeDock(200))
+    status.update(model_label="test/model", mcp=McpStatus(configured=3, connected=2, failed=True))
+    fills = _fills(status.render_text(200))
+    danger = theme_mod.semantic_color("danger").lower()
+    fg = theme_mod.semantic_color("fg").lower()
+    assert fills[f"{ICON_MCP} "] == danger
+    assert fills["2 MCP"] == fg
+
+
+def test_the_mcp_segment_outlives_every_other_droppable_segment() -> None:
+    """It is the reference's ``flexShrink={0}`` indicator, and the ladder's last
+    rung. Two reasons, both asserted here by outcome: it is the cheapest segment
+    in the band to keep, and its failure branch is the only alarm the band can
+    raise — a cramped terminal is exactly where hiding it would make a user
+    conclude the tools were never configured.
+    """
+    status, _clock = _full_band()
+    status.update(mcp=McpStatus(configured=3, connected=2, failed=True))
+    # Walk down until the MCP count goes, and record what is still standing.
+    last_seen = None
+    for width in range(200, 4, -1):
+        plain = status.render_text(width).plain
+        if "2 MCP" not in plain:
+            break
+        last_seen = plain
+    assert last_seen is not None
+    # At its final width every other droppable segment is already gone.
+    for gone in ("49.6%/1M", "$12.40", "high", "3 agents", "41m1s"):
+        assert gone not in last_seen, f"{gone} outlived the MCP segment: {last_seen!r}"
