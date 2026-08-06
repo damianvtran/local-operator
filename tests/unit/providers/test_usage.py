@@ -28,6 +28,21 @@ def _client_for(payload, status: int = 200) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
+def _recording_client(payload, status: int = 200) -> tuple[httpx.AsyncClient, list[str]]:
+    """``(client, urls)`` — the same canned body, plus every URL it was asked for.
+
+    The URL is the contract for a region-derived endpoint: the parsed body looks
+    identical whichever host answered it.
+    """
+    urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        urls.append(str(request.url))
+        return httpx.Response(status, json=payload)
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler)), urls
+
+
 @pytest.mark.asyncio
 async def test_openrouter_credits_parse() -> None:
     payload = {"data": {"usage": 12.5, "limit": 100.0, "is_free_tier": False}}
@@ -69,22 +84,81 @@ async def test_openrouter_no_limit_reports_spend_only() -> None:
 
 
 @pytest.mark.asyncio
-async def test_kimi_api_key_reaches_the_balance_endpoint() -> None:
+async def test_kimi_api_key_reaches_the_balance_endpoint_the_key_belongs_to() -> None:
     """The widest gap this module had: the registry stores `KIMI_API_KEY` while the
     only Kimi fetcher wanted an OAuth token, so an API-key user was told Kimi
-    reports quota and got an empty table forever."""
+    reports quota and got an empty table forever.
+
+    And the host has to be the one the key is FOR. Moonshot mainland
+    (`api.moonshot.cn`) and international (`api.moonshot.ai`) are separate
+    platforms with separate accounts and separate keys, so a balance call to the
+    other region 401s on the only key the user can hold — reinstating the empty
+    table this fetcher exists to remove. The registry configures `kimi` for
+    `https://api.moonshot.cn/v1`, so that is where the request must go.
+    """
     payload = {
-        "data": {"available_balance": 12.5, "voucher_balance": 2.5, "cash_balance": 10.0},
+        "data": {"available_balance": 70.0, "voucher_balance": 20.0, "cash_balance": 50.0},
     }
-    client = _client_for(payload)
+    client, urls = _recording_client(payload)
     async with client:
         report = await fetch_usage(client, "kimi", api_key="sk-moonshot")
+    assert urls == ["https://api.moonshot.cn/v1/users/me/balance"]
     assert report is not None
     limit = report.limits[0]
     assert limit.id == "kimi:balance"
-    assert limit.amount.remaining == pytest.approx(12.5)
+    assert limit.amount.remaining == pytest.approx(70.0)
+    # A mainland balance is CNY. `usd` here would overstate it ~7x, so the unit is
+    # left unlabelled and the currency rides in the label, as DeepSeek does.
+    assert limit.amount.unit == "unknown"
+    assert limit.label == "Balance (CNY)"
+    assert report.notes == "voucher ¥20.00 + cash ¥50.00"
+
+
+@pytest.mark.asyncio
+async def test_the_international_moonshot_region_reports_dollars() -> None:
+    """Same payload, same parser, different platform: `api.moonshot.ai` accounts
+    are billed in USD and the response carries no currency field, so the host is
+    the only thing that says which."""
+    from local_operator.providers.usage import fetch_moonshot_balance
+
+    payload = {
+        "data": {"available_balance": 12.5, "voucher_balance": 2.5, "cash_balance": 10.0},
+    }
+    client, urls = _recording_client(payload)
+    async with client:
+        report = await fetch_moonshot_balance(
+            client, "sk-moonshot", base_url="https://api.moonshot.ai/v1"
+        )
+    assert urls == ["https://api.moonshot.ai/v1/users/me/balance"]
+    assert report is not None
+    limit = report.limits[0]
     assert limit.amount.unit == "usd"
-    assert report.notes is not None and "voucher" in report.notes
+    assert limit.label == "Balance (USD)"
+    assert report.notes == "voucher $2.50 + cash $10.00"
+
+
+def test_the_balance_endpoint_follows_the_configured_base_url() -> None:
+    """Not a hardcoded host: change the provider's base_url and the balance call
+    follows it, because the key that reaches the chat API is the key that reaches
+    the balance."""
+    from local_operator.providers.usage import moonshot_balance_target
+
+    assert moonshot_balance_target("https://api.moonshot.cn/v1") == (
+        "https://api.moonshot.cn/v1/users/me/balance",
+        "unknown",
+        "¥",
+    )
+    assert moonshot_balance_target("https://api.moonshot.ai/v1/") == (
+        "https://api.moonshot.ai/v1/users/me/balance",
+        "usd",
+        "$",
+    )
+    # Default = whatever the registry configures, which is the mainland host.
+    from local_operator.providers.registry import get_provider_definition
+
+    configured = get_provider_definition("kimi")
+    assert configured is not None and configured.base_url is not None
+    assert moonshot_balance_target()[0].startswith(configured.base_url)
 
 
 @pytest.mark.asyncio
@@ -195,14 +269,21 @@ def test_usage_kinds_distinguishes_no_endpoint_from_no_credential() -> None:
     assert usage_kinds("google") == (False, False)  # no endpoint at all
 
 
-def test_the_oauth_only_set_is_derived_from_the_dispatch_table() -> None:
-    """The hand-written version had already drifted from the table and was read by
-    nothing, which is how it stayed wrong."""
-    from local_operator.providers.usage import OAUTH_USAGE_PROVIDERS
+def test_the_advertised_set_is_the_dispatch_table() -> None:
+    """`USAGE_PROVIDERS` is the set that gates the UI, so a hand-maintained copy of
+    the dispatch table drifting one way silently unreaches a provider with a
+    working fetcher and the other way advertises one no fetcher serves. Derived,
+    it cannot drift.
 
-    assert "anthropic" in OAUTH_USAGE_PROVIDERS
-    assert "kimi" not in OAUTH_USAGE_PROVIDERS, "kimi now has an API-key route"
-    assert "openrouter" not in OAUTH_USAGE_PROVIDERS
+    (`OAUTH_USAGE_PROVIDERS` was deleted rather than derived: the question it
+    answered — "OAuth-only?" — is `usage_kinds`, which is what the one caller
+    already calls.)
+    """
+    from local_operator.providers import usage as usage_mod
+
+    assert usage_mod.USAGE_PROVIDERS == frozenset(usage_mod._FETCHERS)
+    assert usage_mod.USAGE_PROVIDERS is not None and len(usage_mod.USAGE_PROVIDERS) == 8
+    assert not hasattr(usage_mod, "OAUTH_USAGE_PROVIDERS")
 
 
 @pytest.mark.asyncio

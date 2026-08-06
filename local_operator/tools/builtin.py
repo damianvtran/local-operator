@@ -60,6 +60,7 @@ from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
     AgentToolUpdate,
+    BrowserSurface,
     BrowserSurfaceProtocol,
     TextContent,
     ToolContext,
@@ -1763,33 +1764,28 @@ def cmux_browser_available() -> bool:
         return False
 
 
-class _BrowserSession:
-    """Per-session browser state: the last opened surface id.
-
-    Satisfies :class:`~local_operator.harness.types.BrowserSurfaceProtocol`
-    and lives on ``context.browser`` so a subsequent ``goto``/``screenshot``
-    reuses the surface the agent opened, and there is one browser per agent
-    session — never a fresh leaky surface per call.
-    """
-
-    def __init__(self) -> None:
-        self.surface_id = ""
-
-
 def _browser_state(context: ToolContext | None) -> BrowserSurfaceProtocol:
+    """The session's browser surface holder.
+
+    Normally injected by the host (``Session._build_tool_context``), because
+    the ToolContext is rebuilt every turn and a handle stored on it would be
+    dropped — and a dropped handle strands a cmux tab nothing can close.
+
+    A host that injects nothing still gets a working single call: the
+    throwaway holder below means 'open' works and every later action reports
+    "no browser surface open".
+    """
     if context is None:
-        # No context to remember it on: the caller gets a throwaway surface
-        # handle, which is why 'goto'/'screenshot' then report nothing open.
-        return _BrowserSession()
+        return BrowserSurface()
     if context.browser is None:
-        # Store back so later calls in the same session reuse the surface.
-        context.browser = _BrowserSession()
+        context.browser = BrowserSurface()
     return context.browser
 
 
 async def _run_cmux(argv: list[str], timeout: float = 30.0) -> tuple[int, str]:
-    """Run a cmux subcommand; returns (exit_code, output). Never raises, and
-    on timeout terminates the child so a hung cmux cannot orphan.
+    """Run a cmux subcommand; returns (exit_code, output). Never raises except
+    on cancellation, and terminates the child in every exit path so a hung
+    cmux cannot orphan.
 
     The returned text is stdout on success and STDERR on failure, because that
     is where cmux writes its diagnostics — on a socket or permission failure it
@@ -1820,6 +1816,23 @@ async def _run_cmux(argv: list[str], timeout: float = 30.0) -> tuple[int, str]:
             # failure — a caller interpolating this must always have something.
             return code, err or out or f"cmux exited {code} with no output"
         return code, out
+    except asyncio.CancelledError:
+        # BEFORE the handlers below, and re-raised. CancelledError derives from
+        # BaseException, so it passes straight through `except
+        # asyncio.TimeoutError` and `except Exception` alike, and
+        # `wait_for(proc.communicate())` propagates it with the child still
+        # running and unreaped. The calls most likely to be cancelled are the
+        # long ones — _await_navigation polls up to BROWSER_NAV_TIMEOUT_S and
+        # _browser_open allows the full 30 s — which are also the ones most
+        # likely to be wedged, so session teardown or an aborted turn would
+        # otherwise leave a cmux process behind for each.
+        if proc is not None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except BaseException:  # noqa: BLE001 — cleanup, incl. a second cancel
+                pass
+        raise
     except asyncio.TimeoutError:
         if proc is not None:
             try:
@@ -1842,11 +1855,16 @@ def _cmux_new_surface(url: str) -> list[str]:
     that afterwards: the layout is hand-arranged and they rebuild it by hand.
     ``new-surface`` adds the browser as a sibling TAB in the calling pane
     instead. ``--focus false`` keeps their window and workspace exactly where
-    they left them; cmux only activates on an explicitly truthy focus. No
-    ``--workspace`` and no ``--pane``: the socket resolves the calling
-    terminal's own pane, whereas ``$CMUX_WORKSPACE_ID`` is the workspace the
-    terminal was CREATED in and goes stale the moment a surface is moved, which
-    drops the browser into an unrelated workspace.
+    they left them; cmux only activates on an explicitly truthy focus.
+
+    No ``--pane``: the socket resolves the calling terminal's own pane, which
+    is the pane the browser should join. Omitting ``--workspace`` does NOT
+    likewise avoid ``$CMUX_WORKSPACE_ID`` — ``cmux new-surface --help``
+    documents ``--workspace <id|ref|index>  Target workspace (default:
+    $CMUX_WORKSPACE_ID)``, so cmux applies that default server-side either
+    way. It is omitted because passing it explicitly can only make things
+    worse (a value we compute from a stale env var, versus cmux resolving its
+    own current one), not because it buys immunity from the variable.
     """
     return ["--json", "new-surface", "--type", "browser", "--url", url, "--focus", "false"]
 
@@ -1892,6 +1910,59 @@ def _validate_selector(raw: str, action: str) -> str:
     return ""
 
 
+def _validate_typed_text(raw: str) -> str:
+    """Return a refusal message for unusable ``type`` text, or "" when fine.
+
+    The same argv hazard the selector and URL are already checked for, in the
+    slot that was left out. cmux's parser is flag-greedy in the ``--text``
+    position: measured on this host, ``cmux browser --surface <s> fill
+    --selector a --text --help`` exits 0 and prints the browser help instead of
+    filling anything, and the tool then reported "Typed into a." having typed
+    nothing.
+
+    Blanket on a leading dash, matching :func:`_validate_selector`, rather than
+    enumerating the values that actually bite. Ordinary dash-leading text
+    (``-5``, ``-x``, ``--force``) does fill correctly today, so this refuses a
+    little more than it must — but the alternative is an allowlist of cmux's
+    global flags, which is a private detail of another program that changes
+    without notice. A model that needs a literal leading dash can fill the
+    remainder and press the key, and the read-back comparison in
+    :func:`_browser_type` catches anything that slips through either way.
+    """
+    if raw.startswith("-"):
+        return (
+            f"refusing flag-shaped text: {raw!r} — cmux's --text slot parses a "
+            "leading dash as an option (`--text --help` prints help and fills "
+            "nothing)"
+        )
+    return ""
+
+
+def _validate_browser_args(action: str, params: BrowserParams) -> str:
+    """Refuse an unusable argument, or "" when the call may proceed.
+
+    Deliberately one function called from the dispatcher rather than a check at
+    the top of each action body, because the ORDER matters and should be
+    structural: a value we are going to refuse must not reach the cmux CLI at
+    all, not even behind the stale-handle liveness probe. What makes that a
+    hard requirement is cmux's own behaviour — ``goto`` is an omnibox that
+    Googles a non-URL and still exits 0, and a flag-shaped value in a
+    positional or ``--text`` slot is parsed as an option.
+    """
+    if action in ("open", "goto"):
+        return _validate_browser_url(params.url, action)
+    if action in ("click", "type"):
+        problem = _validate_selector(params.selector, action)
+        if problem or action == "click":
+            return problem
+        return _validate_typed_text(params.text)
+    if action == "snapshot" and params.selector.strip():
+        # Optional here — an absent selector snapshots the whole document —
+        # which is why this is not the same shape as click/type.
+        return _validate_selector(params.selector, "snapshot")
+    return ""
+
+
 def _same_page(live: str, requested: str) -> bool:
     """Whether two URL readings name the same document.
 
@@ -1918,6 +1989,62 @@ async def _probe_document(surface: str) -> tuple[tuple[str, str, str] | None, st
     if not isinstance(parsed, list) or len(parsed) != 3:
         return None, f"unexpected eval payload: {out[:200] or '(empty)'}"
     return (str(parsed[0]), str(parsed[1]), str(parsed[2])), ""
+
+
+async def _cmux_url_probe(surface: str) -> tuple[int, str]:
+    """``(exit_code, url)`` from ``cmux browser --surface <s> get url``.
+
+    Split out because this one verb does double duty: it reports the URL cmux
+    is pointing at, AND it is the only cheap liveness check for the handle —
+    see :func:`_stale_surface_error`.
+    """
+    code, out = await _run_cmux(_surface_argv(surface, "get", "url"), timeout=15.0)
+    return code, out.strip()
+
+
+async def _stale_surface_error(
+    tool_call_id: str, state: BrowserSurfaceProtocol
+) -> ToolResult | None:
+    """``None`` when the recorded handle is still live; an error when it is not,
+    with the handle cleared.
+
+    Why every surface-taking action pays one extra round trip for this. cmux
+    resolves a ``--surface`` handle that no longer exists by falling back to
+    the ACTIVE surface and exiting 0 — so a stale handle silently drives
+    whatever tab the USER is looking at. Measured on this host against
+    ``--surface surface:999999`` (a handle that never existed): ``get title``,
+    ``get text --selector body``, ``eval`` and ``snapshot --compact`` all
+    returned rc=0 carrying an unrelated tab's content, so ``read`` answered
+    ``is_error: False`` with a confident page header and that page's full text
+    while ``details.surface_id`` still named the dead handle — internally
+    consistent and completely wrong, with nothing in the transcript signalling
+    the substitution.
+
+    ``get url`` is the exception that makes the check possible: rc=1,
+    ``Error: invalid_params: Missing or invalid surface_id``.
+    :func:`_await_navigation` cannot stand in for it, because its ``eval``
+    probe SUCCEEDS against the fallback surface and ``probe_failures`` never
+    trips.
+
+    Handles go stale routinely: the user closes the tab, or cmux restarts and
+    reissues small refs like ``surface:73`` to someone else. Called once per
+    action, never inside a poll loop.
+    """
+    surface = state.surface_id
+    code, out = await _cmux_url_probe(surface)
+    if code == 0:
+        return None
+    # Dropped, not kept: a retained dead handle points every later action at
+    # the user's own tab, and 'open' reuses the recorded handle, so there would
+    # be no route back to a surface of our own.
+    state.surface_id = ""
+    return _error(
+        tool_call_id,
+        "browser",
+        f"browser surface {surface} is gone ({out or 'no output'}); dropped the "
+        "handle. Use 'open' with a URL to get a new surface — acting on this "
+        "one would have driven whatever tab is active instead.",
+    )
 
 
 async def _await_navigation(
@@ -1953,9 +2080,9 @@ async def _await_navigation(
     probe_failures = 0
     while True:
         probe, probe_error = await _probe_document(surface)
-        code, out = await _run_cmux(_surface_argv(surface, "get", "url"), timeout=15.0)
+        code, out = await _cmux_url_probe(surface)
         if code == 0:
-            requested = out.strip()
+            requested = out
         if probe is None:
             # A single failure is expected mid-navigation: the execution
             # context is destroyed while the new document commits, and eval
@@ -1992,9 +2119,6 @@ def _page_line(title: str, href: str) -> str:
 
 
 async def _browser_goto(tool_call_id: str, surface: str, raw_url: str) -> ToolResult:
-    problem = _validate_browser_url(raw_url, "goto")
-    if problem:
-        return _error(tool_call_id, "browser", problem)
     url = raw_url.strip()
     code, out = await _run_cmux(_surface_argv(surface, "goto", url))
     if code != 0:
@@ -2013,16 +2137,20 @@ async def _browser_goto(tool_call_id: str, surface: str, raw_url: str) -> ToolRe
 async def _browser_open(
     tool_call_id: str, state: BrowserSurfaceProtocol, raw_url: str
 ) -> ToolResult:
-    problem = _validate_browser_url(raw_url, "open")
-    if problem:
-        return _error(tool_call_id, "browser", problem)
     url = raw_url.strip()
     if state.surface_id:
-        # One surface per session, reused. A fresh surface per navigation is
-        # how a session leaves a drift of dead browser tabs the user closes one
-        # at a time, so 'open' degrades to 'goto' once a surface exists rather
-        # than being an error the model has to learn to avoid.
-        return await _browser_goto(tool_call_id, state.surface_id, url)
+        live_code, _live_out = await _cmux_url_probe(state.surface_id)
+        if live_code == 0:
+            # One surface per session, reused. A fresh surface per navigation is
+            # how a session leaves a drift of dead browser tabs the user closes
+            # one at a time, so 'open' degrades to 'goto' once a surface exists
+            # rather than being an error the model has to learn to avoid.
+            return await _browser_goto(tool_call_id, state.surface_id, url)
+        # The recorded surface is gone (see _stale_surface_error). 'open' is the
+        # recovery verb, so it RECOVERS here instead of erroring the way every
+        # other action does: drop the dead handle and make a real surface, which
+        # is what the model asked for anyway.
+        state.surface_id = ""
     code, out = await _run_cmux(_cmux_new_surface(url))
     if code != 0:
         return _error(tool_call_id, "browser", f"cmux open failed: {out.strip()}")
@@ -2157,8 +2285,8 @@ async def _browser_screenshot(
 
 async def _cmux_url(surface: str) -> str:
     """The URL cmux is POINTING AT — not necessarily the live document's."""
-    code, out = await _run_cmux(_surface_argv(surface, "get", "url"), timeout=15.0)
-    return out.strip() if code == 0 else ""
+    code, out = await _cmux_url_probe(surface)
+    return out if code == 0 else ""
 
 
 async def _mark_document(surface: str) -> bool:
@@ -2215,9 +2343,6 @@ async def _navigation_started(surface: str, before: str, marked: bool) -> bool:
 
 
 async def _browser_click(tool_call_id: str, surface: str, raw_selector: str) -> ToolResult:
-    problem = _validate_selector(raw_selector, "click")
-    if problem:
-        return _error(tool_call_id, "browser", problem)
     selector = raw_selector.strip()
     before = await _cmux_url(surface)
     marked = await _mark_document(surface)
@@ -2254,9 +2379,6 @@ async def _browser_click(tool_call_id: str, surface: str, raw_selector: str) -> 
 async def _browser_type(
     tool_call_id: str, surface: str, raw_selector: str, value: str
 ) -> ToolResult:
-    problem = _validate_selector(raw_selector, "type")
-    if problem:
-        return _error(tool_call_id, "browser", problem)
     selector = raw_selector.strip()
     # cmux `fill` REPLACES the field; cmux `type` APPENDS keystrokes to
     # whatever is already there (verified: typing "XY" into a box holding "not
@@ -2271,33 +2393,76 @@ async def _browser_type(
     read_code, read_out = await _run_cmux(
         _surface_argv(surface, "get", "value", "--selector", selector)
     )
-    # Best effort: a contenteditable or a non-input target has no value, and a
-    # missing read-back is not a failure of the fill itself.
-    confirmation = f" Value is now {read_out.strip()!r}." if read_code == 0 else ""
+    if read_code != 0:
+        # A contenteditable or a non-input target has no `value` property, so
+        # an unreadable read-back is not evidence either way and the fill's own
+        # exit code stands. Said out loud, because "Typed into X." with no
+        # confirmation is otherwise indistinguishable from a verified fill.
+        return _text(
+            tool_call_id,
+            "browser",
+            f"Typed into {selector} (cmux could not read the value back, so "
+            "this is unverified).",
+            details={"surface_id": surface, "selector": selector},
+        )
+    # Compared, not just echoed. The read-back used to be interpolated straight
+    # into "Value is now 'X'." without ever being checked against `value`, so a
+    # fill that did nothing was reported as a success quoting the field's OLD
+    # contents as the new ones.
+    #
+    # Whitespace-insensitive on purpose: _run_cmux strips the CLI's output, so
+    # leading or trailing spaces in `value` cannot survive the round trip and
+    # comparing them would flag every such fill as a failure.
+    got = read_out.strip()
+    if got != value.strip():
+        return _error(
+            tool_call_id,
+            "browser",
+            f"fill of {selector} did not take: the field holds {got!r}, not "
+            f"{value!r}. Check the selector names an editable field ('snapshot' "
+            "shows what is there).",
+        )
     return _text(
         tool_call_id,
         "browser",
-        f"Typed into {selector}.{confirmation}",
+        f"Typed into {selector}. Value is now {got!r}.",
         details={"surface_id": surface, "selector": selector},
     )
+
+
+async def close_browser_surface(state: BrowserSurfaceProtocol) -> str:
+    """Close the recorded surface and drop the handle. Returns "" on success
+    (or when there was nothing open), else cmux's diagnostic.
+
+    Public because SESSION TEARDOWN calls it as well as the tool: the surface
+    outlives the per-turn ToolContext, so a session that ends without the model
+    thinking to say 'close' would otherwise strand a browser tab in the user's
+    pane forever.
+
+    The handle is dropped whatever the exit code says. If the surface is
+    already gone — the user closed the tab, or cmux restarted — the call fails,
+    and keeping a dead handle would point every later action at whatever tab is
+    active (see :func:`_stale_surface_error`) with no route back, because
+    'open' itself reuses the recorded handle.
+    """
+    surface = state.surface_id
+    if not surface:
+        return ""
+    code, out = await _run_cmux(["close-surface", "--surface", surface])
+    state.surface_id = ""
+    return "" if code == 0 else out or f"cmux exited {code}"
 
 
 async def _browser_close(tool_call_id: str, state: BrowserSurfaceProtocol) -> ToolResult:
     if not state.surface_id:
         return _text(tool_call_id, "browser", "No browser surface open.", useless=True)
     surface = state.surface_id
-    code, out = await _run_cmux(["close-surface", "--surface", surface])
-    # The handle is dropped whatever the exit code says. If the surface is
-    # already gone — the user closed the tab, or cmux restarted — the call
-    # fails, and keeping a dead handle would make every later action fail
-    # against a surface that does not exist, with no route back: 'open' itself
-    # reuses the recorded handle.
-    state.surface_id = ""
-    if code != 0:
+    problem = await close_browser_surface(state)
+    if problem:
         return _text(
             tool_call_id,
             "browser",
-            f"Browser surface {surface} could not be closed ({out}); dropped the handle.",
+            f"Browser surface {surface} could not be closed ({problem}); dropped the handle.",
         )
     return _text(tool_call_id, "browser", f"Closed browser surface {surface}.")
 
@@ -2329,6 +2494,11 @@ async def execute_browser(
             "CMUX browser not available: no cmux binary on PATH and no "
             "CMUX_BUNDLED_CLI_PATH. This host cannot drive a browser.",
         )
+    # Before the state lookup and before every subprocess, including the
+    # liveness probe below: see _validate_browser_args.
+    problem = _validate_browser_args(action, params)
+    if problem:
+        return _error(tool_call_id, "browser", problem)
     state = _browser_state(context)
 
     # 'open' creates the surface and 'close' must stay callable without one, so
@@ -2339,6 +2509,15 @@ async def execute_browser(
         return await _browser_close(tool_call_id, state)
     if not state.surface_id:
         return _error(tool_call_id, "browser", "no browser surface open — use 'open' first")
+    # ONE liveness probe here rather than one per action body, and never inside
+    # a poll loop: cmux answers a dead handle by silently retargeting the
+    # ACTIVE surface with exit 0, so without this check 'read', 'snapshot',
+    # 'click', 'type', 'screenshot' and 'goto' would each drive and report on
+    # whatever tab the user happens to be looking at. See
+    # :func:`_stale_surface_error` for the measurements.
+    stale = await _stale_surface_error(tool_call_id, state)
+    if stale is not None:
+        return stale
     surface = state.surface_id
 
     if action == "goto":
@@ -2348,9 +2527,6 @@ async def execute_browser(
     if action == "snapshot":
         argv = _surface_argv(surface, "snapshot", "--compact")
         if params.selector.strip():
-            selector_problem = _validate_selector(params.selector, "snapshot")
-            if selector_problem:
-                return _error(tool_call_id, "browser", selector_problem)
             argv += ["--selector", params.selector.strip()]
         code, out = await _run_cmux(argv)
         if code != 0:

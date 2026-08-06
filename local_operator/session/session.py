@@ -48,6 +48,7 @@ from local_operator.harness.types import (
     AgentTool,
     Aside,
     AsideResult,
+    BrowserSurface,
     ChatRequest,
     CompactionEndEvent,
     CompactionStartEvent,
@@ -318,6 +319,14 @@ class Session:
             persist=self._persist_wake_schedules,
         )
         self._load_wake_schedules()
+        # Owned here, not by the browser tool, for the same reason the wake
+        # scheduler is: _build_tool_context runs at the start of EVERY turn, so
+        # a handle the tool stored on the ToolContext lived exactly one turn.
+        # The visible symptoms were that multi-turn browsing could not work at
+        # all ("open X", then next message "click Y" → "no browser surface
+        # open") and that every turn which opened a browser stranded a cmux tab
+        # the agent could never close. dispose() closes whatever is still open.
+        self._browser = BrowserSurface()
 
     async def async_init(self) -> None:
         """Async second half of construction.
@@ -731,9 +740,13 @@ class Session:
         task.add_done_callback(self._background_tasks.discard)
 
     def _build_tool_context(self) -> ToolContext:
-        # ``wake_scheduler`` is a declared ToolContext field: the wake tool's
-        # createIf check and executor read it off the context, and a session
-        # without a scheduler must not advertise the tool at all.
+        # This context is REBUILT on every turn, so anything that must outlive
+        # a turn is owned by the session and injected here. ``wake_scheduler``
+        # is a declared ToolContext field: the wake tool's createIf check and
+        # executor read it off the context, and a session without a scheduler
+        # must not advertise the tool at all. ``browser`` is the same shape —
+        # the surface handle has to survive to the next turn for browsing to
+        # work, and for teardown to be able to close the tab.
         return ToolContext(
             cwd=self._cwd,
             session_id=self._session_id,
@@ -742,6 +755,7 @@ class Session:
             resolve_internal_url=self._skill_resolver,
             request_approval=None if self._yolo else self._request_approval,
             wake_scheduler=self._wake,
+            browser=self._browser,
         )
 
     async def _drain_steering(self) -> list[AgentMessage]:
@@ -1058,9 +1072,39 @@ class Session:
         """
         self._dispose_hooks.append(hook)
 
+    async def _close_browser_surface(self) -> None:
+        """Close a cmux browser surface the agent left open.
+
+        The surface is session-scoped (see ``BrowserSurface``), so nothing else
+        will ever close it: the model is not guaranteed to call ``browser
+        close``, and the handle dies with the process.
+
+        The tool layer is imported HERE rather than at module scope: this is a
+        teardown-only call, and ``tools.builtin`` is otherwise absent from the
+        session's import graph. Failures are logged, never raised — a terminal
+        emulator that will not answer must not be able to break dispose.
+
+        Bounded, because ``_run_cmux`` allows a cmux call 30 s and a wedged
+        socket is exactly the state a session is likely to be torn down in.
+        Cancelling the wait kills the cmux child (``_run_cmux`` handles
+        ``CancelledError``), so the timeout does not trade a stranded tab for an
+        orphaned process.
+        """
+        if not self._browser.surface_id:
+            return
+        try:
+            from local_operator.tools.builtin import close_browser_surface
+
+            problem = await asyncio.wait_for(close_browser_surface(self._browser), timeout=5.0)
+            if problem:
+                logger.warning("could not close browser surface: %s", problem)
+        except Exception:
+            logger.warning("closing the browser surface failed", exc_info=True)
+
     async def dispose(self) -> None:
-        """Abort any in-flight turn, cancel background work, dispose jobs and
-        the wake scheduler, flush the transcript, then run dispose hooks.
+        """Abort any in-flight turn, close the browser surface, cancel
+        background work, dispose jobs and the wake scheduler, flush the
+        transcript, then run dispose hooks.
 
         Order matters: the running turn is aborted and AWAITED (bounded)
         before anything is torn down, so its persistence and event emission
@@ -1080,6 +1124,11 @@ class Session:
                     await asyncio.wait_for(asyncio.shield(turn), timeout=5.0)
                 except BaseException:  # noqa: BLE001 — dispose must always proceed
                     pass
+            # The browser surface is session-scoped and lives in the user's own
+            # cmux pane, so an unclosed one is a tab THEY have to close by hand.
+            # After the turn has stopped (so nothing is mid-navigation on it)
+            # and before the task group closes, since this awaits a subprocess.
+            await self._close_browser_surface()
             # HC-11: cancel tracked background tasks (wake deliveries, aside
             # persistence), then close the session task group.
             for task in list(self._background_tasks):

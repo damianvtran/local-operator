@@ -158,6 +158,13 @@ def test_upper_bound_never_undercounts_across_scripts():
     sound while the bound genuinely dominates, so this sweeps the character
     classes where a naive ``len(text)`` bound breaks: a single CJK glyph or
     emoji is one code point but several cl100k tokens.
+
+    Both argument-serialization branches are swept. ``_compute_tokens`` and the
+    bound each read ``call.raw_arguments or json.dumps(call.arguments)``, and
+    the streaming path is the one that populates ``raw_arguments`` — leaving it
+    unset on every trial would test only the branch production does not take,
+    and a bound that read ``arguments`` while the estimator read the raw string
+    would pass.
     """
     import random
 
@@ -178,13 +185,45 @@ def test_upper_bound_never_undercounts_across_scripts():
         blocks = [TextContent(text=text()) for _ in range(rng.randint(0, 4))]
         calls = []
         if rng.random() < 0.3:
+            raw = text()[:60] if rng.random() < 0.5 else None
             calls = [
-                ToolCall(id=f"c{trial}", name=text()[:20] or "t", arguments={"k": text()[:50]})
+                ToolCall(
+                    id=f"c{trial}",
+                    name=text()[:20] or "t",
+                    arguments={"k": text()[:50]},
+                    raw_arguments=raw,
+                )
             ]
         message = Message(
             role=rng.choice(["user", "assistant", "tool"]), content=blocks, tool_calls=calls
         )
         assert messages_tokens_upper_bound([message]) >= estimate_tokens(message)
+
+
+def test_upper_bound_dominates_after_a_mutate_then_invalidate_round_trip():
+    """The bound dominates ``estimate_messages_tokens`` only while the module's
+    invalidation contract is honoured, so exercise the contract rather than
+    assuming it.
+
+    ``estimate_tokens`` memoizes settled messages on ``message.id``. Pruning
+    blanks a message IN PLACE, keeping its id, so the cache would keep serving
+    the pre-blank estimate — a value the bound on the new, tiny content has no
+    reason to exceed, which would make the compaction pre-check claim a session
+    is nowhere near its threshold when it is over it. The other bound tests all
+    estimate fresh messages, so none of them touches the cached path at all.
+    """
+    message = Message.user("The quick brown fox jumps over the lazy dog. " * 200)
+    before = estimate_messages_tokens([message])
+    assert before > 0
+    assert messages_tokens_upper_bound([message]) >= before
+
+    # Blank it the way pruning._blank does: same object, same id, new content.
+    message.content = [TextContent(text="[pruned]")]
+    invalidate_message_cache(message)
+
+    after = estimate_messages_tokens([message])
+    assert after < before, "the cache still served the pre-blank estimate"
+    assert messages_tokens_upper_bound([message]) >= after
 
 
 def test_upper_bound_counts_images_and_is_additive():

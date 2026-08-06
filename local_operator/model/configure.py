@@ -29,7 +29,12 @@ from pydantic import BaseModel, SecretStr
 
 from local_operator.harness.types import AbortSignal, ChatRequest, ModelSpec, StreamEvent
 from local_operator.model.catalogue import DEFAULT_TTL_S
-from local_operator.model.registry import ModelInfo, get_model_info
+from local_operator.model.registry import (
+    ModelInfo,
+    anthropic_default_model_info,
+    get_model_info,
+    unknown_model_info,
+)
 from local_operator.paths import config_dir
 
 logger = logging.getLogger("local_operator.model.configure")
@@ -87,6 +92,16 @@ DEFAULT_MODEL_NAMES: dict[str, str] = {
 # Sensible ModelSpec fallbacks when the legacy registry knows nothing.
 UNKNOWN_CONTEXT_WINDOW = 128_000
 UNKNOWN_MAX_OUTPUT = 8_192
+
+#: Per-provider fallback templates for an id the shipped registry does not carry.
+#: Only providers whose whole FAMILY shares a floor belong here: Anthropic's
+#: listing names models without describing them, so without a template an id the
+#: provider confirms exists still resolves to the global 128k/8192/no-cache
+#: unknown — numbers no Claude has ever had. A provider absent from this map keeps
+#: the existing behaviour and falls through to ``unknown_model_info``.
+_UNKNOWN_MODEL_TEMPLATES: dict[str, ModelInfo] = {
+    "anthropic": anthropic_default_model_info,
+}
 
 
 class ModelConfiguration:
@@ -480,6 +495,26 @@ def _has_real_window(info: ModelInfo) -> bool:
     return bool(info.context_window and info.context_window > 0)
 
 
+def _needs_enrichment(info: ModelInfo) -> bool:
+    """True when a live listing could still teach us something about this model.
+
+    The window alone was the gate, and it left nine shipped rows priced at $0
+    forever — `google/gemini-2.0-pro-exp-02-05`, `google/gemini-2.0-flash-exp`,
+    the `alibaba/qwen2.5-coder-*` pair and five more all carry a real window and
+    no price. This module's contract names prices as one of the things enrichment
+    fixes, and a row that can never enter the enrichment path can never learn one:
+    the status band renders "cost unavailable" for the whole life of the install.
+
+    A second reason to enter costs nothing when the listing turns out to be terse,
+    because :func:`_info_from_discovery` takes each field only when the listing
+    actually carries it — a priced-lookup that comes back priceless leaves the row
+    exactly as it was. What it does cost is one listing call for such a row, which
+    is why the gate stays closed for a row that has BOTH: a fully described model
+    still does zero HTTP, zero cache reads and zero listing scans.
+    """
+    return not _has_real_window(info) or not (info.input_price or info.output_price)
+
+
 #: Sent as the bearer token when no key can be found. The listing endpoints are
 #: PUBLIC catalogue data — verified: `GET https://openrouter.ai/api/v1/models`
 #: returns 200 and all 340 models with no Authorization header at all, and 200
@@ -489,6 +524,32 @@ def _has_real_window(info: ModelInfo) -> bool:
 #: catalogue, the request 401s and the whole path degrades to the static entry,
 #: which is the same outcome as having no key today.
 _PUBLIC_LISTING_TOKEN = "public-catalogue-read"
+
+
+def _credential_file_names(provider: str) -> list[str]:
+    """The ``CredentialManager`` keys worth trying for ``provider``.
+
+    ``env_key_name`` answers this for the plain-string ``env_keys`` form and
+    returns ``None`` for the callable one, which today is exactly ``anthropic``.
+    Stopping there would leave half of the defect in place: an install whose key
+    came from ``local-operator credential update ANTHROPIC_API_KEY`` writes the
+    credential FILE, so the listing would still go out unauthenticated. The
+    provider table already declares the key name that command writes, so it is the
+    right second source — a second hard-coded map here could drift from the one
+    the CLI, the server schema and the setup prompt all read.
+    """
+    from local_operator.providers.registry import env_key_name
+
+    name = env_key_name(provider)
+    if name:
+        return [name]
+
+    from local_operator.model.registry import SupportedHostingProviders
+
+    for detail in SupportedHostingProviders:
+        if detail.id == provider:
+            return list(detail.requiredCredentials)
+    return []
 
 
 def _catalogue_api_key(provider: str) -> str:
@@ -504,30 +565,52 @@ def _catalogue_api_key(provider: str) -> str:
     failure recorded only at debug level. Every other key reader in the repo goes
     through ``CredentialManager``; this one was the outlier.
 
+    The env leg goes through ``resolve_env_key`` rather than reading the
+    definition's ``env_keys`` directly, because that field has TWO forms —
+    ``str | Callable[[], str | None]`` — and an ``isinstance(..., str)`` test
+    silently drops the callable one. Anthropic is the only provider using it, so
+    the reader that skipped it skipped precisely the provider whose listing needs
+    a credential most: its catalogue 401s unauthenticated, so enrichment never ran
+    and every unshipped Claude id kept the 128k unknown default.
+
     The OAuth store is NOT read here — see :func:`_catalogue_credential`, which
     layers it underneath this and reports which kind of secret it found.
     """
-    from local_operator.providers.registry import get_provider_definition
+    from local_operator.providers.registry import resolve_env_key
 
-    definition = get_provider_definition("test" if provider == "noop" else provider)
-    env_keys = getattr(definition, "env_keys", None)
-    names = [env_keys] if isinstance(env_keys, str) else []
-    for name in names:
-        from_env = os.environ.get(name, "")
-        if from_env:
-            return from_env
+    canonical = "test" if provider == "noop" else provider
+    from_env = resolve_env_key(canonical)
+    if from_env:
+        return from_env
 
     try:
         from local_operator.credentials import CredentialManager
 
         manager = CredentialManager(config_dir())
-        for name in names:
+        for name in _credential_file_names(canonical):
             secret = manager.get_credential(name)
             if secret is not None and secret.get_secret_value():
                 return secret.get_secret_value()
     except Exception as exc:  # noqa: BLE001 - an unreadable store is not fatal
         logger.debug("could not read %s key for the catalogue: %s", provider, exc)
     return ""
+
+
+def _env_secret_is_oauth(secret: str) -> bool:
+    """True when ``secret`` was picked up out of an OAuth-named env variable.
+
+    The callable ``env_keys`` resolvers can hand back either kind of credential —
+    ``_anthropic_env_key`` prefers ``ANTHROPIC_OAUTH_TOKEN`` over
+    ``ANTHROPIC_API_KEY`` — and return only the VALUE, so the caller cannot tell
+    which it got. Getting that wrong is not cosmetic: Anthropic rejects an OAuth
+    token sent as ``x-api-key`` with a 401, which is exactly the "model cannot be
+    described" outcome this whole path exists to avoid.
+
+    Matching on the variable NAME keeps this a general rule instead of a second
+    place that knows about Anthropic specifically, and it runs at most once per
+    model id per TTL bucket.
+    """
+    return any(value == secret and "OAUTH" in name.upper() for name, value in os.environ.items())
 
 
 def _catalogue_credential(provider: str) -> tuple[str, bool]:
@@ -539,11 +622,13 @@ def _catalogue_credential(provider: str) -> tuple[str, bool]:
 
     Order is env, then the credential file, then the OAuth store — an explicit
     variable is the operator overriding config for one run, which is the same
-    precedence every other key reader in the repo uses.
+    precedence every other key reader in the repo uses. That order was inverted in
+    practice for Anthropic: the env leg could not see a callable ``env_keys``, so
+    a stored OAuth row beat an explicitly exported ``ANTHROPIC_API_KEY``.
     """
     key = _catalogue_api_key(provider)
     if key:
-        return key, False
+        return key, _env_secret_is_oauth(key)
     return _oauth_listing_token(provider)
 
 
@@ -579,6 +664,24 @@ def _oauth_listing_token(provider: str) -> tuple[str, bool]:
     return "", False
 
 
+def _normalised_id(model_id: str) -> str:
+    """A model id in the one spelling both sides of a match can agree on.
+
+    Discovery NORMALISES ids on ingest — ``_row_from_gemini_entry`` strips
+    Google's ``models/`` resource prefix so the rest of the system sees a bare id
+    — while the user types whatever the provider's own documentation shows, which
+    for Gemini is ``models/gemini-2.5-pro``. An exact-match-only lookup therefore
+    missed the spelling Google itself publishes and handed that session the 128k
+    unknown default. Case is folded for the same reason: an id is a wire
+    identifier, not prose, and no provider ships two models differing only in case.
+    """
+    trimmed = model_id.strip()
+    prefix = "models/"
+    if trimmed.startswith(prefix):
+        trimmed = trimmed[len(prefix) :]
+    return trimmed.casefold()
+
+
 def _info_from_discovery(provider: str, model_name: str, fallback: ModelInfo) -> ModelInfo:
     """Fill ``fallback``'s gaps from the provider's own live model listing.
 
@@ -609,6 +712,13 @@ def _info_from_discovery(provider: str, model_name: str, fallback: ModelInfo) ->
 
     row = next((candidate for candidate in rows if candidate.id == model_name), None)
     if row is None:
+        # Exact first, normalised second: the exact hit is what every provider but
+        # Google produces, and trying it alone costs one comparison per row.
+        wanted = _normalised_id(model_name)
+        row = next(
+            (candidate for candidate in rows if _normalised_id(candidate.id) == wanted), None
+        )
+    if row is None:
         logger.debug("%s listing (%s) has no entry for %s", provider, status, model_name)
         return fallback
 
@@ -636,6 +746,36 @@ def _info_from_discovery(provider: str, model_name: str, fallback: ModelInfo) ->
     return info
 
 
+def _registry_fallback(provider: str, model_id: str) -> ModelInfo:
+    """What the registry can say about ``model_id``, or the best template for it.
+
+    The global ``unknown_model_info`` is the right answer only for a provider we
+    know nothing structural about. For Anthropic it is actively wrong: the listing
+    confirms an id exists but describes NOTHING about it (ids and display names
+    only), so an unshipped Claude id would keep 128k/8192/no-cache — numbers no
+    Claude generation has ever had. The per-provider template carries the family
+    floor instead, in the same shape ``openrouter_default_model_info`` and
+    ``radient_default_model_info`` already use for the aggregators.
+
+    The id and name are overwritten so a template shared by every unknown id of a
+    provider cannot leak its placeholder identity ("Anthropic Claude") into a band
+    that is meant to name the model the session is running.
+    """
+    try:
+        info = get_model_info(provider, model_id)
+    except (ValueError, KeyError):
+        info = None
+    if info is not None and info is not unknown_model_info:
+        return info
+
+    template = _UNKNOWN_MODEL_TEMPLATES.get(provider)
+    if template is not None:
+        return template.model_copy(deep=True, update={"id": model_id, "name": model_id})
+    if info is not None:
+        return info
+    return ModelInfo(id=model_id, name=model_id, description="Unknown model")
+
+
 @functools.lru_cache(maxsize=64)
 def _resolve_model_info_cached(provider: str, model_id: str, _bucket: int) -> ModelInfo:
     """Memoized body of :func:`resolve_model_info`.
@@ -649,11 +789,8 @@ def _resolve_model_info_cached(provider: str, model_id: str, _bucket: int) -> Mo
     underneath it and nothing would ever read the new numbers.
     """
     canonical = "test" if provider == "noop" else provider
-    try:
-        info = get_model_info(canonical, model_id)
-    except (ValueError, KeyError):
-        info = ModelInfo(id=model_id, name=model_id, description="Unknown model")
-    if not _has_real_window(info):
+    info = _registry_fallback(canonical, model_id)
+    if _needs_enrichment(info):
         # EVERY provider, not just the aggregators. The gate used to be
         # `canonical in LISTING_PROVIDERS`, which left a hole that the model picker
         # turned into a routine path: the picker offers whatever a provider's live
@@ -663,10 +800,23 @@ def _resolve_model_info_cached(provider: str, model_id: str, _bucket: int) -> Mo
         # so that is not a cosmetic gap: compaction silently never fires and the
         # turn eventually 400s on the provider's real limit.
         #
-        # Only reached when the registry has no window, so a shipped model costs
-        # nothing: no HTTP call, no cache read, no listing scan.
+        # Only reached when the registry is missing the window or BOTH prices, so a
+        # fully described model still costs nothing: no HTTP call, no cache read,
+        # no listing scan.
         info = _info_from_discovery(canonical, model_id, info)
     return info
+
+
+def invalidate_model_info_cache() -> None:
+    """Drop the in-process metadata memo.
+
+    The memo is keyed on a TTL bucket, so a resolution that degraded for a fixable
+    reason — no credential yet, provider briefly down — otherwise stays degraded
+    for up to a full bucket (24h by default). A user who logs in or pastes a key
+    mid-session has fixed the cause and should not have to restart to see real
+    numbers, so the fix path gets a way to say so.
+    """
+    _resolve_model_info_cached.cache_clear()
 
 
 def resolve_model_info(provider: str, model_id: str) -> ModelInfo:
@@ -694,9 +844,19 @@ def resolve_model_info(provider: str, model_id: str) -> ModelInfo:
     typo per turn must not grow the map without limit.
 
     A switch to a DIFFERENT model needs no invalidation: the id is part of the
-    key, so it simply misses.
+    key, so it simply misses. :func:`invalidate_model_info_cache` handles the
+    other direction, where the SAME key should be re-resolved because the reason
+    it degraded (a missing credential) has just been fixed.
+
+    Every caller gets its OWN copy. ``ModelInfo`` is a mutable pydantic model and
+    the registry hands out module-level singletons, so handing back the memo entry
+    made ``config.info.context_window = ...`` in one session rewrite the shipped
+    registry for every later session in the process — the server and the TUI both
+    resolve many models in one process. The copy is a few dozen field assignments
+    against the ~25ms JSON parse this memo exists to avoid.
     """
-    return _resolve_model_info_cached(provider, model_id, int(time.time() // DEFAULT_TTL_S))
+    info = _resolve_model_info_cached(provider, model_id, int(time.time() // DEFAULT_TTL_S))
+    return info.model_copy(deep=True)
 
 
 # ---------------------------------------------------------------------------

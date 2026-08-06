@@ -25,7 +25,6 @@ from local_operator.harness.types import ModelSpec
 from local_operator.model.configure import build_model_spec  # noqa: F401  (used by callers)
 from local_operator.model.discovery import available_models
 from local_operator.model.registry import static_models
-from local_operator.providers.oauth.callback_server import LoginCallbacks
 from local_operator.providers.registry import (
     AGGREGATOR_PROVIDERS,
     PROVIDER_REGISTRY,
@@ -38,14 +37,16 @@ from local_operator.providers.usage import (
     USAGE_PROVIDERS,
     UsageReport,
     fetch_usage,
+    usage_kinds,
     usage_supported,
 )
 
 if TYPE_CHECKING:  # auth_store stays off this module's runtime import graph
     from local_operator.credentials import CredentialManager
     from local_operator.providers.auth_store import OAuthAccess, StoredCredential
+    from local_operator.providers.oauth.callback_server import LoginCallbacks
 
-LoginCallbackFactory = Callable[[ProviderDefinition], LoginCallbacks]
+LoginCallbackFactory = Callable[[ProviderDefinition], "LoginCallbacks"]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -166,8 +167,37 @@ class ProviderController:
         return bool(resolve_env_key(provider))
 
     def usage_enabled_providers(self) -> list[str]:
-        """Provider ids with a live quota endpoint, sorted."""
+        """Provider ids with a live quota endpoint, sorted.
+
+        "Has an endpoint", not "can reach it" — see :meth:`can_report_usage` for
+        the question every UI surface actually asks.
+        """
         return sorted(USAGE_PROVIDERS)
+
+    def can_report_usage(self, provider: str) -> bool:
+        """Whether the credentials ON HAND can reach ``provider``'s quota endpoint.
+
+        ONE predicate, because there are three surfaces asking it — `/provider`'s
+        "reports quota" list, bare `/usage`'s target list and `/usage <provider>`'s
+        up-front warning — and any two of them disagreeing is the defect this
+        replaces: with only ``ANTHROPIC_API_KEY`` set, `/provider` advertised
+        anthropic, bare `/usage` rendered "no usage data", and `/usage anthropic`
+        correctly said it needs a login.
+
+        :meth:`is_usable` alone is too coarse here. It answers "is there any
+        credential", including one resolved from the environment, but five of the
+        eight usage providers are OAuth-only for usage — an API key cannot reach
+        their endpoint at all, so an ``ANTHROPIC_API_KEY`` user holds a credential
+        that runs the model and cannot read the quota. The API-key route has to
+        exist (``usage_kinds(p)[1]``) before an env/API key counts.
+        """
+        if not self.is_usable(provider):
+            return False
+        return self.has_any_credential(provider) or usage_kinds(provider)[1]
+
+    def usage_reportable_providers(self) -> list[str]:
+        """Sorted provider ids that both have an endpoint and a way to reach it."""
+        return [p for p in self.usage_enabled_providers() if self.can_report_usage(p)]
 
     # -- model -------------------------------------------------------------
     def resolve_model(self, provider: str, model_id: str) -> ModelSpec:
@@ -241,13 +271,11 @@ class ProviderController:
         malformed provider never aborts the others."""
         targets = provider_ids or []
         if not targets:
-            # `is_usable`, not `has_any_credential`. The narrow check sees only the
-            # AuthStore, so a user whose only credential was `OPENROUTER_API_KEY` in
-            # the environment got three different answers from three surfaces:
-            # `/provider` said openrouter reports quota, bare `/usage` returned
-            # nothing, and `/usage openrouter` produced a correct report — because
-            # the per-provider fetch resolves the env tier and this filter did not.
-            targets = [p for p in self.usage_enabled_providers() if self.is_usable(p)]
+            # The SAME predicate `/provider` and `/usage <provider>` use. An env key
+            # counts (it is the tier the stream cascade resolves), but only where an
+            # API-key route to the quota endpoint exists — see
+            # :meth:`can_report_usage` for why each half is needed.
+            targets = self.usage_reportable_providers()
         # De-duplicate aliases that share a storage id (openai vs
         # openai-device; xai vs xai-oauth) so one request/one report per row.
         targets = self._dedupe_targets(targets)

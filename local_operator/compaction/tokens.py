@@ -252,7 +252,7 @@ def estimate_messages_tokens(messages: Sequence[Message]) -> int:
 
 
 def messages_tokens_upper_bound(messages: Sequence[Message]) -> int:
-    """A cheap value that is NEVER below :func:`estimate_messages_tokens`.
+    """A cheap value that is NEVER below :func:`_compute_tokens`.
 
     Exists so a caller can prove "nowhere near the compaction threshold"
     without touching tiktoken. The first real estimate in a process loads the
@@ -275,9 +275,43 @@ def messages_tokens_upper_bound(messages: Sequence[Message]) -> int:
       counts them, so the bound cannot slip under the real estimate when a
       history is mostly images.
 
-    Deliberately NOT memoized: it is already cheaper than a dict lookup plus
-    the settle-gate check, and a second cache keyed on message id would be one
-    more thing owners must invalidate on in-place mutation.
+    PRECONDITION for the claim about :func:`estimate_messages_tokens`. The
+    bound dominates :func:`_compute_tokens` for ANY input, unconditionally.
+    It therefore dominates :func:`estimate_messages_tokens` only while this
+    module's invalidation contract holds, because that path serves
+    ``_ESTIMATE_CACHE`` entries keyed on ``message.id``: a message mutated in
+    place without :func:`invalidate_message_cache` keeps the estimate of its
+    OLD content, which the bound on the NEW content has no reason to exceed.
+    Blanking a settled 1501-token message to ``"[pruned]"`` without
+    invalidating yields ``est=1501`` against ``bound=8``; invalidating first
+    yields ``est=4`` against the same bound. The failure is
+    silent and one-directional: a stale LARGER cached estimate makes the
+    bound's early return claim "nowhere near the threshold" for a session that
+    is over it, so compaction never fires. All three in-place mutation owners
+    (``pruning._blank``, loop finalize, and streaming deltas — never cached
+    while unsettled) invalidate today; that is what this bound rests on.
+
+    Deliberately NOT memoized, but not because it is cheap in relative terms —
+    on a 400-message tool-heavy history it is SLOWER than the cached estimate,
+    measured on this repo (Python 3.13, M3 Max): 0.107 ms vs 0.050 ms when
+    every call carries ``raw_arguments`` (~2x), and 3.2 ms vs 0.050 ms when it
+    does not (~60x), because the ``json.dumps`` fallback re-serializes every
+    tool call in the history on every turn. The reason it stays unmemoized is
+    that single-digit milliseconds per turn is nothing against the ~84 ms and
+    ~43.6 MB the tokenizer costs once, while a second cache keyed on message
+    id would be one more structure every mutation owner must invalidate — a
+    new way to produce exactly the stale-value failure described above.
+
+    Scale note: the bound is loose, so the early return only covers the low
+    end of the range. Measured ratios of bound to exact estimate: ~3.5-4.5x on
+    ASCII prose, chat text and source code (cl100k averages ~4 bytes/token and
+    the bound charges one token per byte), ~3.8x on pure CJK, but ~18x on
+    ASCII text sprinkled with non-ASCII, where a single non-ASCII character
+    makes the whole block take the 4x-per-code-point branch. So the tokenizer
+    is skipped only while real context is roughly under ``threshold / 4`` and
+    possibly much less; past that the caller falls through to the real
+    estimator and loads tiktoken anyway. The substitution buys the cheap
+    common case, not the whole range.
     """
     total = 0
     for message in messages:

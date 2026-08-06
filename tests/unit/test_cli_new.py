@@ -357,6 +357,28 @@ def test_config_create_command(tmp_home: Path) -> None:
     manager._write_config.assert_called_once()
 
 
+def test_config_create_command_reports_the_path_it_wrote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The message must name the file that was actually created.
+
+    The write target is ``config_dir()``, which honours
+    LOCAL_OPERATOR_CONFIG_DIR; a hardcoded ``~/.local-operator`` in the message
+    sends the user to a file that does not exist and contradicts
+    ``config open`` twelve lines below, which prints the resolved path. Runs
+    against the real ConfigManager so the asserted path is the one on disk.
+    """
+    override = tmp_path / "elsewhere"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(override))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "unused-home")
+
+    assert config_create_command() == 0
+
+    created = override / "config.yml"
+    assert created.exists()
+    assert str(created) in capsys.readouterr().out
+
+
 def test_serve_command_preserves_uvicorn_call() -> None:
     """uvicorn is imported lazily INSIDE serve_command (so `local-operator`
     starts without the server extra), so the patch target is the uvicorn

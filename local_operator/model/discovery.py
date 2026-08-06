@@ -32,13 +32,14 @@ from __future__ import annotations
 import dataclasses
 import logging
 import math
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Literal
 
 import httpx
 
-from local_operator.model.catalogue import DEFAULT_TTL_S, cached_listing
+from local_operator.model.catalogue import DEFAULT_TTL_S, cached_listing, invalidate
 from local_operator.model.registry import ModelInfo, static_models
 from local_operator.providers.registry import (
     PROVIDER_REGISTRY,
@@ -48,9 +49,11 @@ from local_operator.providers.registry import (
 
 logger = logging.getLogger("local_operator.model.discovery")
 
-#: Ceiling on a single listing request. A model picker calls this synchronously
-#: while the user waits, so an unreachable host must fail in seconds rather than
-#: hang on the default socket timeout.
+#: Ceiling on ONE listing, pagination included. A model picker and session start
+#: both call this synchronously while the user waits, so an unreachable -- or
+#: merely slow -- host must fail in seconds rather than hang on the default socket
+#: timeout. ``_fetch_gemini`` spends it as a deadline across its pages rather than
+#: per request, because 25 pages x this value is not "seconds".
 DEFAULT_TIMEOUT_S = 10.0
 
 #: Anthropic pins its wire format with a dated header and rejects requests that
@@ -246,14 +249,21 @@ def _get_json(
     # primitives, and widening it here only moved the mismatch to the call site.
     # Every caller passes strings and page sizes, so nothing is lost.
     params: Mapping[str, str | int],
+    timeout: float | None = None,
 ) -> object | None:
     """One GET, decoded, or ``None`` for any answer we cannot use.
 
     A non-2xx status returns ``None`` rather than raising, because the caller's
     only distinction is failure-versus-listing: a 401 and a 500 both mean "keep
     the registry", and the status is useful solely in the debug log.
+
+    ``timeout`` overrides the context's per-request ceiling, which is what lets a
+    paginating transport spend ONE ceiling across several requests instead of
+    granting each hop a fresh one. Passed here rather than by rebuilding the
+    context, so the single-request transports allocate nothing extra.
     """
-    response = ctx.client.get(url, headers=dict(headers), params=dict(params), timeout=ctx.timeout)
+    ceiling = ctx.timeout if timeout is None else timeout
+    response = ctx.client.get(url, headers=dict(headers), params=dict(params), timeout=ceiling)
     status = int(getattr(response, "status_code", 0))
     if not 200 <= status < 300:
         logger.debug("%s model listing returned HTTP %s for %s", ctx.provider_id, status, url)
@@ -463,11 +473,37 @@ def _fetch_gemini(ctx: _FetchContext) -> list[DiscoveredModel] | None:
     rows: list[DiscoveredModel] = []
     seen: set[str] = set()
     page_token = ""
+    # ``ctx.timeout`` is a PER-REQUEST ceiling, but this is the only transport that
+    # issues more than one request: at the documented 10 s ceiling, a
+    # slow-but-alive endpoint handing back a fresh ``nextPageToken`` each time
+    # cost 25 x 10 s = 250 s for ONE `resolve_model_info()` -- measured with a stub
+    # that always paginates. That call is on the synchronous session-start path and
+    # on the TUI's `_cost_for`, so the whole run has to share one ceiling: the
+    # deadline is taken once here and each page gets only what is left of it.
+    deadline = time.monotonic() + ctx.timeout
     for _ in range(GEMINI_MAX_PAGES):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            # Same choice as a failed page below, for the same reason: the pages
+            # that did arrive are not the catalogue, and passing them off as one
+            # silently deletes every model on the pages that did not.
+            logger.debug(
+                "%s model listing exceeded its %.1fs budget after %d models",
+                ctx.provider_id,
+                ctx.timeout,
+                len(rows),
+            )
+            return None
         params: dict[str, str | int] = {"key": ctx.api_key, "pageSize": 100}
         if page_token:
             params["pageToken"] = page_token
-        body = _get_json(ctx, url, headers={"Accept": "application/json"}, params=params)
+        body = _get_json(
+            ctx,
+            url,
+            headers={"Accept": "application/json"},
+            params=params,
+            timeout=remaining,
+        )
         if body is None:
             # A failure part-way through pagination fails the WHOLE listing.
             # Returning the pages that did arrive would present a truncated
@@ -584,7 +620,9 @@ def fetch_models(
         client: Reused HTTP client. When omitted, one is created and closed here;
             a caller listing several providers should pass one so the connection
             pool and TLS handshake are shared.
-        timeout: Per-request ceiling in seconds.
+        timeout: Ceiling in seconds for the whole listing. Google's transport
+            paginates and spends it as a single deadline; every other transport
+            issues one request, so for them it is also the per-request ceiling.
     """
     definition = get_provider_definition(provider_id)
     transport = _TRANSPORTS.get(definition.id) if definition is not None else None
@@ -742,13 +780,15 @@ def _merge_name(live_name: str, static_name: str, model_id: str) -> str:
 def _cache_key(provider_id: str) -> str:
     """Cache document name for a provider's listing.
 
-    Suffixed because ``catalogue`` keys its files by this string alone and the
-    aggregator catalogues already own the bare ``openrouter`` and ``radient``
-    names. Writing a listing under the bare provider id would overwrite a
-    ``/models`` catalogue document with a differently-shaped payload, and the
-    catalogue reader would then serve rows it cannot interpret for a full day.
+    ``.listing`` rather than the bare provider id because an earlier release
+    cached a differently-shaped document -- the provider client's raw
+    ``list_models()`` payload -- under ``<provider>.models.json``. Reusing that
+    name would hand this reader a document it cannot interpret and, since the
+    payload is written before anything maps it, serve the failure as a fresh cache
+    hit for a full day. The old documents are unreachable by name and
+    ``catalogue.purge_legacy_documents`` deletes them.
     """
-    return f"{provider_id}.models"
+    return f"{provider_id}.listing"
 
 
 def _rows_from_payload(payload: Mapping[str, object] | None) -> list[DiscoveredModel] | None:
@@ -801,8 +841,9 @@ def available_models(
 
     The result is always at least the registry, so a provider outage costs the
     user discovery of new models and nothing else. This never raises and never
-    blocks longer than ``timeout`` per request: it is called from the model
-    picker while the user waits, and a fresh cache skips the request entirely.
+    blocks longer than ``timeout``: it is called from the model picker and from
+    session start while the user waits, and a fresh cache skips the request
+    entirely.
 
     Returns:
         ``(models, status)``, where status is ``"ok"`` (fetched live just now),
@@ -883,9 +924,19 @@ def _available_models(
         fetched = True
         return {"models": [dataclasses.asdict(row) for row in live]}
 
-    payload = cached_listing(_cache_key(definition.id), fetch, ttl_s=ttl_s, cache_dir=cache_dir)
+    key = _cache_key(definition.id)
+    payload = cached_listing(key, fetch, ttl_s=ttl_s, cache_dir=cache_dir)
     live_rows = _rows_from_payload(payload)
     if live_rows is None:
+        if payload is not None:
+            # A document that survived `cached_listing`'s shape checks but holds
+            # nothing this reader can map -- a `models` key that is not an array,
+            # after a payload-shape change or a truncated write. It is written
+            # before anything interprets it, so leaving it in place serves the same
+            # failure as a FRESH cache hit on every start until the TTL expires: a
+            # planted document with a dict `models` produced three consecutive
+            # `static` results and zero fetches. Dropping it costs one refetch.
+            invalidate(key, cache_dir=cache_dir)
         # Neither a listing nor a cache: the registry is all there is.
         return merge_models(rows, None), "static"
 

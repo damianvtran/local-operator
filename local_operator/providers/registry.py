@@ -15,10 +15,12 @@ from __future__ import annotations
 import dataclasses
 import importlib
 import os
-from typing import Any, Awaitable, Callable, Literal
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
 from local_operator.harness.types import AbortSignal
-from local_operator.providers.oauth.callback_server import LoginCallbacks, maybe_await
+
+if TYPE_CHECKING:
+    from local_operator.providers.oauth.callback_server import LoginCallbacks
 
 WireFormat = Literal["openai-compat", "anthropic", "google", "mock"]
 
@@ -95,6 +97,12 @@ def create_api_key_login(provider_label: str, auth_url: str, instructions: str =
     """
 
     async def login(callbacks: LoginCallbacks, **_kwargs: Any) -> str:
+        # Imported HERE, not at module scope. ``callback_server`` pulls in
+        # http.server, ssl, email and 150-odd other modules (~138 ms), and this
+        # registry is on the model picker's path — every interactive session
+        # paid for a loopback HTTP server it only needs if the user logs in.
+        from local_operator.providers.oauth.callback_server import maybe_await
+
         if callbacks.on_auth_url is not None:
             await maybe_await(callbacks.on_auth_url(auth_url, instructions=instructions or None))
         if callbacks.on_manual_code_input is None:

@@ -1,24 +1,29 @@
 """Provider usage-quota fetchers, normalized to one ``UsageReport`` shape.
 
 A compact per-provider usage layer with a single normalized output shape.
-The design is deliberately small because local-operator is a per-token
-billing product: most providers here
-are pay-per-token API keys with **no** public balance endpoint (OpenRouter
-is the notable exception — its ``/api/v1/auth/key`` returns live credit
-data). The natural line is drawn the same way: live quota is implemented only for
-subscription/coding-plan products and shows local token tallies for the
-rest.
+The design is deliberately small because local-operator is mostly a
+per-token billing product: most providers here are pay-per-token API keys
+with **no** public balance endpoint, so live quota exists only where the
+vendor actually publishes one.
 
-What local-operator DOES fetch:
+What local-operator DOES fetch, grouped by the credential it needs:
 
-- ``openrouter`` — `GET /api/v1/auth/key` with the API key → USD credit
-  usage/limit plus free-tier state. The one every local-operator user has.
-- ``zai`` — `GET /api/monitor/usage/quota/limit` (raw token, no ``Bearer``)
-  — a per-token provider that DOES expose a quota endpoint, so it doubles
-  as the template for any future provider with a token budget.
-- OAuth subscription plans when the user logged in via OAuth: ``anthropic``
-  (``/api/oauth/usage``), ``openai``/``openai-device`` (backend
-  ``/wham/usage``), ``kimi`` (``/coding/v1/usages``), ``xai`` (billing).
+- With the plain API key the registry already stores:
+
+  - ``openrouter`` — `GET /api/v1/key` → USD credit usage/limit plus
+    free-tier state. The one every local-operator user has.
+  - ``kimi`` — Moonshot `GET /v1/users/me/balance`, on whichever host the
+    provider is CONFIGURED for, so the key that reaches the chat API is the
+    key that reaches the balance. The region also fixes the currency.
+  - ``deepseek`` — `GET /user/balance` → one balance per currency.
+
+- With an OAuth access token, when the user logged in via OAuth:
+  ``anthropic`` (`/api/oauth/usage`), ``openai``/``openai-device`` (ChatGPT
+  backend `/wham/usage`), ``kimi`` (`/coding/v1/usages`), ``xai``/
+  ``xai-oauth`` (billing).
+
+``kimi`` is the only provider with both, and its two routes are different
+endpoints on different hosts rather than two ways of authenticating one.
 
 Every fetcher returns the SAME ``UsageReport`` (or ``None`` when the
 provider/credential cannot report) so the TUI renders one shape and is
@@ -35,11 +40,26 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import httpx
 
-#: Human labels for the unit a usage amount is measured in.
-UNIT_LABELS = {"usd": "USD", "percent": "%", "tokens": "tokens", "requests": "req", "unknown": ""}
+from local_operator.providers.registry import get_provider_definition
+
+#: Human labels for the unit a usage amount is measured in. The renderer reads
+#: this rather than interpolating the raw key, so an amount prints ``519.86 USD``
+#: and ``30%`` instead of ``519.86 usd`` and ``30 percent``.
+#:
+#: This is the RENDERER's vocabulary, not the vendor's: a currency with no entry
+#: here (a CNY balance) is reported ``unknown`` with the currency in the limit's
+#: label, which prints a bare number rather than one mislabelled as dollars.
+UNIT_LABELS = {
+    "usd": "USD",
+    "percent": "%",
+    "tokens": "tokens",
+    "requests": "req",
+    "unknown": "",
+}
 
 #: OpenRouter's key endpoint doubles as the credit statement. Returns 200 with
 #: ``data`` for a valid key, 401 for an invalid one.
@@ -61,10 +81,18 @@ OPENAI_WHAM_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 KIMI_USAGE_URL = "https://api.kimi.com/coding/v1/usages"
 
 #: Moonshot/Kimi account balance, reachable with the PLAIN API key the registry
-#: already stores. Its absence was the widest gap in this module: a KIMI_API_KEY
-#: user was told by `/provider` that Kimi reports quota and then got an empty
-#: table forever, because the only Kimi fetcher wanted an OAuth token.
-MOONSHOT_BALANCE_URL = "https://api.moonshot.ai/v1/users/me/balance"
+#: already stores. Appended to the provider's own ``base_url`` rather than
+#: hardcoded: Moonshot runs TWO platforms — mainland ``api.moonshot.cn`` and
+#: international ``api.moonshot.ai`` — with separate accounts and separate keys.
+#: The registry configures ``kimi`` for ``https://api.moonshot.cn/v1``, so a
+#: hardcoded ``.ai`` host 401s on the only key a user can hold, the fetch returns
+#: None and the table is empty forever — the exact failure this fetcher exists to
+#: fix.
+MOONSHOT_BALANCE_PATH = "/users/me/balance"
+
+#: Used only if the registry ever loses its ``kimi`` definition; the mainland host
+#: is what the registry, the validation descriptor and the model registry all use.
+MOONSHOT_DEFAULT_BASE_URL = "https://api.moonshot.cn/v1"
 
 #: DeepSeek account balance — plain Bearer with the key already in the registry.
 DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
@@ -72,27 +100,57 @@ DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 #: xAI Grok subscription usage (OAuth).
 XAI_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing"
 
-#: Providers with a live quota endpoint. Kept as a set so the registry and
-#: the TUI can answer "does this provider report usage?" without importing
-#: every fetcher.
+#: The fetcher a provider id routes to. Naming the kinds keeps the dispatch
+#: table and the if-chain in :func:`fetch_usage` in lockstep.
+FetcherKind = Literal[
+    "openrouter",
+    "anthropic-oauth",
+    "openai-oauth",
+    "kimi-oauth",
+    "moonshot-balance",
+    "deepseek-balance",
+    "xai-oauth",
+]
+
+#: Provider id (canonical) -> ``(oauth_fetcher, api_key_fetcher)``.
 #:
-#: ``zai`` was removed rather than fixed. It had a working fetcher and a passing
+#: A PAIR, because a provider's two credential kinds often mean two different
+#: endpoints rather than two ways of authenticating one. Kimi is the clearest
+#: case: the coding-plan usage route wants an OAuth token, while the account
+#: balance wants the plain API key the registry already stores, and they live on
+#: different hosts and return different shapes. Under the old one-fetcher-per-
+#: provider mapping the API-key half was simply unreachable — `/provider`
+#: advertised that Kimi and xAI report quota and both rendered an empty table
+#: forever, because the single fetcher hard-returned None without a token.
+#:
+#: ``None`` in either slot means "that credential kind has no route here", which
+#: is what :func:`usage_kinds` reports so the UI can say WHICH credential is
+#: missing instead of showing nothing.
+#:
+#: ``zai`` is absent rather than fixed. It had a working fetcher and a passing
 #: test, but no ``ProviderDefinition`` — so `/login zai` raised, its env var was
 #: never read, and no code path could insert the credential row the fetcher
-#: needed. It was unreachable by construction, and a set that advertises an
-#: unreachable provider is worse than one that is merely incomplete.
-USAGE_PROVIDERS: frozenset[str] = frozenset(
-    {
-        "openrouter",
-        "anthropic",
-        "openai",
-        "openai-device",
-        "kimi",
-        "deepseek",
-        "xai",
-        "xai-oauth",
-    }
-)
+#: needed. It was unreachable by construction, and advertising an unreachable
+#: provider is worse than being merely incomplete.
+_FETCHERS: dict[str, tuple[FetcherKind | None, FetcherKind | None]] = {
+    "openrouter": (None, "openrouter"),
+    "anthropic": ("anthropic-oauth", None),
+    "openai": ("openai-oauth", None),
+    "openai-device": ("openai-oauth", None),
+    "kimi": ("kimi-oauth", "moonshot-balance"),
+    "deepseek": (None, "deepseek-balance"),
+    "xai": ("xai-oauth", None),
+    "xai-oauth": ("xai-oauth", None),
+}
+
+#: Providers with a live quota endpoint, for callers that only need the question
+#: "does this provider report usage?" answered without importing every fetcher.
+#:
+#: DERIVED from the dispatch table, never hand-listed. This is the set that gates
+#: the UI, so a hand-written duplicate that drifted one way would silently unreach
+#: a provider with a working fetcher, and the other way would advertise a provider
+#: no fetcher serves.
+USAGE_PROVIDERS: frozenset[str] = frozenset(_FETCHERS)
 
 
 @dataclass
@@ -236,7 +294,34 @@ async def fetch_openrouter(client: httpx.AsyncClient, api_key: str) -> UsageRepo
     return UsageReport(provider="openrouter", limits=limits, notes=notes)
 
 
-async def fetch_moonshot_balance(client: httpx.AsyncClient, api_key: str) -> UsageReport | None:
+def moonshot_balance_target(base_url: str | None = None) -> tuple[str, str, str]:
+    """``(balance_url, unit, currency_symbol)`` for a Moonshot ``base_url``.
+
+    Moonshot's two platforms are separate products, not two hostnames for one:
+    ``api.moonshot.cn`` (mainland) and ``api.moonshot.ai`` (international) have
+    separate accounts, separate keys and separate currencies. The balance response
+    carries NO currency field, so the HOST is the currency — a mainland balance
+    rendered as dollars is off by roughly a factor of seven.
+
+    ``base_url`` defaults to whatever the registry configures for ``kimi``, which
+    is the same value the chat client and the key validator use. That is the whole
+    point: the endpoint follows the key the user must actually hold.
+    """
+    if base_url is None:
+        definition = get_provider_definition("kimi")
+        base_url = (definition.base_url if definition else None) or MOONSHOT_DEFAULT_BASE_URL
+    base = base_url.rstrip("/")
+    host = (urlsplit(base).hostname or "").lower()
+    if host.endswith(".cn"):
+        # No UNIT_LABELS entry for CNY, so the currency rides in the label and the
+        # amount prints bare rather than wearing a dollar sign it did not earn.
+        return base + MOONSHOT_BALANCE_PATH, "unknown", "¥"
+    return base + MOONSHOT_BALANCE_PATH, "usd", "$"
+
+
+async def fetch_moonshot_balance(
+    client: httpx.AsyncClient, api_key: str, base_url: str | None = None
+) -> UsageReport | None:
     """Moonshot/Kimi account balance from the PLAIN API key.
 
     The counterpart to :func:`fetch_kimi_oauth`, and the one most Kimi users can
@@ -244,13 +329,15 @@ async def fetch_moonshot_balance(client: httpx.AsyncClient, api_key: str) -> Usa
     endpoint only accepts an OAuth token, so an API-key user had a provider that
     claimed to report quota and never did.
 
-    Balances are USD. ``available_balance`` is the actionable number — it already
-    nets the voucher and cash components the response also breaks out — so it is
-    reported as ``remaining`` with no limit. There is no spend figure to pair it
-    with, and inventing ``used = limit - remaining`` from a limit we were never
-    given would draw a progress bar out of an assumption.
+    ``available_balance`` is the actionable number — it already nets the voucher
+    and cash components the response also breaks out — so it is reported as
+    ``remaining`` with no limit. There is no spend figure to pair it with, and
+    inventing ``used = limit - remaining`` from a limit we were never given would
+    draw a progress bar out of an assumption.
     """
-    payload = await _get_json(client, MOONSHOT_BALANCE_URL, _bearer(api_key))
+    url, unit, symbol = moonshot_balance_target(base_url)
+    currency = UNIT_LABELS.get(unit) or "CNY"
+    payload = await _get_json(client, url, _bearer(api_key))
     if payload is None:
         return None
     data = payload.get("data")
@@ -263,14 +350,14 @@ async def fetch_moonshot_balance(client: httpx.AsyncClient, api_key: str) -> Usa
     voucher = _num(data.get("voucher_balance"))
     cash = _num(data.get("cash_balance"))
     if voucher is not None and cash is not None:
-        notes = f"voucher ${voucher:.2f} + cash ${cash:.2f}"
+        notes = f"voucher {symbol}{voucher:.2f} + cash {symbol}{cash:.2f}"
     return UsageReport(
         provider="kimi",
         limits=[
             UsageLimit(
                 id="kimi:balance",
-                label="Balance",
-                amount=UsageAmount(remaining=available, unit="usd"),
+                label=f"Balance ({currency})",
+                amount=UsageAmount(remaining=available, unit=unit),
                 window="lifetime",
             )
         ],
@@ -486,51 +573,6 @@ def _num(value: Any, default: float | None = None) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return default
-
-
-#: The fetcher a provider id routes to. Naming the kinds keeps the dispatch
-#: table and the if-chain in :func:`fetch_usage` in lockstep.
-FetcherKind = Literal[
-    "openrouter",
-    "anthropic-oauth",
-    "openai-oauth",
-    "kimi-oauth",
-    "moonshot-balance",
-    "deepseek-balance",
-    "xai-oauth",
-]
-
-#: Provider id (canonical) -> ``(oauth_fetcher, api_key_fetcher)``.
-#:
-#: A PAIR, because a provider's two credential kinds often mean two different
-#: endpoints rather than two ways of authenticating one. Kimi is the clearest
-#: case: the coding-plan usage route wants an OAuth token, while the account
-#: balance wants the plain API key the registry already stores, and they live on
-#: different hosts and return different shapes. Under the old one-fetcher-per-
-#: provider mapping the API-key half was simply unreachable — `/provider`
-#: advertised that Kimi and xAI report quota and both rendered an empty table
-#: forever, because the single fetcher hard-returned None without a token.
-#:
-#: ``None`` in either slot means "that credential kind has no route here", which
-#: is what :func:`usage_kinds` reports so the UI can say WHICH credential is
-#: missing instead of showing nothing.
-_FETCHERS: dict[str, tuple[FetcherKind | None, FetcherKind | None]] = {
-    "openrouter": (None, "openrouter"),
-    "anthropic": ("anthropic-oauth", None),
-    "openai": ("openai-oauth", None),
-    "openai-device": ("openai-oauth", None),
-    "kimi": ("kimi-oauth", "moonshot-balance"),
-    "deepseek": (None, "deepseek-balance"),
-    "xai": ("xai-oauth", None),
-    "xai-oauth": ("xai-oauth", None),
-}
-
-#: Providers whose usage needs an OAuth access token and has NO API-key route.
-#: Derived, so it can never drift from the dispatch table above — the hand-written
-#: version had already drifted and was read by nothing.
-OAUTH_USAGE_PROVIDERS: frozenset[str] = frozenset(
-    provider for provider, (oauth, api_key) in _FETCHERS.items() if oauth and not api_key
-)
 
 
 async def fetch_usage(

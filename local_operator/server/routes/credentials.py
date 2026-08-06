@@ -121,6 +121,16 @@ async def update_credential(
         # Set the credential
         credential_manager.set_credential(credential_data.key, credential_data.value)
 
+        # A key is exactly the reason model metadata resolves poorly: without one
+        # a provider's listing 401s and every model it describes falls back to the
+        # 128k unknown default. That answer is memoized per TTL bucket, so in a
+        # server — which runs for days — fixing the credential would otherwise
+        # change nothing until the bucket rolled. Imported lazily to keep the
+        # model/harness stack off this route's import path.
+        from local_operator.model.configure import invalidate_model_info_cache
+
+        invalidate_model_info_cache()
+
         response = CRUDResponse(
             status=200,
             message="Credential updated successfully",

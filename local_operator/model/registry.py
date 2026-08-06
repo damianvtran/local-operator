@@ -511,6 +511,47 @@ radient_default_model_info: ModelInfo = ModelInfo(
     recommended=False,
 )
 
+anthropic_default_model_info: ModelInfo = ModelInfo(
+    max_tokens=64_000,
+    context_window=200_000,
+    supports_images=True,
+    supports_prompt_cache=True,
+    # NOT a guess at the model's real numbers: 0 is this registry's "unknown"
+    # for a price, and a wrong price is worse than an absent one because the
+    # session band renders it as fact. Anthropic's models listing carries no
+    # prices at all, so an unshipped id keeps zeros until someone adds a row.
+    input_price=0.0,
+    output_price=0.0,
+    cache_writes_price=0.0,
+    cache_reads_price=0.0,
+    description="Anthropic Claude model not described by the shipped registry",
+    id="anthropic",
+    name="Anthropic Claude",
+    recommended=False,
+)
+"""Family FLOOR for a Claude id the registry does not ship.
+
+Anthropic's ``/v1/models`` returns ids and display names and nothing else, so an
+id the listing CONFIRMS EXISTS still arrives with no window, no output cap and no
+capabilities. Falling through to :data:`unknown_model_info` then hands the session
+128k/8192/no-cache, which is wrong for every Claude generation ever shipped: the
+whole family is 200k context, and prompt caching plus images are universal from
+Claude 3 on. Those three are the floor, and a floor is the safe direction — the
+cost of under-reporting is silent, the cost of over-reporting is loud. An
+under-reported window disables nothing but throws away 36% of the room and
+compacts early; an under-reported ``max_tokens`` TRUNCATES a long answer with no
+error at all; ``supports_prompt_cache=False`` makes the wire client skip
+``cache_control`` on the most expensive models in the catalogue. Over-report and
+the provider rejects the request with a 400 naming the real limit, which is a
+diagnosable failure rather than a silent degradation.
+
+``max_tokens`` is the floor among the CURRENT generations (Sonnet 4 is 64k) rather
+than the all-time floor (Claude 3 Haiku is 4k), because this template is only ever
+reached for an id the registry does not have — and every older, smaller-output
+model is already in :data:`anthropic_models`, so an unknown id is by construction
+a newer one.
+"""
+
 openai_models: Dict[str, ModelInfo] = {
     "gpt-4o": ModelInfo(
         id="gpt-4o",

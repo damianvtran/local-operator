@@ -42,7 +42,6 @@ from textual.containers import Container, Horizontal
 from textual.widgets import Static
 
 from local_operator.session import naming
-from local_operator.providers.oauth.callback_server import LoginCallbacks
 from local_operator.session.protocol import SessionProtocol
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import SlashCommand
@@ -81,6 +80,7 @@ from local_operator.tui.widgets.welcome import WelcomeView, session_welcome_info
 
 if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from local_operator.providers.controller import CatalogueEntry
+    from local_operator.providers.oauth.callback_server import LoginCallbacks
 
 #: Slash commands handled synchronously before any prompt is sent. One
 #: registry entry per command; aliases live on the entry (TUI-014).
@@ -828,15 +828,16 @@ class OperatorApp(App[None]):
             notice(f"provider list failed: {error}", "error")
 
     def _provider_usage_state(self) -> list[str]:
-        """Provider ids that can report usage, readable by credential state."""
+        """Provider ids `/provider` may advertise as reporting quota.
+
+        Delegated rather than recomputed. This line and bare `/usage`'s target
+        list have to be the same set or `/provider` promises a table that `/usage`
+        then renders empty — which is what a locally-written `is_usable` filter
+        did for the five OAuth-only providers when the user held only an API key.
+        """
         if self._providers is None:
             return []
-        return [
-            p
-            for p in self._providers.usage_enabled_providers()
-            # An env key reaches the quota endpoint exactly like a stored one.
-            if self._providers.is_usable(p)
-        ]
+        return self._providers.usage_reportable_providers()
 
     def _cmd_accounts(self, notice: NoticeFn) -> None:
         """``/accounts`` — list stored credentials (OAuth + pasted keys)."""
@@ -958,10 +959,9 @@ class OperatorApp(App[None]):
                 label = f" {limit.label}"
                 if limit.window:
                     label += f" ({limit.window})"
-                if a.unit != "unknown" and a.used is not None:
-                    unit = a.unit
-                    used = f"{a.used:.2f}" if unit == "usd" else f"{a.used:g}"
-                    label += f" — {used} {unit}"
+                amount_text = _format_usage_amount(a)
+                if amount_text:
+                    label += f" — {amount_text}"
                 left.append(label, style=dim)
                 lines.append(left)
         return RichBlock(Group(*lines))
@@ -1010,6 +1010,10 @@ class OperatorApp(App[None]):
         is a CLI situation; offering it here would mean reading stdin while the
         app owns it.
         """
+        # ``callback_server`` is imported HERE: it drags in http.server, ssl and
+        # email (~138 ms, 150-odd modules) for a loopback listener that only a
+        # login needs, and this module is what every interactive session imports.
+        from local_operator.providers.oauth.callback_server import LoginCallbacks
 
         def on_auth_url(url: str, instructions: str | None = None) -> None:
             lines = [
@@ -1338,6 +1342,47 @@ def _partial_text(partial_result) -> str:
         text = getattr(content, "text", None)
         if text:
             return text
+    return ""
+
+
+def _format_usage_amount(amount) -> str:
+    """The number for one usage row, or ``""`` when the amount carries none.
+
+    ``used`` first, then ``remaining``, then ``limit``, then an explicit fraction.
+    A remaining-only balance — exactly what both account-balance fetchers report,
+    since neither vendor gives a limit to derive spend from — used to print no
+    number at all, leaving a row labelled "Balance" that never said how much and,
+    for DeepSeek, no digit anywhere on screen.
+
+    Units come from ``UNIT_LABELS`` rather than the raw key, so a row reads
+    ``519.86 USD`` and ``30%`` instead of ``519.86 usd`` and ``30 percent``. A unit
+    with no label (``unknown`` — a CNY balance already naming its currency in the
+    label) prints the bare number rather than dropping it.
+    """
+    # Imported here, not at module scope: this file deliberately keeps the
+    # provider layer off the TUI's import graph, and by the time a report exists
+    # the module is already loaded.
+    from local_operator.providers.usage import UNIT_LABELS
+
+    unit = getattr(amount, "unit", "unknown")
+    label = UNIT_LABELS.get(unit, unit)
+
+    def with_unit(value: float) -> str:
+        text = f"{value:.2f}" if unit == "usd" else f"{value:g}"
+        if not label:
+            return text
+        # "%" is a suffix, every other label is a separate word.
+        return f"{text}{label}" if label == "%" else f"{text} {label}"
+
+    if amount.used is not None:
+        return with_unit(amount.used)
+    if amount.remaining is not None:
+        return f"{with_unit(amount.remaining)} left"
+    if amount.limit is not None:
+        return f"{with_unit(amount.limit)} limit"
+    if amount.used_fraction is not None:
+        # The bar already shows this, but a bar cannot be read off precisely.
+        return f"{amount.used_fraction * 100:g}% used"
     return ""
 
 

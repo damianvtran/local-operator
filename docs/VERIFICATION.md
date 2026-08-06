@@ -700,14 +700,16 @@ produce a report for a typical user:
 | `zai` was in `USAGE_PROVIDERS` with a working fetcher and **no `ProviderDefinition`** — `/login zai` raised, its env var was never read, no code path could supply its credential | deleted (fetcher, set entry, test) |
 | One fetcher per provider, so Kimi's OAuth-only route made `KIMI_API_KEY` users unreachable; `/provider` advertised quota and the table was empty forever | `_FETCHERS` is now `(oauth, api_key)` pairs; added `fetch_moonshot_balance` (plain Bearer, the key the registry already stores) |
 | DeepSeek had no fetcher despite a documented endpoint and a stored key | added `fetch_deepseek_balance`, one limit per currency (a CNY balance rendered as USD is wrong by ~7x) |
-| Three surfaces disagreed: `/provider` used `is_usable`, bare `/usage` used `has_any_credential`, `/usage <p>` resolved the env tier | all unified on `is_usable` |
-| `OAUTH_USAGE_PROVIDERS` was hand-written, had drifted, and was read by nothing | derived from the dispatch table |
+| Three surfaces disagreed: `/provider` used `is_usable`, bare `/usage` used `has_any_credential`, `/usage <p>` resolved the env tier | all three call one predicate, `ProviderController.can_report_usage` = `is_usable(p) and (has_any_credential(p) or usage_kinds(p)[1])`. `is_usable` alone was too coarse: five of the eight providers are OAuth-only for usage, so an `ANTHROPIC_API_KEY`-only install was advertised four providers it could not read |
+| `OAUTH_USAGE_PROVIDERS` was hand-written, had drifted, and was read by nothing; `USAGE_PROVIDERS` (the set that gates the UI) duplicated the same eight keys | `USAGE_PROVIDERS = frozenset(_FETCHERS)`; `OAUTH_USAGE_PROVIDERS` deleted — `usage_kinds()` already answers its question for its one would-be caller |
+| The Moonshot balance URL hardcoded the INTERNATIONAL host `api.moonshot.ai` while every other Kimi setting targets mainland `api.moonshot.cn` — separate platforms, separate accounts, separate keys, so the `KIMI_API_KEY` a user must hold 401s and the table is empty again | the balance path is appended to the provider's configured `base_url`; the host also fixes the currency (the response carries none), so a CNY balance no longer renders as USD |
 | `UsageReport.identity` was never assigned, so the TUI's annotation was unreachable | populated from the OAuth email/account id |
 | `/usage` could not distinguish "no endpoint" from "endpoint you cannot reach" | `usage_kinds()` reports both routes; the TUI now names the missing credential |
 | OpenRouter called the undocumented `/api/v1/auth/key` alias | pinned to the documented `/api/v1/key` (both verified live, identical bodies) |
+| The renderer printed a number only for `used`, so both balance fetchers (deliberately `remaining`-only) drew a row labelled "Balance" with no amount, and `UNIT_LABELS` was read by nothing while the raw dict key was interpolated | `remaining`/`limit`/fraction fall-backs, and units come from `UNIT_LABELS` — `519.86 USD` and `30%`, not `519.86 usd` and `30 percent` |
 
-Live: `/usage openrouter` returns `openrouter:spend $519.85 usd` through the
-documented endpoint.
+Live: `/usage openrouter` returns `Spend (no limit set) (lifetime) — 519.86 USD`
+through the documented endpoint.
 
 ### Base overhead, measured then reduced
 
@@ -764,18 +766,28 @@ shortest), because the stable prefix grows while the volatile tail does not.
 ### Browser support
 
 The existing cmux browser tool was extended in place (`tools/builtin.py`,
-28 → 61 tests) rather than moved to a new module, since every builtin lives in
-that file. Detection is PATH + `CMUX_BUNDLED_CLI_PATH`, no subprocess, and
-returns None when unavailable so the tool is never advertised without a working
-backend. `CMUX_SOCKET` turned out to be exported as the empty string in a real
-session, so the pre-existing check for it could never fire.
+28 → 100 tests) rather than moved to a new module, since every builtin lives in
+that file. Detection is `shutil.which("cmux")` plus `CMUX_BUNDLED_CLI_PATH`, no
+subprocess, and returns None when neither resolves, so the tool is not
+advertised on a host with no cmux CLI. That is a **PATH check, not a liveness
+check**: what is verified is that a binary exists and is executable, not that
+the socket answers or that the browser panel is enabled. Session start must not
+block on a terminal emulator, so a reachable-but-wedged cmux is reported
+per-action instead — every action returns one clear error. `CMUX_SOCKET` turned
+out to be exported as the empty string in a real session, so the pre-existing
+check for it could never fire.
 
-Live driving found six real cmux behaviours the tool now defends against, each
+Live driving found seven real cmux behaviours the tool now defends against, each
 with captured evidence — `get url` reporting the requested rather than the live
 URL (so navigation settles on `readyState` **and** URL agreement), `goto`
-behaving as an omnibox that silently Googles a non-URL, `get text` returning
-empty on a never-laid-out background surface, and `screenshot` exiting 0 without
-a usable file. Details in `docs/BROWSER.md`.
+behaving as an omnibox that silently Googles a non-URL, a dead `--surface`
+handle silently retargeting whatever surface is ACTIVE with exit 0 (which makes
+`get url`, the one verb that refuses, the liveness probe every action runs),
+`fill` exiting 0 without filling when its `--text` sees a leading dash,
+`get text` returning empty on a never-laid-out background surface, and
+`screenshot` exiting 0 without a usable file. The surface handle is owned by the
+`Session` and injected into each rebuilt `ToolContext`, so it survives a turn
+boundary and `dispose()` can close the tab. Details in `docs/BROWSER.md`.
 
 ### Final state
 
@@ -789,3 +801,92 @@ a usable file. Details in `docs/BROWSER.md`.
 | live `exec --json` | `done.txt` contains `shipped` |
 | live `/usage openrouter` | `$519.85` spend via the documented endpoint |
 | leaked processes | none (two stray headless Chrome trees from the browser work were killed) |
+
+## 14. Review round on the new work (2026-08-06)
+
+Three read-only reviewers audited commits `a305e1f`, `2c37fa9` and `fd6e237`.
+All three returned `incorrect`, and they were right: the batch had two blockers
+and eight majors. Every finding below was reproduced by the reviewer with
+observed output, then fixed and independently re-verified here.
+
+### What the reviewers CONFIRMED
+
+- The upper bound is sound. Neither the reviewer nor a 400-message adversarial
+  sweep here (CJK, emoji, combining marks, zero-width, BOM, multi-block, images,
+  tool calls) could construct an input where it falls below the exact estimate,
+  and the substitution site is monotonic in the safe direction — it can only
+  prove "definitely below threshold".
+- Enrichment is genuinely wired for every provider and free for registry-known
+  models: zero discovery calls, zero HTTP, zero cache reads for
+  `anthropic/claude-sonnet-4`, `openai/gpt-4o`, `deepseek/deepseek-chat`.
+- Live OpenRouter usage reports the vendor's own number, not a mis-parse.
+- The browser tool's surface-handle parsing is hostile-input-safe: `--help`,
+  `pane:2`, `window:1`, `surface:3; rm -rf /` and embedded flags are all
+  rejected.
+
+### Blockers
+
+| ID | Defect | Fix |
+|---|---|---|
+| B-01 | `Session._run_turn` rebuilds the `ToolContext` every turn with `browser=None`, so the surface handle survived only the turn that created it. "Open X" then "click Y" could not work, and every turn that opened a browser stranded a cmux tab nothing could close — reproduced as 2 `new-surface` calls, 0 `close-surface` calls | `BrowserSurface` is owned by the `Session` and injected like `wake_scheduler`; `dispose` closes it under a 5 s bound |
+| B-02 | cmux resolves a dead `--surface` handle by silently falling back to the **user's active tab**, exiting 0. `read` on `surface:99999` returned another tab's full text with `is_error=False` and `details.surface_id` still claiming the dead handle — internally consistent and completely wrong | `get url` is the one verb that returns non-zero for a dead handle, so it gates every surface-taking action; on failure the handle is cleared and the model is told to `open` again |
+
+### Majors
+
+| ID | Defect | Fix |
+|---|---|---|
+| M-01 | `_catalogue_api_key` dropped the callable `env_keys` form, so Anthropic's API key was never found — the listing went out unauthenticated and enrichment silently never ran for the provider the commit names. Where an OAuth row also existed, precedence inverted and the credential KIND flipped (`Bearer` where `x-api-key` was correct) | resolve through the registry's own `resolve_env_key`/`env_key_name`; report the kind from the variable it came out of |
+| M-02 | Anthropic's listing returns id + display name only, so `claude-opus-5` **still** ran at 128k/8192 with prompt caching OFF — the exact model the commit's own comment cites. `max_output_tokens=8192` silently truncates, and no `cache_control` was emitted for the most expensive model in the family | `anthropic_default_model_info` carries the family FLOOR (200k window, 64k output, cache on, prices left unknown); verified `claude-opus-5 -> 200000/64000/cache=True` |
+| M-03 | An unreadable cache document was served for the full 24 h TTL: `catalogue.invalidate` had no production caller left, so a payload-shape drift cost a day of degraded metadata with no self-healing | invalidate on unmappable; three consecutive calls now go `static -> ok -> cached` instead of `static, static, static` |
+| M-04 | `DEFAULT_TIMEOUT_S` is per-request while `_fetch_gemini` follows up to 25 pages, so one `resolve_model_info()` could block **250 s** on a synchronous session-start path | one deadline bounds the whole listing; measured 25 requests/250 s → 1 request/10 s |
+| M-06 | The tests for the headline claim fabricated listing rows Anthropic cannot emit, and both credential tests used the one `env_keys` shape that worked | fixtures use each wire's real row shape; credential tests parametrized over both shapes, which alone catches M-01 |
+| U-01 | The Moonshot balance URL pointed at the international host while every other Kimi setting targets China mainland — separate platforms, separate keys — so the `KIMI_API_KEY` a user must hold 401s, reinstating the empty table this fetcher was added to fix. A `.cn` balance would also have rendered CNY as USD | the host is derived from the provider's configured `base_url`, and it decides the currency |
+| U-02 | `is_usable` answers "is there any credential", but five of eight usage providers are OAuth-only for usage, so an `ANTHROPIC_API_KEY`-only user was advertised providers no key can reach — three surfaces, three answers, the `zai` defect one level finer | one `can_report_usage` predicate behind all three surfaces |
+| U-03 | Both new fetchers report `remaining` with `used=None`, and the renderer printed a value only when `used` was set — so a row labelled "Balance" never said how much, and for DeepSeek no digit appeared at all | renderer falls back to `remaining`/`limit`/`fraction`, prints unitless amounts, and `UNIT_LABELS` is finally read (`519.86 USD`, not `519.86 usd`) |
+
+### Snapshot flake, root-caused
+
+`test_boot_snapshot` failed about 1 run in 6 while rendering byte-identical
+**pixels**. Cause: `WelcomeView` polls every 250 ms until the session reports a
+model label, then repaints once and retires its own timer. A fixed
+`pilot.pause()` count races that last tick — and although both outcomes draw the
+same characters, the repaint splits the row into different Rich segments, while
+`export_svg` derives its element-id prefix from `adler32` over the segment
+reprs. So the byte compare failed on an id with no visual meaning.
+
+The earlier `cursor_blink = False` pin was real but addressed a different timer.
+The fix waits for the welcome timer to retire instead of pausing a fixed number
+of times, which asserts a real property — the boot frame reaches a steady state.
+**20 consecutive runs clean**, from ~1-in-6 failing.
+
+### Also fixed
+
+`asyncio` was the largest claimed import win and the only lazy import with **no
+regression pin** — verified to fail correctly once added. `config create`
+printed a path it had not written under `LOCAL_OPERATOR_CONFIG_DIR`. The
+overhead benchmark discarded the measured child's exit status, so a crashed
+`exec noop` would have been reported as a 45% improvement. `_browser_type`
+echoed a read-back it never compared, so a fill that did nothing reported
+success quoting the OLD value. Cancellation orphaned the cmux child (only
+timeout was handled). The cache key produced doubled `.models.models.` names and
+orphaned ~800 KB per install; renamed to `.listing` with a one-time sweep that
+reclaimed 811,131 bytes here. A credential update in the long-running server now
+invalidates the metadata memo, which would otherwise have held degraded numbers
+for a day.
+
+Three reviewer numbers did **not** reproduce and were corrected rather than
+copied: the bound runs ~3.5–4.5x above the exact estimate on ASCII (~18x on
+mixed scripts), not ~6x; `xai-oauth` is not `is_usable` at all with only
+`XAI_API_KEY` set; and the doubled cache-key suffix was an accident, not intent.
+
+### Final state
+
+| Gate | Result |
+|---|---|
+| unit tests | **1,986 passed**, 3 skipped |
+| `flake8` / `black --check` / `pyright` | clean / clean / 0 errors |
+| live TUI picker | `/model` → 465 rows → `opus` → `anthropic/claude-opus-5` |
+| live `exec --json` | `ship.txt` contains `landed` |
+| live `/usage openrouter` | `openrouter:spend 519.860777038 usd` |
+| live browser, two turns | `open` → `surface:110`, `read` reuses `surface:110` across a rebuilt `ToolContext`; stale `surface:99999` refused with the handle cleared; 0 surfaces left |
+| snapshot determinism | 20/20 clean |

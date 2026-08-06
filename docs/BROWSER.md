@@ -20,8 +20,14 @@ Tests: `tests/unit/tools/test_browser_tool.py`.
 | `type` | Replace the value of a field | `browser --surface <s> fill --selector <sel> --text <t>` |
 | `close` | Close the surface and drop the handle | `close-surface --surface <s>` |
 
-One surface per session, stored on `ToolContext.browser`. `open` called a second
-time navigates that surface instead of creating another.
+One surface per session, owned by the `Session` and injected into every rebuilt
+`ToolContext` as `ToolContext.browser`. `open` called a second time navigates
+that surface instead of creating another, and `Session.dispose()` closes
+whatever is still open. The holder has to be host-owned because
+`Session._run_turn` rebuilds the `ToolContext` at the start of *every* turn: a
+handle the tool stored on the context it was handed survived exactly one turn,
+which broke `open X` → next message → `click Y` outright and stranded a cmux
+tab per turn that nothing could close.
 
 ## Detection
 
@@ -79,13 +85,21 @@ surface in a single pane, hand-arranged.
 - **Never `cmux browser open`, `open-split`, or `new`.** They reuse a right-hand
   pane if one exists and otherwise **split the pane in two**. Nothing heals
   that; the operator rebuilds the layout by hand.
-- **Never pass `--workspace` or `--pane`.** The socket resolves the calling
-  terminal's own pane. `$CMUX_WORKSPACE_ID` is the workspace the terminal was
-  *created* in and goes stale the moment a surface moves, which drops the
-  browser into an unrelated workspace.
-- **`--focus false` on everything.** cmux only activates on an explicitly truthy
-  focus, so an unfocused command never raises the window over what the user is
-  doing.
+- **Never pass `--workspace` or `--pane`.** No `--pane` is what makes the
+  socket resolve the calling terminal's own pane, which is the pane the browser
+  should join. Omitting `--workspace` does **not** likewise avoid
+  `$CMUX_WORKSPACE_ID` — `cmux new-surface --help` documents
+  `--workspace <id|ref|index>  Target workspace (default: $CMUX_WORKSPACE_ID)`,
+  so cmux applies that default server-side either way. It is omitted because
+  passing it explicitly can only make things worse (a value we compute from a
+  stale env var, against cmux resolving its own current one).
+- **`--focus false` when CREATING a surface** — that is the only place the tool
+  passes it, and the only place cmux accepts it: `cmux browser --help` lists
+  `--focus` on `open|open-split|new` alone, and `cmux new-surface --help` on
+  the creation call. `goto`, `click`, `snapshot` and friends take no `--focus`,
+  so do not add one when adding an action. cmux only activates on an explicitly
+  truthy focus, so an unfocused creation never raises the window over what the
+  user is doing.
 - **One surface, reused, then closed.** A fresh surface per navigation leaves a
   drift of dead tabs the operator closes one at a time.
 
@@ -99,9 +113,9 @@ tab left behind, no split:
 │       └── surface surface:32 [terminal] …
 ```
 
-## Three cmux behaviours the tool has to defend against
+## Five cmux behaviours the tool has to defend against
 
-All three were measured against the real CLI; each has a regression test.
+All five were measured against the real CLI; each has a regression test.
 
 ### 1. `get url` is the URL cmux was *asked* for, not the one that is loaded
 
@@ -141,6 +155,51 @@ search-escaped the same way. A typo'd or hallucinated URL would therefore
 produce a search-results page that every later read and screenshot describes as
 if it were the requested site, so only `http://` and `https://` are accepted,
 and the refusal happens before the subprocess runs.
+
+### 4. A dead `--surface` handle silently drives the *active* surface
+
+cmux resolves a handle that no longer exists by falling back to whatever
+surface is active, and exits 0. Measured against `--surface surface:999999`, a
+handle that never existed:
+
+| command | rc | result |
+|---|---|---|
+| `get url` | **1** | `Error: invalid_params: Missing or invalid surface_id` |
+| `get title` | 0 | an unrelated tab's title |
+| `get text --selector body` | 0 | that tab's full text |
+| `eval --script …` | 0 | that tab's document |
+| `snapshot --compact` | 0 | that tab's tree |
+
+Driven through the tool with a stale handle, `read` answered `is_error: False`
+with a confident page header and that page's whole body while
+`details.surface_id` still named the dead handle — internally consistent and
+completely wrong, with nothing in the transcript signalling the substitution.
+`_await_navigation` cannot catch it either: its `eval` probe *succeeds* against
+the fallback surface, so `probe_failures` never reaches 3.
+
+Handles go stale routinely — the user closes the tab, or cmux restarts and
+reissues small refs like `surface:73` to someone else.
+
+`get url` is the only usable liveness probe *because* it is the one verb that
+refuses. `execute_browser` runs exactly one before dispatching any
+surface-taking action (`_stale_surface_error`) — never inside a poll loop — and
+on failure drops the handle and tells the model to `open` again. `open` itself
+recovers instead of erroring: it is the verb that would fix this anyway.
+
+### 5. `fill` exits 0 without filling
+
+cmux's parser is flag-greedy in the `--text` slot:
+`fill --selector a --text --help` exits 0 and prints the browser help. Ordinary
+dash-leading values (`-5`, `-x`, `--force`) do fill correctly, but the tool
+refuses any leading dash anyway — same rule as the selector and the URL, because
+the alternative is an allowlist of another program's global flags.
+
+`type` then **compares** the `get value` read-back against what was asked for
+and reports a mismatch as an error. It used to interpolate the read-back into
+`Value is now 'X'.` without comparing, so a fill that did nothing was reported
+as a success quoting the field's OLD contents as the new ones. A target with no
+`value` property (a contenteditable) says `unverified` rather than claiming a
+confirmation it does not have.
 
 Two smaller ones:
 

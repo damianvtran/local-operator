@@ -97,7 +97,7 @@ def test_a_failed_fetch_with_no_cache_returns_none(tmp_path) -> None:
 def test_an_unusable_cache_is_treated_as_absent(tmp_path, content: str) -> None:
     """A half-written file from a killed process must not raise; this is an
     optimisation store, so the only correct response is to refetch."""
-    path = tmp_path / "openrouter.models.json"
+    path = tmp_path / "openrouter.json"
     path.write_text(content, encoding="utf-8")
     assert cached_listing("openrouter", lambda: _payload(), cache_dir=tmp_path) == _payload()
 
@@ -108,7 +108,7 @@ def test_the_cache_write_is_atomic(tmp_path) -> None:
     document parses."""
     cached_listing("openrouter", lambda: _payload(), cache_dir=tmp_path)
     assert not list(tmp_path.glob("*.tmp")), "temp file leaked"
-    raw = json.loads((tmp_path / "openrouter.models.json").read_text(encoding="utf-8"))
+    raw = json.loads((tmp_path / "openrouter.json").read_text(encoding="utf-8"))
     assert raw["payload"] == _payload()
     assert time.time() - raw["fetched_at"] < 60
 
@@ -134,7 +134,17 @@ def test_an_unwritable_cache_dir_still_returns_the_payload(tmp_path, monkeypatch
 
 
 def _row(model_id: str, **kwargs):
-    """One `DiscoveredModel`, defaulting to the shape a real listing returns."""
+    """One `DiscoveredModel` shaped the way an AGGREGATOR lists a model.
+
+    OpenRouter and Radient describe every model they route — window and both
+    prices — so these defaults are the truth for them and for any OpenAI-compatible
+    gateway that fills in `context_length`/`pricing`. They are NOT the truth for
+    every wire, and defaulting them here once let two tests pin a fiction: the
+    Anthropic listing returns ids and display names and nothing else, so a row
+    carrying a window is a shape `_fetch_anthropic` cannot emit and a test built on
+    one passes against an enrichment that cannot work in production. Use
+    :func:`_anthropic_row` for that wire.
+    """
     from local_operator.model.discovery import DiscoveredModel
 
     fields = {
@@ -145,6 +155,18 @@ def _row(model_id: str, **kwargs):
     }
     fields.update(kwargs)
     return DiscoveredModel(**fields)
+
+
+def _anthropic_row(model_id: str, name: str = ""):
+    """One row exactly as `_fetch_anthropic` builds it: an id, a name, zeros.
+
+    `GET /v1/models` answers with `id`, `display_name`, `created_at` and `type`.
+    No window, no output cap, no prices, no capability flags — so every number a
+    session needs has to come from somewhere other than this listing.
+    """
+    from local_operator.model.discovery import DiscoveredModel
+
+    return DiscoveredModel(id=model_id, name=name or model_id)
 
 
 def _bare_info(model_id: str):
@@ -181,17 +203,37 @@ def test_configure_model_takes_the_window_from_the_listing(monkeypatch, tmp_path
 
 
 def test_a_direct_provider_is_enriched_too_not_just_the_aggregators(monkeypatch, tmp_path) -> None:
-    """The hole the model picker turned into a routine path. `claude-opus-5` is a
-    real Anthropic model that the shipped registry does not describe; enriching only
-    openrouter/radient left it at `context_window = -1`, and compaction thresholds
-    are derived from that number."""
+    """The hole the model picker turned into a routine path, pinned against the
+    row Anthropic's wire can ACTUALLY produce.
+
+    `claude-opus-5` is a real model the shipped registry does not describe, and the
+    picker offers it because the listing names it. But that listing names it and
+    nothing more — no window, no output cap, no capability flags — so "enrich from
+    the listing" cannot supply a single number here. An earlier version of this
+    test handed enrichment a 500k window that `_fetch_anthropic` has no field to
+    report, and so passed while the real path still ran at 128k/8192 with prompt
+    caching off: the exact model named in the claim, silently truncated at 8k of
+    output and paying full price on every cached prefix.
+
+    What has to hold instead is that a CONFIRMED-but-undescribed Claude id inherits
+    the family floor rather than the global unknown default.
+    """
     from local_operator.model import configure as configure_mod
 
-    _stub_discovery(monkeypatch, [_row("claude-opus-5", context_window=500_000)])
+    _stub_discovery(monkeypatch, [_anthropic_row("claude-opus-5", "Claude Opus 5")])
     monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
 
     config = configure_mod.configure_model(hosting="anthropic", model_name="claude-opus-5")
-    assert config.spec.context_window == 500_000
+    assert config.spec.context_window == 200_000, "fell back to the 128k unknown default"
+    assert config.spec.max_output_tokens == 64_000, "8192 silently truncates long answers"
+    assert config.spec.supports_prompt_cache is True, "no cache_control on the priciest model"
+    assert config.spec.supports_images is True
+    # No invented prices: Anthropic's listing quotes none, and a made-up number
+    # renders in the status band as fact.
+    assert config.info.input_price == 0.0
+    assert config.info.output_price == 0.0
+    # The listing's one real contribution is the display name.
+    assert config.info.name == "Claude Opus 5"
 
 
 @pytest.mark.parametrize("break_it", ["discovery-raises", "no-such-model", "empty-listing"])
@@ -281,7 +323,7 @@ def test_a_future_timestamp_is_stale_not_permanently_fresh(tmp_path) -> None:
     file copied between machines pins the catalogue with no recovery short of
     deleting it by hand. Refetching once is the cheap direction to be wrong in.
     """
-    path = tmp_path / "openrouter.models.json"
+    path = tmp_path / "openrouter.json"
     path.write_text(
         json.dumps({"fetched_at": time.time() + 86_400 * 30, "payload": _payload()}),
         encoding="utf-8",
@@ -315,7 +357,7 @@ def test_two_writers_never_share_a_temp_file_name(tmp_path, monkeypatch) -> None
     pins the property (each writer stages into a file of its own) rather than the
     mechanism that provides it.
     """
-    path = tmp_path / "openrouter.models.json"
+    path = tmp_path / "openrouter.json"
     staged: list[str] = []
     real_replace = catalogue.Path.replace
 
@@ -344,7 +386,7 @@ def test_another_writers_temp_file_cannot_corrupt_this_write(tmp_path) -> None:
     """A stranded temp file from some other writer must not be adopted."""
     import os
 
-    path = tmp_path / "openrouter.models.json"
+    path = tmp_path / "openrouter.json"
     (tmp_path / f"{path.name}.{os.getpid()}.tmp").write_text("{partial", encoding="utf-8")
     (tmp_path / f"{path.name}.tmp").write_text("{partial", encoding="utf-8")
     catalogue._write_cache(path, _payload(window=42))
@@ -355,7 +397,7 @@ def test_another_writers_temp_file_cannot_corrupt_this_write(tmp_path) -> None:
 
 def test_a_failed_write_does_not_strand_a_temp_file(tmp_path, monkeypatch) -> None:
     """Otherwise a persistently failing start accumulates one temp file per run."""
-    path = tmp_path / "openrouter.models.json"
+    path = tmp_path / "openrouter.json"
     real_replace = catalogue.Path.replace
 
     def fail_replace(self, target):  # noqa: ANN001
@@ -403,7 +445,23 @@ def test_the_in_process_memo_expires_with_the_wall_clock() -> None:
 # -- credential resolution (S1) ----------------------------------------------
 
 
-def test_the_key_is_read_from_the_apps_own_credential_store(tmp_path, monkeypatch) -> None:
+#: ``(provider, env_var, credential_file_key)`` for both shapes of
+#: ``ProviderDefinition.env_keys``. Every credential test runs over both on
+#: purpose: ``env_keys`` is ``str | Callable[[], str | None] | None``, and a reader
+#: written as ``isinstance(env_keys, str)`` passes every openrouter test while
+#: silently resolving NOTHING for the one provider using the callable form. That
+#: provider is Anthropic, whose catalogue 401s unauthenticated — so the shape that
+#: was untested was also the one where failing to read a key costs the most.
+_ENV_KEY_SHAPES = [
+    pytest.param("openrouter", "OPENROUTER_API_KEY", "OPENROUTER_API_KEY", id="str-env-keys"),
+    pytest.param("anthropic", "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY", id="callable-env-keys"),
+]
+
+
+@pytest.mark.parametrize("provider, env_var, file_key", _ENV_KEY_SHAPES)
+def test_the_key_is_read_from_the_apps_own_credential_store(
+    tmp_path, monkeypatch, provider: str, env_var: str, file_key: str
+) -> None:
     """Reading only ``os.environ`` made the whole fix a no-op for the users who
     configured credentials the sanctioned way.
 
@@ -416,23 +474,60 @@ def test_the_key_is_read_from_the_apps_own_credential_store(tmp_path, monkeypatc
     from local_operator.credentials import CredentialManager
     from local_operator.model import configure as configure_mod
 
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv(env_var, raising=False)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    CredentialManager(tmp_path).set_credential("OPENROUTER_API_KEY", "sk-or-store-value")
+    CredentialManager(tmp_path).set_credential(file_key, "sk-store-value")
 
-    assert configure_mod._catalogue_api_key("openrouter") == "sk-or-store-value"
+    assert configure_mod._catalogue_api_key(provider) == "sk-store-value"
 
 
-def test_an_env_var_takes_precedence_over_the_stored_credential(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("provider, env_var, file_key", _ENV_KEY_SHAPES)
+def test_an_env_var_takes_precedence_over_the_stored_credential(
+    tmp_path, monkeypatch, provider: str, env_var: str, file_key: str
+) -> None:
     """An explicit env var is the operator overriding config for one run."""
     from local_operator.credentials import CredentialManager
     from local_operator.model import configure as configure_mod
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    CredentialManager(tmp_path).set_credential("OPENROUTER_API_KEY", "sk-or-store-value")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-env-value")
+    CredentialManager(tmp_path).set_credential(file_key, "sk-store-value")
+    monkeypatch.setenv(env_var, "sk-env-value")
 
-    assert configure_mod._catalogue_api_key("openrouter") == "sk-or-env-value"
+    assert configure_mod._catalogue_api_key(provider) == "sk-env-value"
+
+
+def test_an_env_api_key_beats_a_stored_oauth_row_and_keeps_its_kind(monkeypatch) -> None:
+    """Precedence AND credential kind, for the provider where both were wrong.
+
+    With the callable ``env_keys`` form unread, ``ANTHROPIC_API_KEY`` resolved to
+    nothing and the cascade fell through to the OAuth store. Two things broke at
+    once: the documented order inverted, so a key exported for this one run lost to
+    a months-old stored login; and the KIND flipped with it, so the request went
+    out as ``Authorization: Bearer`` plus the OAuth beta header where ``x-api-key``
+    was correct. Anthropic answers the wrong shape with a 401, which is exactly the
+    "model cannot be described" outcome enrichment exists to prevent.
+    """
+    from local_operator.model import configure as configure_mod
+
+    monkeypatch.setattr(
+        configure_mod, "_oauth_listing_token", lambda _provider: ("oauth-access-token", True)
+    )
+    assert configure_mod._catalogue_credential("anthropic") == ("oauth-access-token", True)
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-explicit")
+    assert configure_mod._catalogue_credential("anthropic") == ("sk-ant-explicit", False)
+
+
+def test_an_oauth_token_from_the_environment_is_not_sent_as_an_api_key(monkeypatch) -> None:
+    """``_anthropic_env_key`` prefers ``ANTHROPIC_OAUTH_TOKEN`` and returns only the
+    VALUE, so reporting whatever it hands back as an API key would send an OAuth
+    token as ``x-api-key`` — a 401, and a model left undescribed."""
+    from local_operator.model import configure as configure_mod
+
+    monkeypatch.setenv("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat-token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-key")
+
+    assert configure_mod._catalogue_credential("anthropic") == ("sk-ant-oat-token", True)
 
 
 def test_no_key_anywhere_still_resolves(tmp_path, monkeypatch) -> None:
@@ -539,6 +634,64 @@ def test_invalidate_is_safe_when_there_is_no_cache(tmp_path) -> None:
     catalogue.invalidate("openrouter", cache_dir=tmp_path)  # must not raise
 
 
+# -- orphaned documents from earlier layouts (M-08) --------------------------
+
+
+def test_purge_removes_only_the_documents_no_reader_can_reach(tmp_path) -> None:
+    """~800 KB per install was measured sitting in the cache under dead names.
+
+    Two generations are dead -- ``<provider>.models.json`` from the bare-provider
+    key and ``<provider>.models.models.json`` from the doubled suffix -- while the
+    current ``<provider>.listing.json`` and the skills index's files, which share
+    this directory, must survive.
+    """
+    dead = [
+        tmp_path / "openrouter.models.json",
+        tmp_path / "radient.models.json",
+        tmp_path / "openrouter.models.models.json",
+        tmp_path / "anthropic.models.models.json",
+    ]
+    alive = [
+        tmp_path / "openrouter.listing.json",
+        tmp_path / "4b2e3b6dedc6f0c7.skills.meta.json",
+        tmp_path / "4b2e3b6dedc6f0c7.skills.vec",
+    ]
+    for path in dead + alive:
+        path.write_text("{}", encoding="utf-8")
+
+    catalogue.purge_legacy_documents(tmp_path)
+    catalogue.purge_legacy_documents(tmp_path)  # idempotent, no marker file needed
+
+    assert [path.name for path in dead if path.exists()] == []
+    assert all(path.exists() for path in alive)
+    # No bookkeeping file either: state would be one more thing to get wrong.
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(p.name for p in alive)
+
+
+def test_purge_is_safe_when_the_cache_dir_does_not_exist(tmp_path) -> None:
+    # The common case on a first run, and it must not create the directory
+    # either: nothing is cached yet, so there is nothing to hold.
+    missing = tmp_path / "never-created"
+    catalogue.purge_legacy_documents(missing)  # must not raise
+    assert not missing.exists()
+
+
+def test_a_cached_listing_call_sweeps_the_orphans(tmp_path) -> None:
+    """The sweep has to be on the read path: there is no other moment that knows
+    the cache directory, and a dead name has no reader left to notice it."""
+    orphan = tmp_path / "openrouter.models.json"
+    orphan.write_text(
+        json.dumps({"fetched_at": time.time(), "payload": _payload()}), encoding="utf-8"
+    )
+
+    served = cached_listing("openrouter.listing", lambda: _payload(window=7), cache_dir=tmp_path)
+
+    assert served is not None
+    assert served["data"][0]["context_length"] == 7
+    assert not orphan.exists()
+    assert (tmp_path / "openrouter.listing.json").exists()
+
+
 # -- real concurrency, not a happy-path stand-in (S4) ------------------------
 
 
@@ -554,11 +707,11 @@ def test_concurrent_writers_never_produce_a_corrupt_cache(tmp_path) -> None:
 
     def writer(window: int) -> None:
         for _ in range(15):
-            catalogue._write_cache(tmp_path / "openrouter.models.json", _payload(window=window))
+            catalogue._write_cache(tmp_path / "openrouter.json", _payload(window=window))
 
     def reader() -> None:
         for _ in range(40):
-            payload, _age = catalogue._read_cache(tmp_path / "openrouter.models.json")
+            payload, _age = catalogue._read_cache(tmp_path / "openrouter.json")
             if payload is None:
                 continue
             try:
@@ -638,9 +791,13 @@ def test_a_direct_provider_gets_its_real_window_from_its_own_listing(
     `UNKNOWN_CONTEXT_WINDOW` placeholder, and compaction sized itself off that
     instead of the 2M/262k the provider would have reported for free.
 
-    Parametrized across two providers on purpose: Google's listing has its own
-    envelope, pagination and query-parameter auth, so a fix that only threads
-    openai-compat through would pass for Alibaba and still fail here.
+    Scope, stated honestly: `_stub_discovery` replaces `available_models`
+    WHOLESALE, so nothing below that seam runs — this test passes unchanged if
+    `_fetch_gemini` is deleted. What it pins is the resolution gate above the seam,
+    which is provider-agnostic, and both parameters exercise the same code path.
+    The wire-specific claim belongs to a test that speaks HTTP:
+    :func:`test_the_gemini_wire_reaches_the_spec_through_a_real_transport` below,
+    plus the per-transport tests in `test_discovery.py`.
     """
     from local_operator.model import configure as configure_mod
 
@@ -650,3 +807,186 @@ def test_a_direct_provider_gets_its_real_window_from_its_own_listing(
     spec = configure_mod.build_model_spec(provider, model_id)
     assert spec.context_window == window, "a direct provider fell back to the placeholder"
     assert spec.max_output_tokens == max_out
+
+
+# -- the wire, not the seam --------------------------------------------------
+
+
+class _CannedHttp:
+    """The slice of `httpx.Client` the transports use, answering canned bodies.
+
+    Same shape as `test_discovery.py`'s stub client, kept here rather than shared
+    because this module needs it for exactly one boundary test and importing test
+    helpers across modules is how a fixture ends up serving two contracts.
+    """
+
+    def __init__(self, pages: list[dict]) -> None:
+        self._pages = list(pages)
+        self.calls: list[tuple[str, dict]] = []
+
+    def get(self, url: str, *, headers: dict, params: dict, timeout: float):
+        self.calls.append((url, dict(params)))
+        assert self._pages, f"unexpected extra request to {url}"
+        return _CannedResponse(self._pages.pop(0))
+
+
+class _CannedResponse:
+    def __init__(self, body: dict) -> None:
+        self.status_code = 200
+        self._body = body
+
+    def json(self) -> dict:
+        return self._body
+
+
+@pytest.mark.parametrize("spelling", ["gemini-2.5-pro", "models/gemini-2.5-pro", "Gemini-2.5-Pro"])
+def test_the_gemini_wire_reaches_the_spec_through_a_real_transport(
+    monkeypatch, tmp_path, spelling: str
+) -> None:
+    """End to end from Google's real envelope to the ModelSpec, with only the
+    socket replaced.
+
+    Everything between runs for real: `_fetch_gemini`'s query-parameter auth and
+    pagination, `_row_from_gemini_entry`'s `models/` strip and `generateContent`
+    filter, the merge, the cache, and the resolution gate. Deleting `_fetch_gemini`
+    fails this test, which is the wire-specific claim the seam-level test above
+    cannot make.
+
+    Parametrized over spellings because discovery NORMALISES ids on ingest while
+    the user types what Google's own docs show. `models/gemini-2.5-pro` matched
+    nothing under an exact-only comparison and that session ran at 128k — a model
+    with 1M of context compacting at ~102k.
+    """
+    from local_operator.model import configure as configure_mod
+    from local_operator.model import discovery as discovery_mod
+
+    monkeypatch.setenv("GOOGLE_AI_STUDIO_API_KEY", "AIza-test-key")
+    http = _CannedHttp(
+        [
+            {
+                "models": [
+                    {
+                        "name": "models/gemini-2.5-pro",
+                        "displayName": "Gemini 2.5 Pro",
+                        "inputTokenLimit": 1_048_576,
+                        "outputTokenLimit": 65_536,
+                        "supportedGenerationMethods": ["generateContent", "countTokens"],
+                    },
+                    {
+                        "name": "models/text-embedding-004",
+                        "supportedGenerationMethods": ["embedContent"],
+                    },
+                ]
+            }
+        ]
+    )
+    real_available_models = discovery_mod.available_models
+
+    def wired(provider_id, **kwargs):
+        # `_info_from_discovery` owns the call and passes neither a client nor a
+        # cache dir, so the transport is injected here. Everything below this line
+        # is production code.
+        kwargs.setdefault("cache_dir", tmp_path)
+        return real_available_models(provider_id, client=http, **kwargs)
+
+    monkeypatch.setattr(discovery_mod, "available_models", wired)
+
+    spec = configure_mod.build_model_spec("google", spelling)
+    assert spec.context_window == 1_048_576, "the listing's window never reached the spec"
+    assert spec.max_output_tokens == 65_536
+    assert http.calls, "the transport was never exercised"
+    assert http.calls[0][1]["key"] == "AIza-test-key"
+
+
+# -- what the enrichment gate lets through -----------------------------------
+
+
+def test_a_registry_row_with_a_real_window_but_no_price_still_gets_enriched(
+    monkeypatch, tmp_path
+) -> None:
+    """A window-only gate leaves nine shipped rows priced at $0 forever.
+
+    `google/gemini-2.0-flash-exp`, `google/gemini-2.0-pro-exp-02-05`, the
+    `alibaba/qwen2.5-coder-*` pair and five more all ship with a real window and no
+    prices. Under a gate that asks only about the window they can never enter
+    enrichment, so their cost never resolves and the status band reads "cost
+    unavailable" for the life of the install — while this module's contract names
+    prices as one of the things enrichment fixes.
+    """
+    from local_operator.model import configure as configure_mod
+    from local_operator.model.registry import get_model_info
+
+    shipped = get_model_info("alibaba", "qwen2.5-coder-1.5b-instruct")
+    assert shipped.context_window == 32_768 and not shipped.input_price, "fixture drifted"
+
+    _stub_discovery(
+        monkeypatch,
+        [_row("qwen2.5-coder-1.5b-instruct", context_window=0, input_price=0.3, output_price=0.9)],
+    )
+    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+
+    info = configure_mod.resolve_model_info("alibaba", "qwen2.5-coder-1.5b-instruct")
+    assert info.input_price == pytest.approx(0.3)
+    assert info.output_price == pytest.approx(0.9)
+    # The listing had no window; the registry's own must survive the merge.
+    assert info.context_window == 32_768
+
+
+def test_a_fully_described_model_performs_zero_discovery(monkeypatch) -> None:
+    """The second reason to enter must not become a reason to enter ALWAYS.
+
+    Session start is on this path, so a listing call for a model the registry
+    already describes completely would be latency paid by every user on every
+    start, for nothing.
+    """
+    from local_operator.model import configure as configure_mod
+    from local_operator.model import discovery as discovery_mod
+
+    def explode(*_args, **_kwargs):
+        raise AssertionError("a fully described model must not trigger discovery")
+
+    monkeypatch.setattr(discovery_mod, "available_models", explode)
+
+    info = configure_mod.resolve_model_info("anthropic", "claude-3-5-sonnet-20241022")
+    assert info.context_window == 200_000
+    assert info.input_price == pytest.approx(3.0)
+
+
+def test_the_resolved_info_is_never_the_registrys_own_object(monkeypatch) -> None:
+    """One session mutating its `ModelInfo` must not rewrite the process registry.
+
+    `get_model_info` hands out module-level singletons and `ModelInfo` is a mutable
+    pydantic model, so a memo that returns them shares one object across every
+    session in the process — a server or a TUI resolving many models. Latent until
+    someone writes to `config.info`, and by then the corruption is global and
+    silent.
+    """
+    from local_operator.model import configure as configure_mod
+    from local_operator.model.registry import anthropic_models
+
+    shipped = anthropic_models["claude-3-5-sonnet-20241022"]
+    first = configure_mod.resolve_model_info("anthropic", "claude-3-5-sonnet-20241022")
+    assert first is not shipped
+
+    first.context_window = 1
+    assert shipped.context_window == 200_000, "a caller corrupted the shipped registry"
+    second = configure_mod.resolve_model_info("anthropic", "claude-3-5-sonnet-20241022")
+    assert second.context_window == 200_000, "the memo served the mutated object"
+
+
+def test_the_memo_can_be_dropped_when_the_cause_of_a_bad_answer_is_fixed(monkeypatch) -> None:
+    """A resolution that degraded for a FIXABLE reason must not be pinned for a
+    full TTL bucket: the user who pastes a key mid-session has removed the cause,
+    and 24h of stale numbers is not an acceptable answer to that."""
+    from local_operator.model import configure as configure_mod
+
+    _stub_discovery(monkeypatch, [])
+    configure_mod.invalidate_model_info_cache()
+    degraded = configure_mod.resolve_model_info("anthropic", "claude-opus-5")
+    assert degraded.name == "claude-opus-5", "the listing had nothing to add"
+
+    _stub_discovery(monkeypatch, [_anthropic_row("claude-opus-5", "Claude Opus 5")])
+    assert configure_mod.resolve_model_info("anthropic", "claude-opus-5").name == "claude-opus-5"
+
+    configure_mod.invalidate_model_info_cache()
+    assert configure_mod.resolve_model_info("anthropic", "claude-opus-5").name == "Claude Opus 5"
