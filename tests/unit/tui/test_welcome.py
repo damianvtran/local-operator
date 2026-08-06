@@ -264,7 +264,11 @@ class FakeSession:
     def set_conversation_name(self, name: str) -> None:
         self.conversation_name = name
 
-    async def complete_once(self, prompt: str, system_prompt: str | None = None) -> str:
+    async def complete_once(self, system: str, prompt: str) -> str:
+        # Parameter names AND order must match SessionProtocol.complete_once:
+        # this fake had them reversed, so the first test to drive naming through
+        # it positionally would have swapped the system and user prompts and
+        # still passed.
         return ""
 
     async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:

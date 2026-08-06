@@ -13,10 +13,15 @@ here rather than eyeballed:
 
 from __future__ import annotations
 
+import re
+
 from rich.cells import cell_len
 
+from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.status_line import (
+    BRAND_GLYPH,
     StatusLine,
+    _MIN_GROUP_GAP,
     format_agents,
     format_context_usage,
     format_cost,
@@ -189,29 +194,34 @@ def test_the_brand_glyph_survives_a_terminal_far_too_narrow() -> None:
 # -- overflow priority -------------------------------------------------------
 
 
-def test_the_jobs_counter_is_the_first_segment_to_go(monkeypatch) -> None:
-    """Transient counters are cheapest to lose; the owner's numbers are not."""
+def test_the_label_the_user_typed_is_the_first_segment_to_go(monkeypatch) -> None:
+    """The conversation name goes first, and every NUMBER outlives it.
+
+    The name is a label the user typed and already knows; the counters and live
+    figures beside it are not re-derivable at a glance. An earlier order shed the
+    subagent count first, which meant a three-agent fan-out went invisible while
+    a title the user had chosen was still on screen.
+    """
     monkeypatch.setenv("HOME", "/Users/tester")
     status, _clock = _full_band()
-    assert "3 agents" in status.render_text(200).plain
+    assert "Status band enrichment" in status.render_text(200).plain
 
-    # Walk down to the first width that sheds a segment rather than computing
-    # it from the 200-cell row. That row is PADDED to the full width (the
-    # right group is edge-aligned), so its length is 200 whatever the content
-    # measures and `len(row) - 1` says nothing about when the band overflows.
+    # Walk down to the first width that sheds it rather than computing it from
+    # the 200-cell row. That row is PADDED to the full width (the right group is
+    # edge-aligned), so its length is 200 whatever the content measures and
+    # `len(row) - 1` says nothing about when the band overflows.
     for width in range(200, 4, -1):
         tight = status.render_text(width).plain
-        if "3 agents" not in tight:
+        if "Status band enrichment" not in tight:
             break
     else:  # pragma: no cover - the band always sheds something by width 5
-        raise AssertionError("no width shed the subagent counter")
+        raise AssertionError("no width shed the conversation name")
 
-    # The counter goes FIRST: at the very width that drops it, everything the
-    # operator actually steers by is still on screen.
+    # At the very width that drops the name, everything numeric survives.
+    assert "3 agents" in tight
     assert "41m1s" in tight
     assert "49.6%/1M" in tight
     assert "$12.40" in tight
-    assert "Status band enrichment" in tight
 
 
 def test_segments_disappear_in_the_declared_ladder_order(monkeypatch) -> None:
@@ -255,15 +265,18 @@ def test_segments_disappear_in_the_declared_ladder_order(monkeypatch) -> None:
                 order.append(key)
 
     assert order == [
-        "subagents",
-        "duration",
-        "name",
+        "name",  # a label the user typed and already knows
+        "duration",  # re-derivable from the transcript
+        "subagents",  # a counter, but not re-derivable without scrolling
         "cwd-full",  # shortened to its basename, not dropped
         "model-full",  # shortened to the bare model id, not dropped
+        "effort",  # a static setting: it does not change while they watch
         "cost",
-        "context",
-        "effort",
+        "context",  # the last number standing — it predicts compaction
         "cwd-short",
+        # The model label is never DROPPED; it survives to width 17, where the
+        # irreducible-row path truncates it to `kimi-k2-t…` rather than leaving
+        # a bare glyph on an empty strip.
         "model-short",
     ]
 
@@ -357,3 +370,73 @@ def test_no_duration_segment_before_anything_has_run() -> None:
     status = StatusLine(FakeDock(200), clock=clock)
     status.update(model_label="p/m", cwd="/tmp")
     assert "0s" not in status.render_text(200).plain
+
+
+# -- accent budget and group seam --------------------------------------------
+
+
+def _fills(row) -> dict[str, str]:
+    """``{segment text: hex fill}`` for every styled span in a rendered row."""
+    out: dict[str, str] = {}
+    for span in row.spans:
+        color = span.style.color if hasattr(span.style, "color") else None
+        if color is not None and color.triplet is not None:
+            out[row.plain[span.start : span.end]] = color.triplet.hex.lower()
+    return out
+
+
+def test_the_accent_marks_a_live_turn_not_the_brand_glyph() -> None:
+    """The accent budget's whole point is that seeing green MEANS something.
+
+    Painting the always-on brand glyph accent and the streaming spinner dim made
+    the band render identically whether the agent was working or idle — the one
+    row an operator glances at for liveness — while the tool card and the working
+    line both put their running signal in accent.
+    """
+    accent = theme_mod.semantic_color("accent").lower()
+
+    status, _clock = _full_band()
+    idle = _fills(status.render_text(200))
+    assert accent not in idle.values(), f"idle band must spend no accent: {idle}"
+
+    status.update(streaming=True)
+    live = _fills(status.render_text(200))
+    greens = [text for text, hex_ in live.items() if hex_ == accent]
+    assert greens, "a streaming band must show its running indicator in accent"
+    # …and that green is the spinner, not the brand glyph.
+    assert all(BRAND_GLYPH not in text for text in greens), greens
+
+
+def test_the_two_groups_never_crowd_closer_than_their_own_separator() -> None:
+    """`_compose` pads with `max(_MIN_GROUP_GAP, …)`, and the FIT TEST reserves
+    the same gap. Testing only the composed length let a row 'fit' with the
+    groups one cell apart — tighter than the 3-cell ` · ` inside each group — so
+    a filesystem path abutted a percentage and the left/right architecture the
+    band is built on dissolved into one run. Reachable by dragging a window one
+    cell at ordinary widths.
+    """
+    status, _clock = _full_band()
+    for width in range(200, 20, -1):
+        plain = status.render_text(width).plain.rstrip()
+        # The widest internal run of spaces IS the group seam.
+        gaps = [len(m.group(0)) for m in re.finditer(r" {2,}", plain)]
+        if not gaps:
+            # Everything shed down to a single group; nothing to separate.
+            continue
+        assert max(gaps) >= _MIN_GROUP_GAP, f"width {width}: seam {max(gaps)} < {_MIN_GROUP_GAP}"
+
+
+def test_a_terminal_too_narrow_for_anything_still_names_the_model() -> None:
+    """The ladder's old final rung DROPPED the model, leaving a bare glyph on an
+    empty tinted strip — which reads as broken rather than compressed, and
+    discards the answer to the only question the band still had room for. The
+    label is truncated instead: `kimi-k2-t…` still says who is replying.
+    """
+    status, _clock = _full_band()
+    for width in (30, 20, 17, 12, 8):
+        plain = status.render_text(width).plain.rstrip()
+        assert cell_len(plain) <= width
+        body = plain.replace(BRAND_GLYPH, "").strip()
+        assert body, f"width {width} rendered an empty band: {plain!r}"
+        # Some recognisable part of the model id survives, not just the ellipsis.
+        assert body.strip("…").strip(), f"width {width} kept only an ellipsis: {plain!r}"

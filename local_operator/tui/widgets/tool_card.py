@@ -620,12 +620,20 @@ class ToolCard(TranscriptBlock):
             if cap:
                 label = truncate_cells(label, cap, ellipsis="")
             return [(label, dim)]
-        # D13: error message danger, duration dim — two runs.
+        # Error message danger, glyph and duration dim — three runs.
+        #
+        # The GLYPH sits in the status column with the duration, not at the head
+        # of the message (D20). The right edge is where an operator scans a run
+        # of tool rows for pass/fail, and putting `✗` before a right-aligned
+        # message moved the failed row's glyph ~25 cells left of the `✓` on every
+        # neighbouring row — so the scan found a hole exactly where the answer
+        # should be. The message keeps the space to the glyph's left.
         error = self._error
         if cap:
             error = truncate_cells(error, max(1, cap - len(f"{ICON_ERROR}  ") - len(duration)))
         return [
-            (f"{ICON_ERROR} {error} ", Style(color=theme_mod.semantic_color("danger"))),
+            (f"{error} ", Style(color=theme_mod.semantic_color("danger"))),
+            (f"{ICON_ERROR} ", Style(color=theme_mod.semantic_color("danger"))),
             (duration, dim),
         ]
 

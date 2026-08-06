@@ -38,6 +38,7 @@ from rich.text import Text
 from textual.widgets import Static
 
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.widgets.tool_card import truncate_cells
 
 #: Spinner frames shown while the session is streaming (~12.5 fps glyph
 #: cadence when shimmer is disabled).
@@ -49,37 +50,60 @@ BRAND_GLYPH = "π"
 
 _SEPARATOR = " · "
 
+#: Minimum cells between the left and right groups. Deliberately WIDER than the
+#: 3-cell intra-group separator so the seam between the groups always dominates
+#: the seams inside them — otherwise the band's identity-left/numbers-right
+#: architecture dissolves into one run at ordinary widths.
+_MIN_GROUP_GAP = 4
+
 #: Reduction order, cheapest loss first. Each entry is applied in turn until
 #: the row fits the available width.
 #:
-#: Rationale, because this is the part most likely to look wrong rather than
-#: be wrong: ``subagents`` and ``duration`` are transient counters the
-#: operator can re-derive from the transcript, so they go first. ``name`` is
-#: a label, not a number.
+#: The ordering principle: shed what the user already knows or can re-derive,
+#: and protect what predicts their next decision. In order —
 #:
-#: The two SHORTEN steps come next and outrank every remaining drop, because
-#: they recover width while keeping the segment: a basename still answers
-#: "where am I", and a bare model id still answers "who is replying".
-#: Together they free ~35 cells on a realistic label, which is more than the
-#: cost and context segments cost combined — dropping numbers to preserve a
-#: fully-qualified path would be the wrong trade.
+#: * ``name`` is a label the user typed; they know it.
+#: * ``duration`` is re-derivable from the transcript.
+#: * ``subagents`` is a counter, but NOT re-derivable without scrolling, which
+#:   is why it outlasts the two above rather than going first.
+#: * the two SHORTEN steps outrank every remaining drop, because they recover
+#:   width while keeping the segment: a basename still answers "where am I" and
+#:   a bare model id still answers "who is replying". Together they free ~35
+#:   cells on a realistic label, more than cost and context cost combined, so
+#:   dropping numbers to preserve a fully-qualified path would be a bad trade.
+#: * ``effort`` is a static setting the user chose. It does not change while
+#:   they watch, so it goes before either live number — an earlier version had
+#:   it OUTLIVING context usage, which meant a band could show `high` but not
+#:   `49.6%/1M`: it kept the field nobody re-reads and dropped the one that
+#:   says compaction is coming.
+#: * ``cost``, then ``context``: context usage is the last number standing
+#:   because it is the one an operator acts on.
 #:
-#: Cost and context usage are the numbers that change decisions mid-task, so
-#: they outlast everything except the left group, and the model is the very
-#: last thing to go: a band that cannot say which model is answering is worse
-#: than no band. The brand glyph and the streaming spinner are never
-#: droppable — the glyph is one cell and the spinner is the liveness signal.
+#: The model label, the brand glyph and the streaming spinner are NEVER
+#: dropped. When even the irreducible row overflows, ``_render`` truncates the
+#: label rather than shedding it: `deepse…` still answers which model is
+#: replying, and a band reduced to a bare glyph on an empty tinted strip reads
+#: as broken rather than as compressed.
 _DROP_LADDER: tuple[str, ...] = (
-    "subagents",
-    "duration",
+    # A label the user typed and already knows.
     "name",
+    # Re-derivable from the transcript.
+    "duration",
+    # A counter, but one the operator cannot re-derive without scrolling, so it
+    # outlasts the two above.
+    "subagents",
+    # Shorten before dropping: a basename still answers "where am I" and a bare
+    # model id still answers "who is replying".
     "shorten-cwd",
     "shorten-model",
-    "cost",
-    "context",
+    # A static session setting the user chose — it does not change while they
+    # watch, so it goes before either live number.
     "effort",
+    "cost",
+    # Context usage is the last number to go: it is the one that predicts
+    # compaction, which is the thing an operator actually acts on.
+    "context",
     "cwd",
-    "model",
 )
 
 
@@ -324,28 +348,38 @@ class StatusLine:
 
         dropped: set[str] = set()
         short: set[str] = set()
-        # Bound before the loop only so the post-loop clip below is provably
-        # reachable with a value. The ladder's first step is the literal
-        # ``None`` (render everything), so this is always overwritten.
-        row = Text()
-        # Walk the ladder until the row fits. Building the row is a handful
-        # of string joins and the ladder is ten steps, so the worst case is
-        # eleven cheap rebuilds on a resize — far cheaper than the
-        # alternative of measuring segments independently and getting the
-        # separator arithmetic subtly wrong.
+        # Walk the ladder until the row fits. Building the row is a handful of
+        # string joins and the ladder is nine steps, so the worst case is ten
+        # cheap rebuilds on a resize — far cheaper than measuring segments
+        # independently and getting the separator arithmetic subtly wrong.
         for step in (None, *_DROP_LADDER):
             if step is not None:
                 target = step.partition("shorten-")[2]
                 (short if target else dropped).add(target or step)
             left = self._left_text(dropped, short, dim, muted, seam, accent)
             right = self._right_text(dropped, dim, seam)
-            row = self._compose(left, right, width, dim)
-            if cell_len(row.plain) <= width:
-                return row
-        # Even the irreducible band (glyph + spinner) overflows: clip it.
-        # A terminal this narrow has bigger problems than a status line.
-        row.truncate(width, overflow="ellipsis")
-        return row
+            # The fit test reserves the group gap rather than asking whether the
+            # composed row happens to fit. `_compose` pads with `max(1, …)`, so a
+            # row could "fit" with the two groups ONE cell apart — tighter than
+            # the 3-cell ` · ` separator used inside each group, which makes the
+            # whole left/right architecture read as one undifferentiated run and
+            # abuts a filesystem path against a percentage. Reachable by dragging
+            # a window one cell at ordinary widths like 98 or 116 (D3).
+            if cell_len(left.plain) + cell_len(right.plain) + _MIN_GROUP_GAP <= width:
+                return self._compose(left, right, width, dim)
+
+        # Even the irreducible row overflows. Truncate the model label rather
+        # than shedding it (D7): `deepse…` still answers which model is
+        # replying, whereas the ladder's old final rung dropped the label and
+        # left a bare glyph on an empty tinted strip, which reads as broken
+        # rather than as compressed.
+        tail = Text()
+        tail.append(BRAND_GLYPH + " ", style=muted)
+        label = format_model_label(self._model_label, short=True) if self._model_label else ""
+        if label:
+            tail.append(truncate_cells(label, max(1, width - cell_len(tail.plain))), style=muted)
+        tail.truncate(width, overflow="ellipsis")
+        return tail
 
     def _left_text(
         self,
@@ -358,7 +392,13 @@ class StatusLine:
     ) -> Text:
         """Brand glyph · provider/model · effort · cwd (+ working indicator)."""
         left = Text()
-        left.append(BRAND_GLYPH + " ", style=accent)
+        # The brand glyph is MUTED, not accent (D1). It is always on screen, so
+        # painting it green spent the accent on "the app is running at all" and
+        # left nothing for the one glyph that means "a turn is in flight" — the
+        # band rendered identically working and idle, while the tool card and the
+        # working line both put their running signal in accent. The accent moves
+        # to the spinner below.
+        left.append(BRAND_GLYPH + " ", style=muted)
         parts: list[tuple[str, Style]] = []
         if self._model_label and "model" not in dropped:
             parts.append((format_model_label(self._model_label, short="model" in short), muted))
@@ -382,7 +422,11 @@ class StatusLine:
 
             if parts:
                 left.append(_SEPARATOR, style=seam)
-            left.append(_SPINNER_FRAMES[self._spinner_index], style=dim)
+            # ACCENT: this is the band's running indicator, and the accent
+            # budget's whole point is that seeing green means a turn is live.
+            # The trailing " working" word stays dim so the colour is the signal
+            # and the word is only the caption.
+            left.append(_SPINNER_FRAMES[self._spinner_index], style=accent)
             if not shimmer_enabled():
                 left.append(" working", style=dim)
         return left
@@ -418,7 +462,7 @@ class StatusLine:
 
     def _compose(self, left: Text, right: Text, width: int, dim: Style) -> Text:
         """Left group, filler, right group — right-aligned to the band edge."""
-        gap = max(1, width - cell_len(left.plain) - cell_len(right.plain))
+        gap = max(_MIN_GROUP_GAP, width - cell_len(left.plain) - cell_len(right.plain))
         row = Text()
         row.append_text(left)
         row.append(" " * gap, style=dim)

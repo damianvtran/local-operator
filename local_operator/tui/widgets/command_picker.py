@@ -131,22 +131,37 @@ def slash_context(text: str) -> SlashContext | None:
     return SlashContext(start, stripped[1:])
 
 
+#: Below this many typed characters the fuzzy tail is suppressed. A one- or
+#: two-letter query matches an arbitrary-looking set by subsequence — `/u`
+#: offered `usage, quit, accounts, logout` and `/g` offered
+#: `goal, usage, login, logout`. The correct command ranked first every time,
+#: but rows 2+ taught the user that the list is unreliable, which is the
+#: fastest way to make them stop reading it. Typo tolerance lives at three
+#: characters and up (`/cmpct`, `/lgout`), so nothing the feature exists for
+#: is affected.
+FUZZY_MIN_QUERY_CHARS = 3
+
+
 def command_suggestions(query: str, commands: list[SlashCommand]) -> list[tuple[str, SlashCommand]]:
     """``(display_name, command)`` suggestions for a typed command word.
 
-    Non-empty queries go straight to :func:`match_commands` — same scoring,
-    same tie-break, same order the Tab/Enter completion applies.
+    A bare ``/`` cannot go through :func:`match_commands`:
+    ``score_command_text_match`` scores an empty prefix at 0 by contract (it is
+    what makes "no match" and "nothing typed" distinguishable for the completion
+    path, and it is pinned by test), so asking it would answer "no commands" for
+    the keystroke whose entire purpose is "show me the commands". The full
+    registry, in registration order, IS the answer to ``/``.
 
-    A bare ``/`` is the one case that cannot: ``score_command_text_match``
-    scores an empty prefix at 0 by contract (it is what makes "no match" and
-    "nothing typed" distinguishable for the completion path, and it is pinned
-    by test), so asking it would answer "no commands" for the keystroke whose
-    entire purpose is "show me the commands". The full registry, in
-    registration order, IS the answer to ``/``.
+    Short queries keep only prefix matches — see
+    :data:`FUZZY_MIN_QUERY_CHARS`.
     """
     if not query:
         return [(command.name, command) for command in commands]
-    return match_commands(f"/{query}", commands)
+    matches = match_commands(f"/{query}", commands)
+    if len(query) >= FUZZY_MIN_QUERY_CHARS:
+        return matches
+    lowered = query.lower()
+    return [pair for pair in matches if pair[0].lower().startswith(lowered)]
 
 
 def _pad_to(row: Text, width: int, style: Style) -> Text:
@@ -353,22 +368,37 @@ class CommandPicker(Static):
         selected = index == self._selected
         hovered = index == self._hovered
 
-        # ONE green (D23): the accent is spent on the highlighted command name
-        # and nothing else on the row. Depth carries the rest — the selected
-        # row rises one elevation step, hover rises further, which is the same
-        # language the tool cards already speak.
+        # ONE green: the accent is spent on the highlighted command NAME.
+        #
+        # Selection is carried by HUE, not elevation. Pure luminance steps could
+        # not do it — surface->raised measures 1.096:1 and surface->overlay
+        # 1.218:1, both imperceptible — so the highlight rested entirely on the
+        # accent and hover (which has no accent) gave a mouse user almost no
+        # feedback about which row a click would run. `tint-select` is the same
+        # move `tint-danger` already makes on a failed tool row: elevation says
+        # "this is a row", hue says "this is its state" (D8).
         ground = theme_mod.semantic_color("surface")
         if selected:
-            ground = theme_mod.semantic_color("raised")
+            ground = theme_mod.semantic_color("tint-select")
         if hovered:
-            ground = theme_mod.semantic_color("overlay")
+            ground = theme_mod.semantic_color("raised")
         row_bg = Style(bgcolor=ground)
         name_style = row_bg + Style(color=theme_mod.semantic_color("accent" if selected else "fg"))
-        alias_style = row_bg + Style(color=theme_mod.semantic_color("faint"))
+        # `dim`, not `faint`. An alias is a typeable command, and the picker is
+        # where a user DISCOVERS that `/quit` and `/models` exist — at `faint`
+        # that discovery rendered at 1.7:1 against its own ground, so the row
+        # promised two names and hid one. `faint` stays what it is: chrome, for
+        # the band's separators (D2).
+        alias_style = row_bg + Style(color=theme_mod.semantic_color("dim"))
         description_style = row_bg + Style(color=theme_mod.semantic_color("muted"))
+        # The cursor is MUTED, not the accent name style: the input's focused
+        # chevron is already accent at the same column on the adjacent row, so
+        # two identical green chevrons a row apart read as a duplicated caret
+        # exactly when the user is mid-keystroke (D17).
+        cursor_style = row_bg + Style(color=theme_mod.semantic_color("muted"))
 
         row = Text()
-        row.append(f"{_CURSOR} " if selected else " " * _GUTTER_CELLS, style=name_style)
+        row.append(f"{_CURSOR} " if selected else " " * _GUTTER_CELLS, style=cursor_style)
 
         primary = f"/{name}"
         aliases = tuple(other for other in command.names if other != name)
@@ -388,7 +418,7 @@ class CommandPicker(Static):
             # Not enough room after the name column to say anything useful:
             # rebuild as a name-only row rather than ship a stub description.
             row = Text()
-            row.append(f"{_CURSOR} " if selected else " " * _GUTTER_CELLS, style=name_style)
+            row.append(f"{_CURSOR} " if selected else " " * _GUTTER_CELLS, style=cursor_style)
 
         budget = max(1, width - _GUTTER_CELLS - _EDGE_MARGIN)
         self._append_primary(row, primary, alias_run, budget, name_style, alias_style)
