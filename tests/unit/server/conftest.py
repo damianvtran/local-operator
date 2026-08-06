@@ -24,6 +24,7 @@ from local_operator.model.registry import ModelInfo
 from local_operator.scheduler_service import SchedulerService
 from local_operator.server.app import app
 from local_operator.server.utils.operator import ExecutorInitError
+from local_operator.server.utils.event_broker import EventBroker
 from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import (
     ActionType,
@@ -198,6 +199,8 @@ def test_app_client(temp_dir):
         original_state["job_manager"] = app.state.job_manager
     if hasattr(app.state, "websocket_manager"):
         original_state["websocket_manager"] = app.state.websocket_manager
+    if hasattr(app.state, "event_broker"):
+        original_state["event_broker"] = app.state.event_broker
     if hasattr(app.state, "env_config"):
         original_state["env_config"] = app.state.env_config
 
@@ -208,6 +211,9 @@ def test_app_client(temp_dir):
     mock_agent_registry = AgentRegistry(config_dir=temp_dir, refresh_interval=1.0)
     mock_job_manager = JobManager()
     mock_websocket_manager = WebSocketManager()
+    # Streaming fan-out is app state like the websocket manager: the async chat
+    # routes depend on it, so a client built without lifespan must supply it.
+    mock_event_broker = EventBroker()
     mock_env_config = EnvConfig(
         radient_api_base_url="https://api.radienthq.com/v1",
     )
@@ -230,6 +236,7 @@ def test_app_client(temp_dir):
     app.state.agent_registry = mock_agent_registry
     app.state.job_manager = mock_job_manager
     app.state.websocket_manager = mock_websocket_manager
+    app.state.event_broker = mock_event_broker
     app.state.env_config = mock_env_config
     app.state.scheduler_service = mock_scheduler_service
 

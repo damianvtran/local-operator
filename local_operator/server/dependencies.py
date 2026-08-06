@@ -7,6 +7,7 @@ from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.jobs import JobManager
 from local_operator.scheduler_service import SchedulerService
+from local_operator.server.utils.event_broker import EventBroker
 from local_operator.server.utils.websocket_manager import WebSocketManager
 
 
@@ -34,6 +35,11 @@ def get_job_manager(request: Request) -> JobManager:
 def get_websocket_manager(request: Request) -> WebSocketManager:
     """Get the WebSocket manager from the application state."""
     return request.app.state.websocket_manager
+
+
+def get_event_broker(request: Request) -> EventBroker:
+    """Get the SSE event broker from the application state."""
+    return request.app.state.event_broker
 
 
 def get_env_config(request: Request) -> EnvConfig:
