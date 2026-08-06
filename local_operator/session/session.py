@@ -76,6 +76,7 @@ from local_operator.harness.wake import (
     format_wake_delivery_text,
 )
 from local_operator.session.goal import GoalState
+from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import ConversationName
 from local_operator.session.transcript import Transcript
 
@@ -277,6 +278,12 @@ class Session:
         # only for diagnostics — the session never drives the manager itself,
         # it just governs its lifetime through a dispose hook.
         self.mcp_manager: McpManager | None = None
+        # What that wiring actually achieved, recorded as data so a front end
+        # can render it. ``None`` means MCP wiring never ran on this session at
+        # all, which is distinct from "it ran and found nothing configured" —
+        # the latter is an empty outcome. See session/mcp_status.py for why the
+        # record does not live in the mcp package.
+        self.mcp_startup: McpStartupOutcome | None = None
         self._aside_thunks: list[Aside] = []
         self._continuation_queue: list[AgentMessage] = []
         self._last_usage: Usage | None = None  # latest provider-reported usage

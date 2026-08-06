@@ -22,6 +22,12 @@ Layout — a borderless two-column list, one row per suggestion (D4):
   into a handful of cells is noise, and the command name is the part the user
   is actually choosing between.
 
+The SAME widget also presents a command's ARGUMENT (``/login <provider>``) in
+:attr:`PickerMode.ARGUMENT`: bare names instead of ``/name``, and a
+right-aligned ``detail`` column carrying the state the user is choosing by. A
+second widget was the alternative, which is how a codebase ends up with two
+lists that look almost the same and behave almost the same.
+
 ONE ROW PER SUGGESTION is enforced structurally, not hopefully: every row is
 padded/truncated to EXACTLY the render width (so Textual has nothing to wrap)
 and the widget's height is pinned to the row count on every repaint. Textual's
@@ -35,7 +41,8 @@ count.
 
 from __future__ import annotations
 
-from typing import Callable, NamedTuple
+from enum import Enum
+from typing import Callable, NamedTuple, Sequence
 
 from rich.cells import cell_len
 from rich.style import Style
@@ -45,7 +52,12 @@ from textual.dom import NoScreen
 from textual.widgets import Static
 
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.autocomplete import SlashCommand, match_commands
+from local_operator.tui.autocomplete import (
+    ArgumentChoice,
+    SlashCommand,
+    match_choices,
+    match_commands,
+)
 
 # The project has exactly ONE cell-accurate truncator and it lives in
 # tool_card. Importing it across widget modules is deliberate: a local copy is
@@ -92,6 +104,45 @@ _EDGE_MARGIN = 2
 #: width-independent, so the worst case is a single frame of narrow rows that
 #: the following Resize corrects — never a list that silently doubles height.
 _MIN_RENDER_WIDTH = 20
+
+#: Floor for the NAME column of an argument row before its ``detail`` is
+#: dropped. The name is the text Tab types into the buffer, so a truncated one
+#: is unusable — the user cannot read what to complete to. ``detail`` is worth
+#: a lot (it is what `/logout` is chosen by) but never worth that.
+_MIN_NAME_CELLS = _PRIMARY_COLUMN_MIN
+
+
+class PickerMode(Enum):
+    """Which kind of list the picker is currently showing.
+
+    Read by the editor, which has to know whether Tab is completing a command
+    WORD (rewrite everything from the slash, add a trailing space) or a command's
+    ARGUMENT (replace the tail, no trailing space — the space would terminate the
+    argument and close the very list Tab just used).
+    """
+
+    COMMAND = "command"
+    ARGUMENT = "argument"
+
+
+#: One rendered row: its display name and the thing it stands for. A UNION
+#: rather than the :class:`~local_operator.tui.autocomplete.Completable`
+#: protocol the matcher is generic over, because rendering needs the concrete
+#: fields (a command's aliases, a choice's ``detail``) and dispatching on the
+#: item's type makes "argument rows carry a detail column" impossible to get
+#: wrong — there is no mode flag to fall out of step with the payload.
+_Suggestion = tuple[str, "SlashCommand | ArgumentChoice"]
+
+
+class _RowStyles(NamedTuple):
+    """The styles one row paints with, resolved once from its selection state."""
+
+    selected: bool
+    ground: Style
+    name: Style
+    alias: Style
+    description: Style
+    cursor: Style
 
 
 class SlashContext(NamedTuple):
@@ -201,6 +252,31 @@ def command_suggestions(query: str, commands: list[SlashCommand]) -> list[tuple[
     return prefixed or matches
 
 
+def argument_suggestions(
+    query: str, choices: list[ArgumentChoice]
+) -> list[tuple[str, ArgumentChoice]]:
+    """``(display_name, choice)`` suggestions for a command's typed ARGUMENT.
+
+    The same shape and the same short-query preference as
+    :func:`command_suggestions`, deliberately: the two lists appear in the same
+    place, are driven by the same keys and are ranked by the same scorer, so a
+    user cannot tell which one they are in — and does not need to.
+
+    The one behavioural difference is that an argument list may legitimately be
+    EMPTY when the set itself is empty (``/logout`` with nothing stored), which
+    is a real answer rather than a failed match. The caller distinguishes those
+    two cases, because only one of them is worth saying out loud.
+    """
+    if not query:
+        return [(choice.name, choice) for choice in choices]
+    matches = match_choices(query, choices)
+    if len(query) >= FUZZY_MIN_QUERY_CHARS:
+        return matches
+    lowered = query.lower()
+    prefixed = [pair for pair in matches if pair[0].lower().startswith(lowered)]
+    return prefixed or matches
+
+
 def _pad_to(row: Text, width: int, style: Style) -> Text:
     """Pad ``row`` out to exactly ``width`` cells under ``style``.
 
@@ -229,7 +305,9 @@ class CommandPicker(Static):
         super().__init__()
         self._on_choose = on_choose
         self._commands: list[SlashCommand] = []
-        self._matches: list[tuple[str, SlashCommand]] = []
+        self._choices: list[ArgumentChoice] = []
+        self._mode = PickerMode.COMMAND
+        self._matches: list[_Suggestion] = []
         self._selected = 0
         self._window_start = 0
         self._hovered: int | None = None
@@ -248,11 +326,29 @@ class CommandPicker(Static):
         """Replace the offered command registry."""
         self._commands = list(commands)
 
+    def set_choices(self, choices: list[ArgumentChoice]) -> None:
+        """Replace the values offered for the current command's ARGUMENT.
+
+        Re-derives the visible rows immediately, because the app fills these in
+        answer to a posted message — one message-loop tick after the keystroke
+        that opened the list. Without the resync the picker would sit closed on
+        the empty set it was opened with until the user typed another character.
+        """
+        self._choices = list(choices)
+        if self._mode is PickerMode.ARGUMENT:
+            matches = argument_suggestions(self._query, self._choices)
+            self._apply(PickerMode.ARGUMENT, self._query, matches)
+
+    @property
+    def mode(self) -> PickerMode:
+        """Whether the rows are commands or one command's argument values."""
+        return self._mode
+
     def is_open(self) -> bool:
         """True when suggestions are showing."""
         return bool(self._matches)
 
-    def suggestions(self) -> list[tuple[str, SlashCommand]]:
+    def suggestions(self) -> list[_Suggestion]:
         """All current matches, best first (not just the visible window)."""
         return list(self._matches)
 
@@ -289,23 +385,52 @@ class CommandPicker(Static):
         return self._window_start, end, total
 
     def sync(self, text: str) -> None:
-        """Re-derive the suggestions from the editor's current ``text``."""
+        """Re-derive the COMMAND suggestions from the editor's current ``text``."""
         context = slash_context(text)
         if context is None:
             # Left slash context entirely: forget the dismissal, so the next
             # `/` opens a fresh picker.
             self._dismissed_query = None
+            self._mode = PickerMode.COMMAND
             self._close()
             return
-        self._query = context.query
-        if context.query == self._dismissed_query:
+        matches = command_suggestions(context.query, self._commands)
+        self._apply(PickerMode.COMMAND, context.query, matches)
+
+    def sync_argument(self, query: str) -> None:
+        """Re-derive the ARGUMENT suggestions for the current command.
+
+        The editor calls this INSTEAD of :meth:`sync` while the buffer holds a
+        command whose argument drives a list, so the two can never both be
+        showing: which list is up is a property of the buffer parse, not of two
+        widgets agreeing to take turns.
+        """
+        self._apply(PickerMode.ARGUMENT, query, argument_suggestions(query, self._choices))
+
+    def _apply(self, mode: PickerMode, query: str, matches: Sequence[_Suggestion]) -> None:
+        """Adopt a freshly derived candidate set, whichever list produced it.
+
+        ``Sequence``, not ``list``: a list is invariant, so the concrete
+        ``list[tuple[str, SlashCommand]]`` the command matcher returns is not a
+        ``list[_Suggestion]`` — only a read-only view of one.
+        """
+        if mode is not self._mode:
+            # A mode change is a different list of different things. Carrying the
+            # highlight, the window or Esc's "not now" across it would point them
+            # at rows that no longer exist.
+            self._mode = mode
+            self._dismissed_query = None
+            self._selected = 0
+            self._window_start = 0
+            self._chosen_by_hand = False
+        self._query = query
+        if query == self._dismissed_query:
             self._close()
             return
         # The token changed, so Esc's "not now" has expired. Latching the
         # dismissal until the slash is deleted would leave a user who pressed
         # Esc once with no way to get the list back while still typing.
         self._dismissed_query = None
-        matches = command_suggestions(context.query, self._commands)
         if not matches:
             self._close()
             return
@@ -317,7 +442,7 @@ class CommandPicker(Static):
             self._selected = 0
             self._window_start = 0
             self._chosen_by_hand = False
-        self._matches = matches
+        self._matches = list(matches)
         self.display = True
         self._scroll_to_selection()
         self._repaint()
@@ -417,7 +542,15 @@ class CommandPicker(Static):
         self.update(self.render_text(width))
 
     def _row(self, index: int, width: int) -> Text:
-        name, command = self._matches[index]
+        """The row for suggestion ``index``, dispatched on what it stands for."""
+        name, item = self._matches[index]
+        styles = self._row_styles(index)
+        if isinstance(item, ArgumentChoice):
+            return self._argument_row(name, item, width, styles)
+        return self._command_row(name, item, width, styles)
+
+    def _row_styles(self, index: int) -> _RowStyles:
+        """Ground and text styles for row ``index`` — shared by both kinds."""
         selected = index == self._selected
         hovered = index == self._hovered
 
@@ -464,9 +597,24 @@ class CommandPicker(Static):
         # two identical green chevrons a row apart read as a duplicated caret
         # exactly when the user is mid-keystroke (D17).
         cursor_style = row_bg + Style(color=theme_mod.semantic_color("muted"))
+        return _RowStyles(
+            selected=selected,
+            ground=row_bg,
+            name=name_style,
+            alias=alias_style,
+            description=description_style,
+            cursor=cursor_style,
+        )
 
+    def _gutter(self, styles: _RowStyles) -> Text:
         row = Text()
-        row.append(f"{_CURSOR} " if selected else " " * _GUTTER_CELLS, style=cursor_style)
+        mark = f"{_CURSOR} " if styles.selected else " " * _GUTTER_CELLS
+        row.append(mark, style=styles.cursor)
+        return row
+
+    def _command_row(self, name: str, command: SlashCommand, width: int, s: _RowStyles) -> Text:
+        row = self._gutter(s)
+        row_bg = s.ground
 
         primary = f"/{name}"
         aliases = tuple(other for other in command.names if other != name)
@@ -476,20 +624,82 @@ class CommandPicker(Static):
         if description and width > DESCRIPTION_COLLAPSE_WIDTH:
             column = max(1, min(self._primary_column(), width - _GUTTER_CELLS - _EDGE_MARGIN * 2))
             budget = max(1, column - _PRIMARY_COLUMN_GAP)
-            used = self._append_primary(row, primary, alias_run, budget, name_style, alias_style)
+            used = self._append_primary(row, primary, alias_run, budget, s.name, s.alias)
             gap = max(_PRIMARY_COLUMN_GAP, column - used)
             row.append(" " * gap, style=row_bg)
             remaining = width - _GUTTER_CELLS - used - gap - _EDGE_MARGIN
             if remaining > _MIN_DESCRIPTION_CELLS:
-                row.append(truncate_cells(description, remaining), style=description_style)
+                row.append(truncate_cells(description, remaining), style=s.description)
                 return _pad_to(row, width, row_bg)
             # Not enough room after the name column to say anything useful:
             # rebuild as a name-only row rather than ship a stub description.
-            row = Text()
-            row.append(f"{_CURSOR} " if selected else " " * _GUTTER_CELLS, style=cursor_style)
+            row = self._gutter(s)
 
         budget = max(1, width - _GUTTER_CELLS - _EDGE_MARGIN)
-        self._append_primary(row, primary, alias_run, budget, name_style, alias_style)
+        self._append_primary(row, primary, alias_run, budget, s.name, s.alias)
+        return _pad_to(row, width, row_bg)
+
+    def _argument_row(self, name: str, choice: ArgumentChoice, width: int, s: _RowStyles) -> Text:
+        """``name  description                     detail`` — no leading slash.
+
+        The slash is COMMAND vocabulary. Prefixing an argument with it would read
+        as `/login /anthropic`, which is not something the user can type. Aliases
+        are absent for the same reason: `claude` makes anthropic FINDABLE, but the
+        only text that completes into the buffer is the provider id, so listing
+        the alias would advertise input the command does not accept.
+        """
+        row = self._gutter(s)
+        row_bg = s.ground
+        # `danger` only when the state is a problem; an unfinished login is not
+        # one. Tinting every un-logged-in provider red would make the ordinary
+        # `/login` list read as a wall of failures.
+        detail_style = row_bg + Style(
+            color=theme_mod.semantic_color("danger" if choice.alert else "muted")
+        )
+
+        span = max(1, width - _GUTTER_CELLS - _EDGE_MARGIN)
+        detail = choice.detail.strip()
+        # Reserve `detail` BEFORE the description, and drop the description first
+        # when only one of the two fits: for `/logout` the state is the thing being
+        # chosen by ("which of these am I logged into"), while the description only
+        # restates a provider name the id already carries.
+        reserved = cell_len(detail) + _PRIMARY_COLUMN_GAP if detail else 0
+        if reserved and span - reserved < _MIN_NAME_CELLS:
+            detail = ""
+            reserved = 0
+        body = span - reserved
+
+        description = choice.description.strip()
+        if description and width > DESCRIPTION_COLLAPSE_WIDTH:
+            column = max(1, min(self._primary_column(), body))
+            clipped = truncate_cells(name, max(1, column - _PRIMARY_COLUMN_GAP))
+            row.append(clipped, style=s.name)
+            used = cell_len(clipped)
+            gap = max(_PRIMARY_COLUMN_GAP, column - used)
+            remaining = body - used - gap
+            if remaining > _MIN_DESCRIPTION_CELLS:
+                row.append(" " * gap, style=row_bg)
+                row.append(truncate_cells(description, remaining), style=s.description)
+                return self._append_detail(row, width, detail, detail_style, row_bg)
+            # Not enough room after the name column to say anything useful:
+            # rebuild as a name-only row rather than ship a stub description.
+            row = self._gutter(s)
+
+        row.append(truncate_cells(name, max(1, body)), style=s.name)
+        return self._append_detail(row, width, detail, detail_style, row_bg)
+
+    def _append_detail(
+        self, row: Text, width: int, detail: str, detail_style: Style, row_bg: Style
+    ) -> Text:
+        """Right-align ``detail`` at the row's trailing edge and pad to ``width``.
+
+        Its cells were reserved out of the body budget above, so padding to the
+        detail's own start can only ever ADD space — never truncate content that
+        has already been appended.
+        """
+        if detail:
+            _pad_to(row, width - _EDGE_MARGIN - cell_len(detail), row_bg)
+            row.append(detail, style=detail_style)
         return _pad_to(row, width, row_bg)
 
     def _append_primary(
@@ -535,11 +745,16 @@ class CommandPicker(Static):
     def _primary_column(self) -> int:
         """Fit-to-content name column, clamped to the 12..32 cell band."""
         widest = 0
-        for name, command in self._matches:
-            aliases = tuple(other for other in command.names if other != name)
-            cells = cell_len(f"/{name}")
-            if aliases:
-                cells += cell_len("  " + " ".join(f"/{alias}" for alias in aliases))
+        for name, item in self._matches:
+            if isinstance(item, ArgumentChoice):
+                # No slash and no alias run: an argument row's primary column is
+                # the bare value, which is all that is typeable.
+                cells = cell_len(name)
+            else:
+                aliases = tuple(other for other in item.names if other != name)
+                cells = cell_len(f"/{name}")
+                if aliases:
+                    cells += cell_len("  " + " ".join(f"/{alias}" for alias in aliases))
             widest = max(widest, cells + _PRIMARY_COLUMN_GAP)
         return max(_PRIMARY_COLUMN_MIN, min(_PRIMARY_COLUMN_MAX, widest))
 

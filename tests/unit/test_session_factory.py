@@ -307,12 +307,20 @@ async def test_skills_backend_failure_degrades_to_no_skills(tmp_config_dir: Path
 
 
 class FakeMcpManager:
-    def __init__(self) -> None:
+    def __init__(self, configured: list[str] | None = None, connected: list[str] | None = None):
         self.disconnected = 0
         self.callback = None
+        self._configured = list(configured or [])
+        self._connected = list(connected or [])
 
     def set_on_tools_changed(self, cb) -> None:
         self.callback = cb
+
+    def get_all_server_names(self) -> list[str]:
+        return sorted(self._configured)
+
+    def get_connected_servers(self) -> list[str]:
+        return sorted(self._connected)
 
     async def disconnect_all(self) -> None:
         self.disconnected += 1
@@ -330,6 +338,7 @@ class FakeSessionShell:
         self.tools: list = []
         self.disposed = 0
         self.mcp_manager = None
+        self.mcp_startup = None
         self._dispose_hooks: list = []
 
     def refresh_tools(self, tools) -> None:
@@ -375,6 +384,95 @@ async def test_mcp_merge_on_tools_changed_and_dispose(monkeypatch) -> None:
     await session.dispose()
     assert session.disposed == 1
     assert manager.disconnected == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_outcome_is_recorded_on_the_session_for_a_ui_to_read(monkeypatch) -> None:
+    """A ``print`` to stderr is invisible under a full-screen TUI (alternate
+    screen buffer) or corrupts the frame. The structured outcome is recorded on
+    the session instead, and it keys failures on the BARE server name — the
+    discovery wrapper reports them as ``mcp:<server>``, which is not what the
+    user typed in ``.mcp.json`` or what ``/mcp`` lists.
+    """
+    session = FakeSessionShell()
+    manager = FakeMcpManager(configured=["github", "slack"], connected=["github"])
+    tool = MagicMock(name="mcp_tool")
+
+    async def fake_discover(cwd, auth_store=None):
+        return manager, [tool], [{"path": "mcp:slack", "error": "command not found"}]
+
+    monkeypatch.setattr("local_operator.mcp.discover_and_load_mcp_tools", fake_discover)
+
+    await wire_mcp_into_session(session, [], ".", has_ui=True)
+
+    outcome = session.mcp_startup
+    assert outcome is not None
+    assert outcome.configured == ("github", "slack")
+    assert outcome.connected == ("github",)
+    assert outcome.failures == {"slack": "command not found"}
+    assert outcome.tool_count == 1
+    assert outcome.failed is True
+    assert outcome.reportable is True
+
+
+@pytest.mark.asyncio
+async def test_the_stderr_warning_is_kept_for_headless_and_dropped_under_a_ui(
+    monkeypatch, capsys
+) -> None:
+    """``has_ui`` routes the ANNOUNCEMENT, never whether the failure is recorded.
+    ``exec`` and the plain REPL have a real terminal to print to and must not
+    regress to silence; a Textual app must not be written over mid-frame."""
+    manager = FakeMcpManager(configured=["slack"], connected=[])
+
+    async def fake_discover(cwd, auth_store=None):
+        return manager, [], [{"path": "mcp:slack", "error": "command not found"}]
+
+    monkeypatch.setattr("local_operator.mcp.discover_and_load_mcp_tools", fake_discover)
+
+    headless = FakeSessionShell()
+    await wire_mcp_into_session(headless, [], ".", has_ui=False)
+    assert "command not found" in capsys.readouterr().err
+
+    with_ui = FakeSessionShell()
+    await wire_mcp_into_session(with_ui, [], ".", has_ui=True)
+    assert capsys.readouterr().err == ""
+    # Silence on stderr, but the record is intact either way.
+    assert with_ui.mcp_startup.failures == headless.mcp_startup.failures
+
+
+@pytest.mark.asyncio
+async def test_a_hard_discovery_failure_still_degrades_to_zero_mcp_tools(monkeypatch) -> None:
+    """MCP is enrichment, never a startup requirement. The failure is recorded as
+    reportable (unlike a missing SDK, reaching here means the user HAS an MCP
+    setup and it is not working), and the session still comes up."""
+
+    async def boom(cwd, auth_store=None):
+        raise RuntimeError("config unreadable")
+
+    monkeypatch.setattr("local_operator.mcp.discover_and_load_mcp_tools", boom)
+
+    session = FakeSessionShell()
+    assert await wire_mcp_into_session(session, [], ".", has_ui=True) is None
+    assert session.tools == []
+    assert session.mcp_startup.failures == {"discovery": "config unreadable"}
+    assert session.mcp_startup.reportable is True
+
+
+@pytest.mark.asyncio
+async def test_no_configured_servers_records_a_silent_outcome(monkeypatch) -> None:
+    """A machine with no ``.mcp.json`` must produce nothing to report, so the
+    band segment and the toast both stay away."""
+    manager = FakeMcpManager()
+
+    async def fake_discover(cwd, auth_store=None):
+        return manager, [], []
+
+    monkeypatch.setattr("local_operator.mcp.discover_and_load_mcp_tools", fake_discover)
+
+    session = FakeSessionShell()
+    await wire_mcp_into_session(session, [], ".", has_ui=True)
+    assert session.mcp_startup.reportable is False
+    assert session.mcp_startup.failed is False
 
 
 # --- CL-08: dispose closes the auth store ---------------------------------------------

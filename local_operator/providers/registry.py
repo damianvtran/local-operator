@@ -42,6 +42,13 @@ class ProviderDefinition:
     - ``store_credentials_as``: alias the credential row under another
       provider id (xai-oauth ⇒ xai; openai-device ⇒ openai).
     - ``wire``: which wire client serves this provider.
+    - ``search_aliases``: other names a USER would type for this provider —
+      almost always the model family it is known by (``claude`` for anthropic,
+      ``qwen`` for alibaba). Provider metadata rather than view state, so the
+      TUI picker, the CLI and any later surface all offer the same vocabulary.
+      Nothing routes on these; they only make the provider findable, which
+      matters because the company name and the name on the model a user came
+      here for are frequently different.
     """
 
     id: str
@@ -56,6 +63,7 @@ class ProviderDefinition:
     paste_code_flow: bool = False
     base_url: str | None = None
     wire: WireFormat = "openai-compat"
+    search_aliases: tuple[str, ...] = ()
 
 
 def _lazy_login(module: str, attr: str) -> LoginFn:
@@ -123,6 +131,11 @@ def _anthropic_env_key() -> str | None:
 PROVIDER_REGISTRY: list[ProviderDefinition] = [
     ProviderDefinition(
         id="openai",
+        search_aliases=(
+            "gpt",
+            "chatgpt",
+            "codex",
+        ),
         name="OpenAI (ChatGPT Plus/Pro)",
         env_keys="OPENAI_API_KEY",
         login=_lazy_login("local_operator.providers.oauth.openai", "login_openai"),
@@ -135,6 +148,11 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
     ),
     ProviderDefinition(
         id="openai-device",
+        search_aliases=(
+            "gpt",
+            "chatgpt",
+            "codex",
+        ),
         name="OpenAI (ChatGPT device code)",
         env_keys="OPENAI_API_KEY",
         login=_lazy_login("local_operator.providers.oauth.openai", "login_openai_device"),
@@ -147,6 +165,12 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
     ),
     ProviderDefinition(
         id="anthropic",
+        search_aliases=(
+            "claude",
+            "sonnet",
+            "opus",
+            "haiku",
+        ),
         name="Anthropic (Claude Pro/Max)",
         env_keys=_anthropic_env_key,
         login=_lazy_login("local_operator.providers.oauth.anthropic", "login_anthropic"),
@@ -161,6 +185,10 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
     ),
     ProviderDefinition(
         id="kimi",
+        search_aliases=(
+            "moonshot",
+            "k2",
+        ),
         name="Kimi (Moonshot)",
         env_keys="KIMI_API_KEY",
         login=_lazy_login("local_operator.providers.oauth.kimi", "login_kimi"),
@@ -170,6 +198,7 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
     ),
     ProviderDefinition(
         id="xai",
+        search_aliases=("grok",),
         name="xAI (Grok API key)",
         env_keys="XAI_API_KEY",
         login=create_api_key_login("xAI", "https://console.x.ai/", "Paste your xAI API key"),
@@ -177,6 +206,7 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
     ),
     ProviderDefinition(
         id="xai-oauth",
+        search_aliases=("grok",),
         name="xAI (Grok OAuth)",
         login=_lazy_login("local_operator.providers.oauth.xai", "login_xai"),
         refresh_token=_lazy_refresh("local_operator.providers.oauth.xai", "refresh_xai_token"),
@@ -186,6 +216,7 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
     ),
     ProviderDefinition(
         id="deepseek",
+        search_aliases=("ds",),
         name="DeepSeek",
         env_keys="DEEPSEEK_API_KEY",
         login=create_api_key_login(
@@ -195,6 +226,11 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
     ),
     ProviderDefinition(
         id="google",
+        search_aliases=(
+            "gemini",
+            "vertex",
+            "aistudio",
+        ),
         name="Google (Gemini)",
         env_keys="GOOGLE_AI_STUDIO_API_KEY",
         login=create_api_key_login(
@@ -207,6 +243,10 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
     ),
     ProviderDefinition(
         id="mistral",
+        search_aliases=(
+            "codestral",
+            "magistral",
+        ),
         name="Mistral AI",
         env_keys="MISTRAL_API_KEY",
         login=create_api_key_login(
@@ -216,12 +256,17 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
     ),
     ProviderDefinition(
         id="ollama",
+        search_aliases=("local",),
         name="Ollama (local)",
         allows_missing_api_key=True,
         base_url="http://localhost:11434/v1",
     ),
     ProviderDefinition(
         id="openrouter",
+        search_aliases=(
+            "or",
+            "router",
+        ),
         name="OpenRouter",
         env_keys="OPENROUTER_API_KEY",
         login=create_api_key_login(
@@ -240,6 +285,11 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
     ),
     ProviderDefinition(
         id="alibaba",
+        search_aliases=(
+            "qwen",
+            "dashscope",
+            "tongyi",
+        ),
         name="Alibaba Cloud (Qwen)",
         env_keys="ALIBABA_CLOUD_API_KEY",
         login=create_api_key_login(
@@ -251,6 +301,7 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
     ),
     ProviderDefinition(
         id="test",
+        search_aliases=("mock",),
         name="Test (mock)",
         allows_missing_api_key=True,
         wire="mock",

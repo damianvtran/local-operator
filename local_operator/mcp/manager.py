@@ -543,6 +543,20 @@ class McpManager:
         """Install the callback fired whenever the tool list changes."""
         self._on_tools_changed = callback
 
+    @property
+    def on_tools_changed(self) -> ToolsChangedCallback | None:
+        """The installed callback, so a second consumer can CHAIN it.
+
+        The slot is deliberately single: the composition root owns it and uses
+        it to keep the session's tool inventory in step. A front end that also
+        wants to hear about connect/disconnect (the TUI's live MCP counter)
+        therefore has to read the incumbent and call it from its own wrapper —
+        reaching for ``_on_tools_changed`` to do that would make the inventory
+        merge depend on a private attribute, and silently dropping it would
+        leave the agent's tool list frozen at boot.
+        """
+        return self._on_tools_changed
+
     def get_tools(self) -> list[AgentTool]:
         """All registered tools, sorted by name for stability."""
         tools: list[AgentTool] = []

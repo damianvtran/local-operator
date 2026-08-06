@@ -19,6 +19,7 @@ from local_operator.tui.widgets.editor import (
     InterruptRequested,
 )
 from local_operator.tui.widgets.status_line import StatusLine
+from local_operator.tui.widgets.toast import Toast
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import (
     NoticeBlock,
@@ -36,6 +37,7 @@ __all__ = [
     "InterruptRequested",
     "NoticeBlock",
     "StatusLine",
+    "Toast",
     "ToolCard",
     "TranscriptBlock",
     "TranscriptView",

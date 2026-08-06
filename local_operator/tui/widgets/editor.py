@@ -23,6 +23,13 @@ the app as a sibling below the input row, since the picker must draw outside
 the chevron+editor row). One picker always exists, so every completion path —
 Tab, Enter, mouse click — runs through the same code with no "no picker
 attached" variant to keep in step.
+
+The picker under the field serves two lists. While the command WORD is open it
+offers commands; once the word is terminated by a space, ``/model`` hands the
+model picker its query and ``/login``/``/logout`` put the SAME command picker
+into argument mode over the provider list. Which one is live is decided by
+parsing the buffer (``slash_context`` versus ``slash_argument``), so two lists
+can never be open at once.
 """
 
 from __future__ import annotations
@@ -37,6 +44,7 @@ from typing import Callable
 from local_operator.tui.autocomplete import SlashCommand
 from local_operator.tui.widgets.command_picker import (
     CommandPicker,
+    PickerMode,
     slash_argument,
     slash_context,
 )
@@ -78,6 +86,22 @@ class ModelQueryOpened(Message):
         super().__init__()
 
 
+class ProviderQueryOpened(Message):
+    """Posted when the buffer enters ``/login …`` or ``/logout …``.
+
+    Carries the command WORD because the two lists are different sets — every
+    loginable provider versus only the ones holding a stored credential — and the
+    app cannot recover which one from the buffer once the message is queued.
+
+    Like :class:`ModelQueryOpened` it fires on the TRANSITION only, so the app
+    reads the credential store once per opening rather than once per keystroke.
+    """
+
+    def __init__(self, command: str) -> None:
+        super().__init__()
+        self.command = command
+
+
 class Editor(TextArea):
     """Multiline prompt editor with submit-on-Enter, history, slash-completion."""
 
@@ -89,6 +113,16 @@ class Editor(TextArea):
     #: the same list.
     MODEL_COMMANDS = ("model", "models")
 
+    #: Command words whose ARGUMENT is a provider id. These drive the SAME picker
+    #: the command word uses, in its argument mode.
+    PROVIDER_COMMANDS = ("login", "logout")
+
+    #: Every command whose argument drives a list. Completing one of these opens
+    #: that list, which IS the outcome of the keystroke — running the bare command
+    #: as well would echo a no-op into the transcript and clear the buffer the
+    #: list was just opened over.
+    LIST_COMMANDS = MODEL_COMMANDS + PROVIDER_COMMANDS
+
     def __init__(
         self,
         placeholder: str = "Message Local Operator…",
@@ -99,6 +133,13 @@ class Editor(TextArea):
         # through _sync_picker().
         self._picker = CommandPicker(self._apply_command)
         self._model_picker = ModelPicker(self._apply_model)
+        # Which provider command the argument list is currently open for, or None
+        # when the buffer is not in one. This is the transition edge the
+        # ProviderQueryOpened message rides: without it the app would rebuild the
+        # credential list on every character typed into the query. Assigned here
+        # for the same reason as the pickers — _sync_picker() reads it during
+        # super().__init__().
+        self._provider_command: str | None = None
         # tab_behavior="indent": Tab NEVER moves focus (TUI-013). Command
         # completion consumes the key first; otherwise it indents.
         super().__init__(placeholder=placeholder, soft_wrap=True, tab_behavior="indent")
@@ -244,11 +285,14 @@ class Editor(TextArea):
                 # appears where the intent genuinely is not clear (D16).
                 name = self._picker.highlighted_name()
                 if name is not None:
-                    # Decided BEFORE the completion is applied: `_apply_command`
+                    # Decided BEFORE the completion is applied: completing
                     # rewrites the text and re-syncs the picker, so asking
                     # afterwards would measure the completed word (always one
                     # exact match) and submit unconditionally.
-                    if self._picker_choice_is_unambiguous(name):
+                    unambiguous = self._picker_choice_is_unambiguous(name)
+                    if self._picker.mode is PickerMode.ARGUMENT:
+                        self._resolve_argument(name, key, unambiguous)
+                    elif unambiguous:
                         self._apply_command(name)
                         # A command whose ARGUMENT drives its own list is not run
                         # by completing it — completing it IS opening the list. The
@@ -257,7 +301,7 @@ class Editor(TextArea):
                         # the transcript, cleared the buffer, and made the app put
                         # the query back to reopen a list the keystroke had already
                         # opened. One keystroke, one outcome.
-                        if key == "enter" and name.lower() not in self.MODEL_COMMANDS:
+                        if key == "enter" and name.lower() not in self.LIST_COMMANDS:
                             self._submit()
                     elif key == "tab":
                         # Tab never sends, so it can safely take the highlighted
@@ -347,15 +391,31 @@ class Editor(TextArea):
         self._sync_picker()
 
     def _sync_picker(self) -> None:
-        """Re-derive BOTH lists from the buffer.
+        """Re-derive EVERY list from the buffer.
 
-        The buffer is the single authority, so neither picker holds state the
-        other could contradict: `slash_context` is live while the command word is
-        open and `slash_argument` takes over on the terminating space, which makes
-        "exactly one list is showing" a property of the parse rather than a rule
-        two widgets have to cooperate on.
+        The buffer is the single authority, so no picker holds state another could
+        contradict: `slash_context` is live while the command word is open and
+        `slash_argument` takes over on the terminating space, which makes "exactly
+        one list is showing" a property of the parse rather than a rule the widgets
+        have to cooperate on. The command picker serves both the word and a
+        provider argument, so the branch below is which LIST it derives, not which
+        widget is visible.
         """
-        self._picker.sync(self.text)
+        provider_argument = slash_argument(self.text, self.PROVIDER_COMMANDS)
+        if provider_argument is None:
+            self._provider_command = None
+            self._picker.sync(self.text)
+        else:
+            command = self._command_word()
+            if command != self._provider_command:
+                self._provider_command = command
+                # Drop the previous command's rows before asking for this one's.
+                # `/login` offers every provider and `/logout` only the ones with a
+                # credential, so carrying them across would briefly offer a logout
+                # from an account the user never had.
+                self._picker.set_choices([])
+                self.post_message(ProviderQueryOpened(command or ""))
+            self._picker.sync_argument(provider_argument)
         argument = slash_argument(self.text, self.MODEL_COMMANDS)
         if argument is None:
             if self._model_picker.is_open():
@@ -368,6 +428,14 @@ class Editor(TextArea):
             # Transition only. Posting per keystroke would re-fetch every provider
             # for each character the user types into the query.
             self.post_message(ModelQueryOpened())
+
+    def _command_word(self) -> str | None:
+        """The lower-cased command word on the buffer's first non-blank line."""
+        line = next((line for line in self.text.split("\n") if line.strip()), "")
+        stripped = line.lstrip()
+        if not stripped.startswith("/"):
+            return None
+        return stripped[1:].partition(" ")[0].lower()
 
     def _complete_model(self, row: ModelRow) -> None:
         """Put ``row``'s selector in the buffer without acting on it.
@@ -412,23 +480,45 @@ class Editor(TextArea):
         registry's uneven blast radius: `/usage` is harmless and `/loop` and
         `/logout` are not, so a fuzzy pick must not be *run* on one keystroke.
         """
-        context = slash_context(self.text)
-        if context is None:
+        query = self._picker_query()
+        if query is None:
             return False
         if len(self._picker.suggestions()) <= 1:
             return True
         if self._picker.chosen_by_hand:
             return True
-        return context.query.strip().lower() == name.strip().lower()
+        return query.strip().lower() == name.strip().lower()
+
+    def _picker_query(self) -> str | None:
+        """The text the open list is matching against, or ``None`` when closed.
+
+        One gate, two lists: the command word and a provider argument are parsed
+        by different functions but judged by the same rule, so the destructive
+        case each protects (`/lo` reaching `loop`, `/logout an` reaching a stored
+        credential) cannot drift apart.
+        """
+        if self._picker.mode is PickerMode.ARGUMENT:
+            return slash_argument(self.text, self.PROVIDER_COMMANDS)
+        context = slash_context(self.text)
+        return None if context is None else context.query
 
     def _apply_command(self, name: str) -> None:
-        """Replace the typed command word with ``/name `` (trailing space).
+        """What CHOOSING a row does — the picker's ``on_choose`` callback.
 
-        The trailing space is load-bearing, not cosmetic: most commands take
-        an argument (``/model provider/id``), and it is also what closes the
-        picker — the word is now whitespace-terminated, so the list drops away
-        on the same keystroke that chose from it.
+        A command word is completed into the buffer and left there. An argument
+        row is RUN, matching the model picker: a click names one exact row with a
+        pointer, which is not the guess the keyboard ambiguity gate protects
+        against, and a click that only filled the field would leave the user
+        reaching for Enter to finish a choice they already made.
+
+        For a command the trailing space is load-bearing, not cosmetic: most
+        commands take an argument (``/model provider/id``), and it is also what
+        closes the picker — the word is now whitespace-terminated, so the list
+        drops away on the same keystroke that chose from it.
         """
+        if self._picker.mode is PickerMode.ARGUMENT:
+            self._run_argument(name)
+            return
         context = slash_context(self.text)
         if context is None:
             return
@@ -436,6 +526,46 @@ class Editor(TextArea):
         # makes it a command word), so the prefix is all that must survive.
         self.text = f"{self.text[: context.start]}/{name} "
         self.move_cursor(self._end_of_buffer())
+
+    def _resolve_argument(self, name: str, key: str, unambiguous: bool) -> None:
+        """Tab/Enter on an argument row: complete it, or run it.
+
+        Enter runs only what the same gate calls unambiguous, for the reason the
+        gate exists at all: `/logout` DELETES a credential, so acting on a row the
+        fuzzy matcher guessed would make one mis-keystroke destructive. An
+        ambiguous Enter completes instead — the buffer then holds the exact id,
+        which is one match, so the second Enter runs it.
+        """
+        if key == "tab" or not unambiguous:
+            self._complete_argument(name)
+            return
+        self._run_argument(name)
+
+    def _complete_argument(self, name: str) -> None:
+        """Put ``name`` in the argument slot without acting on it.
+
+        No trailing space, for the same reason as :meth:`_complete_model`: the
+        space terminates the argument, so the matcher would stop matching and Tab
+        would appear to fill the field and abandon it in one keystroke.
+        """
+        argument = slash_argument(self.text, self.PROVIDER_COMMANDS)
+        if argument is None:
+            return
+        # The argument is by construction the TAIL of the buffer (everything after
+        # the command word's space, on the only non-blank line), so trimming its
+        # length off the end leaves exactly `…/logout ` to append onto.
+        self.text = f"{self.text[: len(self.text) - len(argument)]}{name}"
+        self.move_cursor(self._end_of_buffer())
+
+    def _run_argument(self, name: str) -> None:
+        """Complete ``name`` and submit, so the command's own handler runs it.
+
+        Submitting the finished text rather than calling a callback keeps ONE
+        implementation of what `/login anthropic` means: the app's slash dispatch.
+        A second path would be a second place for the login flow to drift.
+        """
+        self._complete_argument(name)
+        self._submit()
 
     def _extend_to_common_prefix(self) -> None:
         """Grow the typed word to the matches' longest common prefix, no further.

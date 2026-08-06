@@ -44,7 +44,7 @@ from textual.widgets import Static
 from local_operator.session import naming
 from local_operator.session.protocol import SessionProtocol
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.autocomplete import SlashCommand
+from local_operator.tui.autocomplete import ArgumentChoice, SlashCommand
 from local_operator.tui.events import (
     AssistantDelta,
     AssistantMessageEnd,
@@ -72,9 +72,11 @@ from local_operator.tui.widgets.editor import (
     EditorQuit,
     EditorSubmitted,
     InterruptRequested,
+    ProviderQueryOpened,
 )
 from local_operator.tui.widgets.model_picker import ModelRow
-from local_operator.tui.widgets.status_line import StatusLine, format_cost
+from local_operator.tui.widgets.status_line import McpStatus, StatusLine, format_cost
+from local_operator.tui.widgets.toast import Toast, format_mcp_startup
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.welcome import WelcomeView, session_welcome_info
 
@@ -124,6 +126,11 @@ LOOP_PROMPT = (
 #: dozen rows is the cheaper of those two costs. The band is only repainted
 #: when the count actually CHANGES.
 JOB_POLL_INTERVAL_S = 1.0
+
+#: Class the Screen carries while the session has no content. It selects the
+#: boot layout in the stylesheet (centred, clamped input card) and is flipped in
+#: exactly one place — see ``OperatorApp._set_welcome_visible``.
+BOOT_LAYOUT_CLASS = "boot"
 
 
 class NoticeFn(Protocol):
@@ -189,33 +196,46 @@ class OperatorApp(App[None]):
     # -- composition --------------------------------------------------------
     def compose(self) -> ComposeResult:
         # The welcome splash is the transcript's EMPTY STATE, so it is mounted
-        # INSIDE the transcript rather than beside it: that hands it exactly
-        # the region above the input dock, and `1fr` (see the tcss) lets it
-        # yield rows to any block appended under it instead of overflowing the
-        # scroll area. It supersedes the old D9 boot-hint line, which was a
-        # real transcript block and would have hidden the splash on mount.
+        # INSIDE the transcript rather than beside it: that hands it exactly the
+        # region above the input panel with no arithmetic here. It supersedes the
+        # old D9 boot-hint line, which was a real transcript block and would have
+        # hidden the splash on mount.
         with TranscriptView():
             yield WelcomeView(lambda: session_welcome_info(self._session, self._providers))
-        # The status line IS the input box's top row: the band
-        # docks at the top of the input panel and carries the structural rule
-        # styling, so it can never be overdrawn or pushed off-screen by the
-        # editor. One row does double duty — zero extra height (D3/D17).
+        # Two containers for one panel: the dock is the docked POSITIONER, and
+        # the shell is the panel the user sees — the fill, the padding, and the
+        # boot layout's clamp. A docked widget cannot be centred by its parent,
+        # so the clamp has to sit on a child of the dock rather than on the dock
+        # itself; see the tcss.
+        #
+        # The status line IS the input box's last row: the band docks at the
+        # bottom of the shell and carries the structural rule styling, so it can
+        # never be overdrawn or pushed off-screen by the editor, and it travels
+        # with the input when the panel becomes a card. One row does double duty
+        # — zero extra height (D3/D17).
         with Container(id="input-dock"):
-            yield Static(id="status-band")
-            editor = Editor(commands=SLASH_COMMANDS)
-            with Horizontal(id="input-row"):
-                yield Static("❯", id="prompt-chevron")
-                yield editor
-            # The picker is the editor's, but it cannot be the editor's CHILD:
-            # it has to draw across the full dock width, outside the chevron
-            # row. Mounted here it lands between the input row and the
-            # bottom-docked status band — under the text it completes, above
-            # the footer — and it claims zero rows while closed.
-            yield editor.picker
-            # Same placement rule, same reason. The two are mutually exclusive —
-            # the buffer parse that opens one closes the other — so they can share
-            # the row band without ever competing for it.
-            yield editor.model_picker
+            with Container(id="input-shell"):
+                yield Static(id="status-band")
+                editor = Editor(commands=SLASH_COMMANDS)
+                with Horizontal(id="input-row"):
+                    yield Static("❯", id="prompt-chevron")
+                    yield editor
+                # The picker is the editor's, but it cannot be the editor's
+                # CHILD: it has to draw across the full panel width, outside the
+                # chevron row. Mounted here it lands between the input row and
+                # the bottom-docked status band — under the text it completes,
+                # above the footer — and it claims zero rows while closed.
+                yield editor.picker
+                # Same placement rule, same reason. The two are mutually
+                # exclusive — the buffer parse that opens one closes the other —
+                # so they can share the row band without ever competing for it.
+                yield editor.model_picker
+        # The toast slot lives on its own CSS layer (see the tcss), so it
+        # overlays the transcript's top-right corner without taking a row from
+        # it. Mounted once and kept: showing a message never has to await a
+        # mount, and there is no window where two cards exist at once.
+        with Container(id="toast-host"):
+            yield Toast()
 
     def get_css_variables(self) -> dict[str, str]:
         """Brand tokens as the stylesheet's single source of truth."""
@@ -238,6 +258,11 @@ class OperatorApp(App[None]):
         # Cached: every appended block asks the splash to hide, and that path
         # should not pay for a DOM query per block.
         self._welcome = self.query_one(WelcomeView)
+        # An empty transcript is the boot layout's whole precondition, and the
+        # session starts empty — so the app opens in it. Set here rather than in
+        # the stylesheet's base rules because this is state, not style: it is the
+        # same flag `_set_welcome_visible` flips for every later transition.
+        self._set_welcome_visible(True)
 
         self._status = StatusLine(self.query_one("#status-band", Static))
         self._status.update(model_label=MODEL_PENDING, cwd=os.getcwd())
@@ -271,6 +296,8 @@ class OperatorApp(App[None]):
             context_window=_context_window(session),
             conversation_name=session.conversation_name,
         )
+        self._wire_mcp_status(session)
+        self._report_mcp_startup(session)
 
     def _on_boot_failed(self, error: Exception) -> None:
         self._append_block(NoticeBlock(f"session failed to start: {error}", "error"))
@@ -292,13 +319,111 @@ class OperatorApp(App[None]):
         # A reload is a new conversation: its title and its one naming
         # attempt both reset, or the old name would outlive its session.
         self._name_requested = False
+        # The MCP segment is cleared too: the old session's manager is gone, so
+        # a lingering count would describe servers nothing is connected to any
+        # more. _boot_session repaints it from the new session's manager.
         self._status.update(
             model_label=MODEL_PENDING,
             streaming=False,
             effort="",
             conversation_name="",
+            mcp=McpStatus(),
         )
         await self._boot_session()
+
+    # -- MCP status ---------------------------------------------------------
+    def _wire_mcp_status(self, session: SessionProtocol) -> None:
+        """Paint the band's MCP segment and keep it LIVE for the session.
+
+        Deliberately better than the reference here: OpenCode snapshots its MCP
+        count at boot and never revisits it, so a server that dies leaves the
+        indicator claiming it is still there. ``set_on_tools_changed`` fires on
+        connect, disconnect and list-changed, which is exactly the set of events
+        that can move the count.
+        """
+        manager = getattr(session, "mcp_manager", None)
+        if manager is None:
+            return
+        # CHAIN, never replace: the incumbent callback is the composition root's,
+        # and it is what keeps the agent's tool inventory in step with MCP state.
+        # Clobbering it would freeze the tool list at whatever booted, which is a
+        # far worse bug than a stale counter. See McpManager.on_tools_changed.
+        incumbent = manager.on_tools_changed
+
+        def on_tools_changed(tools: list[Any]) -> Any:
+            outcome = incumbent(tools) if incumbent is not None else None
+            # Hop onto the message pump rather than mutating widgets from the
+            # manager's task: this module's whole arrangement is that widget
+            # mutation happens on the Textual thread.
+            self.call_later(self._refresh_mcp_status)
+            # Hand the incumbent's return value back so an async incumbent is
+            # still awaited by the manager (it task-ifies a returned coroutine).
+            return outcome
+
+        manager.set_on_tools_changed(on_tools_changed)
+        self._refresh_mcp_status()
+
+    def _refresh_mcp_status(self) -> None:
+        """Re-read the manager and repaint the band's MCP segment."""
+        if self._status is not None:
+            self._status.update(mcp=self._mcp_status())
+
+    def _mcp_status(self) -> McpStatus:
+        """The band's MCP segment state, read LIVE from the manager.
+
+        Nothing here is taken from the boot record on purpose. A boot failure
+        that later reconnects must clear the danger tint, and a record of what
+        happened at startup can never say that — the manager's per-server status
+        is the only thing that knows the current truth. ``connecting`` is not a
+        failure: the startup gate leaves slow servers in that state on every
+        launch, and tinting it danger would make a red lamp the normal boot.
+        """
+        manager = getattr(self._session, "mcp_manager", None)
+        if manager is None:
+            return McpStatus()
+        configured = manager.get_all_server_names()
+        return McpStatus(
+            configured=len(configured),
+            connected=len(manager.get_connected_servers()),
+            failed=any(
+                manager.get_connection_status(name) == "disconnected" for name in configured
+            ),
+        )
+
+    def _report_mcp_startup(self, session: SessionProtocol) -> None:
+        """Raise the startup toast, and leave a DURABLE record of any failure.
+
+        The toast dismisses itself, which makes it a notification and not a
+        record. So a failure also lands in the transcript as a notice the user
+        can scroll back to, and ``/mcp`` reports per-server state on demand. The
+        toast is the interruption; those two are the evidence.
+
+        Successes get no notice — a transcript line per launch saying everything
+        worked is exactly the log-spam the borderless/quiet mandate exists to
+        prevent, and the band's count already says it.
+
+        None of the three ends the empty state. The session has not started
+        talking just because a server failed to start, and collapsing the boot
+        composition on launch would mean a user with one broken server never saw
+        the centred prompt — while the toast has already interrupted them with
+        the same failure. So the record goes through :meth:`_system_notice`: it
+        lands under the splash, survives the toast, and is there when the
+        conversation does begin.
+        """
+        outcome = getattr(session, "mcp_startup", None)
+        if outcome is None:
+            return
+        toast = self.query_one(Toast)
+        payload = format_mcp_startup(outcome, max_cells=toast.content_cells)
+        if payload is None:
+            return
+        text, duration_ms = payload
+        toast.show(text, duration_ms=duration_ms)
+        # No "server" in the wording: one failure key is ``discovery`` (the
+        # config layer itself), and "MCP server discovery failed" would name a
+        # server that does not exist.
+        for name, error in sorted(outcome.failures.items()):
+            self._system_notice(f"MCP {name} failed: {error}", "error")
 
     # -- resize (TUI-017 / D5) ----------------------------------------------
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -356,14 +481,28 @@ class OperatorApp(App[None]):
         self._streaming_block = None
         self._tool_cards = {}
         # An empty transcript is the welcome view's whole precondition, so the
-        # clear hook is also what brings it back — one mechanism for both
-        # directions rather than a second "should the splash show" rule that
-        # could disagree with this one. The "transcript cleared" notice
-        # appended right after this lands UNDER the splash (it goes through
-        # TranscriptView.append_block, not _append_block), which is why the
-        # receipt for the action survives alongside the restored splash.
+        # clear hook is also what brings it back — and with it the boot layout,
+        # since `_set_welcome_visible` drives both from this one condition. One
+        # mechanism for both directions rather than a second "should the splash
+        # show" rule that could disagree with this one. The "transcript cleared"
+        # notice appended right after this lands UNDER the splash (it goes
+        # through TranscriptView.append_block, not _append_block), which is why
+        # the receipt for the action survives alongside the restored splash.
+        self._set_welcome_visible(True)
+
+    def _set_welcome_visible(self, visible: bool) -> None:
+        """Show or hide the splash AND swap the input layout with it.
+
+        Both ride ONE condition — "the transcript has no content" — because two
+        would eventually disagree, and the way that failure looks is a centred
+        boot card sitting under a populated transcript. The layouts themselves
+        live in the stylesheet (`Screen.boot`); this only flips the flag that
+        selects between them, so there is no second layout written in Python to
+        keep in step with the first.
+        """
         if self._welcome is not None:
-            self._welcome.set_visible(True)
+            self._welcome.set_visible(visible)
+        self.screen.set_class(visible, BOOT_LAYOUT_CLASS)
 
     async def on_unmount(self) -> None:
         if self._status is not None:
@@ -473,10 +612,22 @@ class OperatorApp(App[None]):
             return 0
 
     # -- transcript helpers ---------------------------------------------------
-    def _append_block(self, block) -> None:
-        """Append a block, retiring the welcome view on the first one."""
-        if self._welcome is not None:
-            self._welcome.set_visible(False)
+    def _append_block(self, block, *, ends_empty_state: bool = True) -> None:
+        """Append a block, retiring the welcome view — and the boot layout — on
+        the first one. That is the authoritative "the session has content" edge;
+        both layouts hang off it (see `_set_welcome_visible`).
+
+        ``ends_empty_state=False`` appends WITHOUT ending it, because the
+        predicate is "the CONVERSATION has started", not "something got drawn". A
+        system notice about infrastructure — an MCP server that failed to
+        connect — is not conversation content, and letting one collapse the boot
+        composition would mean anyone with a single broken server never saw the
+        centred prompt at all. The notice is still appended and still scrolls
+        back; it simply lands under the splash, exactly as the ``/clear`` receipt
+        does.
+        """
+        if ends_empty_state:
+            self._set_welcome_visible(False)
         self.query_one(TranscriptView).append_block(block)
 
     # -- slash commands -----------------------------------------------------
@@ -488,6 +639,20 @@ class OperatorApp(App[None]):
         a dispatch. One implementation means every path renders notices the same.
         """
         self._append_block(NoticeBlock(body, kind))
+
+    def _system_notice(self, body: str, kind: str = "info") -> None:
+        """A notice about the HARNESS that leaves the empty state intact.
+
+        Separate from :meth:`_notice` because the two answer different questions.
+        ``_notice`` reports on something the user just did, so the conversation
+        has started by definition. This one reports on infrastructure the user
+        did not ask about — an MCP server that failed to connect, a provider
+        controller that is missing — and the session has not started talking just
+        because a subsystem announced itself. Routing those through ``_notice``
+        collapsed the boot composition on launch for anyone with one broken
+        server, which is how the centred prompt became unreachable.
+        """
+        self._append_block(NoticeBlock(body, kind), ends_empty_state=False)
 
     def _editor(self) -> Editor:
         """The input editor. Queried rather than held: Textual owns the widget."""
@@ -974,6 +1139,89 @@ class OperatorApp(App[None]):
         filled = round(fraction * width)
         return "█" * filled + "░" * (width - filled)
 
+    # -- provider argument list ---------------------------------------------
+    def on_provider_query_opened(self, message: ProviderQueryOpened) -> None:
+        """The buffer just entered ``/login …`` or ``/logout …`` — fill the list.
+
+        Answered on the MESSAGE for the same reason the model list is: every route
+        into the list (typing the space, being completed into it by the command
+        picker) then arrives at one place with one set of rows.
+        """
+        message.stop()
+        picker = self._editor().picker
+        if self._providers is None:
+            # Same degradation as the handlers themselves: no controller means no
+            # credential store to read, so the list is empty and the user is
+            # pointed at the CLI rather than left watching nothing happen.
+            picker.set_choices([])
+            self._system_notice(
+                f"provider controller unavailable — run: local-operator {message.command}",
+                "warning",
+            )
+            return
+        choices = self._provider_choices(message.command)
+        picker.set_choices(choices)
+        if not choices and message.command == "logout":
+            # An empty list and "no match for what you typed" render identically —
+            # as nothing at all. Only one of them is worth saying, and this is it:
+            # there is no credential to remove, so no query would have helped.
+            #
+            # A SYSTEM notice: opening a list is not the conversation starting, and
+            # on a fresh session this would otherwise collapse the boot composition
+            # to report that a command the user has not even run has nothing to do.
+            self._system_notice("no stored credentials — nothing to log out of.")
+
+    def _provider_choices(self, command: str) -> list[ArgumentChoice]:
+        """Provider rows for ``/login`` or ``/logout``, in registry order."""
+        providers = self._providers
+        assert providers is not None
+        logout = command == "logout"
+        choices: list[ArgumentChoice] = []
+        seen_storage: set[str] = set()
+        for definition in providers.login_providers():
+            stored = providers.has_any_credential(definition.id)
+            if logout:
+                # Only what can actually be removed. Offering a provider the user
+                # never logged into is a row whose only outcome is a no-op notice.
+                if not stored:
+                    continue
+                # `xai` and `xai-oauth` (and openai/openai-device) share one
+                # credential row, so both would log the same account out. Two rows
+                # for one outcome is a choice the user cannot make correctly.
+                storage = definition.store_credentials_as or definition.id
+                if storage in seen_storage:
+                    continue
+                seen_storage.add(storage)
+            choices.append(
+                ArgumentChoice(
+                    name=definition.id,
+                    description=definition.name,
+                    # `claude` finds anthropic, `qwen` finds alibaba. The alias only
+                    # makes the row FINDABLE — the completion is still the id.
+                    aliases=tuple(definition.search_aliases),
+                    detail=self._credential_state(definition.id, stored),
+                )
+            )
+        return choices
+
+    def _credential_state(self, provider_id: str, stored: bool) -> str:
+        """Where the user stands with ``provider_id``, in three states not two.
+
+        An environment key is a WORKING credential — it is the tier the stream
+        cascade resolves — but it is not a login, so reporting it as one would
+        suggest a stored account that `/logout` could remove. Wording matched to
+        `/provider`, which answers the same question in the transcript.
+
+        None of the three sets ``ArgumentChoice.alert``: an un-logged-in provider
+        is the ordinary reason to be reading this list, and painting it in the
+        danger tint would make `/login` read as a wall of broken rows.
+        """
+        providers = self._providers
+        assert providers is not None
+        if stored:
+            return "logged in"
+        return "env key" if providers.is_usable(provider_id) else "needs login"
+
     # -- login / logout -----------------------------------------------------
     def _cmd_login(self, arg: str, notice: NoticeFn) -> None:
         """``/login [provider]`` — list loginable providers, or run a flow."""
@@ -1118,17 +1366,35 @@ class OperatorApp(App[None]):
             return None
 
     def _mcp_block(self) -> RichBlock | None:
-        """Graceful introspection of the MCP configs (exception-safe)."""
+        """Per-server MCP state: connection status plus the error when it failed.
+
+        Extended beyond a config dump deliberately. The startup toast dismisses
+        itself, so this is one of the two places a failure has to remain
+        readable afterwards (the other is the transcript notice). Listing the
+        configured command alone answered "what did I ask for" and never "did it
+        work", which is the only question a user runs ``/mcp`` to settle.
+
+        Still exception-safe end to end: introspection that crashes the app is
+        worse than introspection that declines to answer.
+        """
         try:
             from local_operator.mcp.config import load_all_mcp_configs
 
             configs, _sources = load_all_mcp_configs(os.getcwd())
             if not configs:
                 return None
+            manager = getattr(self._session, "mcp_manager", None)
+            startup = getattr(self._session, "mcp_startup", None)
+            failures = dict(startup.failures) if startup is not None else {}
             items: list[tuple[str, str]] = []
             for name, cfg in configs.items():
-                detail = getattr(cfg, "command", None) or getattr(cfg, "url", None) or ""
-                items.append((name, str(detail)))
+                target = getattr(cfg, "command", None) or getattr(cfg, "url", None) or ""
+                status = manager.get_connection_status(name) if manager is not None else "unknown"
+                # The boot error is quoted only while the server is STILL down: a
+                # server that has since reconnected must not keep reporting the
+                # failure it recovered from, or /mcp becomes a permanent accusation.
+                error = failures.get(name, "") if status != "connected" else ""
+                items.append((name, f"{status}  {error or target}".strip()))
             return RichBlock(_tree_listing(items))
         except Exception:
             return None

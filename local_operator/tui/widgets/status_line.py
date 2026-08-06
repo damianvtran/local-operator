@@ -29,6 +29,7 @@ model).
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -59,6 +60,11 @@ ICON_JOBS = "⊞"
 ICON_CONTEXT = "▦"
 ICON_COST = "◈"
 ICON_DURATION = "◷"
+#: MCP servers. ``⊙`` (U+2299) is the reference's glyph and measures ONE cell
+#: in ``rich.cells.cell_len``, so it satisfies the single-cell rule above; it
+#: was checked rather than assumed, because the band's arithmetic is exact and
+#: a two-cell glyph would drift the right group's edge by one column.
+ICON_MCP = "⊙"
 
 #: Separators point INWARD: the left group's chevrons aim right and the right
 #: group's aim left, so both runs converge on the centre gap and frame it. A
@@ -98,8 +104,10 @@ _MIN_GROUP_GAP = 4
 #:   it OUTLIVING context usage, which meant a band could show `high` but not
 #:   `49.6%/1M`: it kept the field nobody re-reads and dropped the one that
 #:   says compaction is coming.
-#: * ``cost``, then ``cwd``, then ``context``: context usage is the last segment
-#:   standing beside the model, because it is the one an operator acts on.
+#: * ``cost``, then ``cwd``, then ``context``, then ``mcp``: context usage is the
+#:   one an operator acts on, and the MCP indicator outlives even that because
+#:   it is the cheapest segment to keep and the only one that can turn into an
+#:   alarm (see its rung below).
 #:
 #: The brand glyph, the streaming spinner and the model label are NEVER dropped.
 #: When even the irreducible row overflows, ``_render`` emits spinner, glyph and a
@@ -132,6 +140,17 @@ _DROP_LADDER: tuple[str, ...] = (
     # these the other way round, which contradicted this very ladder's rationale.
     "cwd",
     "context",
+    # DEAD LAST, mirroring the reference's `flexShrink={0}` on this indicator.
+    # Two reasons it outlives even the context number. It is the narrowest
+    # segment in the band — `⊙ 3 MCP` is 7 cells against context's ~9 and a
+    # path's 7-plus — so dropping it buys the least width of anything here.
+    # And its failure branch is an ALARM: the danger-tinted glyph is the only
+    # place the band admits the agent is missing tools it was configured to
+    # have, and a cramped terminal is exactly where a user would otherwise
+    # conclude the tools were never configured. Kept in the ladder rather than
+    # omitted from it so the very narrowest widths still get one graceful
+    # aligned step before ``_render`` falls back to the truncated tail.
+    "mcp",
 )
 
 
@@ -232,6 +251,76 @@ def format_jobs(count: int) -> str:
     return f"{count} job" if count == 1 else f"{count} jobs"
 
 
+@dataclass(frozen=True)
+class McpStatus:
+    """The three facts the MCP segment renders from.
+
+    Passed as ONE value rather than three ``update`` keywords: the band's
+    update signature is already at ten segments, and the count is meaningless
+    without knowing whether anything was configured — splitting them invites a
+    caller to set one and leave the others stale.
+
+    ``configured`` is how many servers the config asked for, ``connected`` how
+    many are actually up right now, and ``failed`` whether any of them did not
+    come up. All three are read LIVE from the manager; ``configured`` alone
+    decides whether the segment exists at all.
+    """
+
+    configured: int = 0
+    connected: int = 0
+    failed: bool = False
+
+
+def format_mcp(status: McpStatus) -> str:
+    """``3 MCP`` — connected SERVERS, never pluralised; empty when unconfigured.
+
+    The count is servers rather than tools because a server is the thing that
+    can drop: "31 MCP" would tell an operator nothing about the github server
+    having died, which is the event this segment exists to show. The tool total
+    belongs in the startup toast, where there is room to say both.
+
+    ``MCP`` stays singular the way ``2 jobs`` does not, because it is an
+    initialism naming the protocol, not a count of a noun — the reference
+    renders it that way and "3 MCPs" reads as three protocols.
+
+    Zero CONFIGURED servers renders nothing: a permanent ``⊙ 0 MCP`` on a
+    machine with no ``.mcp.json`` is seven cells asserting the absence of a
+    feature the user never asked for. Zero CONNECTED with servers configured
+    does render, because that is a real and interesting state.
+    """
+    if status.configured <= 0:
+        return ""
+    return f"{status.connected} MCP"
+
+
+def mcp_semantic(status: McpStatus) -> str:
+    """Which semantic tint the ``⊙`` glyph carries.
+
+    FAILURE WINS, even when other servers connected. A partial outcome is the
+    dangerous one: `⊙ 2 MCP` in success green on a machine where a third server
+    died looks like everything is fine, and the user then spends the turn
+    wondering why the agent cannot reach that server's tools. Green here has to
+    mean "all of it is up".
+
+    Success only when something is actually connected; otherwise dim, because
+    "configured, nothing up yet, nothing failed yet" is a transient the startup
+    gate produces on every launch and it is not worth a colour.
+
+    Note this is NOT the accent green — the accent means "a turn is live" and
+    nothing else (see the tcss minimalism contract). `success` is the separate
+    outcome green the tool cards already use.
+
+    Public because the startup toast paints the same lamp: two surfaces deriving
+    the same state independently is how they end up disagreeing, and a toast
+    saying green while the band says red is worse than either alone.
+    """
+    if status.failed:
+        return "danger"
+    if status.connected > 0:
+        return "success"
+    return "dim"
+
+
 def format_cwd(cwd: str, *, short: bool) -> str:
     """The working dir as ``~/rel/path``, or just its basename when ``short``.
 
@@ -302,6 +391,7 @@ class StatusLine:
         self._streaming: bool = False
         self._cost: str = ""
         self._conversation_name: str = ""
+        self._mcp: McpStatus = McpStatus()
         # Cumulative ACTIVE processing time: the sum of turn durations, not
         # wall clock since launch. A session left open over lunch has not
         # been working for two hours, and reporting that it has makes the
@@ -325,6 +415,7 @@ class StatusLine:
         streaming: bool | None = None,
         cost: str | None = None,
         conversation_name: str | None = None,
+        mcp: McpStatus | None = None,
     ) -> None:
         """Update any subset of segments and repaint the band."""
         if model_label is not None:
@@ -341,6 +432,8 @@ class StatusLine:
             self._subagents = subagents
         if jobs is not None:
             self._jobs = jobs
+        if mcp is not None:
+            self._mcp = mcp
         if cost is not None:
             self._cost = cost
         if conversation_name is not None:
@@ -453,37 +546,59 @@ class StatusLine:
         seam: Style,
         accent: Style,
     ) -> Text:
-        """model › effort › cwd (+ the working indicator).
+        """model › effort › cwd › mcp (+ the working indicator).
 
         Each segment is ``icon value``, the icon a step dimmer than its value so
         it frames the number rather than competing with it. Separators point
         RIGHT here and LEFT in the other group, so the two chevron runs aim at
         the centre gap and frame it — which is what makes a borderless band read
         as two groups instead of one long run.
+
+        The MCP segment is the one exception to the ramp: there the GLYPH carries
+        the state colour and the text stays neutral foreground. Tinting `3 MCP`
+        danger would read as "the number 3 is wrong"; tinting the glyph reads as
+        a status lamp beside a plain count, which is what it is.
         """
-        parts: list[tuple[str, str, Style]] = []
+        # (icon, value, value style, icon style) — the icon style is None for
+        # every segment whose glyph is pure framing, and set only where the
+        # glyph itself is the signal.
+        parts: list[tuple[str, str, Style, Style | None]] = []
         if self._model_label and "model" not in dropped:
             parts.append(
                 (
                     ICON_MODEL,
                     format_model_label(self._model_label, short="model" in short),
                     Style(color=theme_mod.semantic_color("fg")),
+                    None,
                 )
             )
         if self._effort and "effort" not in dropped:
             parts.append(
-                (ICON_EFFORT, self._effort, Style(color=theme_mod.semantic_color("label")))
+                (ICON_EFFORT, self._effort, Style(color=theme_mod.semantic_color("label")), None)
             )
         if self._cwd and "cwd" not in dropped:
             rendered = format_cwd(self._cwd, short="cwd" in short)
             if rendered:
-                parts.append((ICON_CWD, rendered, Style(color=theme_mod.semantic_color("signal"))))
+                parts.append(
+                    (ICON_CWD, rendered, Style(color=theme_mod.semantic_color("signal")), None)
+                )
+        if "mcp" not in dropped:
+            mcp = format_mcp(self._mcp)
+            if mcp:
+                parts.append(
+                    (
+                        ICON_MCP,
+                        mcp,
+                        Style(color=theme_mod.semantic_color("fg")),
+                        Style(color=theme_mod.semantic_color(mcp_semantic(self._mcp))),
+                    )
+                )
 
         left = Text()
-        for index, (icon, text, style) in enumerate(parts):
+        for index, (icon, text, style, icon_style) in enumerate(parts):
             if index:
                 left.append(f" {_SEP_LEFT} ", style=seam)
-            left.append(f"{icon} ", style=dim)
+            left.append(f"{icon} ", style=icon_style or dim)
             left.append(text, style=style)
         if self._streaming:
             # The aggregate working LINE (WorkingBlock) carries the shimmer; the

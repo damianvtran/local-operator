@@ -614,6 +614,8 @@ async def wire_mcp_into_session(
     builtin_tools: list[AgentTool],
     cwd: str,
     auth_store: AuthStore | None = None,
+    *,
+    has_ui: bool = False,
 ) -> McpManager | None:
     """Load MCP tools and merge them into a constructed session (MCP-20).
 
@@ -627,36 +629,74 @@ async def wire_mcp_into_session(
        next model call, even mid-turn.
     3. ``manager.set_on_tools_changed`` re-merges on server
        connect/disconnect/list-changed so the inventory tracks MCP state.
+    4. Record the structured outcome on ``session.mcp_startup`` so a front end
+       can render it (see session/mcp_status.py).
+
+    ``has_ui`` selects how failures are ANNOUNCED, never whether they are
+    recorded. Under a full-screen TUI a stderr line is written to a terminal
+    that is showing the alternate screen buffer: at best it is swallowed, at
+    worst it lands mid-frame and corrupts the composed output. So the warnings
+    are printed only for the headless callers (``exec``, the plain REPL, the
+    scheduler) that have a real stdout to print to, and the TUI reads
+    ``session.mcp_startup`` instead.
 
     ANY failure degrades to zero MCP tools with a warning — MCP is
     enrichment, never a startup requirement. Returns the manager (caller
     owns its disposal via :func:`attach_mcp_dispose`) or ``None``.
     """
+    from local_operator.session.mcp_status import McpStartupOutcome
+
     try:
         from local_operator.mcp import discover_and_load_mcp_tools
     except ImportError:
-        print(
-            "\033[1;33mWarning: MCP support unavailable, continuing without MCP tools\033[0m",
-            file=sys.stderr,
-        )
+        if not has_ui:
+            print(
+                "\033[1;33mWarning: MCP support unavailable, continuing without MCP tools\033[0m",
+                file=sys.stderr,
+            )
+        # An EMPTY outcome, not a recorded failure: without the MCP package we
+        # cannot even read the config files, so we do not know whether this
+        # machine wanted MCP at all. Announcing "MCP is broken" on every host
+        # that simply never installed the SDK is noise, and the far commoner
+        # case is exactly that.
+        session.mcp_startup = McpStartupOutcome()
         return None
 
     try:
         manager, mcp_tools, errors = await discover_and_load_mcp_tools(cwd, auth_store=auth_store)
     except Exception as exc:  # noqa: BLE001 — degradation is the contract
-        print(
-            f"\033[1;33mWarning: MCP discovery failed, continuing without MCP tools: "
-            f"{exc}\033[0m",
-            file=sys.stderr,
-        )
+        if not has_ui:
+            print(
+                f"\033[1;33mWarning: MCP discovery failed, continuing without MCP tools: "
+                f"{exc}\033[0m",
+                file=sys.stderr,
+            )
+        # Discovery raising IS reportable, unlike the import gap above: reaching
+        # this line means the config layer was present and still could not be
+        # read, so the user has an MCP setup that is not working.
+        session.mcp_startup = McpStartupOutcome(failures={"discovery": str(exc)})
         return None
 
+    # One pass over the error entries: the record keys on the BARE server name
+    # (the discovery wrapper reports paths as ``mcp:<server>``) because that is
+    # what the user typed in ``.mcp.json`` and what ``/mcp`` lists back.
+    failures: dict[str, str] = {}
     for entry in errors:
-        print(
-            f"\033[1;33mWarning: MCP server {entry.get('path', '?')}: "
-            f"{entry.get('error', 'unknown error')}\033[0m",
-            file=sys.stderr,
-        )
+        path = str(entry.get("path", "?"))
+        message = str(entry.get("error", "unknown error"))
+        failures[path.partition("mcp:")[2] or path] = message
+        if not has_ui:
+            print(
+                f"\033[1;33mWarning: MCP server {path}: {message}\033[0m",
+                file=sys.stderr,
+            )
+
+    session.mcp_startup = McpStartupOutcome(
+        configured=tuple(manager.get_all_server_names()),
+        connected=tuple(manager.get_connected_servers()),
+        failures=failures,
+        tool_count=len(mcp_tools),
+    )
 
     merged = list(builtin_tools) + list(mcp_tools)
     if mcp_tools:
@@ -757,12 +797,15 @@ async def create_session(
 
     # MCP seam (MCP-20): merge discovered MCP tools in, subscribe to live
     # changes, and fold server teardown into session.dispose. Degrades to
-    # zero MCP tools on any failure.
+    # zero MCP tools on any failure. ``has_ui`` routes the announcement: a
+    # front end with a full-screen terminal reads session.mcp_startup instead
+    # of being written over by a stderr warning.
     mcp_manager = await wire_mcp_into_session(
         session,
         list(plan.session_kwargs["tools"]),
         effective_cwd,
         auth_store=plan.auth_store,
+        has_ui=has_ui,
     )
     if mcp_manager is not None:
         attach_mcp_dispose(session, mcp_manager)

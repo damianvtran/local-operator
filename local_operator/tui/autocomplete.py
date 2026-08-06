@@ -22,6 +22,7 @@ Scoring contract:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Protocol, Sequence, TypeVar, runtime_checkable
 
 #: Exact / prefix tiers, with registry-order tie-break.
 SCORE_EXACT = 1000
@@ -36,6 +37,73 @@ class SlashCommand:
     name: str
     description: str = ""
     aliases: tuple[str, ...] = field(default_factory=tuple)
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        """Primary name first, then aliases — order is the tie-break order."""
+        return (self.name, *self.aliases)
+
+
+@runtime_checkable
+class Completable(Protocol):
+    """What the picker needs of anything it can offer and complete.
+
+    Exists so the ONE picker widget can present two different kinds of list —
+    the command word (:class:`SlashCommand`) and a command's argument
+    (:class:`ArgumentChoice`) — without a second widget, a second matcher or a
+    second set of key bindings growing beside the first. The alternative was a
+    provider-specific picker, which is how a codebase ends up with two lists
+    that drift apart in look and in behaviour.
+    """
+
+    # Declared as read-only PROPERTIES, not annotated attributes. A bare
+    # ``name: str`` in a Protocol demands a *settable* attribute, which no
+    # frozen dataclass can satisfy — and both implementers here are frozen
+    # (:class:`SlashCommand` and :class:`ArgumentChoice`), deliberately, because
+    # a suggestion the picker is holding must not mutate under it between the
+    # keystroke that ranked it and the Enter that acts on it.
+    @property
+    def name(self) -> str:
+        """The value a completion inserts."""
+        ...
+
+    @property
+    def description(self) -> str:
+        """One line explaining what this is."""
+        ...
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        """Primary name first, then aliases."""
+        ...
+
+
+#: Bound to :class:`Completable` so a matcher hands back the SAME concrete type
+#: it was given: ranking a list of commands returns commands, ranking a list of
+#: argument choices returns argument choices. Without it every caller would have
+#: to narrow the result back at runtime and silently drop anything it failed to
+#: recognise.
+ChoiceT = TypeVar("ChoiceT", bound=Completable)
+
+
+@dataclass(frozen=True)
+class ArgumentChoice:
+    """One value offered for a slash command's ARGUMENT.
+
+    ``detail`` is state rather than explanation — "logged in", "needs login" —
+    and is rendered right-aligned, away from ``description``, because the two
+    answer different questions: what this thing IS versus where it stands right
+    now. A user typing ``/logout`` is choosing by state, so putting the state in
+    the description column would bury the only column they are scanning.
+    """
+
+    name: str
+    description: str = ""
+    aliases: tuple[str, ...] = field(default_factory=tuple)
+    detail: str = ""
+    #: Paints ``detail`` in the danger tint when the state is a problem the user
+    #: should notice (a server that failed, a credential that cannot be read).
+    alert: bool = False
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -108,3 +176,39 @@ def match_commands(
             scored.append((-best, registry_index, best_name, command))
     scored.sort(key=lambda item: (item[0], item[1]))
     return [(name, command) for _, _, name, command in scored]
+
+
+def match_choices(query: str, choices: Sequence[ChoiceT]) -> list[tuple[str, ChoiceT]]:
+    """Rank ``choices`` against a bare ``query`` token, best first.
+
+    The argument-side counterpart to :func:`match_commands`, sharing
+    :func:`score_command_text_match` so a provider and a command are ranked by
+    exactly the same rules — a user who has learned that ``/lgt`` finds
+    ``logout`` should find ``anthrpc`` finds ``anthropic`` without learning a
+    second behaviour.
+
+    Two deliberate differences from :func:`match_commands`. There is no leading
+    ``/`` to strip, because an argument is a bare word. And the returned display
+    name is ALWAYS ``choice.name``, never the alias that happened to match: a
+    command's aliases are themselves typeable commands (``/models`` really runs),
+    whereas an argument's aliases are only a way to FIND it — ``claude`` finds
+    the ``anthropic`` provider but ``/login claude`` is not a thing. Returning
+    the alias would put a word into the buffer that the command then rejects as
+    unknown.
+
+    An empty ``query`` returns everything in the given order, because "I typed
+    the command and stopped" is a request to see the whole set, not a failed
+    match.
+    """
+    if not query:
+        return [(choice.name, choice) for choice in choices]
+    scored: list[tuple[int, int, ChoiceT]] = []
+    for order, choice in enumerate(choices):
+        best = max(
+            (score_command_text_match(query, alias) for alias in choice.names),
+            default=0,
+        )
+        if best > 0:
+            scored.append((-best, order, choice))
+    scored.sort(key=lambda item: (item[0], item[1]))
+    return [(choice.name, choice) for _, _, choice in scored]
