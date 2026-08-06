@@ -166,6 +166,42 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+#: Per-string ceiling for values forwarded on the event stream. A tool result
+#: can be megabytes (a build log, a large file read); pushing that through a
+#: multiprocessing queue and then to every listener would stall the pump and
+#: blow out browser memory for content the transcript already holds. The
+#: authoritative copy is reachable over REST and, for oversized tool output,
+#: through the spill store - so the stream carries a readable prefix and says
+#: so, rather than either truncating silently or shipping everything.
+STREAM_VALUE_LIMIT = 16 * 1024
+
+#: Marker appended to a clipped value. Distinct from the tool-output truncation
+#: marker so a consumer can tell "clipped for streaming" from "clipped by the
+#: tool", which have different recovery paths.
+STREAM_TRUNCATION_MARKER = "\n\n[... truncated for streaming; fetch the record for full content]"
+
+
+def _cap_stream_payload(payload: dict[str, object], _depth: int = 0) -> None:
+    """Clip oversized strings in a serialised event, in place.
+
+    Recursion is depth-limited because event payloads nest (an event holds a
+    message which holds content blocks which hold tool results); a cycle is
+    impossible in JSON-dumped data, but a pathological depth would still be
+    a needless stack risk.
+    """
+    if _depth > 6:
+        return
+    for key, value in payload.items():
+        if isinstance(value, str) and len(value) > STREAM_VALUE_LIMIT:
+            payload[key] = value[:STREAM_VALUE_LIMIT] + STREAM_TRUNCATION_MARKER
+        elif isinstance(value, dict):
+            _cap_stream_payload(value, _depth + 1)  # type: ignore[arg-type]
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    _cap_stream_payload(item, _depth + 1)  # type: ignore[arg-type]
+
+
 # ---------------------------------------------------------------------------
 # Event translation
 # ---------------------------------------------------------------------------
@@ -207,7 +243,7 @@ class AgentEventBridge:
 
     # -- queue plumbing ----------------------------------------------------
 
-    def _put(self, payload: tuple[str, str, CodeExecutionResult]) -> None:
+    def _put(self, payload: tuple[str, str, object]) -> None:
         if self._status_queue is None:
             return
         try:
@@ -222,9 +258,40 @@ class AgentEventBridge:
         if self._job_id:
             self._put(("execution_update", self._job_id, record))
 
+    def _raw(self, event: AgentEvent) -> None:
+        """Forward the engine event itself, for the SSE transport only.
+
+        The record frames above are lossy by design - they collapse a whole
+        message into repeated cumulative snapshots and drop tool progress,
+        turn boundaries and retries entirely, because that is all the legacy
+        websocket contract could express. SSE consumers get the real taxonomy
+        through this path, so no existing client changes and a new one need not
+        reverse-engineer state from snapshots.
+
+        Serialised to plain JSON-compatible data here rather than in the parent:
+        the payload crosses a process boundary by pickle, and a dict of
+        primitives cannot fail to reconstruct on the far side the way a model
+        carrying engine types can.
+        """
+        if self._status_queue is None or not self._job_id:
+            return
+        try:
+            payload = event.model_dump(mode="json")
+        except Exception:  # noqa: BLE001 — a serialisation quirk must not kill the turn
+            logger.warning("failed to serialise agent event for stream", exc_info=True)
+            return
+        _cap_stream_payload(payload)
+        self._put(("agent_event", self._job_id, payload))
+
     # -- the handler -------------------------------------------------------
 
     def handle(self, event: AgentEvent) -> None:
+        # Every event goes to the SSE path first, unconditionally. The record
+        # translation below is a lossy projection for the legacy websocket
+        # contract; forwarding before it means a new event type reaches SSE
+        # consumers whether or not anyone taught the projection about it.
+        self._raw(event)
+
         # isinstance rather than a ``.type`` string switch: each concrete
         # event declares its own fields, so narrowing here is what lets the
         # handlers below read them without probing.

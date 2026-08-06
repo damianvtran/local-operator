@@ -32,10 +32,12 @@ from local_operator.server.routes import (
     models,
     schedules,
     speech,
+    sse,
     static,
     transcription,
     websockets,
 )
+from local_operator.server.utils.event_broker import EventBroker
 from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import OperatorType
 
@@ -77,6 +79,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.agent_registry = AgentRegistry(config_dir=config_dir, refresh_interval=3.0)
     app.state.job_manager = JobManager()
     app.state.websocket_manager = WebSocketManager()
+    # The SSE fan-out. One instance per process, mirroring the websocket
+    # manager: both are subscribers to the same pump, which is what keeps the
+    # legacy transport byte-identical while SSE carries the richer taxonomy.
+    app.state.event_broker = EventBroker()
     app.state.env_config = get_env_config()
 
     app.state.scheduler_service = SchedulerService(
@@ -101,6 +107,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.agent_registry = None
     app.state.job_manager = None
     app.state.websocket_manager = None
+    app.state.event_broker.close()
+    app.state.event_broker = None
     app.state.env_config = None
     app.state.scheduler_service = None
 
@@ -179,6 +187,12 @@ app.include_router(
 # /v1/ws
 app.include_router(
     websockets.router,
+)
+
+# /v1/sse - the preferred streaming transport; /v1/ws above is the fallback
+# kept for older clients.
+app.include_router(
+    sse.router,
 )
 
 # /v1/schedules

@@ -18,6 +18,12 @@ from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.jobs import JobContext, JobContextRecord, JobManager, JobStatus
 from local_operator.server.models.schemas import ChatOptions
+from local_operator.server.utils.event_broker import EventBroker
+from local_operator.server.utils.sse_publisher import (
+    publish_agent_event,
+    publish_job_status,
+    publish_record,
+)
 from local_operator.server.utils.operator import (
     ExecutorInitError,
     StatusQueue,
@@ -288,6 +294,7 @@ def create_and_start_job_process_with_queue(
     job_manager: JobManager,
     websocket_manager: WebSocketManager,
     scheduler_service: "SchedulerService",  # Changed to string literal
+    event_broker: Optional[EventBroker] = None,
 ) -> Process:
     """
     Create and start a process for a job, and set up a queue monitor to update the job status.
@@ -300,6 +307,11 @@ def create_and_start_job_process_with_queue(
         process_func: The function to run in the process
         args: The arguments to pass to the function
         job_manager: The job manager for tracking the process
+        websocket_manager: Legacy websocket fan-out (unchanged wire format)
+        scheduler_service: Scheduler used by scheduling-aware jobs
+        event_broker: SSE fan-out. Optional so a test or an embedder can run
+            the pump without a broker; when absent, every publish is a no-op
+            and only the websocket path is fed.
 
     Returns:
         The created Process object
@@ -336,6 +348,7 @@ def create_and_start_job_process_with_queue(
                                 # Status update message: (type, job_id, status, result)
                                 _, received_job_id, status, result = message
                                 await job_manager.update_job_status(received_job_id, status, result)
+                                publish_job_status(event_broker, received_job_id, status, result)
                             elif msg_type == "execution_update" and len(message) == 3:
                                 # Execution state update: (type, job_id, execution_state)
                                 _, received_job_id, execution_state = message
@@ -343,10 +356,22 @@ def create_and_start_job_process_with_queue(
                                     received_job_id, execution_state
                                 )
                             elif msg_type == "message_update" and len(message) == 3:
-                                # Message update: (type, job_id, message)
+                                # Message update: (type, record_id, message)
                                 _, received_job_id, update = message
 
+                                # The websocket path is deliberately unchanged:
+                                # the fallback transport must stay byte-identical
+                                # while SSE carries the same records plus the
+                                # richer taxonomy below.
                                 await websocket_manager.broadcast_update(received_job_id, update)
+                                publish_record(event_broker, current_job_id, update)
+                            elif msg_type == "agent_event" and len(message) == 3:
+                                # Raw engine event: (type, job_id, payload dict).
+                                # SSE-only - these are the deltas and tool traces
+                                # the websocket bridge collapses away, so no
+                                # legacy consumer can regress on them.
+                                _, _received_job_id, payload = message
+                                publish_agent_event(event_broker, current_job_id, payload)
                             # schedule_add / schedule_remove frames were
                             # produced by the legacy executor's agent
                             # scheduling tools; the rewritten tool table has

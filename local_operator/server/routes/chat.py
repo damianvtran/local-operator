@@ -27,6 +27,7 @@ from local_operator.server.dependencies import (
     get_config_manager,
     get_credential_manager,
     get_env_config,
+    get_event_broker,
     get_job_manager,
     get_scheduler_service,
     get_websocket_manager,
@@ -50,6 +51,7 @@ from local_operator.server.utils.job_processor_queue import (
     run_job_in_process_with_queue,
 )
 from local_operator.server.utils.operator import ExecutorInitError, create_operator
+from local_operator.server.utils.event_broker import EventBroker
 from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import ConversationRecord, ConversationRole
 
@@ -342,6 +344,7 @@ async def chat_async_endpoint(
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     job_manager: JobManager = Depends(get_job_manager),
     websocket_manager: WebSocketManager = Depends(get_websocket_manager),
+    event_broker: EventBroker = Depends(get_event_broker),
     env_config: EnvConfig = Depends(get_env_config),
     scheduler_service: "SchedulerService" = Depends(
         get_scheduler_service
@@ -399,6 +402,7 @@ async def chat_async_endpoint(
             job_manager=job_manager,
             websocket_manager=websocket_manager,
             scheduler_service=scheduler_service,
+            event_broker=event_broker,
         )
 
         # Return job information
@@ -466,6 +470,7 @@ async def chat_with_agent_async(
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     job_manager: JobManager = Depends(get_job_manager),
     websocket_manager: WebSocketManager = Depends(get_websocket_manager),
+    event_broker: EventBroker = Depends(get_event_broker),
     env_config: EnvConfig = Depends(get_env_config),
     scheduler_service: "SchedulerService" = Depends(
         get_scheduler_service
@@ -535,6 +540,7 @@ async def chat_with_agent_async(
             job_manager=job_manager,
             websocket_manager=websocket_manager,
             scheduler_service=scheduler_service,
+            event_broker=event_broker,
         )
 
         # Return job information
