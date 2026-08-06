@@ -611,3 +611,42 @@ def test_the_spec_still_prefers_a_real_registry_entry(monkeypatch) -> None:
     monkeypatch.setattr(discovery_mod, "available_models", explode)
     spec = configure_mod.build_model_spec("anthropic", "claude-sonnet-4-20250514")
     assert spec.context_window == 200_000
+
+
+@pytest.mark.parametrize(
+    "provider, model_id, window, max_out",
+    [
+        # Google: the registry ships `gemini-2.5-pro-preview-05-06` and nothing
+        # for the current flagships, and its wire is neither openai-compat nor
+        # an aggregator - the shape most likely to be missed by an enrichment
+        # gate written around routers.
+        ("google", "gemini-3-pro", 2_097_152, 65_536),
+        # Alibaba/DashScope: openai-compat, but a DIRECT provider, so it was on
+        # the wrong side of the old `canonical in LISTING_PROVIDERS` gate too.
+        ("alibaba", "qwen3-max", 262_144, 32_768),
+    ],
+)
+def test_a_direct_provider_gets_its_real_window_from_its_own_listing(
+    monkeypatch, tmp_path, provider: str, model_id: str, window: int, max_out: int
+) -> None:
+    """Enrichment must cover DIRECT providers, not only the aggregators.
+
+    The original gate was `canonical in LISTING_PROVIDERS`, i.e. openrouter and
+    radient. Every other provider fell through to the shipped registry, and the
+    registry only knows the models that existed when it was written: a user who
+    names `gemini-3-pro` or `qwen3-max` - both real, both current - got the 128k
+    `UNKNOWN_CONTEXT_WINDOW` placeholder, and compaction sized itself off that
+    instead of the 2M/262k the provider would have reported for free.
+
+    Parametrized across two providers on purpose: Google's listing has its own
+    envelope, pagination and query-parameter auth, so a fix that only threads
+    openai-compat through would pass for Alibaba and still fail here.
+    """
+    from local_operator.model import configure as configure_mod
+
+    _stub_discovery(monkeypatch, [_row(model_id, context_window=window, max_tokens=max_out)])
+    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+
+    spec = configure_mod.build_model_spec(provider, model_id)
+    assert spec.context_window == window, "a direct provider fell back to the placeholder"
+    assert spec.max_output_tokens == max_out
