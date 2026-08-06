@@ -44,6 +44,13 @@ BRAND_TOKENS: dict[str, dict[str, str]] = {
         # sit at roughly the same luminance as `surface` so a failed row
         # never shouts — it just stops being neutral.
         "tint-danger": "#2c1a16",  # failed tool row ground (warm red cast)
+        # Selection ground, same idea as `tint-danger`: HUE says the state,
+        # elevation only says "this is a row". Pure luminance steps could not
+        # carry selection — surface->raised is 1.096:1, which is imperceptible,
+        # so the picker's highlight rested entirely on its accent name and hover
+        # gave a mouse user almost nothing (D8). A green cast at roughly
+        # surface's luminance reads immediately without shouting.
+        "tint-select": "#16221a",  # picker's highlighted row (cool green cast)
     },
     # Warm paper ramp (D22: real kit semantics; danger is NEVER the green).
     "light": {
@@ -66,6 +73,7 @@ BRAND_TOKENS: dict[str, dict[str, str]] = {
         "signal": "#2b6ea8",
         "label": "#7c5a9e",
         "tint-danger": "#f6e2dd",
+        "tint-select": "#dfeadf",
     },
 }
 
@@ -93,6 +101,7 @@ _SEMANTIC_ALIASES: dict[str, dict[str, str]] = {
         "signal": "signal",
         "label": "label",
         "tint-danger": "tint-danger",
+        "tint-select": "tint-select",
     },
     "light": {
         "bg": "paper",
@@ -114,6 +123,7 @@ _SEMANTIC_ALIASES: dict[str, dict[str, str]] = {
         "signal": "signal",
         "label": "label",
         "tint-danger": "tint-danger",
+        "tint-select": "tint-select",
     },
 }
 

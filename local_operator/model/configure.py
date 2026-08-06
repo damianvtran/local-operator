@@ -21,6 +21,8 @@ import dataclasses
 import functools
 import logging
 import os
+import time
+from pathlib import Path
 from collections.abc import AsyncIterator, Mapping
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -28,7 +30,12 @@ import requests
 from pydantic import BaseModel, SecretStr
 
 from local_operator.harness.types import AbortSignal, ChatRequest, ModelSpec, StreamEvent
-from local_operator.model.catalogue import LISTING_PROVIDERS, cached_listing
+from local_operator.model.catalogue import (
+    DEFAULT_TTL_S,
+    LISTING_PROVIDERS,
+    cached_listing,
+    invalidate,
+)
 from local_operator.model.registry import ModelInfo, get_model_info
 
 logger = logging.getLogger("local_operator.model.configure")
@@ -342,6 +349,13 @@ def _info_from_listing(
         if model.id != model_name:
             continue
         info = template.model_copy(deep=True)
+        # The template is the PROVIDER's placeholder entry, so its id and name
+        # describe the aggregator ("openrouter" / "OpenRouter") rather than the
+        # model. Nothing in-tree reads them today, which is exactly why it is
+        # worth correcting now: the next reader will reasonably expect
+        # `info.id` to identify the model it just resolved.
+        info.id = model.id
+        info.name = getattr(model, "name", None) or model.id
         # Providers quote price per token here; normalize to per-million.
         info.input_price = float(model.pricing.prompt) * 1_000_000
         info.output_price = float(model.pricing.completion) * 1_000_000
@@ -406,6 +420,63 @@ def _has_real_window(info: ModelInfo) -> bool:
     return bool(info.context_window and info.context_window > 0)
 
 
+#: Sent as the bearer token when no key can be found. The listing endpoints are
+#: PUBLIC catalogue data — verified: `GET https://openrouter.ai/api/v1/models`
+#: returns 200 and all 340 models with no Authorization header at all, and 200
+#: with a bogus one. The clients nevertheless refuse to construct on an empty
+#: key, so a placeholder is what lets a keyless (or OAuth-only) install still
+#: learn its real context window. If a provider ever starts gating the
+#: catalogue, the request 401s and the whole path degrades to the static entry,
+#: which is the same outcome as having no key today.
+_PUBLIC_LISTING_TOKEN = "public-catalogue-read"
+
+
+def _catalogue_api_key(provider: str) -> str:
+    """A listing key for ``provider`` from the app's own stores, else "".
+
+    Reading ONLY ``os.environ`` was a real defect rather than a shortcut: both
+    sanctioned credential flows bypass the environment. ``local-operator
+    credential update OPENROUTER_API_KEY`` writes the ``CredentialManager``
+    file, and the TUI's ``/login`` writes the ``AuthStore``. So the users who
+    configured credentials the app's own way were exactly the ones this
+    enrichment silently skipped — their sessions streamed fine (the stream-time
+    cascade reads those stores) while their band showed a 128k window and no
+    cost, forever, with the failure recorded only at debug level. Every other
+    key reader in the repo goes through ``CredentialManager``; this one was the
+    outlier.
+
+    The ``AuthStore`` cascade is deliberately NOT consulted: its accessor is
+    async and this runs inside a synchronous render path, so awaiting it would
+    mean either a nested event loop or making the whole resolver async for a
+    value the public endpoint does not require. An OAuth-only user is covered by
+    :data:`_PUBLIC_LISTING_TOKEN` instead.
+    """
+    from local_operator.providers.registry import get_provider_definition
+
+    definition = get_provider_definition("test" if provider == "noop" else provider)
+    env_keys = getattr(definition, "env_keys", None)
+    names = [env_keys] if isinstance(env_keys, str) else []
+    for name in names:
+        from_env = os.environ.get(name, "")
+        if from_env:
+            return from_env
+
+    try:
+        from local_operator.credentials import CredentialManager
+
+        config_dir = Path(
+            os.environ.get("LOCAL_OPERATOR_CONFIG_DIR") or Path.home() / ".local-operator"
+        )
+        manager = CredentialManager(config_dir)
+        for name in names:
+            secret = manager.get_credential(name)
+            if secret is not None and secret.get_secret_value():
+                return secret.get_secret_value()
+    except Exception as exc:  # noqa: BLE001 - an unreadable store is not fatal
+        logger.debug("could not read %s key for the catalogue: %s", provider, exc)
+    return ""
+
+
 def _catalogue_source(provider: str) -> tuple[Any, type[Any]] | None:
     """``(client, response_model)`` for ``provider``, or None if unavailable.
 
@@ -413,11 +484,9 @@ def _catalogue_source(provider: str) -> tuple[Any, type[Any]] | None:
     the raw payload: something has to re-validate the dict into the shape
     ``_info_from_listing`` reads, and only the caller knows which shape.
 
-    Returns None rather than raising when a client cannot be built. That is not
-    hypothetical: ``OpenRouterClient`` raises ``RuntimeError`` on an empty key
-    in its constructor, so a keyless install reached this path and failed
-    ``configure_model`` outright — turning a metadata optimisation into "the CLI
-    will not start". Enriching the catalogue is always optional.
+    Returns None rather than raising when a client cannot be built, because
+    enriching the catalogue is always optional and a metadata optimisation must
+    never become "the CLI will not start".
 
     Imports are local: the client modules pull in provider response models that
     must stay out of the startup graph.
@@ -425,13 +494,13 @@ def _catalogue_source(provider: str) -> tuple[Any, type[Any]] | None:
     from pydantic import SecretStr
 
     try:
+        key = SecretStr(_catalogue_api_key(provider) or _PUBLIC_LISTING_TOKEN)
         if provider == "openrouter":
             from local_operator.clients.openrouter import (
                 OpenRouterClient,
                 OpenRouterListModelsResponse,
             )
 
-            key = SecretStr(os.environ.get("OPENROUTER_API_KEY", ""))
             return OpenRouterClient(api_key=key), OpenRouterListModelsResponse
         if provider == "radient":
             from local_operator.clients.radient import (
@@ -440,7 +509,6 @@ def _catalogue_source(provider: str) -> tuple[Any, type[Any]] | None:
             )
             from local_operator.env import get_env_config
 
-            key = SecretStr(os.environ.get("RADIENT_API_KEY", ""))
             base_url = get_env_config().radient_api_base_url or "https://api.radienthq.com/v1"
             return RadientClient(key, base_url), RadientListModelsResponse
     except Exception as exc:  # noqa: BLE001 - a missing key or import is not fatal
@@ -476,23 +544,36 @@ def _info_from_catalogue(provider: str, model_name: str, fallback: ModelInfo) ->
         # Not in the catalogue: a brand-new id, or a typo the provider will
         # reject anyway. The static fallback is the honest answer.
         return fallback
+    except TypeError:
+        # TypeError, not just ValueError, because validation is NOT a guarantee
+        # that the mapping will succeed: the listing schemas set
+        # ``extra="allow"``, so a payload whose extra fields are non-scalar
+        # (``"context_length": {"max": 1000}``, a cache price as an object)
+        # validates cleanly and then blows up inside `float()`/`int()`. Letting
+        # that escape failed session start outright — the exact outcome this
+        # module exists to prevent.
+        #
+        # The poisoned document is also DROPPED. `cached_listing` writes before
+        # the mapping runs, so a payload that cannot be mapped would otherwise
+        # be served as a fresh cache hit on every start for the whole TTL,
+        # repeating the failure for a day with no refetch. Deleting it costs one
+        # HTTP call and makes the next start able to recover on its own.
+        logger.debug("%s catalogue payload did not map; dropping the cache entry", provider)
+        invalidate(provider)
+        return fallback
 
 
 @functools.lru_cache(maxsize=64)
-def resolve_model_info(provider: str, model_id: str) -> ModelInfo:
-    """A model's real metadata: static registry first, catalogue to fill gaps.
+def _resolve_model_info_cached(provider: str, model_id: str, _bucket: int) -> ModelInfo:
+    """Memoized body of :func:`resolve_model_info`.
 
-    THE one resolution path, so the numbers a session runs on and the numbers a
-    UI prices with cannot disagree. ``_cost_for`` in the TUI used to call
-    ``get_model_info`` directly and therefore saw zero prices for every
-    aggregator model — the session had already resolved the real ones, and the
-    status band still rendered "cost unavailable".
-
-    Memoized because callers are per-turn: the disk cache alone still costs a
-    JSON parse (~25ms) on every call, which is real latency inside a render.
-    Bounded because model ids are user-supplied — a typo per turn must not grow
-    the map without limit. Clear it with ``resolve_model_info.cache_clear()``
-    after a deliberate model switch in a long-lived process.
+    ``_bucket`` is unused by the logic and present only to expire the memo: it
+    is part of the cache KEY, so when the caller's bucket advances every entry
+    for the previous one becomes unreachable and `lru_cache` evicts it in due
+    course. Without it a bare `lru_cache` outlives the disk TTL entirely, and a
+    long-lived process (the HTTP server, a scheduler worker) would pin whatever
+    metadata it saw at boot for as long as it ran — the disk cache would refresh
+    underneath it and nothing would ever read the new numbers.
     """
     canonical = "test" if provider == "noop" else provider
     try:
@@ -502,6 +583,28 @@ def resolve_model_info(provider: str, model_id: str) -> ModelInfo:
     if canonical in LISTING_PROVIDERS and not _has_real_window(info):
         info = _info_from_catalogue(canonical, model_id, info)
     return info
+
+
+def resolve_model_info(provider: str, model_id: str) -> ModelInfo:
+    """A model's real metadata: static registry first, catalogue to fill gaps.
+
+    THE one resolution path, so the numbers a session runs on and the numbers a
+    UI prices with cannot disagree. ``_cost_for`` in the TUI used to call
+    ``get_model_info`` directly and therefore saw zero prices for every
+    aggregator model — the session had already resolved the real ones, and the
+    status band still rendered "cost unavailable".
+
+    Memoized in-process because callers are per-turn: the disk cache alone still
+    costs a JSON parse (~25ms) per call, which is real latency inside a render.
+    The memo expires on the same TTL as the disk cache (see ``_bucket`` above),
+    so it can never serve numbers older than the file it is standing in for.
+    Bounded at 64 entries because model ids are user-supplied — a typo per turn
+    must not grow the map without limit.
+
+    A switch to a DIFFERENT model needs no invalidation: the id is part of the
+    key, so it simply misses.
+    """
+    return _resolve_model_info_cached(provider, model_id, int(time.time() // DEFAULT_TTL_S))
 
 
 # ---------------------------------------------------------------------------

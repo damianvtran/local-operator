@@ -4,7 +4,7 @@ Two layers, both sourced from the theme's semantic tokens:
 
 - :data:`brand_markdown_theme` — a rich ``Theme`` mapping rich-markdown's
   element styles onto the island ramp (headings bold fg, code string-green
-  with no background slab, quotes muted, bullets dim, links accent). The app
+  with no background slab, quotes muted, bullets dim, links `signal`). The app
   pushes it onto ``app.console`` once.
 - :class:`IslandCodeBlock` — code fences rendered on the island ground with
   brand syntax colors and zero padding, replacing rich's default Monokai
@@ -47,14 +47,17 @@ _TOKEN_ROOT = Token
 
 
 class IslandSyntaxTheme(SyntaxTheme):
-    """Code colors built from the island ramp: keyword accent, string green,
+    """Code colors built from the island ramp: keywords muted, string green,
     number/warning amber, comment dim. Replaces the Monokai slab palette."""
 
     def __init__(self) -> None:
         self._styles: dict[_TokenType, Style] = {
             Token: Style(color=_C("fg")),
             Comment: Style(color=_C("dim")),
-            Keyword: Style(color=_C("accent")),
+            # NOT accent: syntax highlighting would spend the running-indicator
+            # budget on every `def` in the transcript. Keywords are already
+            # distinguished by position, and the ramp keeps Name.Function at muted.
+            Keyword: Style(color=_C("muted")),
             Keyword.Constant: Style(color=_C("warning")),
             Name: Style(color=_C("fg")),
             Name.Function: Style(color=_C("muted")),
@@ -117,7 +120,11 @@ def brand_markdown_theme() -> Theme:
             "markdown.text": Style(color=_C("fg")),
             "markdown.em": Style(color=_C("fg"), italic=True),
             "markdown.strong": Style(color=_C("fg"), bold=True),
-            "markdown.code": Style(color=_C("string")),
+            # `signal`, not `string`: inline code in agent prose is overwhelmingly
+            # file paths and identifiers, which is the case theme.py reserves
+            # `signal` for. It also frees the greens to mean only
+            # added-or-succeeded rather than doubling as "code literal".
+            "markdown.code": Style(color=_C("signal")),
             "markdown.code_block": Style(color=_C("fg"), bgcolor=_C("bg")),
             "markdown.block_quote": Style(color=_C("muted")),
             "markdown.list": Style(color=_C("fg")),

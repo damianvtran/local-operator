@@ -130,13 +130,28 @@ class Editor(TextArea):
                 event.prevent_default()
                 return
             if key in ("tab", "enter"):
-                # Tab completes and stops; Enter completes and sends. Same
-                # insertion either way, so the highlighted row can never mean
-                # two different commands depending on the key.
+                # Both keys insert the SAME completion, so the highlighted row
+                # can never mean two different commands depending on the key.
+                #
+                # Enter only SENDS when the choice is unambiguous: one match, or
+                # a name the user typed in full. The registry's blast radius is
+                # not uniform — `/loop` starts autonomous work and `/logout`
+                # removes credentials — and with a fuzzy matcher `/lo` highlights
+                # `loop` while `login` and `logout` also match, so "Enter runs
+                # whatever the matcher picked" could start a loop for a user
+                # reaching for login, rewriting their text and running it in one
+                # keystroke. When it is ambiguous, Enter completes (Tab's
+                # behaviour) and a second Enter sends — the extra keystroke only
+                # appears where the intent genuinely is not clear (D16).
                 name = self._picker.highlighted_name()
                 if name is not None:
+                    # Decided BEFORE the completion is applied: `_apply_command`
+                    # rewrites the text and re-syncs the picker, so asking
+                    # afterwards would measure the completed word (always one
+                    # exact match) and submit unconditionally.
+                    send = key == "enter" and self._picker_choice_is_unambiguous(name)
                     self._apply_command(name)
-                    if key == "enter":
+                    if send:
                         self._submit()
                     event.stop()
                     event.prevent_default()
@@ -209,6 +224,27 @@ class Editor(TextArea):
 
     def _sync_picker(self) -> None:
         self._picker.sync(self.text)
+
+    def _picker_choice_is_unambiguous(self, name: str) -> bool:
+        """Whether Enter may SEND the highlighted command, not just insert it.
+
+        Unambiguous means one of two things:
+
+        * there is exactly one match, so the highlighted row is the only command
+          the query could mean; or
+        * the user typed the name in full, so they named it rather than letting
+          the matcher choose.
+
+        Everything else completes and waits for a second Enter. The point is the
+        registry's uneven blast radius: `/usage` is harmless and `/loop` and
+        `/logout` are not, so a fuzzy pick must not be *run* on one keystroke.
+        """
+        context = slash_context(self.text)
+        if context is None:
+            return False
+        if len(self._picker.suggestions()) <= 1:
+            return True
+        return context.query.strip().lower() == name.strip().lower()
 
     def _apply_command(self, name: str) -> None:
         """Replace the typed command word with ``/name `` (trailing space).

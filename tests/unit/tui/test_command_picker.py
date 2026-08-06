@@ -165,21 +165,34 @@ def test_descriptions_come_back_above_the_collapse_width() -> None:
     picker = _picker(SLASH_COMMANDS)
     picker.sync("/")
     text_41 = "\n".join(row.plain for row in picker.render_rows(41))
-    assert "Show available comm" in text_41  # the column is back
+    assert "List all comm" in text_41  # the column is back
     text_80 = "\n".join(row.plain for row in picker.render_rows(80))
-    assert "Show available commands" in text_80  # room for the whole thing
+    assert "List all commands" in text_80  # room for the whole thing
 
 
 def test_primary_column_aligns_descriptions() -> None:
-    """Every description starts at the same cell, regardless of name length."""
+    """Every description starts at the same cell, regardless of name length.
+
+    The probes are asserted PRESENT before their columns are compared. Collecting
+    positions only for probes that happen to appear lets a regression that
+    truncates or drops two of the three pass on the survivor — `len(starts) == 1`
+    is trivially true for a single element, and for an empty set the loop never
+    runs at all. Two tests of exactly that shape shipped in this same commit.
+    """
     picker = _picker(SLASH_COMMANDS)
     picker.sync("/")
-    starts = set()
-    for row in picker.render_rows(80):
-        for candidate in ("Show available commands", "Quit the app", "List MCP servers"):
-            if candidate in row.plain:
-                starts.add(row.plain.index(candidate))
-    assert len(starts) == 1
+    # Probes MUST be inside the visible window and short enough to survive at
+    # this width. "List MCP servers" was neither — `mcp` is the 13th of 15
+    # commands and never rendered, which the old subset-tolerant assertion
+    # silently accepted.
+    probes = ("List all commands", "Quit the app", "Show or switch model (provider/id)")
+    rows = [row.plain for row in picker.render_rows(200)]
+    text = "\n".join(rows)
+    missing = [probe for probe in probes if probe not in text]
+    assert missing == [], f"probe strings absent, so the comparison below is vacuous: {missing}"
+
+    starts = {row.index(probe) for row in rows for probe in probes if probe in row}
+    assert len(starts) == 1, f"descriptions start at different columns: {sorted(starts)}"
 
 
 @pytest.mark.parametrize("width", [20, 40, 80, 200])
@@ -458,3 +471,120 @@ async def test_click_on_the_overflow_row_does_nothing() -> None:
         assert app.editor.text == "/"  # no completion: the marker is a count
         assert picker.is_open()
         assert picker.highlighted_name() == "help"
+
+
+# -- short-query noise and Enter safety --------------------------------------
+
+
+@pytest.mark.parametrize(
+    "query,expected",
+    [
+        ("u", ["usage"]),
+        ("g", ["goal"]),
+        ("s", ["skills"]),
+        ("c", ["clear", "compact"]),
+        ("lo", ["loop", "login", "logout"]),
+        ("mo", ["model"]),
+    ],
+)
+def test_short_queries_keep_only_prefix_matches(query: str, expected: list[str]) -> None:
+    """One and two letters matched an arbitrary-looking set by subsequence:
+    ``/u`` offered usage, quit, accounts, logout and ``/g`` offered goal, usage,
+    login, logout. The right command ranked first every time, but rows 2+ taught
+    the user the list is unreliable — the fastest way to make them stop reading
+    it. Before the picker existed this tail was never rendered.
+    """
+    names = [name for name, _ in command_suggestions(query, SLASH_COMMANDS)]
+    assert names == expected
+
+
+@pytest.mark.parametrize(
+    "query,expected",
+    [("cmpct", "compact"), ("lgout", "logout"), ("qit", "quit"), ("skl", "skills")],
+)
+def test_typo_tolerance_still_works_from_three_characters(query: str, expected: str) -> None:
+    """The gate must not cost the feature its reason to exist: real typos are
+    three characters or more, which is where the fuzzy band still applies."""
+    names = [name for name, _ in command_suggestions(query, SLASH_COMMANDS)]
+    assert names[0] == expected
+
+
+def test_a_bare_slash_still_lists_everything() -> None:
+    """The gate keys off a NON-EMPTY query; `/` is the "show me the commands"
+    keystroke and must stay exhaustive."""
+    assert len(command_suggestions("", SLASH_COMMANDS)) == len(SLASH_COMMANDS)
+
+
+@pytest.mark.asyncio
+async def test_enter_does_not_run_an_ambiguous_fuzzy_pick() -> None:
+    """Enter COMPLETES but does not SEND when the query could mean several
+    commands, because the registry's blast radius is not uniform.
+
+    `/lo` highlights `loop` while `login` and `logout` also match, so
+    "Enter runs whatever the matcher picked" started autonomous work for a user
+    reaching for login — rewriting their text and running it in one keystroke.
+    A second Enter sends it, so the extra press only appears where the intent
+    genuinely is not clear.
+    """
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        await pilot.press("slash", "l", "o")
+        await pilot.pause()
+        assert len(app.editor.picker.suggestions()) > 1, "premise: /lo is ambiguous"
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.submissions == [], "an ambiguous pick must not be sent"
+        assert app.editor.text == "/loop ", "…but it must still be completed"
+
+        # The user can see what was chosen and confirm it.
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.submissions == ["/loop "]
+
+
+@pytest.mark.asyncio
+async def test_enter_sends_immediately_when_there_is_only_one_match() -> None:
+    """The common case must not cost a second keystroke."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        await pilot.press("slash", "m", "o")
+        await pilot.pause()
+        assert len(app.editor.picker.suggestions()) == 1, "premise: /mo is unambiguous"
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.submissions == ["/model "]
+
+
+@pytest.mark.asyncio
+async def test_enter_sends_a_fully_typed_name_even_when_others_match() -> None:
+    """`/log` also matches `login`, but a user who typed `logout` in full named
+    it rather than letting the matcher choose."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        await pilot.press("slash", "l", "o", "g", "o", "u", "t")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.submissions == ["/logout "]
+
+
+@pytest.mark.asyncio
+async def test_tab_never_sends_however_unambiguous() -> None:
+    """Tab's contract is unchanged by the Enter rule."""
+    app = PickerHarnessApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.editor.focus()
+        await pilot.pause()
+        await pilot.press("slash", "m", "o")
+        await pilot.press("tab")
+        await pilot.pause()
+        assert app.submissions == []
+        assert app.editor.text == "/model "

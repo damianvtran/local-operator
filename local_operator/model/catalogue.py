@@ -16,8 +16,9 @@ OpenRouter and Radient session therefore ran on the fallbacks in
 
 * **Context window** fell back to ``UNKNOWN_CONTEXT_WINDOW`` (128k). Auto
   compaction derives its threshold from the window, so a 1M-context model
-  compacted at ~102k instead of ~800k — an 8x premature summarisation of
-  history the model could still hold, on every long session.
+  compacted at ~102k instead of ~600k (`min(0.8 * window, 600_000)`, the cap in
+  `compaction/thresholds.py`) — a ~5.9x premature summarisation of history the
+  model could still hold, on every long session.
 * **Prices** stayed 0.0, so the status band could only report ``$—``. Cost is
   one of the few numbers an operator steers by mid-task.
 * **``supports_prompt_cache``** stayed False, which gates ``cache_control``
@@ -47,6 +48,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -73,11 +75,18 @@ def _cache_path(provider: str, cache_dir: Path | None) -> Path:
 
 
 def _read_cache(path: Path) -> tuple[dict[str, Any] | None, float]:
-    """Return ``(payload, age_seconds)``; ``(None, inf)`` when unreadable.
+    """Return ``(payload, age_seconds)``; ``(None, inf)`` when unusable.
 
     A corrupt cache is treated as absent rather than raised: this is an
     optimisation store, and a half-written file from a killed process must not
     stop a session from starting.
+
+    A timestamp in the FUTURE also counts as unusable. Clamping the age to zero
+    instead (the obvious move) makes such an entry look permanently fresh, so a
+    single clock skew — an NTP correction, a suspend/resume, a file copied from
+    another machine — would pin the catalogue forever with no way to recover
+    short of deleting the file by hand. Refetching once is the cheap direction
+    to be wrong in.
     """
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -87,18 +96,28 @@ def _read_cache(path: Path) -> tuple[dict[str, Any] | None, float]:
         return None, float("inf")
     if not isinstance(payload, dict):
         return None, float("inf")
-    return payload, max(0.0, time.time() - fetched_at)
+    age = time.time() - fetched_at
+    if age < 0:
+        return payload, float("inf")
+    return payload, age
 
 
 def _write_cache(path: Path, payload: dict[str, Any]) -> None:
     """Persist a payload, best-effort.
 
-    Written to a sibling temp file and renamed so a concurrent reader never
-    sees a partial document (two sessions may start at once).
+    Written to a temp file and renamed, because ``rename`` within a directory
+    is atomic: a concurrent reader sees either the old document or the new one,
+    never a partial write.
+
+    The temp name carries the PID. A name derived only from the target (the
+    obvious ``path.with_suffix('.tmp')``) is SHARED by every concurrent writer,
+    so two sessions starting together interleave their writes into one file and
+    then rename the resulting corrupt document into place — turning the atomic
+    rename into a guarantee that the corruption is delivered intact.
     """
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
         tmp.write_text(
             json.dumps({"fetched_at": time.time(), "payload": payload}),
             encoding="utf-8",
@@ -106,6 +125,12 @@ def _write_cache(path: Path, payload: dict[str, Any]) -> None:
         tmp.replace(path)
     except OSError as exc:  # pragma: no cover - disk full, read-only home
         logger.debug("could not cache %s catalogue: %s", path.name, exc)
+        # A failed write can strand the temp file; it would otherwise accumulate
+        # one per failing start.
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def cached_listing(
@@ -132,7 +157,7 @@ def cached_listing(
     except Exception as exc:  # noqa: BLE001 - any client/transport error degrades
         if payload is not None:
             # Stale beats absent: the numbers are days old at worst, whereas
-            # the static fallback is wrong by a factor of eight.
+            # the static fallback is wrong by nearly a factor of six.
             logger.debug("using stale %s catalogue (%.0fs old): %s", provider, age, exc)
             return payload
         logger.debug("no %s catalogue available: %s", provider, exc)
@@ -140,3 +165,18 @@ def cached_listing(
 
     _write_cache(path, fresh)
     return fresh
+
+
+def invalidate(provider: str, *, cache_dir: Path | None = None) -> None:
+    """Drop ``provider``'s cached catalogue so the next call refetches.
+
+    Needed because the payload is written BEFORE anything tries to interpret
+    it. A document that validates but cannot be mapped (a non-scalar price, a
+    context length arriving as an object) would otherwise be served as a fresh
+    cache hit on every start for the whole TTL, repeating the same failure for a
+    day with no way to recover but deleting the file by hand.
+    """
+    try:
+        _cache_path(provider, cache_dir).unlink(missing_ok=True)
+    except OSError as exc:  # pragma: no cover - read-only cache dir
+        logger.debug("could not invalidate %s catalogue: %s", provider, exc)

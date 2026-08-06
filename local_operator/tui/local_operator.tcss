@@ -16,8 +16,13 @@
  *   - one line per tool action while collapsed; each action is a subtle
  *     background-filled card (elevation = a background step, never a border
  *     or shadow) whose FILL carries the outcome
- *   - the accent green is spent ONLY on: the running indicator, links, and
- *     the focused chevron. Everything else is warm neutrals.
+ *   - the accent green is spent ONLY on: the running indicators (the working
+ *     line's shimmer crest, a running tool's glyph, the status band's
+ *     spinner), the focused input chevron, and the picker's highlighted
+ *     command NAME. Everything else is warm neutrals. Links and file paths
+ *     are the `signal` blue and deliberately NOT green — see theme.py. If
+ *     you are about to add a fifth green thing, take one away first: an
+ *     accent spent everywhere is an accent spent nowhere.
  *
  * Edge spacing: one cell at the left, right, and bottom screen edges; NONE
  * along the top while scrolling (content meets the top edge).
@@ -35,11 +40,23 @@ Screen {
  * (D27) so the right-aligned columns measure stable width. */
 TranscriptView {
     height: 1fr;
-    padding: 1 1 0 1;
+    /* Right padding is 0 (D21): the permanently reserved scrollbar column
+     * below already supplies the right-hand cell, so `1` there made every
+     * background-filled tool card one cell wider on the left than the right —
+     * visible as an off-centre slab on the one element whose whole job is to
+     * look deliberately borderless. */
+    padding: 1 0 0 1;
     scrollbar-size-vertical: 1;
     scrollbar-gutter: stable;
     scrollbar-background: $lo-bg;
-    scrollbar-color: $lo-dim;
+    /* `edge`, not `dim` (D4). The gutter is reserved permanently so the
+     * right-aligned columns measure a stable width, which means the THUMB is
+     * on screen whenever the transcript overflows by even one row. At `dim`
+     * that is a full-cell saturated column running the height of the view —
+     * the largest continuous fill in a narrow frame, reading as the right-hand
+     * border a borderless design must not have. `edge` keeps it structurally
+     * present; hover still lights it to `dim`. */
+    scrollbar-color: $lo-edge;
     scrollbar-color-hover: $lo-muted;
 }
 
@@ -123,7 +140,12 @@ ToolCard:hover {
     height: 1;
     background: $lo-sunken;
     color: $lo-dim;
-    padding: 0 1;
+    /* Left padding 0 (D22). The dock already insets this panel by one cell, so
+     * a symmetric `0 1` stacked a second cell on and put the band's brand
+     * glyph at column 2 while the input chevron directly above it, the tool
+     * glyphs and the prose all start at column 1. The app has one strong left
+     * rail and the bottom row was the only thing missing it. */
+    padding: 0 1 0 0;
 }
 
 /* Input panel: docks at the bottom, sits on the surface step, no border box
@@ -140,8 +162,6 @@ ToolCard:hover {
     border-top: tall $lo-dim;
     padding: 1 1 0 1;
 }
-
-/* Focus moves the accent onto the chevron only — the rule stays dim (D23). */
 
 #input-row {
     height: auto;

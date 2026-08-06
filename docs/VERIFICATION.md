@@ -448,3 +448,126 @@ scrollbar's sub-cell end cap: at 60x20 the transcript holds 16 rows in a
 15-row viewport (the new top padding is real space), so a scrollbar is
 correct. Its full cells are painted as coloured spaces, which a plain-text
 dump cannot show — only the fractional cap has a glyph.
+
+## 11. Review round on the TUI work (2026-08-05)
+
+Two independent reviewers on the TUI commit: a design/UX round on the rendered
+frames and a code round on the catalogue. 30 findings, no blockers, every one
+verified by the reviewer rather than inferred. All 30 are fixed.
+
+### The two that mattered most
+
+**The catalogue fix never engaged for most users.** `_catalogue_source` read
+the key from `os.environ` only, but both sanctioned credential flows bypass the
+environment — `local-operator credential update` writes the `CredentialManager`
+file and the TUI's `/login` writes the `AuthStore`. So the users who configured
+credentials the app's own way got a client that refused to construct on an empty
+key, silently kept the 128k fallback window and `$—` forever, and saw only a
+`logger.debug` line — while the welcome view simultaneously reported them logged
+in, because that check reads a different store. Every other key reader in the
+repo goes through `CredentialManager`; this one was the outlier.
+
+Fixed by resolving env → `CredentialManager`, and by sending a placeholder when
+neither has a key: `GET https://openrouter.ai/api/v1/models` returns 200 and all
+340 models with **no Authorization header at all** (verified), so a keyless or
+OAuth-only install can still learn its real context window. The `AuthStore`
+cascade is deliberately not consulted — its accessor is async and this runs in a
+synchronous render path.
+
+**A drift shape escaped the "never raises" contract.** The listing schemas set
+`extra="allow"`, so a payload with non-scalar extras (`"context_length":
+{"max": 1000}`) validates cleanly and then raises `TypeError` inside
+`float()`/`int()` — and only `ValueError` was caught, so session start failed.
+Worse, `cached_listing` writes before anything interprets the payload, so the
+poisoned document was served as a *fresh* cache hit on every subsequent start:
+the failure would repeat for a full day with no refetch. Now caught, and the
+entry is purged so the next start recovers on its own.
+
+### Four issues found by auditing my own code before the reviewer reached them
+
+| Issue | Consequence |
+|---|---|
+| `_read_cache` clamped a negative age to zero | An entry written under a skewed clock looked permanently fresh — one NTP correction pinned the catalogue with no recovery but deleting the file |
+| `_write_cache` used one temp name for all writers | Two sessions starting together interleaved into the same file, and the atomic rename then guaranteed the corruption arrived intact |
+| A failed write stranded its temp file | One leaked file per failing start |
+| `resolve_model_info` was a bare `lru_cache` | It outlives the disk TTL, so the server and scheduler workers would pin boot-time metadata for days while the disk cache refreshed underneath them |
+
+The memo key now carries a TTL bucket, so an older bucket misses.
+
+### The accent budget was the design round's central finding
+
+Frame 4 carried **five** green items where the budget permits one, and the band
+had it exactly inverted: the always-on brand glyph was accent while the
+streaming spinner was `dim`, so the bottom row looked identical whether the
+agent was working or idle — the one row an operator glances at for liveness.
+Meanwhile `Keyword` painted every `def` in accent and `markdown.code` painted
+inline code in the same green as the `+N` diff counts, so one hue meant both
+"code literal" and "lines added" in one viewport.
+
+Measured from the SVG CSS after the fixes — accent now appears **once per
+frame**, on exactly what the budget allocates:
+
+| Frame | accent `#38c96a` | success `#57c785` | signal `#6ea8d8` |
+|---|---|---|---|
+| picker open | `❯` (focused chevron), `/help` (selected name) | — | — |
+| populated | `❯` | `+12` only | `parser.py` |
+
+### Other design fixes worth naming
+
+- **The band could jam its two groups one cell apart.** `_compose` padded with
+  `max(1, …)` and the fit test only measured the composed row, so at ordinary
+  widths (98, 116, 123) a filesystem path abutted a percentage with a gap
+  *tighter than the separator used inside each group* — the left/right
+  architecture dissolved into one run. The fit test now reserves a 4-cell seam,
+  deliberately wider than the 3-cell intra-group ` · `.
+- **The drop ladder protected a constant over a live number.** It shed context
+  usage two rungs before `effort`, so a band could show `high` but not
+  `49.6%/1M` — keeping the field nobody re-reads and dropping the one that says
+  compaction is coming. Reordered to name → duration → subagents → shorten cwd →
+  shorten model → effort → cost → context.
+- **The last rung produced the band its own docstring called worse than
+  nothing**: it dropped the model label, leaving a bare glyph on an empty strip.
+  The label is truncated now — `kimi-k2-t…` still answers who is replying.
+- **Enter could run an ambiguous fuzzy pick.** `/lo` highlights `loop` while
+  `login` and `logout` also match, so a user reaching for login could start
+  autonomous work in one keystroke, with their text rewritten and sent together.
+  Enter now sends only when there is a single match or the name was typed in
+  full; otherwise it completes and a second Enter confirms.
+- **Short queries surfaced the matcher's whole tail** — `/u` offered
+  `usage, quit, accounts, logout`. Fuzzy matching now starts at three
+  characters, which is where real typos live (`/cmpct`, `/lgout` still work).
+- **The scrollbar was a bright border.** At `dim` the thumb was a full-cell
+  saturated column and the largest continuous fill in a narrow frame, abutting
+  the tool cards so the filled slabs looked edged. Moved to `edge`; verified as
+  14 rects at `#3b3527` with zero `dim` rects left.
+- **Selection rested on one signal.** surface→raised measures 1.096:1, so the
+  picker's "elevation plus accent" was really just accent, and hover gave a
+  mouse user nothing. Added a `tint-select` ground — hue for state, elevation
+  for row — the same move `tint-danger` already makes on a failed tool row.
+- **The failed tool row's glyph left the scan column**, sitting ~25 cells left
+  of every neighbour's `✓`. All four glyphs now measure at cell 91.
+
+### Test-quality findings, including one my own fix exposed
+
+Making `test_primary_column_aligns_descriptions` non-vacuous immediately proved
+the point: one of its three probes was `"List MCP servers"`, and `mcp` is the
+13th of 15 commands so it never rendered at all. The old assertion collected
+positions only for probes that happened to appear, so `len(starts) == 1` passed
+on the survivors. Two more of the same shape were fixed earlier in this branch.
+
+`test_the_cache_write_is_atomic` was *named* for the concurrency guarantee but
+wrote once, single-threaded — which is why the shared-temp-file race passed it
+and had to be found by audit. It now drives three writer threads and three
+readers with distinct payloads and asserts no reader ever observes a torn
+document.
+
+### Final state
+
+| Gate | Result |
+|---|---|
+| unit tests | **1,766 passed**, 3 skipped (266 TUI, 1,328 core, 172 server) |
+| `flake8` | clean |
+| `black --check` | clean |
+| `pyright` | 0 errors, 0 warnings across `local_operator/` |
+| live TUI (OpenRouter) | splash, picker, real turn, `hello.txt` written, band showing `0.2%/1.0M · $0.0005 · 1s` |
+| live exec `--json` | exit 0, pure-JSON stdout, 1 `agent_start`/1 `agent_end`, start context 2,407 tokens, **89.8%** warm cache rate, agent's own pytest passing and independently re-verified |

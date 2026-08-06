@@ -229,3 +229,270 @@ def test_configure_model_survives_a_keyless_install(monkeypatch, hosting: str, m
 
     config = configure_model(hosting=hosting, model_name=model)
     assert config.spec.context_window >= UNKNOWN_CONTEXT_WINDOW
+
+
+# -- clock and concurrency hazards ------------------------------------------
+
+
+def test_a_future_timestamp_is_stale_not_permanently_fresh(tmp_path) -> None:
+    """Clamping a negative age to zero — the obvious move — makes an entry
+    written under a skewed clock look fresh FOREVER, so one NTP correction or a
+    file copied between machines pins the catalogue with no recovery short of
+    deleting it by hand. Refetching once is the cheap direction to be wrong in.
+    """
+    path = tmp_path / "openrouter.models.json"
+    path.write_text(
+        json.dumps({"fetched_at": time.time() + 86_400 * 30, "payload": _payload()}),
+        encoding="utf-8",
+    )
+    _, age = catalogue._read_cache(path)
+    assert age == float("inf")
+
+    calls: list[int] = []
+
+    def fetch():
+        calls.append(1)
+        return _payload(window=7)
+
+    got = cached_listing("openrouter", fetch, cache_dir=tmp_path)
+    assert len(calls) == 1, "a future-stamped entry must be refetched"
+    assert got["data"][0]["context_length"] == 7
+
+
+def test_the_temp_file_name_is_unique_per_process(tmp_path) -> None:
+    """``path.with_suffix('.tmp')`` is SHARED by every concurrent writer, so two
+    sessions starting together interleave into one file and then rename the
+    corrupt result into place — the atomic rename guaranteeing the corruption
+    arrives intact. The name must therefore be per-writer.
+    """
+    import os
+
+    path = tmp_path / "openrouter.models.json"
+    catalogue._write_cache(path, _payload())
+    assert not list(tmp_path.glob("*.tmp")), "temp file must be renamed away"
+
+    # Simulate a second writer holding a half-written temp file: it must not be
+    # the name this process would use.
+    other = tmp_path / f"{path.name}.{os.getpid() + 1}.tmp"
+    other.write_text("{partial", encoding="utf-8")
+    catalogue._write_cache(path, _payload(window=42))
+    assert (
+        json.loads(path.read_text(encoding="utf-8"))["payload"]["data"][0]["context_length"] == 42
+    ), "another writer's temp file must not corrupt this write"
+
+
+def test_a_failed_write_does_not_strand_a_temp_file(tmp_path, monkeypatch) -> None:
+    """Otherwise a persistently failing start accumulates one temp file per run."""
+    path = tmp_path / "openrouter.models.json"
+    real_replace = catalogue.Path.replace
+
+    def fail_replace(self, target):  # noqa: ANN001
+        raise OSError("cross-device link")
+
+    monkeypatch.setattr(catalogue.Path, "replace", fail_replace)
+    catalogue._write_cache(path, _payload())
+    monkeypatch.setattr(catalogue.Path, "replace", real_replace)
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_the_in_process_memo_cannot_outlive_the_disk_ttl() -> None:
+    """A bare ``lru_cache`` would pin whatever metadata a long-lived process saw
+    at boot: the HTTP server and scheduler workers run for days, the disk cache
+    would refresh underneath them, and nothing would ever read the new numbers.
+    The memo key carries a TTL bucket so an older bucket misses.
+    """
+    from local_operator.model.configure import (
+        _resolve_model_info_cached,
+        resolve_model_info,
+    )
+
+    bucket = int(time.time() // catalogue.DEFAULT_TTL_S)
+    resolve_model_info("anthropic", "claude-sonnet-4-20250514")
+    before = _resolve_model_info_cached.cache_info().misses
+
+    # Same model, previous TTL window: must MISS, proving expiry is real.
+    _resolve_model_info_cached("anthropic", "claude-sonnet-4-20250514", bucket - 1)
+    assert _resolve_model_info_cached.cache_info().misses == before + 1
+
+    # Same model, same window: must HIT, or the memo is pointless.
+    hits = _resolve_model_info_cached.cache_info().hits
+    resolve_model_info("anthropic", "claude-sonnet-4-20250514")
+    assert _resolve_model_info_cached.cache_info().hits == hits + 1
+
+
+# -- credential resolution (S1) ----------------------------------------------
+
+
+def test_the_key_is_read_from_the_apps_own_credential_store(tmp_path, monkeypatch) -> None:
+    """Reading only ``os.environ`` made the whole fix a no-op for the users who
+    configured credentials the sanctioned way.
+
+    ``local-operator credential update`` writes the CredentialManager file and
+    the TUI's ``/login`` writes the AuthStore; neither touches the environment.
+    Their sessions streamed fine (the stream-time cascade reads those stores)
+    while the band showed a 128k window and no cost forever, with the failure
+    recorded only at debug level.
+    """
+    from local_operator.credentials import CredentialManager
+    from local_operator.model import configure as configure_mod
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    CredentialManager(tmp_path).set_credential("OPENROUTER_API_KEY", "sk-or-store-value")
+
+    assert configure_mod._catalogue_api_key("openrouter") == "sk-or-store-value"
+    assert configure_mod._catalogue_source("openrouter") is not None
+
+
+def test_an_env_var_takes_precedence_over_the_stored_credential(tmp_path, monkeypatch) -> None:
+    """An explicit env var is the operator overriding config for one run."""
+    from local_operator.credentials import CredentialManager
+    from local_operator.model import configure as configure_mod
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    CredentialManager(tmp_path).set_credential("OPENROUTER_API_KEY", "sk-or-store-value")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-env-value")
+
+    assert configure_mod._catalogue_api_key("openrouter") == "sk-or-env-value"
+
+
+def test_no_key_anywhere_still_builds_a_client(tmp_path, monkeypatch) -> None:
+    """The listing endpoints are PUBLIC catalogue data — `GET /api/v1/models`
+    answers 200 with no Authorization header at all. The clients still refuse an
+    empty key, so a placeholder token is what lets a keyless or OAuth-only
+    install learn its real context window instead of silently keeping 128k.
+    """
+    from local_operator.model import configure as configure_mod
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    assert configure_mod._catalogue_api_key("openrouter") == ""
+    assert configure_mod._catalogue_source("openrouter") is not None
+
+
+# -- schema drift that validates but cannot be mapped (S2) -------------------
+
+
+def _drifted_payload() -> dict:
+    """Validates under ``extra="allow"``, then breaks ``float()``/``int()``."""
+    return {
+        "data": [
+            {
+                "id": "v/m",
+                "name": "v/m",
+                "description": "d",
+                "context_length": {"max": 1000},
+                "pricing": {
+                    "prompt": "0.1",
+                    "completion": "0.2",
+                    "input_cache_read": {"usd": 1},
+                },
+            }
+        ]
+    }
+
+
+def test_a_payload_that_validates_but_cannot_map_does_not_raise(tmp_path, monkeypatch) -> None:
+    """Validation is NOT a guarantee that the mapping will succeed. The listing
+    schemas set ``extra="allow"``, so non-scalar extras validate cleanly and
+    then raise TypeError inside the conversions — and only ValueError was
+    caught, so session start FAILED: the exact outcome this module prevents.
+    """
+    from local_operator.clients.openrouter import OpenRouterListModelsResponse
+    from local_operator.model import configure as configure_mod
+    from local_operator.model.registry import ModelInfo
+
+    payload = _drifted_payload()
+    # The premise of the finding: pydantic accepts it.
+    assert OpenRouterListModelsResponse.model_validate(payload) is not None
+
+    class FakeClient:
+        def list_models(self):
+            return OpenRouterListModelsResponse.model_validate(payload)
+
+    monkeypatch.setattr(
+        configure_mod,
+        "_catalogue_source",
+        lambda _p: (FakeClient(), OpenRouterListModelsResponse),
+    )
+    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+
+    fallback = ModelInfo(id="v/m", name="v/m", description="")
+    assert configure_mod._info_from_catalogue("openrouter", "v/m", fallback) is fallback
+    # And the whole call still returns a usable configuration.
+    config = configure_mod.configure_model(hosting="openrouter", model_name="v/m")
+    assert config.spec.context_window == configure_mod.UNKNOWN_CONTEXT_WINDOW
+
+
+def test_an_unmappable_payload_is_purged_rather_than_served_for_a_day(
+    tmp_path, monkeypatch
+) -> None:
+    """``cached_listing`` writes BEFORE anything interprets the payload, so an
+    unmappable document would be served as a FRESH cache hit on every start for
+    the whole TTL — repeating the failure for a day with no refetch. It must be
+    dropped so the next start can recover on its own.
+    """
+    from local_operator.clients.openrouter import OpenRouterListModelsResponse
+    from local_operator.model import configure as configure_mod
+    from local_operator.model.registry import ModelInfo
+
+    class FakeClient:
+        def list_models(self):
+            return OpenRouterListModelsResponse.model_validate(_drifted_payload())
+
+    monkeypatch.setattr(
+        configure_mod,
+        "_catalogue_source",
+        lambda _p: (FakeClient(), OpenRouterListModelsResponse),
+    )
+    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+
+    configure_mod._info_from_catalogue(
+        "openrouter", "v/m", ModelInfo(id="v", name="v", description="")
+    )
+    assert not (tmp_path / "openrouter.models.json").exists()
+
+
+def test_invalidate_is_safe_when_there_is_no_cache(tmp_path) -> None:
+    catalogue.invalidate("openrouter", cache_dir=tmp_path)  # must not raise
+
+
+# -- real concurrency, not a happy-path stand-in (S4) ------------------------
+
+
+def test_concurrent_writers_never_produce_a_corrupt_cache(tmp_path) -> None:
+    """The original test was NAMED for this guarantee but wrote once, single
+    threaded — so the shared-temp-file race passed it and was found by audit
+    instead. Drive real threads with different payloads and assert every read
+    lands on a complete document.
+    """
+    import threading
+
+    errors: list[str] = []
+
+    def writer(window: int) -> None:
+        for _ in range(15):
+            catalogue._write_cache(tmp_path / "openrouter.models.json", _payload(window=window))
+
+    def reader() -> None:
+        for _ in range(40):
+            payload, _age = catalogue._read_cache(tmp_path / "openrouter.models.json")
+            if payload is None:
+                continue
+            try:
+                # A torn document shows up here: a truncated JSON body fails to
+                # parse (already None), and an interleaved one loses its shape.
+                assert payload["data"][0]["context_length"] in (1, 2, 3)
+            except (KeyError, IndexError, TypeError, AssertionError) as exc:
+                errors.append(f"{type(exc).__name__}: {exc}")
+
+    threads = [threading.Thread(target=writer, args=(n,)) for n in (1, 2, 3)]
+    threads += [threading.Thread(target=reader) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == [], f"readers observed a corrupt document: {errors[:3]}"
+    assert not list(tmp_path.glob("*.tmp")), "temp files leaked"

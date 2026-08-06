@@ -53,6 +53,7 @@ from rich.text import Text
 from textual.widgets import Static
 
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.widgets.status_line import format_model_label
 from local_operator.tui.widgets.transcript import NOTICE_GLYPHS
 
 #: The monogram: an angular ``L`` beside a rounded ``O``. Only the three
@@ -222,6 +223,36 @@ def _center(line: Text, width: int) -> Text:
     return out
 
 
+def _center_block(lines: list[Text], width: int) -> list[Text]:
+    """Center a GROUP of lines on their widest member, keeping one left edge.
+
+    Centering each line independently ragged the status stack into a diamond —
+    with a real OpenRouter label the version, model, cwd and warning rows had
+    four different left edges, which is the one composition move that reads as
+    un-designed, on the first frame every user sees (D9).
+
+    It also removes a visible twitch: ``model_label`` starts as ``connecting…``
+    (12 cells) and resolves to as many as 38, so the row used to re-centre and
+    re-widen a second into every boot. Block width is set by the widest row, so
+    the stack now holds still.
+
+    ``_hint_lines`` already worked this way and documents why; the status rows
+    are the same kind of thing — several facts about one session.
+    """
+    if not lines:
+        return []
+    block = max(cell_len(line.plain) for line in lines)
+    pad = max(0, (width - block) // 2)
+    if pad == 0:
+        return lines
+    out: list[Text] = []
+    for line in lines:
+        padded = Text(" " * pad, no_wrap=True)
+        padded.append_text(line)
+        out.append(padded)
+    return out
+
+
 def _logo_lines(width: int) -> list[Text]:
     """The logo lockup at whichever of three width tiers ``width`` allows.
 
@@ -232,7 +263,13 @@ def _logo_lines(width: int) -> list[Text]:
       only loosen a lockup that no longer has the width to be loose.
     - narrower: the plain wordmark alone, which the caller then truncates.
     """
-    mark_style = Style(color=theme_mod.semantic_color("muted"))
+    # `dim`, not `muted`. The intended hierarchy is a small dense mark UNDER a
+    # wide open name, but the mark is four rows of solid block glyphs (~40 filled
+    # cells) against a wordmark of one row and ~11 cells of ink, so one ramp step
+    # could not overcome a 4x area difference and the eye landed on the blocks
+    # first. Two steps down makes the blocks read as a watermark behind the name
+    # — which is also what stops the rounded `O` reading as a zero (D12).
+    mark_style = Style(color=theme_mod.semantic_color("dim"))
     word_style = Style(color=theme_mod.semantic_color("fg"))
     mark = [_center(Text(row, style=mark_style, no_wrap=True), width) for row in LOGO_MARK]
     if width >= LOGO_FULL_MIN_WIDTH:
@@ -260,9 +297,17 @@ def _status_rows(info: WelcomeInfo, width: int) -> list[tuple[int, Text]]:
         rows.append((_PRIORITY_VERSION, Text(f"v{info.version}", style=dim, no_wrap=True)))
     # Always drawn, placeholder and all: a row that appears the instant the
     # session boots would shift the whole block a line while the user reads it.
-    rows.append(
-        (_PRIORITY_MODEL, Text(info.model_label or MODEL_PENDING, style=muted, no_wrap=True))
-    )
+    #
+    # When the full label does not fit, reduce it the way the STATUS BAND does
+    # (keep the bare model id, drop the provider) rather than letting the final
+    # truncation pass keep the head. The two disagreed: the splash printed
+    # `openrouter/deepseek/deepseek-…` while the band six rows below printed
+    # `deepseek-chat-v3.1`, so one app answered "which model" with opposite
+    # halves of the same string (D10).
+    label = info.model_label or MODEL_PENDING
+    if cell_len(label) > width:
+        label = format_model_label(label, short=True)
+    rows.append((_PRIORITY_MODEL, Text(label, style=muted, no_wrap=True)))
     if info.cwd:
         shown = _fit_tail(_shorten_home(info.cwd), width)
         rows.append((_PRIORITY_CWD, Text(shown, style=dim, no_wrap=True)))
@@ -293,8 +338,13 @@ def _hint_lines(width: int) -> list[Text]:
     2. the tight key column (longest key plus one space),
     3. keys only, which still names every affordance the user can try.
     """
-    key_style = Style(color=theme_mod.semantic_color("muted"))
-    desc_style = Style(color=theme_mod.semantic_color("dim"))
+    # The same tint pair the PICKER uses for name/description (fg over muted),
+    # not a step quieter. These rows are a preview of the picker — one of them
+    # literally says "/  command picker" — and rendering the identical
+    # key-then-description shape a full ramp step apart three rows away read as
+    # two products' help text pasted together (D13).
+    key_style = Style(color=theme_mod.semantic_color("fg"))
+    desc_style = Style(color=theme_mod.semantic_color("muted"))
 
     key_column = 0
     for candidate in (HINT_KEY_WIDTH, HINT_KEY_WIDTH_TIGHT):
@@ -348,11 +398,28 @@ def build_welcome_lines(info: WelcomeInfo, width: int, height: int) -> list[Text
         # One blank row joins each visible section to the status rows.
         return rows + (len(logo) + 1 if show_logo else 0) + (len(hints) + 1 if show_hints else 0)
 
-    if total(len(status)) > height:
-        show_logo = False
-    if total(len(status)) > height:
-        show_hints = False
-    while len(status) > 1 and total(len(status)) > height:
+    # A row is held back so the block never touches the input dock's rule.
+    # Opening the picker shrinks this region to exactly the block's height, so
+    # the old arithmetic centered at pad 0 and rendered edge-to-edge: the mark
+    # looked like it was sliding off the top and `ctrl+d  quit` sat directly on
+    # the rule. That is reachable in ONE keystroke from the state the splash
+    # itself teaches, since a hint row says "/  command picker" (D11).
+    #
+    # The margin is a nicety and yields to content: it is worth shedding the
+    # logo or the hints for, but not a status row. At three rows the credential
+    # warning and the model matter more than breathing room, so the first pass
+    # asks for the margin and the second gives it up rather than shed a fact.
+    for usable in (max(1, height - 1), height):
+        show_logo = True
+        show_hints = True
+        if total(len(status)) > usable:
+            show_logo = False
+        if total(len(status)) > usable:
+            show_hints = False
+        if total(len(status)) <= usable:
+            break
+
+    while len(status) > 1 and total(len(status)) > usable:
         weakest = min(range(len(status)), key=lambda index: status[index][0])
         status.pop(weakest)
 
@@ -360,12 +427,12 @@ def build_welcome_lines(info: WelcomeInfo, width: int, height: int) -> list[Text
     if show_logo:
         body.extend(logo)
         body.append(Text(""))
-    body.extend(_center(line, width) for _, line in status)
+    body.extend(_center_block([line for _, line in status], width))
     if show_hints:
         body.append(Text(""))
         body.extend(hints)
 
-    top = max(0, (height - len(body)) // 2)
+    top = max(0, (usable - len(body)) // 2)
     lines = [Text("") for _ in range(top)]
     lines.extend(body)
     for line in lines:

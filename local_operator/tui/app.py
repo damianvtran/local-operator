@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 from typing import Any, Awaitable, Callable, Protocol
 
+from local_operator.tui.widgets.welcome import MODEL_PENDING
 from local_operator.tui.widgets.transcript import (
     NoticeBlock,
     RichBlock,
@@ -78,7 +79,7 @@ from local_operator.tui.widgets.welcome import WelcomeView, session_welcome_info
 #: Slash commands handled synchronously before any prompt is sent. One
 #: registry entry per command; aliases live on the entry (TUI-014).
 SLASH_COMMANDS: list[SlashCommand] = [
-    SlashCommand("help", "Show available commands"),
+    SlashCommand("help", "List all commands"),
     SlashCommand("exit", "Quit the app", aliases=("quit",)),
     SlashCommand("clear", "Clear the transcript (history is untouched)"),
     SlashCommand("reload", "Retry starting the session"),
@@ -88,7 +89,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("usage", "Show provider usage quota"),
     SlashCommand("goal", "Show, set, or clear the session goal"),
     SlashCommand("loop", "Iterate autonomously toward the goal"),
-    SlashCommand("compact", "About context compaction"),
+    SlashCommand("compact", "Explain context compaction"),
     SlashCommand("skills", "List loaded skills"),
     SlashCommand("mcp", "List MCP servers"),
     SlashCommand("login", "Authenticate a provider"),
@@ -228,7 +229,7 @@ class OperatorApp(App[None]):
         self._welcome = self.query_one(WelcomeView)
 
         self._status = StatusLine(self.query_one("#status-band", Static))
-        self._status.update(model_label="connecting…", cwd=os.getcwd())
+        self._status.update(model_label=MODEL_PENDING, cwd=os.getcwd())
         self.query_one(Editor).focus()
         # The count has no event to hang off (see JOB_POLL_INTERVAL_S).
         self.set_interval(JOB_POLL_INTERVAL_S, self._poll_subagents)
@@ -275,7 +276,7 @@ class OperatorApp(App[None]):
         # attempt both reset, or the old name would outlive its session.
         self._name_requested = False
         self._status.update(
-            model_label="connecting…",
+            model_label=MODEL_PENDING,
             streaming=False,
             effort="",
             conversation_name="",
@@ -428,15 +429,26 @@ class OperatorApp(App[None]):
 
         ``bash`` jobs are the operator's own backgrounded shell work, not
         agents, so counting them would inflate the badge with something the
-        tool cards already show. Never raises: a status segment must not be
-        able to take the app down.
+        tool cards already show.
+
+        ``queued`` is excluded to match ``AsyncJobManager``'s own running count
+        (``harness/jobs.py``): a job admitted to the ledger but held behind the
+        capacity gate carries ``status == "running"`` and has not started, so
+        counting it would report agents that are not yet doing anything — and
+        disagree with the number the harness itself reports.
+
+        Never raises: a status segment must not be able to take the app down.
         """
         manager = getattr(self._session, "jobs", None)
         if manager is None:
             return 0
         try:
             return sum(
-                1 for job in manager.list() if job.status == "running" and job.type == "task"
+                1
+                for job in manager.list()
+                if job.status == "running"
+                and job.type == "task"
+                and not getattr(job, "queued", False)
             )
         except Exception:
             return 0
@@ -1090,7 +1102,7 @@ def _model_spec(session) -> Any | None:
 def _context_window(session) -> int:
     """The active model's context window, or 0 when it is unknown.
 
-    Zero is meaningful downstream: the usage segment renders ``12.4k/?``
+    Zero is meaningful downstream: the usage segment renders ``12.4k/—``
     rather than inventing a denominator to divide by.
     """
     window = getattr(_model_spec(session), "context_window", 0) or 0
