@@ -18,6 +18,9 @@ and dispatching to the right wire client through
 from __future__ import annotations
 
 import dataclasses
+import functools
+import logging
+import os
 from collections.abc import AsyncIterator, Mapping
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -25,7 +28,10 @@ import requests
 from pydantic import BaseModel, SecretStr
 
 from local_operator.harness.types import AbortSignal, ChatRequest, ModelSpec, StreamEvent
+from local_operator.model.catalogue import LISTING_PROVIDERS, cached_listing
 from local_operator.model.registry import ModelInfo, get_model_info
+
+logger = logging.getLogger("local_operator.model.configure")
 
 if TYPE_CHECKING:
     # Import-time cost only for type checkers: the listing clients pull in the
@@ -391,6 +397,113 @@ def get_model_info_from_radient(client: ModelListingClient, model_name: str) -> 
     )
 
 
+def _has_real_window(info: ModelInfo) -> bool:
+    """True when the registry actually knows this model's context window.
+
+    ``-1`` and ``0`` are both "no data" sentinels in the legacy registry, and a
+    placeholder entry for an aggregator carries one of them.
+    """
+    return bool(info.context_window and info.context_window > 0)
+
+
+def _catalogue_source(provider: str) -> tuple[Any, type[Any]] | None:
+    """``(client, response_model)`` for ``provider``, or None if unavailable.
+
+    The response model comes back alongside the client because the cache stores
+    the raw payload: something has to re-validate the dict into the shape
+    ``_info_from_listing`` reads, and only the caller knows which shape.
+
+    Returns None rather than raising when a client cannot be built. That is not
+    hypothetical: ``OpenRouterClient`` raises ``RuntimeError`` on an empty key
+    in its constructor, so a keyless install reached this path and failed
+    ``configure_model`` outright — turning a metadata optimisation into "the CLI
+    will not start". Enriching the catalogue is always optional.
+
+    Imports are local: the client modules pull in provider response models that
+    must stay out of the startup graph.
+    """
+    from pydantic import SecretStr
+
+    try:
+        if provider == "openrouter":
+            from local_operator.clients.openrouter import (
+                OpenRouterClient,
+                OpenRouterListModelsResponse,
+            )
+
+            key = SecretStr(os.environ.get("OPENROUTER_API_KEY", ""))
+            return OpenRouterClient(api_key=key), OpenRouterListModelsResponse
+        if provider == "radient":
+            from local_operator.clients.radient import (
+                RadientClient,
+                RadientListModelsResponse,
+            )
+            from local_operator.env import get_env_config
+
+            key = SecretStr(os.environ.get("RADIENT_API_KEY", ""))
+            base_url = get_env_config().radient_api_base_url or "https://api.radienthq.com/v1"
+            return RadientClient(key, base_url), RadientListModelsResponse
+    except Exception as exc:  # noqa: BLE001 - a missing key or import is not fatal
+        logger.debug("no %s catalogue client: %s", provider, exc)
+        return None
+    return None
+
+
+def _info_from_catalogue(provider: str, model_name: str, fallback: ModelInfo) -> ModelInfo:
+    """Describe ``model_name`` from the cached catalogue, else ``fallback``.
+
+    Never raises. A missing model, an unreachable listing, a malformed cache
+    and provider schema drift all degrade to the caller's static fallback,
+    because none of them is a reason to refuse to start a session.
+    """
+    source = _catalogue_source(provider)
+    if source is None:
+        return fallback
+    client, response_model = source
+
+    payload = cached_listing(provider, lambda: client.list_models().model_dump())
+    if payload is None:
+        return fallback
+
+    try:
+        listing = response_model.model_validate(payload)
+    except Exception:  # noqa: BLE001 - schema drift must not break startup
+        logger.debug("%s catalogue payload did not validate; using static fallback", provider)
+        return fallback
+    try:
+        return _info_from_listing(listing, model_name, fallback, provider)
+    except ValueError:
+        # Not in the catalogue: a brand-new id, or a typo the provider will
+        # reject anyway. The static fallback is the honest answer.
+        return fallback
+
+
+@functools.lru_cache(maxsize=64)
+def resolve_model_info(provider: str, model_id: str) -> ModelInfo:
+    """A model's real metadata: static registry first, catalogue to fill gaps.
+
+    THE one resolution path, so the numbers a session runs on and the numbers a
+    UI prices with cannot disagree. ``_cost_for`` in the TUI used to call
+    ``get_model_info`` directly and therefore saw zero prices for every
+    aggregator model — the session had already resolved the real ones, and the
+    status band still rendered "cost unavailable".
+
+    Memoized because callers are per-turn: the disk cache alone still costs a
+    JSON parse (~25ms) on every call, which is real latency inside a render.
+    Bounded because model ids are user-supplied — a typo per turn must not grow
+    the map without limit. Clear it with ``resolve_model_info.cache_clear()``
+    after a deliberate model switch in a long-lived process.
+    """
+    canonical = "test" if provider == "noop" else provider
+    try:
+        info = get_model_info(canonical, model_id)
+    except (ValueError, KeyError):
+        info = ModelInfo(id=model_id, name=model_id, description="Unknown model")
+    if canonical in LISTING_PROVIDERS and not _has_real_window(info):
+        info = _info_from_catalogue(canonical, model_id, info)
+    return info
+
+
 # ---------------------------------------------------------------------------
 # configure_model
 # ---------------------------------------------------------------------------
@@ -454,10 +567,12 @@ def configure_model(
         else:
             raise ValueError(f"Model info client not supported for hosting: {hosting}")
     else:
-        try:
-            model_info = get_model_info(canonical, model_name)
-        except (ValueError, KeyError):
-            model_info = ModelInfo(id=model_name, name=model_name, description="Unknown model")
+        # Aggregators route hundreds of models, so their registry entry is a
+        # placeholder (context_window -1, zero prices). Left at that, auto
+        # compaction sizes itself off a 128k fallback on a 1M model and cost
+        # cannot be reported at all. `resolve_model_info` fills the gap from a
+        # disk-cached catalogue: one HTTP call a day, and never a blocked start.
+        model_info = resolve_model_info(canonical, model_name)
 
     spec = build_model_spec(canonical, model_name, model_info)
     # Sampling rides on the ModelSpec: the loop builds its ChatRequest without

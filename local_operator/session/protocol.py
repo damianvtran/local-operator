@@ -66,6 +66,28 @@ class SessionProtocol(Protocol):
         """
         ...
 
+    @property
+    def conversation_name(self) -> str:
+        """The conversation's title ("" until one is set or generated)."""
+        ...
+
+    def set_conversation_name(self, text: str, *, user_set: bool = True) -> str:
+        """Name the conversation; returns the title in force afterwards.
+
+        ``user_set=True`` marks an explicit rename, which a later
+        auto-generated title must not overwrite.
+        """
+        ...
+
+    async def complete_once(self, system: str, prompt: str) -> str:
+        """One non-tool provider call for host-side side errands.
+
+        Not a turn: no tools, no history, no transcript entry. Hosts use it
+        for small derived text (conversation auto-naming) without rebuilding
+        the provider's auth cascade. Never await it on a turn's critical path.
+        """
+        ...
+
     # --- driving turns ----------------------------------------------------
     async def prompt(self, text: str) -> None:
         """Run one user turn to completion (awaitable) or raise."""

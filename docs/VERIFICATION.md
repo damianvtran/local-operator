@@ -254,3 +254,197 @@ Cost: +279 tokens of start context. The old value came from a calibration at
 dim 512, where the noise floor was 0.31; at dim 4096 it is 0.07–0.08. The
 tests now pin the margin rather than the constant and were confirmed to fail
 on 0.27.
+
+
+## 9. Third pass (2026-08-05) — round-2 review, and four false claims
+
+A second independent reviewer checked the round-1 remediation against clean
+builds and the real binaries rather than the working venv. The three round-1
+blockers were confirmed genuinely fixed. Twenty-four further findings followed,
+and the four worth recording here are the ones where a previous pass of this
+document, or a test it cited, asserted something untrue.
+
+### Claims that were false
+
+| Claim | Reality |
+|---|---|
+| "threshold pinned with a MINIMUM margin" | Both assertions were zero-margin strict inequalities. `MIN_MARGIN` had exactly one AST reference — its own assignment — because an earlier rewrite of the test silently did not apply. A threshold 2.7e-5 above the best false match passed. |
+| This file said the threshold is 0.18 | The same commit shipped 0.19. Three module docstrings also said 0.18. |
+| "unknown-extra guard survives optimization" | The test inspected `LOAD_GLOBAL` argvals for `"AssertionError"`. An `assert` compiles to `LOAD_ASSERTION_ERROR` and never to that, so the test passed on precisely the implementation it claimed to reject. |
+| "100% recall, 0% false positives" | True for two corpora and two query sets, and stated without that qualification. Against the same 15-skill corpus with an independently chosen query set, recall is ~71%. |
+
+All four are corrected in place. The recall figure now carries its
+corpus/query-set qualification and the reason: a hashed term-frequency embedder
+matches vocabulary, not meaning, so `"where do i put my api keys"` against a
+description reading `"credential loading and storage"` scores near zero however
+relevant it is. `ApiEmbedder` is the accurate path; the offline class's ceiling
+is lexical overlap. The labelled query set now ships as
+`scripts/calibration_queries.json`, so the figure is reproducible by the exact
+command the docstring gives:
+
+```
+$ .venv/bin/python scripts/calibrate_skill_threshold.py \
+    --skills-dir ~/.omp/agent/skills --labelled scripts/calibration_queries.json
+relevant  : min 0.2134  median 0.2813  max 0.5208  (n=18)
+unrelated : max 0.1499  median 0.0802  (n=8)
+gap       : (0.1499, 0.2134)  midpoint 0.1817
+0.19 100% 0%  <- shipped
+```
+
+### A fix that measured well and was wrong
+
+Recorded because the next person will have the same idea. Capping the embedded
+description at 300 characters to reduce the length dilution L2-normalised TF
+suffers looked like a clear win on a query set chosen while looking at the
+failures — real-corpus recall 57% -> 71%, ranking 4/7 -> 6/7, lower noise
+ceiling. On the **shipped labelled set** it was worse: recall 100% -> 83% and
+the score gap vanished entirely. Reverted, and the rejected idea is recorded in
+the module docstring with both measurements. Trimming the routing text removes
+matching vocabulary as often as it removes noise; measure any such change
+against the committed query file, not a fresh set chosen post hoc.
+
+### Verification gaps in the CI added to close R10
+
+- The stdout-purity gate had a **proven false negative**. `while read -r line`
+  returns non-zero at EOF on an unterminated final line, so pollution with no
+  trailing newline never entered the loop body and the gate reported clean —
+  the exact shape of an unflushed error path, which is what it exists to catch.
+- Widening `test` to a 3.12/3.13 matrix left `upload-artifact` on a fixed name;
+  v4 rejects a duplicate name per run with 409. The matrix would have failed
+  the job it was added to.
+- A bare `pull_request:` trigger runs the live-LLM jobs on fork PRs where
+  secrets are absent, giving external contributors a permanently red check.
+  Both live jobs are now gated on the PR originating in this repository.
+
+### Shipped-behaviour defects
+
+| ID | Defect |
+|---|---|
+| S1 | `tool_name` is model-controlled and was rendered raw by BOTH renderers, so a name carrying an erase-display escape clears the operator's terminal from inside our frame without the tool running. Stripping moved to a stdlib-only `local_operator/ansi.py` so both share one implementation. |
+| S12 | String-control payloads leaked as visible text when they contained an ESC that is not part of ST (a negated class cannot cross one), and charset designators like `ESC ( B` lost only the ESC. No live control byte escaped, but attacker-chosen text in the card's styling can forge status lines. |
+| S2 | The `ModuleNotFoundError` branch reported every internal import failure in a six-import block as a missing `server` extra — strictly less diagnostic than the message it replaced. |
+| S9 | The R3 fix silently stopped token stats honouring `request.model`, over-reporting CJK by 23% on every o200k model. |
+| S23 | The 64 KB scan window dropped a legitimate oversized payload entirely at a sharp cliff. A quoted-key fallback recovers it; a 5 MB response parses in under a millisecond. |
+| S24 | `goto` puts its URL in a positional argv slot, so `goto --help` exited 0 and printed help, which was reported as successful navigation. |
+
+### Test-quality items
+
+`tests/conftest.py` was **entirely commented out** — zero effective lines — so
+nothing isolated the environment, which is why two environment-dependent tests
+shipped in one week. It now points `HOME` at a scratch directory and clears
+twenty provider/config variables. (Environment only: a first version that also
+patched `Path.home` and `os.path.expanduser` broke 38 tests that set `HOME`
+themselves.) Three calibration tests used `assert not accumulator`, which
+passes when the loop never runs. `jsonl.py` calls its on-disk encoding a
+migration-sensitive contract and had zero tests on a line this branch had just
+changed; eleven now cover the LF terminator, UTF-8 without escaping, embedded
+newlines, CRLF and missing-trailing-newline reads, and every malformed shape.
+
+### End-to-end re-run on the remediated head
+
+`exec --json --yolo`, fizzbuzz + pytest self-test, `deepseek-v4-flash-0731`:
+
+| Measure | Result |
+|---|---|
+| exit code | 0 |
+| stdout | pure JSON — every line parsed; 5 turns, 5 tool calls |
+| event pairing | 1 `agent_start` / 1 `agent_end`; 5 balanced `turn_*`, `message_*`, `tool_execution_*` |
+| stderr | 580 bytes, all HTTP request logs — no diagnostics on stdout |
+| start context | **2,438** tokens (budget 30,000) |
+| peak context | 3,280 tokens |
+| cache rate | 72.4% overall; **86.4%** excluding the unavoidably cold first call |
+| correctness | the produced `fizzbuzz(15)` verified against an independent expected list — exact match |
+
+Usage is carried on `AgentMessage.usage` (nested under the event's `message`),
+not on the envelope of `turn_end`/`agent_end`. Worth stating because a consumer
+reading `event["usage"]` gets `None` and would reasonably conclude usage is
+never reported.
+
+## 10. TUI product feedback (2026-08-05) — and what building it exposed
+
+Four items came from using the TUI: no padding above the first transcript line,
+no command picker on `/`, no new-session view, and a status band carrying only
+the model. Built as three concurrent slices (picker, splash, band) against a
+fixed contract, then verified by hand.
+
+### Delivered
+
+| Item | Evidence |
+|---|---|
+| Top padding above the first line | `TranscriptView` is `padding: 1 1 0 1` — one row at the top only, so the first line of a turn is not flush against the terminal edge |
+| Slash picker with soft match | `/` lists all 15 commands; `/cmpct` → `compact`, `/qit` → `quit`, `/lg` → `login` + `logout`. One row per suggestion at 20/40/80/200 cells, `… N more` overflow row, Up/Down wrap, Tab completes without submitting, Enter completes then submits, Esc dismisses, mouse click and hover both select |
+| Centered new-session splash | Block-glyph lockup + letterspaced wordmark, version, model, cwd, credential warning, hint rows. Rendered by hand at 80x22, 40x22, 26x22, 13x22, 80x9, 80x5 and 80x2: no row ever exceeds the width, and the shed order is decoration → teaching → information with the credential warning surviving to the last row |
+| Rich status band | `π openrouter/deepseek-v4-flash-0731 · /private/tmp    0.2%/1.0M · $0.0005 · 2s` — provider/model, effort, cwd, subagent count, context usage as percent-of-window, cost, active duration, conversation name. Ten-step drop ladder pinned as an ORDER rather than per-width thresholds |
+
+Auto-naming already existed (`session/naming.py`, user-set titles never
+displaced by a generated one); the band consumes it.
+
+### A defect the live run exposed: aggregator model metadata was never resolved
+
+Driving the band against a real provider showed `128k` for a model with a 1M
+window, and `$—` where a cost belonged. Root cause: `model/registry.py` carries
+a PLACEHOLDER entry for aggregators (`context_window = -1`, zero prices)
+because OpenRouter alone routes hundreds of models. `configure_model` could
+read the real numbers from `list_models()`, but only when handed a
+`model_info_client` — and `session_factory` never handed it one. So every
+OpenRouter and Radient session ran on the fallbacks.
+
+Not cosmetic. The window feeds the compaction threshold:
+
+| | before | after |
+|---|---|---|
+| resolved window | 128,000 (fallback) | **1,048,576** (real) |
+| compaction fires at | ~102k | ~600k (the `min(0.8·window, 600k)` cap) |
+| input / output price | 0.0 / 0.0 → `$—` | $0.09/M, $0.18/M → `$0.0005` |
+| `supports_prompt_cache` | False (no `cache_control` emitted) | True |
+
+A 1M-context session was summarising history at a tenth of the window it could
+actually hold, on every long run, and models reached *through* OpenRouter that
+need explicit cache breakpoints silently never got them.
+
+Fixed with `model/catalogue.py`: a disk-cached catalogue (24h TTL, atomic
+write, `~/.local-operator/cache`) plus one shared `resolve_model_info` so the
+numbers a session runs on and the numbers a UI prices with cannot disagree —
+`_cost_for` in the TUI had been calling the static registry directly, which is
+why the band said "pricing unknown" for numbers the session had already
+resolved.
+
+Cost of the fix, measured: **418 ms** cold (one HTTP call), **26 ms** warm.
+Every failure mode degrades instead of raising, because none of them is a
+reason to refuse to start a session:
+
+| Situation | Result |
+|---|---|
+| fresh cache | used, no network |
+| stale cache + fetch fails | stale copy used — days-old numbers beat being wrong by 8x |
+| no cache + fetch fails | static fallback, no raise |
+| corrupt / half-written cache | treated as absent, refetched |
+| model absent from the catalogue | static fallback |
+| provider schema drift | static fallback |
+| **keyless install** | static fallback |
+| provider with a real registry entry (Anthropic) | catalogue never consulted — 0.0 ms, asserted |
+
+The keyless case is worth calling out: `OpenRouterClient` raises
+`RuntimeError` on an empty key *in its constructor*, and `RadientClient`
+requires a positional `base_url`. The first version of this got both wrong and
+turned a metadata optimisation into "the CLI will not start without a key". The
+pre-existing default-names tests caught it; two tests now pin it directly.
+
+### Verification
+
+- 1,737 unit tests pass, 3 skipped. `flake8`, `black --check` and `pyright`
+  clean across `local_operator/`.
+- Live TUI against OpenRouter: splash on boot, picker on a live session, a real
+  turn that called the `write` tool, `hello.txt` written with exactly
+  `live-tui-ok`, and the band reporting real usage, real cost and real duration.
+- Graceful failure observed for free when a bad session factory was passed:
+  `✗ session failed to start: …` in the transcript, `π session error` in the
+  band, and the picker still functional.
+
+### One reported non-issue, recorded so it is not "fixed" later
+
+A lone `▁` appears at the top right of a narrow frame. It is the vertical
+scrollbar's sub-cell end cap: at 60x20 the transcript holds 16 rows in a
+15-row viewport (the new top padding is real space), so a scrollbar is
+correct. Its full cells are painted as coloured spaces, which a plain-text
+dump cannot show — only the fractional cap has a glyph.

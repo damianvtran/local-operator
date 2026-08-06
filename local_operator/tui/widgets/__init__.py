@@ -11,6 +11,7 @@ this package share two invariants:
 """
 
 from local_operator.tui.widgets.assistant import AssistantBlock
+from local_operator.tui.widgets.command_picker import CommandPicker
 from local_operator.tui.widgets.editor import (
     Editor,
     EditorQuit,
@@ -28,6 +29,7 @@ from local_operator.tui.widgets.transcript import (
 
 __all__ = [
     "AssistantBlock",
+    "CommandPicker",
     "Editor",
     "EditorQuit",
     "EditorSubmitted",

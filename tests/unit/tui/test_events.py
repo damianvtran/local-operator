@@ -132,6 +132,17 @@ class FakeSession:
 
         return unsubscribe
 
+    @property
+    def conversation_name(self) -> str:
+        return getattr(self, "_name", "")
+
+    def set_conversation_name(self, text: str, *, user_set: bool = True) -> str:
+        self._name = (text or "").strip()
+        return self._name
+
+    async def complete_once(self, system: str, prompt: str) -> str:
+        return ""
+
     async def dispose(self) -> None:
         pass
 

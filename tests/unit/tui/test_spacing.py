@@ -266,9 +266,14 @@ async def test_expanding_a_card_gives_the_block_below_it_room() -> None:
 
 
 @pytest.mark.asyncio
-async def test_lifting_the_boot_hint_leaves_no_stranded_gap() -> None:
+async def test_removing_a_block_clears_the_gap_it_justified() -> None:
     """The block promoted to the top must not keep a gap decided against a
-    block that is no longer there."""
+    block that is no longer there.
+
+    The live caller is ``app.py`` retiring the streaming working block; the
+    D9 boot hint this test was originally written for no longer exists (the
+    welcome splash subsumed it), so it is named for the invariant instead.
+    """
     app = _Harness()
     async with app.run_test():
         view = app.query_one(TranscriptView)
