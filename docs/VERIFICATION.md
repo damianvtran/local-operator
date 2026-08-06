@@ -890,3 +890,38 @@ mixed scripts), not ~6x; `xai-oauth` is not `is_usable` at all with only
 | live `/usage openrouter` | `openrouter:spend 519.860777038 usd` |
 | live browser, two turns | `open` → `surface:110`, `read` reuses `surface:110` across a rebuilt `ToolContext`; stale `surface:99999` refused with the handle cleared; 0 surfaces left |
 | snapshot determinism | 20/20 clean |
+
+---
+
+## SSE streaming surface (commit 27cebcc)
+
+`GET /v1/sse/messages/{message_id}`, `GET /v1/sse/jobs/{job_id}`, and
+`GET /v1/sse/capabilities`, with the WebSocket left untouched as the fallback.
+All evidence below is live against a real agent turn on
+`openrouter/deepseek-v4-flash-0731`, served on port 1177.
+
+| Claim | Proof |
+|---|---|
+| End to end | 12 frames (text turn), 20 (tool turn); `stream.open` first, `stream.terminal` last, sequences contiguous 1..N |
+| Tool trace is truthful | `tool.start`/`tool.end` for `write` reported success and `sse-proof.txt` existed on disk |
+| Resume is exact | dropped after seq 3, reconnected `Last-Event-ID: 3`, continued at exactly seq 4, `resumed=true`, zero duplicate sequences |
+| Late attach recovers state | connecting after completion yielded a folded snapshot (3 records) carrying the answer, then closed on `stream.terminal` |
+| Fan-out is consistent | two concurrent listeners on one channel saw identical 12-frame sequences |
+| Transport parity | both transports on the same record channel delivered 9 frames each; 24 record keys, none missing, none extra; all 16 rendered fields identical |
+| Heartbeat | beats at 15.0s, 30.0s, 45.0s on an idle stream |
+
+Two defects found by this testing and fixed, not documented around: an
+unhashable `_Subscriber` that made every stream 500 on attach; and a finished
+record channel that never closed, so a late listener hung (a probe stalled for
+20 minutes before the fix). 37 unit tests in `tests/unit/server/test_sse.py`;
+three injected mutations each fail a specific test. Full suite 2394 passed,
+flake8/black/pyright clean.
+
+## Renderer transport (local-operator-ui, feat/sse-transport @ 4b763e99)
+
+`SseClient` over EventSource plus a `StreamingClient` selector; verified against
+the live backend above: probe selects `sse`, a real turn streams records
+carrying the answer and legacy socket keys then closes on `stream.terminal`, an
+SSE-less backend (404) falls back to the socket, and a stream that opens and
+dies falls back too. Storybook fixture (`Chat/SSE transport`) shows stream,
+drop-and-resume, and both fallbacks with no backend. Typecheck and biome clean.
