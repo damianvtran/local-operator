@@ -59,6 +59,7 @@ from .tokens import (
     estimate_messages_tokens,
     estimate_tokens,
     invalidate_message_cache,
+    messages_tokens_upper_bound,
     register_invalidator,
     truncate_to_tokens,
 )
@@ -87,6 +88,7 @@ __all__ = [
     "find_cut_point",
     "format_file_operations",
     "invalidate_message_cache",
+    "messages_tokens_upper_bound",
     "prepare_partitions",
     "prune_tool_outputs",
     "register_invalidator",

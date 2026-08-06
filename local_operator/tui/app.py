@@ -876,16 +876,29 @@ class OperatorApp(App[None]):
     def _cmd_usage(self, arg: str, notice: NoticeFn) -> None:
         """``/usage [provider]`` — fetch live quota for a provider (or all)."""
         if self._providers is None:
-            notice("run: local-operator usage (TUI lacks the provider facade)", "warning")
+            notice("provider controller unavailable — usage cannot be fetched", "warning")
             return
         target = arg.lower() if arg else ""
-        if target and not self._providers.provider(target):
-            # A usage-only provider (e.g. zai) has a quota fetcher but no
-            # registry login entry — accept it when usage_supported says so.
-            from local_operator.providers.usage import usage_supported
+        if target:
+            from local_operator.providers.usage import usage_kinds, usage_supported
 
-            if not usage_supported(target):
+            if self._providers.provider(target) is None and not usage_supported(target):
                 notice(f"unknown provider: {target}", "warning")
+                return
+            wants_oauth, wants_key = usage_kinds(target)
+            # "No endpoint" and "an endpoint you cannot reach" look identical in an
+            # empty table, and only the second is something a user can act on. Said
+            # up front rather than after a request that was always going to answer
+            # nothing.
+            if not wants_oauth and not wants_key:
+                notice(f"{target} publishes no usage or quota endpoint", "warning")
+                return
+            if not self._providers.is_usable(target):
+                need = "an API key" if wants_key else "an OAuth login"
+                notice(f"{target} needs {need} before it can report usage", "warning")
+                return
+            if wants_oauth and not wants_key and not self._providers.has_any_credential(target):
+                notice(f"{target} reports usage only after /login {target}", "warning")
                 return
         notice("fetching usage…")
         self.run_worker(self._fetch_usage_worker(target or None), thread=False, group="usage")

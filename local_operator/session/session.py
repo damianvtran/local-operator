@@ -826,10 +826,29 @@ class Session:
             pass  # optional pruning hook absent; degrade to no pruning
 
         # (2) Trigger math: prefer the provider's ground-truth context size.
-        local_estimate = compaction_api.estimate_messages_tokens(llm_history)
         provider_reported = (
             self._last_usage.context_tokens if self._last_usage is not None else None
         )
+
+        # Cheap proof first. ``should_compact`` is strictly monotonic in
+        # context_tokens and ``compaction_context_tokens`` is monotonic in the
+        # local estimate, so a rigorous UPPER bound that already fails the
+        # threshold test proves the exact estimate fails it too — same early
+        # return, same observable behaviour. This matters because the first
+        # exact estimate in a process loads tiktoken's cl100k_base table
+        # (~84 ms, ~43.6 MB RSS, measured with scripts/bench_base_overhead.py),
+        # and compaction runs on EVERY turn while the typical session never
+        # comes near its threshold — so every short run was buying a 43.6 MB
+        # tokenizer to be told "no".
+        bound = compaction_api.messages_tokens_upper_bound(llm_history)
+        if not compaction_api.should_compact(
+            compaction_api.compaction_context_tokens(provider_reported, bound),
+            self._model.context_window,
+            settings,
+        ):
+            return
+
+        local_estimate = compaction_api.estimate_messages_tokens(llm_history)
         context_tokens = compaction_api.compaction_context_tokens(provider_reported, local_estimate)
         if not compaction_api.should_compact(context_tokens, self._model.context_window, settings):
             return

@@ -209,7 +209,6 @@ def prune_tool_outputs(
         return list(messages), False
 
     idle = (now_ms - last_activity_ms) >= idle_flush_ms
-    suffix_tokens = compute_suffix_tokens(messages)
 
     # Pass (a): superseded reads. Walk newest-to-oldest; a seen key marks any
     # earlier result with the same key superseded, and a seen FULL read marks
@@ -251,6 +250,24 @@ def prune_tool_outputs(
         and not _is_pruned(message)
         and _is_useless(message)
     ]
+
+    # Suffix sums are computed HERE, after the candidate passes, and only when
+    # there is a candidate to judge. They are read by exactly one guard below
+    # (``suffix_tokens[i] > cache_warm_suffix_tokens``), and both passes above
+    # are pure structural walks that never look at a token count — so deferring
+    # is behaviour-identical: nothing has been mutated yet, and the sums are a
+    # pure function of ``messages``.
+    #
+    # It matters because the estimator is not cheap to reach. The first
+    # ``estimate_tokens`` call in a process loads tiktoken's cl100k_base BPE
+    # table, which costs ~84 ms and ~43.6 MB RSS (measured with
+    # scripts/bench_base_overhead.py) — 43% of the peak RSS of a no-op ``exec``
+    # run. Pruning runs every turn, while the common turn has NO prunable tool
+    # output at all (and a no-op run has no tool results whatsoever), so the
+    # old unconditional call made every session pay 43.6 MB to decide there was
+    # nothing to prune. Candidates present -> the guard needs real numbers and
+    # we pay honestly.
+    suffix_tokens = compute_suffix_tokens(messages) if (superseded or useless) else []
 
     changed = False
     for indices, notice in ((superseded, SUPERSEDED_NOTICE), (useless, USELESS_NOTICE)):

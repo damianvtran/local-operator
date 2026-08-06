@@ -25,17 +25,12 @@ import time
 from collections.abc import AsyncIterator, Mapping
 from typing import TYPE_CHECKING, Any, Optional
 
-import requests
 from pydantic import BaseModel, SecretStr
 
 from local_operator.harness.types import AbortSignal, ChatRequest, ModelSpec, StreamEvent
-from local_operator.paths import config_dir
-from local_operator.model.catalogue import (
-    DEFAULT_TTL_S,
-    LISTING_PROVIDERS,
-    cached_listing,
-)
+from local_operator.model.catalogue import DEFAULT_TTL_S
 from local_operator.model.registry import ModelInfo, get_model_info
+from local_operator.paths import config_dir
 
 logger = logging.getLogger("local_operator.model.configure")
 
@@ -152,14 +147,27 @@ class ModelConfiguration:
 
 
 def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = None) -> ModelSpec:
-    """Derive a harness ``ModelSpec`` from the legacy registry when known."""
+    """Derive a harness ``ModelSpec`` from the model's resolved metadata.
+
+    Resolution goes through :func:`resolve_model_info`, NOT ``get_model_info``.
+    They differ by exactly the enrichment: the bare registry lookup returns the
+    ``-1`` placeholder for any model it does not ship, which this function then
+    normalises to the 128k unknown default. That is how a 1M-context model ended up
+    running as a 128k one — the enrichment had already learned the real window and
+    the spec was built from a path that never saw it.
+
+    It matters because the spec IS what the session runs on: compaction thresholds
+    are derived from ``context_window``, so an under-reported window compacts a
+    conversation that had eight times the room, and an absent one disables
+    compaction until the provider rejects the request.
+    """
     from local_operator.providers.registry import get_provider_definition
 
     canonical = "test" if hosting == "noop" else hosting
     if info is None:
         try:
-            info = get_model_info(canonical, model_name)
-        except (ValueError, KeyError):  # legacy registry KeyErrors on unknown openai models
+            info = resolve_model_info(canonical, model_name)
+        except Exception:  # noqa: BLE001 - metadata is never worth a failed start
             info = None
 
     context_window = UNKNOWN_CONTEXT_WINDOW
@@ -268,6 +276,19 @@ def validate_model(hosting: str, model: str, api_key: SecretStr | str) -> bool:
     Same endpoints and semantics as the legacy chain; network errors raise
     ``requests.exceptions.RequestException`` (callers catch and report).
     """
+    # ``requests`` is imported HERE, not at module scope. This module is loaded
+    # by ``session_factory._prepare`` on every single session build, but the
+    # only thing in it that speaks to ``requests`` is this one interactive
+    # credential-validation call. Eagerly, requests costs 53.7 ms / +12.6 MB
+    # RSS / +228 modules in a bare interpreter, and even alongside the httpx
+    # stack the session already loads it still costs +5.8 ms / +2.9 MB / +127
+    # modules — paid by every ``exec`` run that never validates a key.
+    # Measured with scripts/bench_base_overhead.py; pinned by
+    # tests/unit/test_import_graph.py. Note the whole ``local_operator.clients``
+    # package still uses requests, so this defers the cost rather than removing
+    # it: any run that reaches a client pays it then.
+    import requests
+
     descriptor = VALIDATION_ENDPOINTS.get(hosting)
     if descriptor is None:
         return True
@@ -471,24 +492,20 @@ _PUBLIC_LISTING_TOKEN = "public-catalogue-read"
 
 
 def _catalogue_api_key(provider: str) -> str:
-    """A listing key for ``provider`` from the app's own stores, else "".
+    """An explicit API key for ``provider`` from env or the credential file, else "".
 
     Reading ONLY ``os.environ`` was a real defect rather than a shortcut: both
     sanctioned credential flows bypass the environment. ``local-operator
-    credential update OPENROUTER_API_KEY`` writes the ``CredentialManager``
-    file, and the TUI's ``/login`` writes the ``AuthStore``. So the users who
-    configured credentials the app's own way were exactly the ones this
-    enrichment silently skipped — their sessions streamed fine (the stream-time
-    cascade reads those stores) while their band showed a 128k window and no
-    cost, forever, with the failure recorded only at debug level. Every other
-    key reader in the repo goes through ``CredentialManager``; this one was the
-    outlier.
+    credential update OPENROUTER_API_KEY`` writes the ``CredentialManager`` file,
+    and the TUI's ``/login`` writes the ``AuthStore``. So the users who configured
+    credentials the app's own way were exactly the ones this enrichment silently
+    skipped — their sessions streamed fine (the stream-time cascade reads those
+    stores) while their band showed a 128k window and no cost, forever, with the
+    failure recorded only at debug level. Every other key reader in the repo goes
+    through ``CredentialManager``; this one was the outlier.
 
-    The ``AuthStore`` cascade is deliberately NOT consulted: its accessor is
-    async and this runs inside a synchronous render path, so awaiting it would
-    mean either a nested event loop or making the whole resolver async for a
-    value the public endpoint does not require. An OAuth-only user is covered by
-    :data:`_PUBLIC_LISTING_TOKEN` instead.
+    The OAuth store is NOT read here — see :func:`_catalogue_credential`, which
+    layers it underneath this and reports which kind of secret it found.
     """
     from local_operator.providers.registry import get_provider_definition
 
@@ -513,92 +530,110 @@ def _catalogue_api_key(provider: str) -> str:
     return ""
 
 
-def _catalogue_source(provider: str) -> tuple[Any, type[Any]] | None:
-    """``(client, response_model)`` for ``provider``, or None if unavailable.
+def _catalogue_credential(provider: str) -> tuple[str, bool]:
+    """``(secret, is_oauth)`` for a listing call, preferring an explicit key.
 
-    The response model comes back alongside the client because the cache stores
-    the raw payload: something has to re-validate the dict into the shape
-    ``_info_from_listing`` reads, and only the caller knows which shape.
+    The flag matters and is not cosmetic: Anthropic authenticates an API key with
+    ``x-api-key`` and an OAuth token with ``Authorization: Bearer``, so sending the
+    wrong header shape is a 401 and therefore a model that cannot be described.
 
-    Returns None rather than raising when a client cannot be built, because
-    enriching the catalogue is always optional and a metadata optimisation must
-    never become "the CLI will not start".
-
-    Imports are local: the client modules pull in provider response models that
-    must stay out of the startup graph.
+    Order is env, then the credential file, then the OAuth store — an explicit
+    variable is the operator overriding config for one run, which is the same
+    precedence every other key reader in the repo uses.
     """
-    from pydantic import SecretStr
-
-    try:
-        key = SecretStr(_catalogue_api_key(provider) or _PUBLIC_LISTING_TOKEN)
-        if provider == "openrouter":
-            from local_operator.clients.openrouter import (
-                OpenRouterClient,
-                OpenRouterListModelsResponse,
-            )
-
-            return OpenRouterClient(api_key=key), OpenRouterListModelsResponse
-        if provider == "radient":
-            from local_operator.clients.radient import (
-                RadientClient,
-                RadientListModelsResponse,
-            )
-            from local_operator.env import get_env_config
-
-            base_url = get_env_config().radient_api_base_url or "https://api.radienthq.com/v1"
-            return RadientClient(key, base_url), RadientListModelsResponse
-    except Exception as exc:  # noqa: BLE001 - a missing key or import is not fatal
-        logger.debug("no %s catalogue client: %s", provider, exc)
-        return None
-    return None
+    key = _catalogue_api_key(provider)
+    if key:
+        return key, False
+    return _oauth_listing_token(provider)
 
 
-def _info_from_catalogue(provider: str, model_name: str, fallback: ModelInfo) -> ModelInfo:
-    """Describe ``model_name`` from the cached catalogue, else ``fallback``.
+def _oauth_listing_token(provider: str) -> tuple[str, bool]:
+    """The newest stored token for ``provider``, or ``("", False)``.
 
-    Never raises. A missing model, an unreachable listing, a malformed cache
-    and provider schema drift all degrade to the caller's static fallback,
-    because none of them is a reason to refuse to start a session.
+    Best-effort by construction: an unreadable store, a missing table or a row
+    without a token all mean "no listing", never an exception. Opened and closed
+    per call because this is reached only when the registry could not describe a
+    model, which is once per model id per TTL bucket per process.
     """
-    source = _catalogue_source(provider)
-    if source is None:
-        return fallback
-    client, response_model = source
-
-    payload = cached_listing(provider, lambda: client.list_models().model_dump())
-    if payload is None:
-        return fallback
-
+    store = None
     try:
-        listing = response_model.model_validate(payload)
-    except Exception:  # noqa: BLE001 - schema drift must not break startup
-        logger.debug("%s catalogue payload did not validate; using static fallback", provider)
-        return fallback
+        from local_operator.providers.auth_store import AuthStore
+        from local_operator.providers.registry import get_provider_definition
+
+        definition = get_provider_definition(provider)
+        storage = (definition.store_credentials_as or provider) if definition else provider
+        store = AuthStore()
+        rows = store.list_credentials(provider=storage)
+        for row in reversed(rows):
+            token = str(row.data.get("access") or "")
+            if token:
+                return token, row.credential_type == "oauth"
+    except Exception as exc:  # noqa: BLE001 - metadata is never worth a failed start
+        logger.debug("could not read a stored %s token for the listing: %s", provider, exc)
+    finally:
+        if store is not None:
+            try:
+                store.close()
+            except Exception:  # noqa: BLE001 - closing a broken handle is not fatal
+                pass
+    return "", False
+
+
+def _info_from_discovery(provider: str, model_name: str, fallback: ModelInfo) -> ModelInfo:
+    """Fill ``fallback``'s gaps from the provider's own live model listing.
+
+    Never raises, and never returns worse data than it was given: every field is
+    taken only when the listing actually has it. ``local_operator.model.discovery``
+    has already merged the listing over the static registry and applied the rules
+    that make a listing trustworthy — a zero price is unknown rather than free, a
+    ``max_tokens`` of exactly 4096 is a lying OpenAI-compat default, capabilities
+    are OR-ed so a terse listing cannot downgrade a model — so this function is
+    only the projection of that answer onto the legacy ``ModelInfo`` shape.
+
+    Imported lazily. The discovery module pulls httpx and the provider registry,
+    and this branch is only reached for a model the registry does not describe;
+    putting that on the import path would cost every CLI invocation.
+    """
     try:
-        return _info_from_listing(listing, model_name, fallback, provider)
-    except _UnmappableEntry as exc:
-        # The provider's document validated but this entry cannot be read. WARN,
-        # because unlike a missing model this is upstream data the operator may
-        # want to hear about: the session runs on fallback numbers, which means
-        # the wrong context window and the wrong cost.
-        #
-        # The document is deliberately NOT purged. An earlier revision dropped it
-        # here, reasoning that a payload which cannot be mapped should not be
-        # served for the whole TTL — but the failure is scoped to the ONE entry
-        # whose id matched, out of a listing that routinely carries several
-        # hundred. Purging threw away metadata that was correct for all of them,
-        # and since the upstream document is unchanged the refetch re-poisons the
-        # cache immediately, so the only lasting effect was an extra HTTP call per
-        # process start plus a refetch for every other model. Falling back for the
-        # one bad entry costs nothing and keeps the rest of the catalogue.
-        logger.warning("%s catalogue: %s; using static model metadata", provider, exc)
+        from local_operator.model.discovery import available_models
+
+        secret, is_oauth = _catalogue_credential(provider)
+        rows, status = available_models(
+            provider,
+            api_key=secret or None,
+            is_oauth=is_oauth,
+        )
+    except Exception as exc:  # noqa: BLE001 — metadata is never worth a failed start
+        logger.debug("%s discovery unavailable for %s: %s", provider, model_name, exc)
         return fallback
-    except ValueError:
-        # Not in the catalogue: a brand-new id, or a typo the provider will
-        # reject anyway. The static fallback is the honest answer, and this one is
-        # routine enough to stay at debug.
-        logger.debug("%s catalogue has no entry for %s", provider, model_name)
+
+    row = next((candidate for candidate in rows if candidate.id == model_name), None)
+    if row is None:
+        logger.debug("%s listing (%s) has no entry for %s", provider, status, model_name)
         return fallback
+
+    info = fallback.model_copy(deep=True)
+    info.id = row.id
+    info.name = row.name or info.name or row.id
+    if row.context_window > 0:
+        info.context_window = row.context_window
+    if row.max_tokens > 0:
+        info.max_tokens = row.max_tokens
+    if row.input_price > 0:
+        info.input_price = row.input_price
+    if row.output_price > 0:
+        info.output_price = row.output_price
+    if row.cache_read_price > 0:
+        info.cache_reads_price = row.cache_read_price
+        # A quoted cache-READ price is the only signal some providers give that
+        # prompt caching exists at all; the write price is often absent because the
+        # caching is implicit. Falling back to the input price keeps cost estimates
+        # from reading as free rather than inventing a number.
+        if not info.cache_writes_price:
+            info.cache_writes_price = info.input_price
+    info.supports_images = info.supports_images or row.supports_images
+    info.supports_prompt_cache = info.supports_prompt_cache or row.supports_prompt_cache
+    return info
 
 
 @functools.lru_cache(maxsize=64)
@@ -618,8 +653,19 @@ def _resolve_model_info_cached(provider: str, model_id: str, _bucket: int) -> Mo
         info = get_model_info(canonical, model_id)
     except (ValueError, KeyError):
         info = ModelInfo(id=model_id, name=model_id, description="Unknown model")
-    if canonical in LISTING_PROVIDERS and not _has_real_window(info):
-        info = _info_from_catalogue(canonical, model_id, info)
+    if not _has_real_window(info):
+        # EVERY provider, not just the aggregators. The gate used to be
+        # `canonical in LISTING_PROVIDERS`, which left a hole that the model picker
+        # turned into a routine path: the picker offers whatever a provider's live
+        # listing returns, so a user can now select `anthropic/claude-opus-5` — a
+        # real model, absent from the shipped registry — and the session would run
+        # with `context_window = -1`. Compaction thresholds derive from the window,
+        # so that is not a cosmetic gap: compaction silently never fires and the
+        # turn eventually 400s on the provider's real limit.
+        #
+        # Only reached when the registry has no window, so a shipped model costs
+        # nothing: no HTTP call, no cache read, no listing scan.
+        info = _info_from_discovery(canonical, model_id, info)
     return info
 
 

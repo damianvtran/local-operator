@@ -241,7 +241,13 @@ class ProviderController:
         malformed provider never aborts the others."""
         targets = provider_ids or []
         if not targets:
-            targets = [p for p in self.usage_enabled_providers() if self.has_any_credential(p)]
+            # `is_usable`, not `has_any_credential`. The narrow check sees only the
+            # AuthStore, so a user whose only credential was `OPENROUTER_API_KEY` in
+            # the environment got three different answers from three surfaces:
+            # `/provider` said openrouter reports quota, bare `/usage` returned
+            # nothing, and `/usage openrouter` produced a correct report — because
+            # the per-provider fetch resolves the env tier and this filter did not.
+            targets = [p for p in self.usage_enabled_providers() if self.is_usable(p)]
         # De-duplicate aliases that share a storage id (openai vs
         # openai-device; xai vs xai-oauth) so one request/one report per row.
         targets = self._dedupe_targets(targets)
@@ -375,28 +381,40 @@ class ProviderController:
         if not usage_supported(provider):
             return None
         access = await self.auth_store.get_oauth_access(provider)
-        if access is not None and access.kind == "oauth":
-            # An OAuth subscription token — the endpoint wants the access
-            # token, not a billing API key.
-            return await fetch_usage(
-                client,
-                provider,
-                access_token=access.access_token,
-                account_id=access.account_id,
-            )
+        access_token: str | None = None
         api_key: str | None = None
-        # Fall back to the API-key cascade (covers both a stored/pasted key
-        # and the environment tier resolved for api-key providers).
-        if access is not None and access.access_token:
+        account_id: str | None = None
+        if access is not None and access.kind == "oauth":
+            access_token = access.access_token
+            account_id = access.account_id
+        elif access is not None and access.access_token:
             api_key = access.access_token
-        else:
+        if api_key is None:
             try:
                 api_key = await self.auth_store.get_api_key(provider)
             except Exception:  # noqa: BLE001 — a refresh failure is not fatal here
                 api_key = None
-        if not api_key:
+        if not access_token and not api_key:
             return None
-        return await fetch_usage(client, provider, api_key=api_key)
+        # BOTH are handed over, and the dispatcher picks the route each can reach.
+        # Passing only one was how the API-key half of a dual-route provider became
+        # unreachable: an OAuth token for Kimi went to the coding-plan endpoint, but
+        # an API key went nowhere at all because this function had already decided
+        # the request was an OAuth one.
+        report = await fetch_usage(
+            client,
+            provider,
+            api_key=api_key,
+            access_token=access_token,
+            account_id=account_id,
+        )
+        if report is not None and not report.identity and access is not None:
+            # Whose account this is. The field existed and no fetcher ever set it, so
+            # the TUI's annotation for it was unreachable — and it matters most
+            # exactly where usage does: an operator with two accounts on one provider
+            # needs to know which one the numbers describe.
+            report.identity = getattr(access, "email", None) or access.account_id
+        return report
 
 
 def _price(value: float | None, definition: ProviderDefinition) -> float:

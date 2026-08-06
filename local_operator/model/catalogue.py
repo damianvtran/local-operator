@@ -61,10 +61,6 @@ logger = logging.getLogger("local_operator.model.catalogue")
 #: a week would hide a genuinely new model for too long.
 DEFAULT_TTL_S = 24 * 60 * 60
 
-#: Providers whose static registry entry is a placeholder, so the listing is
-#: the ONLY source of their real windows and prices.
-LISTING_PROVIDERS = frozenset({"openrouter", "radient"})
-
 
 def default_cache_dir() -> Path:
     """Same cache root the skills index uses, so there is one place to clear."""

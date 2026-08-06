@@ -124,25 +124,54 @@ def test_an_unwritable_cache_dir_still_returns_the_payload(tmp_path, monkeypatch
 
 
 # -- integration with configure_model ---------------------------------------
+#
+# The enrichment seam is `local_operator.model.discovery.available_models`, which
+# these tests stub. It replaced a per-provider client factory that only ever ran
+# for the two aggregators, and that narrowness was a real hole: the model picker
+# offers whatever a provider's live listing returns, so a user could select a real
+# model absent from the shipped registry — `anthropic/claude-opus-5` — and the
+# session would run with `context_window = -1`, which silently disables compaction.
 
 
-def test_configure_model_takes_the_window_from_the_catalogue(monkeypatch, tmp_path) -> None:
-    """The defect this module exists for: an aggregator's real window reaching
-    the ModelSpec instead of the 128k placeholder."""
-    from local_operator.clients.openrouter import OpenRouterListModelsResponse
+def _row(model_id: str, **kwargs):
+    """One `DiscoveredModel`, defaulting to the shape a real listing returns."""
+    from local_operator.model.discovery import DiscoveredModel
+
+    fields = {
+        "id": model_id,
+        "context_window": 1_000_000,
+        "input_price": 0.1,
+        "output_price": 0.2,
+    }
+    fields.update(kwargs)
+    return DiscoveredModel(**fields)
+
+
+def _bare_info(model_id: str):
+    """A registry entry that knows nothing — the state enrichment exists to fix."""
+    from local_operator.model.registry import ModelInfo
+
+    return ModelInfo(id=model_id, name=model_id, description="", context_window=-1)
+
+
+def _stub_discovery(monkeypatch, rows, status: str = "ok"):
+    """Point `_info_from_discovery` at a canned listing."""
+    from local_operator.model import discovery as discovery_mod
+
+    def fake(provider_id, **_kwargs):
+        if callable(rows):
+            return rows(provider_id), status
+        return list(rows), status
+
+    monkeypatch.setattr(discovery_mod, "available_models", fake)
+
+
+def test_configure_model_takes_the_window_from_the_listing(monkeypatch, tmp_path) -> None:
+    """The defect this module exists for: a model's real window reaching the
+    ModelSpec instead of the 128k placeholder."""
     from local_operator.model import configure as configure_mod
 
-    class FakeClient:
-        def list_models(self):
-            return OpenRouterListModelsResponse.model_validate(
-                _payload("vendor/big", window=1_000_000)
-            )
-
-    monkeypatch.setattr(
-        configure_mod,
-        "_catalogue_source",
-        lambda _p: (FakeClient(), OpenRouterListModelsResponse),
-    )
+    _stub_discovery(monkeypatch, [_row("vendor/big")])
     monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
 
     config = configure_mod.configure_model(hosting="openrouter", model_name="vendor/big")
@@ -151,70 +180,80 @@ def test_configure_model_takes_the_window_from_the_catalogue(monkeypatch, tmp_pa
     assert config.info.output_price == pytest.approx(0.2)
 
 
-@pytest.mark.parametrize(
-    "break_it",
-    ["client-raises", "no-such-model", "payload-drift"],
-)
-def test_configure_model_never_fails_on_a_bad_catalogue(
-    monkeypatch, tmp_path, break_it: str
-) -> None:
-    """Every catalogue failure mode degrades to the static fallback. A session
-    MUST start with no network, an unknown model id, or a drifted schema."""
-    from local_operator.clients.openrouter import OpenRouterListModelsResponse
+def test_a_direct_provider_is_enriched_too_not_just_the_aggregators(monkeypatch, tmp_path) -> None:
+    """The hole the model picker turned into a routine path. `claude-opus-5` is a
+    real Anthropic model that the shipped registry does not describe; enriching only
+    openrouter/radient left it at `context_window = -1`, and compaction thresholds
+    are derived from that number."""
     from local_operator.model import configure as configure_mod
+
+    _stub_discovery(monkeypatch, [_row("claude-opus-5", context_window=500_000)])
+    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+
+    config = configure_mod.configure_model(hosting="anthropic", model_name="claude-opus-5")
+    assert config.spec.context_window == 500_000
+
+
+@pytest.mark.parametrize("break_it", ["discovery-raises", "no-such-model", "empty-listing"])
+def test_configure_model_never_fails_on_a_bad_listing(monkeypatch, tmp_path, break_it: str) -> None:
+    """Every listing failure mode degrades to the static fallback. A session MUST
+    start with no network, an unknown model id, or an empty answer."""
+    from local_operator.model import configure as configure_mod
+    from local_operator.model import discovery as discovery_mod
     from local_operator.model.configure import UNKNOWN_CONTEXT_WINDOW
 
-    class FakeClient:
-        def list_models(self):
-            if break_it == "client-raises":
-                raise RuntimeError("no network")
-            if break_it == "payload-drift":
-                return OpenRouterListModelsResponse.model_validate({"data": []})
-            return OpenRouterListModelsResponse.model_validate(_payload("other/model"))
+    if break_it == "discovery-raises":
 
-    monkeypatch.setattr(
-        configure_mod,
-        "_catalogue_source",
-        lambda _p: (FakeClient(), OpenRouterListModelsResponse),
-    )
+        def fake(provider_id, **_kwargs):
+            raise RuntimeError("no network")
+
+        monkeypatch.setattr(discovery_mod, "available_models", fake)
+    elif break_it == "no-such-model":
+        _stub_discovery(monkeypatch, [_row("other/model")])
+    else:
+        _stub_discovery(monkeypatch, [], status="empty")
     monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
 
     config = configure_mod.configure_model(hosting="openrouter", model_name="vendor/asked-for")
     assert config.spec.context_window == UNKNOWN_CONTEXT_WINDOW
 
 
-def test_a_provider_with_a_real_static_entry_never_consults_the_catalogue(monkeypatch) -> None:
-    """The catalogue is for placeholder entries only. Anthropic's window is in
-    the registry, so touching the network for it would add latency to every
-    session start for nothing."""
+def test_a_model_with_a_real_static_entry_never_consults_a_listing(monkeypatch) -> None:
+    """Enrichment is for gaps only. Anthropic's Sonnet window is in the registry, so
+    touching the network for it would add latency to every session start for
+    nothing."""
     from local_operator.model import configure as configure_mod
+    from local_operator.model import discovery as discovery_mod
 
-    def explode(_provider):
-        raise AssertionError("the catalogue must not be consulted for anthropic")
+    def explode(*_args, **_kwargs):
+        raise AssertionError("a known model must not trigger discovery")
 
-    monkeypatch.setattr(configure_mod, "_catalogue_source", explode)
+    monkeypatch.setattr(discovery_mod, "available_models", explode)
     config = configure_mod.configure_model(
         hosting="anthropic", model_name="claude-sonnet-4-20250514"
     )
     assert config.spec.context_window == 200_000
 
 
-@pytest.mark.parametrize("provider", ["openrouter", "radient"])
-def test_a_keyless_install_does_not_raise_building_a_client(monkeypatch, provider: str) -> None:
-    """`OpenRouterClient` raises RuntimeError on an empty key IN ITS
-    CONSTRUCTOR, and `RadientClient` requires a base_url. The first version of
-    the catalogue got both wrong and turned a metadata optimisation into "the
-    CLI will not start without a key" — caught by the existing default-names
-    tests, which is exactly the failure this pins.
+@pytest.mark.parametrize("provider", ["openrouter", "radient", "anthropic", "ollama"])
+def test_a_keyless_install_never_raises_resolving_metadata(monkeypatch, provider: str) -> None:
+    """A metadata optimisation must never become "the CLI will not start".
+
+    The first version of this got it wrong in the client constructors —
+    `OpenRouterClient` raises on an empty key and `RadientClient` needs a base_url —
+    and turned a missing key into a failed start. The transports moved into
+    `discovery`, which is contractually non-raising, so what is pinned here is the
+    END of the chain: no key anywhere, no exception, and a usable answer.
     """
     from local_operator.model import configure as configure_mod
+    from local_operator.model.registry import ModelInfo
 
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.delenv("RADIENT_API_KEY", raising=False)
+    for name in ("OPENROUTER_API_KEY", "RADIENT_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
 
-    # Must answer, not raise: None (no client) or a usable (client, model) pair.
-    source = configure_mod._catalogue_source(provider)
-    assert source is None or len(source) == 2
+    fallback = ModelInfo(id="x", name="x", description="")
+    info = configure_mod._info_from_discovery(provider, "no-such-model", fallback)
+    assert info is fallback, "an absent model must hand back the caller's fallback"
 
 
 @pytest.mark.parametrize(
@@ -382,7 +421,6 @@ def test_the_key_is_read_from_the_apps_own_credential_store(tmp_path, monkeypatc
     CredentialManager(tmp_path).set_credential("OPENROUTER_API_KEY", "sk-or-store-value")
 
     assert configure_mod._catalogue_api_key("openrouter") == "sk-or-store-value"
-    assert configure_mod._catalogue_source("openrouter") is not None
 
 
 def test_an_env_var_takes_precedence_over_the_stored_credential(tmp_path, monkeypatch) -> None:
@@ -397,19 +435,20 @@ def test_an_env_var_takes_precedence_over_the_stored_credential(tmp_path, monkey
     assert configure_mod._catalogue_api_key("openrouter") == "sk-or-env-value"
 
 
-def test_no_key_anywhere_still_builds_a_client(tmp_path, monkeypatch) -> None:
-    """The listing endpoints are PUBLIC catalogue data — `GET /api/v1/models`
-    answers 200 with no Authorization header at all. The clients still refuse an
-    empty key, so a placeholder token is what lets a keyless or OAuth-only
-    install learn its real context window instead of silently keeping 128k.
-    """
+def test_no_key_anywhere_still_resolves(tmp_path, monkeypatch) -> None:
+    """The aggregators' listing endpoints are PUBLIC catalogue data — `GET
+    /api/v1/models` answers 200 with no Authorization header at all — so a keyless
+    or OAuth-only install must still be able to learn a real context window instead
+    of silently keeping 128k."""
     from local_operator.model import configure as configure_mod
 
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
 
     assert configure_mod._catalogue_api_key("openrouter") == ""
-    assert configure_mod._catalogue_source("openrouter") is not None
+    _stub_discovery(monkeypatch, [_row("vendor/big", context_window=777_000)])
+    info = configure_mod._info_from_discovery("openrouter", "vendor/big", _bare_info("vendor/big"))
+    assert info.context_window == 777_000
 
 
 # -- schema drift that validates but cannot be mapped (S2) -------------------
@@ -443,18 +482,24 @@ def _drifted_payload() -> dict:
         (float("inf"), "OverflowError"),
     ],
 )
-def test_a_payload_that_validates_but_cannot_map_does_not_raise(
-    tmp_path, monkeypatch, bad_window, raised_by_python
+def test_a_payload_that_validates_but_cannot_map_is_reported_not_raised(
+    bad_window, raised_by_python: str
 ) -> None:
     """Validation is NOT a guarantee that the mapping will succeed. The listing
     schemas set ``extra="allow"``, so a wrong-shaped extra validates cleanly and
-    then raises inside the conversions, failing session start outright.
+    then raises inside the conversions.
 
-    All four shapes are parametrized because they raise three DIFFERENT
-    exceptions and each was a separate hole: catching ValueError alone let the
-    dict through, and adding TypeError still left ``Infinity`` — which
-    ``json.loads`` accepts as a bare literal and ``int()`` then rejects with
-    OverflowError, a subclass of neither.
+    All four shapes are parametrized because they raise three DIFFERENT exceptions
+    and each was a separate hole: catching ValueError alone let the dict through,
+    and adding TypeError still left ``Infinity`` — which ``json.loads`` accepts as
+    a bare literal and ``int()`` then rejects with OverflowError, a subclass of
+    neither.
+
+    Asserted against ``_info_from_listing`` itself, which is where the rule lives
+    and which is still reached by the injected-client path
+    (``get_model_info_from_openrouter``). It raises ``_UnmappableEntry`` — a
+    ValueError subclass, so every existing caller's ``except ValueError`` still
+    holds — rather than letting the raw conversion error escape.
     """
     from local_operator.clients.openrouter import OpenRouterListModelsResponse
     from local_operator.model.registry import ModelInfo
@@ -462,65 +507,32 @@ def test_a_payload_that_validates_but_cannot_map_does_not_raise(
     payload = _drifted_payload()
     payload["data"][0]["context_length"] = bad_window
     # The premise of the finding: pydantic accepts it.
-    assert OpenRouterListModelsResponse.model_validate(payload) is not None
+    listing = OpenRouterListModelsResponse.model_validate(payload)
 
-    class FakeClient:
-        def list_models(self):
-            return OpenRouterListModelsResponse.model_validate(payload)
-
-    monkeypatch.setattr(
-        configure_mod,
-        "_catalogue_source",
-        lambda _p: (FakeClient(), OpenRouterListModelsResponse),
-    )
-    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
-
-    fallback = ModelInfo(id="v/m", name="v/m", description="")
-    assert configure_mod._info_from_catalogue("openrouter", "v/m", fallback) is fallback
-    # And the whole call still returns a usable configuration.
-    config = configure_mod.configure_model(hosting="openrouter", model_name="v/m")
-    assert config.spec.context_window == configure_mod.UNKNOWN_CONTEXT_WINDOW
+    template = ModelInfo(id="v/m", name="v/m", description="")
+    with pytest.raises(configure_mod._UnmappableEntry):
+        configure_mod._info_from_listing(listing, "v/m", template, "openrouter")
+    # A ValueError subclass on purpose: callers outside this module catch that.
+    with pytest.raises(ValueError):
+        configure_mod._info_from_listing(listing, "v/m", template, "openrouter")
 
 
-def test_one_unmappable_entry_keeps_the_rest_of_the_catalogue(tmp_path, monkeypatch) -> None:
-    """A bad entry is not a bad document.
-
-    An earlier revision purged the whole cache file here, reasoning that a
-    payload which cannot be mapped should not be served for the TTL. But the
-    conversions only ever run for the ONE model whose id matched, out of a listing
-    that carries several hundred: purging discarded metadata that was correct for
-    all the others, and since the upstream document is unchanged the refetch
-    re-poisons the cache immediately. The lasting effect was an extra HTTP call
-    per start plus a refetch for every other model.
-    """
+def test_a_bad_entry_does_not_stop_a_good_one_being_mapped() -> None:
+    """A bad entry is not a bad document. The conversions only ever run for the ONE
+    model whose id matched, out of a listing that carries several hundred, so a
+    single unreadable row must not cost the other 339 their metadata."""
     from local_operator.clients.openrouter import OpenRouterListModelsResponse
     from local_operator.model.registry import ModelInfo
 
     bad = _drifted_payload()["data"][0]
     good = _payload(model_id="good/model", window=999_000)["data"][0]
-    fetches: list[int] = []
+    listing = OpenRouterListModelsResponse.model_validate({"data": [good, bad]})
+    template = ModelInfo(id="t", name="t", description="")
 
-    class FakeClient:
-        def list_models(self):
-            fetches.append(1)
-            return OpenRouterListModelsResponse.model_validate({"data": [good, bad]})
-
-    monkeypatch.setattr(
-        configure_mod,
-        "_catalogue_source",
-        lambda _p: (FakeClient(), OpenRouterListModelsResponse),
-    )
-    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
-    template = ModelInfo(id="v", name="v", description="")
-
-    # The bad entry falls back without taking the document with it.
-    assert configure_mod._info_from_catalogue("openrouter", bad["id"], template) is template
-    assert (tmp_path / "openrouter.models.json").exists(), "one bad entry purged the whole cache"
-
-    # So the good entry still resolves from cache — no second fetch.
-    resolved = configure_mod._info_from_catalogue("openrouter", "good/model", template)
+    resolved = configure_mod._info_from_listing(listing, "good/model", template, "openrouter")
     assert resolved.context_window == 999_000
-    assert len(fetches) == 1, "the good entry had to be refetched"
+    with pytest.raises(ValueError):
+        configure_mod._info_from_listing(listing, bad["id"], template, "openrouter")
 
 
 def test_invalidate_is_safe_when_there_is_no_cache(tmp_path) -> None:
@@ -565,3 +577,37 @@ def test_concurrent_writers_never_produce_a_corrupt_cache(tmp_path) -> None:
 
     assert errors == [], f"readers observed a corrupt document: {errors[:3]}"
     assert not list(tmp_path.glob("*.tmp")), "temp files leaked"
+
+
+def test_the_spec_carries_the_enriched_window_not_the_placeholder(monkeypatch, tmp_path) -> None:
+    """`build_model_spec` must resolve through the ENRICHED path.
+
+    It used to call `get_model_info` directly, which returns the `-1` placeholder
+    for any model it does not ship; the spec then normalised that to the 128k
+    unknown default. So a 1M-context model ran as a 128k one even though the
+    enrichment had already learned its real window — and the spec is what the
+    session runs on, so compaction sized itself off the wrong number and threw away
+    eight times the room it had.
+    """
+    from local_operator.model import configure as configure_mod
+
+    _stub_discovery(monkeypatch, [_row("vendor/huge", context_window=1_000_000, max_tokens=65_536)])
+    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+
+    spec = configure_mod.build_model_spec("openrouter", "vendor/huge")
+    assert spec.context_window == 1_000_000, "the placeholder path was taken"
+    assert spec.max_output_tokens == 65_536
+
+
+def test_the_spec_still_prefers_a_real_registry_entry(monkeypatch) -> None:
+    """A shipped model must not pay for a listing call, and must keep its own
+    numbers rather than a listing's."""
+    from local_operator.model import configure as configure_mod
+    from local_operator.model import discovery as discovery_mod
+
+    def explode(*_args, **_kwargs):
+        raise AssertionError("a known model must not trigger discovery")
+
+    monkeypatch.setattr(discovery_mod, "available_models", explode)
+    spec = configure_mod.build_model_spec("anthropic", "claude-sonnet-4-20250514")
+    assert spec.context_window == 200_000

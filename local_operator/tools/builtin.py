@@ -1608,36 +1608,158 @@ def build_read_variable_tool() -> AgentTool:
 
 
 # ---------------------------------------------------------------------------
-# browser — detect and drive the CMUX browser (open / goto / screenshot)
+# browser — detect and drive the CMUX browser
 # ---------------------------------------------------------------------------
+
+#: Every action the tool accepts. One tuple so the schema text, the dispatch
+#: guard and the tests cannot drift apart.
+BROWSER_ACTIONS = (
+    "open",
+    "goto",
+    "read",
+    "snapshot",
+    "screenshot",
+    "click",
+    "type",
+    "close",
+)
+
+#: Page text is model input, so it rides the same ceiling as command output
+#: rather than a bespoke one — a single-page app whose body is megabytes would
+#: otherwise spend the whole context window in one tool call.
+BROWSER_TEXT_LIMIT_CHARS = BASH_OUTPUT_LIMIT_CHARS
+
+#: How long a navigation gets to prove it actually happened, and how often we
+#: ask. Each poll is two cmux round trips (~0.3 s measured on macOS), so the
+#: interval is mostly a floor on how hard a slow page hammers the socket.
+BROWSER_NAV_TIMEOUT_S = 20.0
+BROWSER_NAV_POLL_S = 0.25
+
+#: How long a click gets to START a navigation before we conclude it did not.
+#: Measured: cmux's own URL flips within the first poll after a link click, so
+#: this is a wide margin. It is also a floor on the latency of a click that
+#: does NOT navigate, which is why it is not larger.
+BROWSER_CLICK_GRACE_S = 1.5
+
+#: The eight bytes every PNG starts with. Checked because cmux exits 0 after
+#: writing a file it never finished painting into.
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+#: One eval per poll instead of three ``get`` calls: each cmux invocation is a
+#: process spawn plus a socket round trip (~150 ms measured), and the three
+#: values only mean something if they describe the SAME instant.
+_DOC_PROBE_JS = "JSON.stringify([document.readyState, location.href, document.title])"
+
+#: Marker property used to notice that a click replaced the document WITHOUT
+#: changing the URL — which is exactly what a form POST to the same path does.
+#: A fresh document does not carry it, so its disappearance is the signal.
+_NAV_TOKEN_SET_JS = "window.__lo_nav = 1; 'ok'"
+_NAV_TOKEN_GET_JS = "String(window.__lo_nav || 0)"
+
+
+def _dom_text_js(selector: str) -> str:
+    """Script that extracts text from the DOM without needing layout.
+
+    ``cmux get text`` is ``innerText``, which is defined in terms of RENDERED
+    text: a browser surface sitting in a background tab may never lay out, and
+    then a page full of content reads as the empty string. Verified on this
+    host against a DuckDuckGo results page — both ``get text --selector body``
+    and ``document.body.innerText`` returned "" while ``textContent`` held
+    15 247 characters.
+
+    script/style/noscript/template are stripped first because ``textContent``
+    would otherwise hand the model minified JavaScript as page content, and
+    runs of whitespace are collapsed because the un-laid-out DOM keeps every
+    source-formatting newline.
+
+    The selector is embedded as a JSON string literal, so a selector
+    containing quotes cannot break out of it.
+    """
+    return (
+        "(function(sel){var el=document.querySelector(sel);if(!el)return '';"
+        "var c=el.cloneNode(true);"
+        "c.querySelectorAll('script,style,noscript,template')"
+        ".forEach(function(n){n.remove();});"
+        'return c.textContent.replace(/[ \\t\\u00a0]+/g," ")'
+        '.replace(/\\n\\s*\\n\\s*\\n+/g,"\\n\\n").trim();})(' + json.dumps(selector) + ")"
+    )
+
+
+#: Schemes the browser may be pointed at. Everything else is refused BEFORE it
+#: reaches cmux, because ``cmux browser goto`` is an omnibox: a value it cannot
+#: parse as a URL is sent to Google and answered with exit 0 "OK". Verified on
+#: this host — ``goto 'not a url at all'`` landed on
+#: ``https://www.google.com/search?q=not%20a%20url%20at%20all``, and a
+#: ``data:`` URL was search-escaped the same way. Without this guard a typo'd
+#: or hallucinated URL yields a search-results page that every later read and
+#: screenshot then describes as if it were the requested site.
+_BROWSER_URL_SCHEMES = ("http://", "https://")
 
 
 class BrowserParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     action: str = Field(
-        description="'open' (new surface at a URL), 'goto' (navigate current), "
-        "'screenshot' (capture the current page)."
+        description="open (start a surface at a URL) | goto | read (page text) | "
+        "snapshot (accessibility tree with click refs) | screenshot | click | "
+        "type | close."
     )
-    url: str = Field(default="", description="URL for 'open'/'goto'.")
-    path: str = Field(default="", description="Optional file path for 'screenshot'.")
+    url: str = Field(default="", description="http(s) URL for 'open'/'goto'.")
+    path: str = Field(default="", description="Destination file for 'screenshot'.")
+    selector: str = Field(
+        default="",
+        description="CSS selector or a snapshot ref (e5) for 'click'/'type'; "
+        "scopes the text for 'read' (default: body).",
+    )
+    text: str = Field(default="", description="Text to enter for 'type'.")
+
+
+def _cmux_binary() -> str | None:
+    """Absolute path to the cmux CLI, or None when this host has none.
+
+    PATH first, then ``CMUX_BUNDLED_CLI_PATH`` — the variable a cmux session
+    exports pointing at the CLI inside the app bundle. That fallback earns its
+    place because the bundle's bin directory is prepended to PATH by cmux's
+    shell integration, and a venv activation, a ``sudo -i`` or a login shell
+    that rebuilds PATH from /etc/paths drops it while every CMUX_* marker
+    survives.
+
+    The BINARY is the gate, never the environment markers on their own. CMUX_*
+    is inherited by every descendant of a cmux session, including ones that
+    crossed into a container or an ssh host where no cmux CLI exists;
+    advertising the tool there produced a capability whose every action could
+    only answer "cmux is not on PATH". Worth knowing for anyone re-deriving
+    this: a real session exports ``CMUX_SOCKET`` EMPTY (the populated variable
+    is ``CMUX_SOCKET_PATH``), so the previous ``os.environ.get("CMUX_SOCKET")``
+    test could never fire and detection was always really ``which cmux``.
+    """
+    import shutil
+
+    found = shutil.which("cmux")
+    if found:
+        return found
+    bundled = os.environ.get("CMUX_BUNDLED_CLI_PATH", "").strip()
+    if bundled and os.path.isfile(bundled) and os.access(bundled, os.X_OK):
+        return bundled
+    return None
 
 
 def cmux_browser_available() -> bool:
     """Whether a CMUX browser can be driven from this session.
 
-    Detection is via the CMUX runtime environment (``CMUX_SOCKET`` /
-    ``CMUX_SURFACE_ID`` set) or a ``cmux`` binary on PATH. Absence is not an
-    error — the tool is simply not advertised (builder returns None), so a
-    host without cmux keeps a lean tool inventory.
-    """
-    if os.environ.get("CMUX_SOCKET") or os.environ.get("CMUX_SURFACE_ID"):
-        return True
-    try:
-        import shutil
+    Runs during tool-list construction on every session start, so it stays a
+    PATH lookup plus an environment read and spawns nothing. ``cmux
+    browser-status`` would additionally report whether the browser panel is
+    enabled, but it costs a process spawn and a socket round trip and can hang
+    when the socket is wedged — session start must never block on a terminal
+    emulator, and a disabled panel already produces a clear per-action error.
 
-        return shutil.which("cmux") is not None
-    except Exception:  # noqa: BLE001
+    Never raises: an unreadable PATH or environment degrades to "no browser",
+    which the createIf builder handles by not advertising the tool at all.
+    """
+    try:
+        return _cmux_binary() is not None
+    except Exception:  # noqa: BLE001 — detection must never break session start
         return False
 
 
@@ -1675,10 +1797,16 @@ async def _run_cmux(argv: list[str], timeout: float = 30.0) -> tuple[int, str]:
     every real failure surface to the model and the user as the blank message
     "cmux open failed: ", which is unactionable.
     """
+    binary = _cmux_binary()
+    if binary is None:
+        # Resolved per call rather than cached at import: a session can start
+        # before cmux is installed or after PATH is repaired, and a cached
+        # "absent" would strand it until restart.
+        return 1, "cmux is not on PATH"
     proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
-            "cmux",
+            binary,
             *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -1707,8 +1835,471 @@ async def _run_cmux(argv: list[str], timeout: float = 30.0) -> tuple[int, str]:
 
 
 def _cmux_new_surface(url: str) -> list[str]:
-    """The open command — focus stays on the agent's own pane."""
+    """The open command — and the only sanctioned one.
+
+    ``cmux browser open`` / ``open-split`` / ``new`` reuse a right-hand pane if
+    one exists and otherwise SPLIT the user's pane in two, and nothing heals
+    that afterwards: the layout is hand-arranged and they rebuild it by hand.
+    ``new-surface`` adds the browser as a sibling TAB in the calling pane
+    instead. ``--focus false`` keeps their window and workspace exactly where
+    they left them; cmux only activates on an explicitly truthy focus. No
+    ``--workspace`` and no ``--pane``: the socket resolves the calling
+    terminal's own pane, whereas ``$CMUX_WORKSPACE_ID`` is the workspace the
+    terminal was CREATED in and goes stale the moment a surface is moved, which
+    drops the browser into an unrelated workspace.
+    """
     return ["--json", "new-surface", "--type", "browser", "--url", url, "--focus", "false"]
+
+
+def _surface_argv(surface: str, *rest: str) -> list[str]:
+    """``cmux browser --surface <id> ...``.
+
+    The handle always goes in as an OPTION, never as the leading positional
+    cmux also accepts, so it can never be re-read as a subcommand.
+    """
+    return ["browser", "--surface", surface, *rest]
+
+
+def _validate_browser_url(raw: str, action: str) -> str:
+    """Return a refusal message for an unusable URL, or "" when it is fine."""
+    url = raw.strip()
+    if not url:
+        return f"'{action}' requires a URL"
+    if url.startswith("-"):
+        # The URL also lands in a POSITIONAL argv slot, so a flag-shaped value
+        # is parsed by cmux as an option: `goto --help` exits 0 and prints
+        # help, which we would then report as a successful navigation. There is
+        # no legitimate URL starting with "-".
+        return f"refusing a flag-shaped URL: {raw!r}"
+    if not url.lower().startswith(_BROWSER_URL_SCHEMES):
+        return (
+            f"refusing {raw!r}: only http:// and https:// can be opened — cmux "
+            "turns anything else into a Google search and still reports success"
+        )
+    return ""
+
+
+def _validate_selector(raw: str, action: str) -> str:
+    """Return a refusal message for an unusable selector, or "" when fine."""
+    selector = raw.strip()
+    if not selector:
+        return f"'{action}' requires a selector (use 'snapshot' to find one)"
+    if selector.startswith("-"):
+        # Same argv hazard as the URL: cmux accepts the selector positionally
+        # as well as via --selector, and no CSS selector or snapshot ref begins
+        # with a dash.
+        return f"refusing a flag-shaped selector: {raw!r}"
+    return ""
+
+
+def _same_page(live: str, requested: str) -> bool:
+    """Whether two URL readings name the same document.
+
+    Only a trailing slash is normalised. Nothing else is: both readings come
+    out of the same browser AFTER redirects, so they already agree on scheme,
+    host case and query order, and inventing further equivalence would hide
+    exactly the mismatch this comparison exists to catch.
+    """
+    live = live.strip()
+    return bool(live) and live.rstrip("/") == requested.strip().rstrip("/")
+
+
+async def _probe_document(surface: str) -> tuple[tuple[str, str, str] | None, str]:
+    """``((readyState, href, title), "")`` or ``(None, diagnostic)``."""
+    code, out = await _run_cmux(
+        _surface_argv(surface, "eval", "--script", _DOC_PROBE_JS), timeout=15.0
+    )
+    if code != 0:
+        return None, out
+    try:
+        parsed = json.loads(out.strip())
+    except ValueError:
+        return None, f"unparseable eval output: {out[:200] or '(empty)'}"
+    if not isinstance(parsed, list) or len(parsed) != 3:
+        return None, f"unexpected eval payload: {out[:200] or '(empty)'}"
+    return (str(parsed[0]), str(parsed[1]), str(parsed[2])), ""
+
+
+async def _await_navigation(
+    surface: str, timeout: float | None = None
+) -> tuple[bool, str, str, str]:
+    """Block until the live document is the one cmux was asked to load.
+
+    Returns ``(settled, href, title, detail)``; ``detail`` explains the failure
+    when ``settled`` is False.
+
+    Why this cannot be skipped. ``cmux browser get url`` answers with the URL
+    cmux was last ASKED for, not the URL of the document that is live, and
+    ``goto`` exits 0 the instant the request is accepted. Measured on this
+    host: after ``goto https://iana.org/domains/example`` — a 301 the WKWebView
+    never completed — ``get url`` reported the requested URL for 20+ seconds
+    while ``location.href`` and ``get title`` still described the PREVIOUS page
+    and ``screenshot`` wrote a byte-identical PNG of it (md5 cef9cd9d…,
+    67 821 B). No exit code says so, so without this wait the tool confidently
+    reports, reads and photographs the wrong page.
+
+    The two views converge exactly when the requested document is the live one,
+    which is what makes their agreement (plus ``readyState``) the completion
+    signal. It is redirect-safe because both sides report POST-redirect state —
+    verified: ``www.rust-lang.org/learn`` settles with both reading
+    ``https://rust-lang.org/learn/``.
+    """
+    # Read at CALL time, not bound as a default argument: a default freezes the
+    # value at import, which would make the module constant unoverridable by a
+    # host (or a test) that needs a shorter budget.
+    budget = BROWSER_NAV_TIMEOUT_S if timeout is None else timeout
+    deadline = time.monotonic() + budget
+    href = title = requested = ""
+    probe_failures = 0
+    while True:
+        probe, probe_error = await _probe_document(surface)
+        code, out = await _run_cmux(_surface_argv(surface, "get", "url"), timeout=15.0)
+        if code == 0:
+            requested = out.strip()
+        if probe is None:
+            # A single failure is expected mid-navigation: the execution
+            # context is destroyed while the new document commits, and eval
+            # fails for that instant. A run of them means the surface is gone
+            # or the browser panel is disabled, and waiting out the full
+            # timeout on that would only delay an error we can already give.
+            probe_failures += 1
+            if probe_failures >= 3:
+                return False, href, title, f"cannot read the document: {probe_error}"
+        else:
+            probe_failures = 0
+            ready, href, title = probe
+            if ready == "complete" and _same_page(href, requested):
+                return True, href, title, ""
+        if time.monotonic() >= deadline:
+            return (
+                False,
+                href,
+                title,
+                f"after {budget:g}s cmux is pointing at {requested or '(unknown)'} "
+                f"but the live document is still {href or '(unreadable)'}",
+            )
+        await asyncio.sleep(BROWSER_NAV_POLL_S)
+
+
+def _page_line(title: str, href: str) -> str:
+    """One-line description of what is actually on screen.
+
+    Every navigating action ends with this instead of echoing the URL that was
+    REQUESTED, so a redirect, a login wall or a consent interstitial shows up
+    in the transcript rather than hiding behind the model's own intent.
+    """
+    return f"{title or '(untitled)'} — {href or '(unknown URL)'}"
+
+
+async def _browser_goto(tool_call_id: str, surface: str, raw_url: str) -> ToolResult:
+    problem = _validate_browser_url(raw_url, "goto")
+    if problem:
+        return _error(tool_call_id, "browser", problem)
+    url = raw_url.strip()
+    code, out = await _run_cmux(_surface_argv(surface, "goto", url))
+    if code != 0:
+        return _error(tool_call_id, "browser", f"cmux goto failed: {out}")
+    settled, href, title, detail = await _await_navigation(surface)
+    if not settled:
+        return _error(tool_call_id, "browser", f"navigating to {url} did not complete: {detail}")
+    return _text(
+        tool_call_id,
+        "browser",
+        f"Navigated {surface}: {_page_line(title, href)}",
+        details={"surface_id": surface, "url": href, "title": title},
+    )
+
+
+async def _browser_open(
+    tool_call_id: str, state: BrowserSurfaceProtocol, raw_url: str
+) -> ToolResult:
+    problem = _validate_browser_url(raw_url, "open")
+    if problem:
+        return _error(tool_call_id, "browser", problem)
+    url = raw_url.strip()
+    if state.surface_id:
+        # One surface per session, reused. A fresh surface per navigation is
+        # how a session leaves a drift of dead browser tabs the user closes one
+        # at a time, so 'open' degrades to 'goto' once a surface exists rather
+        # than being an error the model has to learn to avoid.
+        return await _browser_goto(tool_call_id, state.surface_id, url)
+    code, out = await _run_cmux(_cmux_new_surface(url))
+    if code != 0:
+        return _error(tool_call_id, "browser", f"cmux open failed: {out.strip()}")
+    surface_id = _parse_surface_id(out)
+    if not surface_id:
+        # A "success" with no handle is a FAILURE: the next goto/screenshot
+        # can only report "no browser surface open", and the model has been
+        # told the open worked so it has no reason to retry. Fail here, with
+        # the raw output, so the actual shape is visible in the transcript.
+        return _error(
+            tool_call_id,
+            "browser",
+            "cmux opened a browser but reported no surface handle; cannot "
+            f"drive it. Output was: {out or '(empty)'}",
+        )
+    # Recorded BEFORE the load is confirmed: the surface exists either way, and
+    # dropping the handle on a slow page would leak a tab nothing can close.
+    state.surface_id = surface_id
+    settled, href, title, detail = await _await_navigation(surface_id)
+    if not settled:
+        return _error(
+            tool_call_id,
+            "browser",
+            f"opened surface {surface_id} but {url} did not load: {detail}. "
+            "The surface is open — retry with 'goto', or 'close' it.",
+        )
+    return _text(
+        tool_call_id,
+        "browser",
+        f"Opened browser surface {surface_id}: {_page_line(title, href)}",
+        details={"surface_id": surface_id, "url": href, "title": title},
+    )
+
+
+async def _browser_read(tool_call_id: str, surface: str, raw_selector: str) -> ToolResult:
+    # cmux refuses `get text` with no selector, and "body" is the whole page —
+    # the default the model means when it says "read the page".
+    selector = raw_selector.strip() or "body"
+    code, out = await _run_cmux(_surface_argv(surface, "get", "text", "--selector", selector))
+    if code != 0:
+        return _error(tool_call_id, "browser", f"cmux read failed: {out}")
+    if not out.strip():
+        # Empty is usually a lie, not an empty page: `get text` is innerText
+        # and needs layout the background surface may never have performed.
+        # See _dom_text_js — measured 0 characters here against 15 247 in the
+        # DOM on a real results page. Falling back beats reporting "(no text)"
+        # for a page the model can plainly see in the screenshot.
+        fallback_code, fallback_out = await _run_cmux(
+            _surface_argv(surface, "eval", "--script", _dom_text_js(selector)), timeout=20.0
+        )
+        if fallback_code == 0 and fallback_out.strip():
+            out = fallback_out
+    probe, _probe_error = await _probe_document(surface)
+    details: dict[str, Any] = {"surface_id": surface, "selector": selector}
+    header = ""
+    if probe is not None:
+        _ready, href, title = probe
+        details["url"] = href
+        details["title"] = title
+        # Title and URL ride WITH the text. A model that navigated, got
+        # redirected to a login wall and then read would otherwise file the
+        # content under the URL it asked for.
+        header = f"{_page_line(title, href)}\n\n"
+    body = truncate_output(out, BROWSER_TEXT_LIMIT_CHARS)
+    return _text(tool_call_id, "browser", header + (body or "(no text)"), details=details)
+
+
+async def _browser_screenshot(
+    tool_call_id: str, surface: str, raw_path: str, context: ToolContext | None
+) -> ToolResult:
+    # cmux takes the destination as ``--out <path>``; passing it positionally
+    # is silently IGNORED (cmux writes into its own temp dir and still exits
+    # 0), which would make us report a file that does not exist.
+    if raw_path:
+        # Route through the shared resolver like every other file-writing tool
+        # (write/edit/read/grep). Without it `~` was never expanded (creating a
+        # literal "~" directory), relative paths resolved against the operator
+        # process CWD instead of the session's, and the approval prompt showed
+        # the unresolved string the model typed rather than the real target.
+        # NOTE: the write-tier approval prompt shows the RAW arguments the model
+        # wrote (loop.py builds its summary from call.raw_arguments), not this
+        # resolved path — so a user approving `../../evil.png` sees that string.
+        # That matches the pre-existing `write` tool, so it is consistent rather
+        # than a new hazard, but do not mistake resolution here for disclosure
+        # there. `inside` is deliberately unused: unlike read/grep this tool has
+        # no read-tier to escalate FROM, and `write` already always prompts.
+        resolved, _inside = _resolve_workspace_path(raw_path, _safe_cwd(context))
+        target = str(resolved)
+    else:
+        import tempfile
+
+        target = os.path.join(tempfile.gettempdir(), f"lo-browser-{surface}.png")
+    code, out = await _run_cmux(_surface_argv(surface, "screenshot", "--out", target))
+    if code != 0:
+        return _error(tool_call_id, "browser", f"cmux screenshot failed: {out}")
+    # Exit 0 is not proof of a write: confirm the file landed before telling
+    # the model it can read it.
+    if not os.path.exists(target):
+        return _error(
+            tool_call_id,
+            "browser",
+            f"cmux reported success but no file at {target}: {out or '(no output)'}",
+        )
+    size = os.path.getsize(target)
+    with open(target, "rb") as handle:
+        magic = handle.read(len(PNG_MAGIC))
+    if magic != PNG_MAGIC:
+        # A capture of a surface that never painted, or one interrupted
+        # mid-write, lands as an empty or truncated file and cmux still exits
+        # 0. Catching it here beats the model handing the path to an image
+        # reader that fails several turns away from the cause.
+        return _error(
+            tool_call_id,
+            "browser",
+            f"{target} is not a PNG ({size} bytes, starts {magic!r}); the "
+            "capture did not complete",
+        )
+    probe, _probe_error = await _probe_document(surface)
+    shot_of = ""
+    if probe is not None:
+        _ready, href, title = probe
+        # Says WHAT was photographed, because a screenshot is the one result
+        # the model cannot inspect for itself.
+        shot_of = f" of {_page_line(title, href)}"
+    return _text(
+        tool_call_id,
+        "browser",
+        f"Screenshot{shot_of} saved to {target} ({size} bytes).",
+        details={"path": target, "bytes": size},
+    )
+
+
+async def _cmux_url(surface: str) -> str:
+    """The URL cmux is POINTING AT — not necessarily the live document's."""
+    code, out = await _run_cmux(_surface_argv(surface, "get", "url"), timeout=15.0)
+    return out.strip() if code == 0 else ""
+
+
+async def _mark_document(surface: str) -> bool:
+    """Stamp the live document so a replacement can be noticed. See
+    :data:`_NAV_TOKEN_SET_JS`. False when the stamp could not be applied, in
+    which case the caller falls back to the URL signal alone."""
+    code, _out = await _run_cmux(
+        _surface_argv(surface, "eval", "--script", _NAV_TOKEN_SET_JS), timeout=15.0
+    )
+    return code == 0
+
+
+async def _navigation_started(surface: str, before: str, marked: bool) -> bool:
+    """Whether a click set a navigation in motion.
+
+    A click is asynchronous in a way ``goto`` is not. cmux accepts a ``goto``
+    and updates its own URL synchronously, but a link click is initiated by
+    the PAGE, so for a short window cmux is still pointing at the old URL and
+    both readings agree — which the settle predicate reads as "already
+    settled" and reports success on the page we just navigated AWAY from.
+    Measured on this host: clicking the example.com link left cmux pointing at
+    iana.org/domains/example while the live document stayed example.com for
+    20+ seconds, and a settle sampled immediately after the click saw neither
+    the departure nor the stall.
+
+    TWO signals, because neither covers the other's case:
+
+    * the URL cmux is pointing at changes — a link click, measured to flip
+      within the first poll;
+    * the document marker is gone — a form POST to the SAME url, which changes
+      no URL at all. Measured against DuckDuckGo's no-JS search form: the
+      marker cleared ~0.6 s after submit while the URL never moved, and
+      without this signal the result was labelled "no navigation" even though
+      the whole document had been replaced.
+
+    An unreadable ``before`` counts as started, so the settle decides —
+    guessing "no navigation" there would restore the very bug this prevents.
+    """
+    if not before:
+        return True
+    deadline = time.monotonic() + BROWSER_CLICK_GRACE_S
+    while True:
+        if await _cmux_url(surface) != before:
+            return True
+        if marked:
+            code, out = await _run_cmux(
+                _surface_argv(surface, "eval", "--script", _NAV_TOKEN_GET_JS), timeout=15.0
+            )
+            if code == 0 and out.strip() == "0":
+                return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(BROWSER_NAV_POLL_S)
+
+
+async def _browser_click(tool_call_id: str, surface: str, raw_selector: str) -> ToolResult:
+    problem = _validate_selector(raw_selector, "click")
+    if problem:
+        return _error(tool_call_id, "browser", problem)
+    selector = raw_selector.strip()
+    before = await _cmux_url(surface)
+    marked = await _mark_document(surface)
+    code, out = await _run_cmux(_surface_argv(surface, "click", "--selector", selector))
+    if code != 0:
+        return _error(tool_call_id, "browser", f"cmux click failed: {out}")
+    if not await _navigation_started(surface, before, marked):
+        # Most clicks do not navigate. Report what is on screen rather than
+        # waiting out a load that was never going to happen.
+        probe, _probe_error = await _probe_document(surface)
+        _ready, href, title = probe if probe is not None else ("", before, "")
+        return _text(
+            tool_call_id,
+            "browser",
+            f"Clicked {selector} (no navigation). Page: {_page_line(title, href)}",
+            details={"surface_id": surface, "url": href, "title": title},
+        )
+    settled, href, title, detail = await _await_navigation(surface)
+    if not settled:
+        return _error(
+            tool_call_id,
+            "browser",
+            f"clicked {selector}, but the page it started loading never "
+            f"arrived: {detail}. Anything read now describes the old page.",
+        )
+    return _text(
+        tool_call_id,
+        "browser",
+        f"Clicked {selector}. Page: {_page_line(title, href)}",
+        details={"surface_id": surface, "url": href, "title": title},
+    )
+
+
+async def _browser_type(
+    tool_call_id: str, surface: str, raw_selector: str, value: str
+) -> ToolResult:
+    problem = _validate_selector(raw_selector, "type")
+    if problem:
+        return _error(tool_call_id, "browser", problem)
+    selector = raw_selector.strip()
+    # cmux `fill` REPLACES the field; cmux `type` APPENDS keystrokes to
+    # whatever is already there (verified: typing "XY" into a box holding "not
+    # a url at all" left "not a url at allXY"). A model that types twice — a
+    # retry after a timeout, say — would otherwise silently submit doubled
+    # input, and it has no cheap way to notice.
+    code, out = await _run_cmux(
+        _surface_argv(surface, "fill", "--selector", selector, "--text", value)
+    )
+    if code != 0:
+        return _error(tool_call_id, "browser", f"cmux type failed: {out}")
+    read_code, read_out = await _run_cmux(
+        _surface_argv(surface, "get", "value", "--selector", selector)
+    )
+    # Best effort: a contenteditable or a non-input target has no value, and a
+    # missing read-back is not a failure of the fill itself.
+    confirmation = f" Value is now {read_out.strip()!r}." if read_code == 0 else ""
+    return _text(
+        tool_call_id,
+        "browser",
+        f"Typed into {selector}.{confirmation}",
+        details={"surface_id": surface, "selector": selector},
+    )
+
+
+async def _browser_close(tool_call_id: str, state: BrowserSurfaceProtocol) -> ToolResult:
+    if not state.surface_id:
+        return _text(tool_call_id, "browser", "No browser surface open.", useless=True)
+    surface = state.surface_id
+    code, out = await _run_cmux(["close-surface", "--surface", surface])
+    # The handle is dropped whatever the exit code says. If the surface is
+    # already gone — the user closed the tab, or cmux restarted — the call
+    # fails, and keeping a dead handle would make every later action fail
+    # against a surface that does not exist, with no route back: 'open' itself
+    # reuses the recorded handle.
+    state.surface_id = ""
+    if code != 0:
+        return _text(
+            tool_call_id,
+            "browser",
+            f"Browser surface {surface} could not be closed ({out}); dropped the handle.",
+        )
+    return _text(tool_call_id, "browser", f"Closed browser surface {surface}.")
 
 
 @_guard("browser")
@@ -1724,95 +2315,57 @@ async def execute_browser(
         params = BrowserParams(**args)
     except ValidationError as exc:
         return _validation_error(tool_call_id, "browser", exc)
-    action = params.action.lower()
-    if action not in ("open", "goto", "screenshot"):
-        return _error(tool_call_id, "browser", f"unknown action: {action}")
+    action = params.action.strip().lower()
+    if action not in BROWSER_ACTIONS:
+        return _error(
+            tool_call_id,
+            "browser",
+            f"unknown action: {action} (expected one of {', '.join(BROWSER_ACTIONS)})",
+        )
     if not cmux_browser_available():
         return _error(
-            tool_call_id, "browser", "CMUX browser not available (no CMUX_SOCKET / cmux binary)"
+            tool_call_id,
+            "browser",
+            "CMUX browser not available: no cmux binary on PATH and no "
+            "CMUX_BUNDLED_CLI_PATH. This host cannot drive a browser.",
         )
     state = _browser_state(context)
 
+    # 'open' creates the surface and 'close' must stay callable without one, so
+    # both run before the have-a-surface gate below.
     if action == "open":
-        if not params.url.strip():
-            return _error(tool_call_id, "browser", "'open' requires a URL")
-        code, out = await _run_cmux(_cmux_new_surface(params.url))
-        if code != 0:
-            return _error(tool_call_id, "browser", f"cmux open failed: {out.strip()}")
-        surface_id = _parse_surface_id(out)
-        if not surface_id:
-            # A "success" with no handle is a FAILURE: the next goto/screenshot
-            # can only report "no browser surface open", and the model has been
-            # told the open worked so it has no reason to retry. Fail here, with
-            # the raw output, so the actual shape is visible in the transcript.
-            return _error(
-                tool_call_id,
-                "browser",
-                "cmux opened a browser but reported no surface handle; cannot "
-                f"drive it. Output was: {out or '(empty)'}",
-            )
-        state.surface_id = surface_id
-        return _text(
-            tool_call_id,
-            "browser",
-            f"Opened browser surface {surface_id} at {params.url}.",
-            details={"surface_id": surface_id, "url": params.url},
-        )
-
+        return await _browser_open(tool_call_id, state, params.url)
+    if action == "close":
+        return await _browser_close(tool_call_id, state)
     if not state.surface_id:
         return _error(tool_call_id, "browser", "no browser surface open — use 'open' first")
     surface = state.surface_id
 
     if action == "goto":
-        if not params.url.strip():
-            return _error(tool_call_id, "browser", "'goto' requires a URL")
-        if params.url.lstrip().startswith("-"):
-            # The URL goes into a POSITIONAL argv slot, so a flag-shaped value is
-            # parsed by cmux as an option: `goto --help` exits 0 and prints help,
-            # which we would then report as a successful navigation. There is no
-            # legitimate URL starting with "-".
-            return _error(tool_call_id, "browser", f"refusing a flag-shaped URL: {params.url!r}")
-        code, out = await _run_cmux(["browser", "--surface", surface, "goto", params.url])
+        return await _browser_goto(tool_call_id, surface, params.url)
+    if action == "read":
+        return await _browser_read(tool_call_id, surface, params.selector)
+    if action == "snapshot":
+        argv = _surface_argv(surface, "snapshot", "--compact")
+        if params.selector.strip():
+            selector_problem = _validate_selector(params.selector, "snapshot")
+            if selector_problem:
+                return _error(tool_call_id, "browser", selector_problem)
+            argv += ["--selector", params.selector.strip()]
+        code, out = await _run_cmux(argv)
         if code != 0:
-            return _error(tool_call_id, "browser", f"cmux goto failed: {out.strip()}")
-        return _text(tool_call_id, "browser", f"Navigated {surface} to {params.url}.")
-
-    # screenshot — cmux takes the destination as ``--out <path>``; passing it
-    # positionally is silently IGNORED (cmux writes into its own temp dir and
-    # still exits 0), which would make us report a file that does not exist.
-    if params.path:
-        # Route through the shared resolver like every other file-writing tool
-        # (write/edit/read/grep). Without it `~` was never expanded (creating a
-        # literal "~" directory), relative paths resolved against the operator
-        # process CWD instead of the session's, and the approval prompt showed
-        # the unresolved string the model typed rather than the real target.
-        # NOTE: the write-tier approval prompt shows the RAW arguments the model
-        # wrote (loop.py builds its summary from call.raw_arguments), not this
-        # resolved path — so a user approving `../../evil.png` sees that string.
-        # That matches the pre-existing `write` tool, so it is consistent rather
-        # than a new hazard, but do not mistake resolution here for disclosure
-        # there. `inside` is deliberately unused: unlike read/grep this tool has
-        # no read-tier to escalate FROM, and `write` already always prompts.
-        resolved, _inside = _resolve_workspace_path(params.path, _safe_cwd(context))
-        target = str(resolved)
-    else:
-        import tempfile
-
-        target = os.path.join(tempfile.gettempdir(), f"lo-browser-{surface}.png")
-    code, out = await _run_cmux(["browser", "--surface", surface, "screenshot", "--out", target])
-    if code != 0:
-        return _error(tool_call_id, "browser", f"cmux screenshot failed: {out}")
-    # Exit 0 is not proof of a write: confirm the file landed before telling
-    # the model it can read it.
-    if not os.path.exists(target):
-        return _error(
+            return _error(tool_call_id, "browser", f"cmux snapshot failed: {out}")
+        return _text(
             tool_call_id,
             "browser",
-            f"cmux reported success but no file at {target}: {out or '(no output)'}",
+            truncate_output(out, BROWSER_TEXT_LIMIT_CHARS) or "(empty snapshot)",
+            details={"surface_id": surface},
         )
-    return _text(
-        tool_call_id, "browser", f"Screenshot saved to {target}.", details={"path": target}
-    )
+    if action == "click":
+        return await _browser_click(tool_call_id, surface, params.selector)
+    if action == "type":
+        return await _browser_type(tool_call_id, surface, params.selector, params.text)
+    return await _browser_screenshot(tool_call_id, surface, params.path, context)
 
 
 #: A cmux surface handle is exactly ``surface:<n>`` — the PREFIX is part of the
@@ -1950,13 +2503,25 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
     """Advertise the browser tool only when a CMUX browser is reachable.
 
     Mirrors the wake builder: an environment-specific capability that returns
-    None (excluded from the inventory) when the host cannot support it."""
+    None (excluded from the inventory) when the host cannot support it.
+
+    There is deliberately no headless fallback. This repo ships no browser
+    engine — playwright belongs to the pre-rewrite codebase and appears in no
+    dependency group — and pulling one into the default install would add a
+    ~150 MB browser download to a dependency set that is kept small on
+    purpose. A host without cmux therefore has no browser tool at all, which
+    is honest, and the agent still reaches static pages through `bash` and
+    curl.
+    """
     if not cmux_browser_available():
         return None
     return AgentTool(
         name="browser",
         label="Browser",
-        description="Detect and drive the CMUX browser: open/goto/screenshot.",
+        description=(
+            "Drive the CMUX browser: open/goto a URL, read page text, snapshot "
+            "the accessibility tree for click refs, click, type, screenshot, close."
+        ),
         parameters=BrowserParams.model_json_schema(),
         # Navigates and can write a screenshot file, so it rides the write
         # approval gate rather than auto-approved read.
