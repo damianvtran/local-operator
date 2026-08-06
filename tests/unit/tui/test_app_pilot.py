@@ -534,6 +534,11 @@ class FakeProviderController:
     def usage_enabled_providers(self):
         return ["openrouter", "zai"]
 
+    def usage_reportable_providers(self):
+        # The real controller narrows "has an endpoint" by "and a credential that
+        # can reach it"; `/provider` renders this one, not the wider list.
+        return [p for p in self.usage_enabled_providers() if self.has_any_credential(p)]
+
     def resolve_model(self, provider, model_id):
         return FakeModel(provider, model_id)
 
@@ -699,6 +704,134 @@ async def test_usage_command_renders_report() -> None:
         texts = _transcript_text(app)
     assert "openrouter" in texts
     assert "Credits" in texts
+
+
+def _usage_lines(reports) -> list[str]:
+    """The `/usage` table as the user reads it, one plain string per line."""
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=None)
+    block = app._usage_block(reports, None)
+    return _renderable_plain(block.renderable).splitlines()
+
+
+def test_a_remaining_only_balance_renders_its_number() -> None:
+    """Both account-balance fetchers report `remaining` with no `used` — neither
+    vendor gives a limit to derive spend from. The renderer printed a value only
+    when `used` was set, so a row labelled "Balance" never said how much, and for
+    DeepSeek no digit appeared on screen at all."""
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+
+    lines = _usage_lines(
+        [
+            UsageReport(
+                provider="kimi",
+                notes="voucher $2.50 + cash $10.00",
+                limits=[
+                    UsageLimit(
+                        id="kimi:balance",
+                        label="Balance (USD)",
+                        amount=UsageAmount(remaining=12.5, unit="usd"),
+                        window="lifetime",
+                    )
+                ],
+            ),
+            UsageReport(
+                provider="deepseek",
+                limits=[
+                    UsageLimit(
+                        id="deepseek:balance:cny",
+                        label="Balance (CNY)",
+                        # No UNIT_LABELS entry for CNY: the number must still print,
+                        # just without a currency it did not earn.
+                        amount=UsageAmount(remaining=70.0, unit="unknown"),
+                        window="lifetime",
+                    )
+                ],
+            ),
+        ]
+    )
+    usd = "Balance (USD) (lifetime) — 12.50 USD left"
+    assert any(line.endswith(usd) for line in lines), lines
+    assert any(line.endswith("Balance (CNY) (lifetime) — 70 left") for line in lines), lines
+
+
+def test_amounts_print_the_unit_label_not_the_raw_key() -> None:
+    """`UNIT_LABELS` existed and was read by nothing while the renderer interpolated
+    the dict key, so a row read `519.86 usd` / `30 percent`."""
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+
+    lines = _usage_lines(
+        [
+            UsageReport(
+                provider="openrouter",
+                limits=[
+                    UsageLimit(
+                        id="openrouter:spend",
+                        label="Spend (no limit set)",
+                        amount=UsageAmount(used=519.855, unit="usd"),
+                        window="lifetime",
+                    ),
+                    UsageLimit(
+                        id="x:pct",
+                        label="Session",
+                        amount=UsageAmount(used=30, limit=100, unit="percent"),
+                        window="5 hour",
+                    ),
+                ],
+            )
+        ]
+    )
+    joined = "\n".join(lines)
+    assert "— 519.86 USD" in joined, lines
+    assert "— 30%" in joined, lines
+    assert "usd" not in joined and "percent" not in joined, lines
+
+
+def test_a_fraction_only_window_still_states_its_percentage() -> None:
+    """The OAuth plan fetchers report a bare fraction; the bar showed it and no
+    number did, and a bar cannot be read off precisely."""
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+
+    lines = _usage_lines(
+        [
+            UsageReport(
+                provider="openai",
+                limits=[
+                    UsageLimit(
+                        id="openai:primary",
+                        label="Primary",
+                        amount=UsageAmount(used_fraction=0.4, unit="percent"),
+                        window="5 hour",
+                    )
+                ],
+            )
+        ]
+    )
+    assert any(line.endswith("Primary (5 hour) — 40% used") for line in lines), lines
+
+
+def test_all_three_usage_surfaces_agree_for_an_api_key_only_install(monkeypatch) -> None:
+    """`/provider`'s "report quota" list, bare `/usage`'s targets and
+    `/usage <provider>`'s up-front warning are three surfaces answering one
+    question, and they used to give three answers: with only `ANTHROPIC_API_KEY`
+    set, `/provider` advertised anthropic, bare `/usage` rendered "no usage data",
+    and `/usage anthropic` correctly said it needs a login."""
+    from local_operator.providers.controller import ProviderController
+    from tests.unit.providers.test_controller import _USAGE_ENV_VARS, FakeAuthStore
+
+    for name in _USAGE_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    controller = ProviderController(FakeAuthStore(), login_callbacks=None)
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=controller)
+
+    # Surface 1: `/provider` must not advertise what `/usage` cannot deliver.
+    assert app._provider_usage_state() == []
+    # Surface 2: the bare `/usage` target list is the same list.
+    assert controller.usage_reportable_providers() == []
+    # Surface 3: `/usage anthropic` refuses up front, with the actionable reason.
+    notices: list[tuple[str, str]] = []
+    app._cmd_usage("anthropic", lambda body, kind="info": notices.append((body, kind)))
+    assert notices == [("anthropic reports usage only after /login anthropic", "warning")]
 
 
 @pytest.mark.asyncio

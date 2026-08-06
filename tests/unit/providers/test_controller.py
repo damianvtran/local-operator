@@ -140,6 +140,89 @@ def test_usage_enabled_provider_ids(controller) -> None:
     assert ids == sorted(ids)
 
 
+#: Every env var that can make a usage provider look credentialed. Cleared first
+#: so the test describes the install it sets up rather than the developer's shell.
+_USAGE_ENV_VARS = (
+    "OPENROUTER_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_OAUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "XAI_API_KEY",
+    "KIMI_API_KEY",
+    "DEEPSEEK_API_KEY",
+)
+
+
+def test_an_api_key_cannot_reach_an_oauth_only_usage_endpoint(controller, monkeypatch) -> None:
+    """`is_usable` answers "is there any credential", which is too coarse here.
+
+    Five of the eight usage providers are OAuth-only for USAGE — an API key cannot
+    authenticate against their endpoint at all — so a user holding only
+    `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `XAI_API_KEY` holds keys that run the
+    model and cannot read the quota. Advertising them anyway is the `zai` defect
+    one level finer: a provider no available credential can reach.
+    """
+    for name in _USAGE_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-oai-test")
+    monkeypatch.setenv("XAI_API_KEY", "xai-test")
+
+    for provider in ("anthropic", "openai", "openai-device", "xai"):
+        assert controller.is_usable(provider), f"{provider}: the key does run the model"
+        assert not controller.can_report_usage(provider), f"{provider}: but not the quota"
+    # `xai-oauth` has no env var of its own and nothing stored under `xai`, so it
+    # never even reaches the finer check — it is unusable outright.
+    assert not controller.is_usable("xai-oauth")
+    assert not controller.can_report_usage("xai-oauth")
+    assert controller.usage_reportable_providers() == []
+
+
+def test_an_env_api_key_does_reach_an_api_key_usage_endpoint(controller, monkeypatch) -> None:
+    """The other half: where an API-key route EXISTS, an env key reaches it, because
+    that is the tier the stream-time cascade resolves."""
+    for name in _USAGE_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setenv("KIMI_API_KEY", "sk-moonshot")
+
+    assert controller.usage_reportable_providers() == ["kimi", "openrouter"]
+    assert not controller.has_any_credential("openrouter"), "nothing STORED, still reachable"
+
+
+def test_an_oauth_login_unlocks_an_oauth_only_usage_endpoint(
+    controller, store, monkeypatch
+) -> None:
+    for name in _USAGE_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    assert controller.usage_reportable_providers() == []
+    store.upsert_credential("anthropic", {"access": "tok", "refresh": "ref"})
+    assert controller.can_report_usage("anthropic")
+    assert controller.usage_reportable_providers() == ["anthropic"]
+
+
+@pytest.mark.asyncio
+async def test_the_default_fetch_target_list_is_the_advertised_list(
+    controller, monkeypatch
+) -> None:
+    """Bare `/usage` must fetch exactly what `/provider` advertised. When the two
+    filters were written separately, `/provider` listed anthropic, openai,
+    openai-device and xai as reporting quota and bare `/usage` returned nothing."""
+    for name in _USAGE_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+
+    seen: list[str] = []
+
+    async def _record(client, provider):
+        seen.append(provider)
+        return None
+
+    monkeypatch.setattr(controller, "_fetch_one", _record)
+    assert await controller.fetch_usage() == []
+    assert seen == controller.usage_reportable_providers() == []
+
+
 # -- catalogue ---------------------------------------------------------------
 
 

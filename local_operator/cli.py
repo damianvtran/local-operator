@@ -480,9 +480,14 @@ def credential_delete_command(args: argparse.Namespace) -> int:
 
 def config_create_command() -> int:
     """Create a new configuration file."""
-    config_manager = ConfigManager(config_dir())
+    base_dir = config_dir()
+    config_manager = ConfigManager(base_dir)
     config_manager._write_config(vars(config_manager.config))
-    print("Created new configuration file at ~/.local-operator/config.yml")
+    # Print the path that was actually written, not a hardcoded
+    # ~/.local-operator: config_dir() honours LOCAL_OPERATOR_CONFIG_DIR, and
+    # config_open_command below already reports the resolved path — naming a
+    # different file here makes the two commands contradict each other.
+    print(f"Created new configuration file at {base_dir / 'config.yml'}")
     return 0
 
 

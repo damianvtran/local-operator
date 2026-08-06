@@ -19,7 +19,7 @@ import pytest
 from pathlib import Path
 
 import local_operator.tools.builtin as builtin
-from local_operator.harness.types import ToolContext
+from local_operator.harness.types import BrowserSurface, ToolContext
 
 #: Enough of a PNG to satisfy the magic-byte guard without shipping a fixture.
 FAKE_PNG = builtin.PNG_MAGIC + b"\x00" * 64
@@ -35,7 +35,10 @@ def _run(tool, tool_call_id: str, args: dict[str, Any], ctx: ToolContext):
 
 def _with_surface(surface_id: str = "surface:3") -> ToolContext:
     ctx = _ctx()
-    ctx.browser = builtin._BrowserSession()
+    # Injected the way Session._build_tool_context does it: the holder is owned
+    # by the host, not created by the tool, because this context is rebuilt
+    # every turn.
+    ctx.browser = BrowserSurface()
     ctx.browser.surface_id = surface_id
     return ctx
 
@@ -305,7 +308,7 @@ def test_screenshot_exit_zero_without_file_is_an_error(monkeypatch, tmp_path) ->
     monkeypatch.setattr(builtin, "_run_cmux", fake_run)
     tool = builtin.build_browser_tool(_ctx())
     ctx = _ctx()
-    ctx.browser = builtin._BrowserSession()
+    ctx.browser = BrowserSurface()
     ctx.browser.surface_id = "surface:3"
     target = tmp_path / "never-written.png"
     result = _run(tool, "t1", {"action": "screenshot", "path": str(target)}, ctx)
@@ -553,13 +556,17 @@ def test_goto_refuses_a_flag_shaped_url(monkeypatch) -> None:
     monkeypatch.setattr(builtin, "_run_cmux", fake_run)
     tool = builtin.build_browser_tool(_ctx())
     ctx = _ctx()
-    ctx.browser = builtin._BrowserSession()
+    ctx.browser = BrowserSurface()
     ctx.browser.surface_id = "surface:3"
     for bad in ("--help", "-x", "  --focus"):
         result = _run(tool, "t1", {"action": "goto", "url": bad}, ctx)
         assert result.is_error, f"{bad!r} should be refused"
         assert "flag-shaped" in result.text
-    assert not calls, "a refused URL must never reach the subprocess"
+    # The refused value must never reach the subprocess. (The stale-handle
+    # liveness probe does run first — a `get url` against our OWN surface — so
+    # this asserts on the argv content rather than on there being no calls.)
+    assert not any("goto" in call for call in calls), calls
+    assert not any(bad in call for call in calls for bad in ("--help", "-x", "--focus")), calls
 
 
 # --- navigation must be PROVEN, not assumed ---------------------------------
@@ -976,3 +983,266 @@ def test_unknown_action_lists_the_real_ones(monkeypatch) -> None:
     assert result.is_error
     for action in builtin.BROWSER_ACTIONS:
         assert action in result.text
+
+
+# --- the surface must outlive the per-turn ToolContext ------------------------
+#
+# Session._run_turn calls `self._context.tool_context = self._build_tool_context()`
+# at the START OF EVERY TURN. A handle the tool stored on the context it was
+# handed therefore lived exactly one turn: the next turn saw browser=None, so
+# "open X" then "click Y" in the following message answered "no browser surface
+# open", and every turn that opened a browser stranded a cmux tab nothing could
+# close. The whole suite passed over it because no test built a SECOND context.
+
+
+def _session(tmp_path):
+    """A Session, for the sake of its real ``_build_tool_context``."""
+    from local_operator.harness.types import ModelSpec
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+
+    def stream(_request, _signal):
+        async def gen():
+            if False:  # pragma: no cover - never streamed; only the context is used
+                yield None
+
+        return gen()
+
+    return Session(
+        model=ModelSpec(provider="test", model_id="m", context_window=1000),
+        stream_fn=stream,
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: [],
+    )
+
+
+def test_surface_survives_a_rebuilt_tool_context(monkeypatch, tmp_path) -> None:
+    """Turn 1 opens, turn 2 reads and closes THE SAME surface.
+
+    Each turn gets a context built exactly the way ``_run_turn`` builds it.
+    Before the surface was owned by the session, turn 2's context carried
+    ``browser=None``: 'read' answered "no browser surface open", 'close' answered
+    "No browser surface open.", and 'open' created a SECOND surface — two
+    ``new-surface`` calls and zero ``close-surface`` calls for one session.
+    """
+    fake = _install(monkeypatch, FakeCmux())
+    session = _session(tmp_path)
+    tool = builtin.build_browser_tool(session._build_tool_context())
+
+    turn_one = session._build_tool_context()
+    opened = _run(tool, "t1", {"action": "open", "url": "https://example.com"}, turn_one)
+    assert not opened.is_error
+    assert turn_one.browser is not None and turn_one.browser.surface_id == "surface:73"
+
+    turn_two = session._build_tool_context()
+    assert turn_two is not turn_one, "the fixture must model a REBUILT context"
+    assert turn_two.browser is not None, "the handle did not survive the turn boundary"
+    assert turn_two.browser.surface_id == "surface:73"
+
+    assert not _run(tool, "t2", {"action": "read"}, turn_two).is_error
+    closed = _run(tool, "t3", {"action": "close"}, turn_two)
+    assert "Closed browser surface surface:73" in closed.text
+
+    opens = [call for call in fake.calls if call[:2] == ["--json", "new-surface"]]
+    assert len(opens) == 1, f"a second surface would be a leaked tab: {opens}"
+    assert fake.calls.count(["close-surface", "--surface", "surface:73"]) == 1
+
+
+def test_dispose_closes_a_surface_the_model_left_open(monkeypatch, tmp_path) -> None:
+    """Nothing else can close it: the handle dies with the process, and the tab
+    stays in the user's pane for them to close by hand."""
+    fake = _install(monkeypatch, FakeCmux())
+    session = _session(tmp_path)
+    tool = builtin.build_browser_tool(session._build_tool_context())
+    args = {"action": "open", "url": "https://example.com"}
+    assert not _run(tool, "t1", args, session._build_tool_context()).is_error
+
+    asyncio.run(session.dispose())
+    assert fake.calls[-1] == ["close-surface", "--surface", "surface:73"]
+    assert session._browser.surface_id == ""
+
+
+def test_dispose_without_a_surface_runs_no_cmux(monkeypatch, tmp_path) -> None:
+    fake = _install(monkeypatch, FakeCmux())
+    session = _session(tmp_path)
+    asyncio.run(session.dispose())
+    assert not fake.calls
+
+
+# --- a stale handle must never drive the user's own tab -----------------------
+
+
+class StaleSurfaceCmux(FakeCmux):
+    """cmux resolving a dead ``--surface`` handle the way it really does.
+
+    Measured on this host against ``--surface surface:999999`` (a handle that
+    never existed): ``get url`` returned rc=1 ``Error: invalid_params: Missing
+    or invalid surface_id``, while ``get title``, ``get text --selector body``,
+    ``eval`` and ``snapshot --compact`` ALL returned rc=0 carrying an unrelated
+    tab's content. That fallback is what let a stale handle silently drive and
+    report on whatever tab the USER was looking at.
+    """
+
+    def __init__(self, live: str = "surface:73") -> None:
+        super().__init__(href="https://someone-elses-tab.example/", title="Not your page")
+        self.live = live
+
+    async def __call__(self, argv, timeout: float = 30.0):
+        argv = list(argv)
+        if argv[:2] == ["browser", "--surface"] and argv[2] != self.live:
+            if argv[3:5] == ["get", "url"]:
+                self.calls.append(argv)
+                return 1, "Error: invalid_params: Missing or invalid surface_id"
+            # Everything else falls back to the active surface and exits 0.
+        return await super().__call__(argv, timeout)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"action": "read"},
+        {"action": "snapshot"},
+        {"action": "screenshot"},
+        {"action": "click", "selector": "a"},
+        {"action": "type", "selector": "input", "text": "hi"},
+        {"action": "goto", "url": "https://example.com"},
+    ],
+    ids=lambda a: a["action"],
+)
+def test_a_dead_handle_is_refused_instead_of_driving_the_active_tab(monkeypatch, args) -> None:
+    fake = _install(monkeypatch, StaleSurfaceCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    ctx = _with_surface("surface:99999")
+    result = _run(tool, "t1", dict(args), ctx)
+    assert result.is_error, result.text
+    assert "surface:99999 is gone" in result.text
+    assert "'open'" in result.text, "the model needs to be told how to recover"
+    # Cleared, or 'open' would reuse the dead handle and there would be no way back.
+    assert ctx.browser.surface_id == ""
+    # Nothing but the liveness probe itself may reach cmux: the action's own
+    # verb would have been answered by the user's tab with exit 0.
+    assert fake.calls == [["browser", "--surface", "surface:99999", "get", "url"]]
+
+
+def test_open_recovers_from_a_dead_handle_instead_of_erroring(monkeypatch) -> None:
+    """'open' is the recovery verb, so it drops the dead handle and makes a real
+    surface rather than telling the model to call the verb it just called."""
+    fake = _install(monkeypatch, StaleSurfaceCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    ctx = _with_surface("surface:99999")
+    result = _run(tool, "t1", {"action": "open", "url": "https://example.com"}, ctx)
+    assert not result.is_error, result.text
+    assert ctx.browser.surface_id == "surface:73"
+    assert any(call[:2] == ["--json", "new-surface"] for call in fake.calls), fake.calls
+    assert "goto" not in fake.verbs(), "a goto here would have driven the user's tab"
+
+
+# --- 'type' must verify the fill, not echo the read-back ----------------------
+
+
+def test_type_reports_a_fill_that_did_not_take_as_an_error(monkeypatch) -> None:
+    """The read-back used to be interpolated into "Value is now 'X'." without
+    ever being compared to what was asked for, so a fill that did nothing was
+    reported as a success quoting the field's OLD contents as the new ones."""
+    fake = _install(monkeypatch, FakeCmux())
+    fake.value = "stale contents"
+
+    async def fill_does_nothing(argv, timeout: float = 30.0):
+        if argv[3:4] == ["fill"]:
+            fake.calls.append(list(argv))
+            return 0, "OK"  # exit 0, field untouched — cmux's actual shape here
+        return await FakeCmux.__call__(fake, argv, timeout)
+
+    monkeypatch.setattr(builtin, "_run_cmux", fill_does_nothing)
+    tool = builtin.build_browser_tool(_ctx())
+    args = {"action": "type", "selector": "input[name=q]", "text": "hello"}
+    result = _run(tool, "t1", args, _with_surface())
+    assert result.is_error
+    assert "did not take" in result.text
+    assert "'stale contents'" in result.text and "'hello'" in result.text
+
+
+def test_type_says_so_when_the_value_cannot_be_read_back(monkeypatch) -> None:
+    """A contenteditable has no `value` property, so an unreadable read-back is
+    not evidence either way — but it must not read as a verified fill."""
+    fake = _install(monkeypatch, FakeCmux())
+
+    async def no_value_property(argv, timeout: float = 30.0):
+        if argv[3:5] == ["get", "value"]:
+            return 1, "Error: not_supported"
+        return await FakeCmux.__call__(fake, argv, timeout)
+
+    monkeypatch.setattr(builtin, "_run_cmux", no_value_property)
+    tool = builtin.build_browser_tool(_ctx())
+    args = {"action": "type", "selector": "div[contenteditable]", "text": "hello"}
+    result = _run(tool, "t1", args, _with_surface())
+    assert not result.is_error
+    assert "unverified" in result.text
+
+
+def test_type_refuses_flag_shaped_text(monkeypatch) -> None:
+    """cmux's parser is flag-greedy in the --text slot: measured, `fill
+    --selector a --text --help` exits 0 and prints the browser help, and the
+    tool then reported "Typed into a." having typed nothing."""
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    for bad in ("--help", "--focus true", "-x"):
+        result = _run(
+            tool, "t1", {"action": "type", "selector": "input", "text": bad}, _with_surface()
+        )
+        assert result.is_error, f"{bad!r} should be refused"
+        assert "flag-shaped text" in result.text
+    assert not fake.calls, "a refused value must never reach the subprocess"
+
+
+# --- cancellation must not orphan the child ----------------------------------
+
+
+class HangingProc:
+    """A cmux child that never answers, so the only way out is cancellation."""
+
+    def __init__(self) -> None:
+        self.killed = False
+        self.waited = False
+        self.returncode: int | None = None
+
+    async def communicate(self):
+        await asyncio.sleep(3600)
+        raise AssertionError("unreachable")
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+
+    async def wait(self) -> int | None:
+        self.waited = True
+        return self.returncode
+
+
+def test_run_cmux_kills_the_child_when_the_turn_is_cancelled(monkeypatch) -> None:
+    """CancelledError derives from BaseException, so it passes straight through
+    both `except asyncio.TimeoutError` and `except Exception` and used to
+    propagate with the child still running and unreaped. The calls most likely
+    to be cancelled are the long ones (navigation polls for up to 20 s, 'open'
+    allows 30 s), which are also the ones most likely to be wedged, so session
+    teardown or an aborted turn orphaned a cmux process each time."""
+    proc = HangingProc()
+    monkeypatch.setattr(builtin, "_cmux_binary", lambda: "/opt/homebrew/bin/cmux")
+
+    async def fake_exec(*_args, **_kwargs):
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    async def scenario() -> None:
+        task = asyncio.ensure_future(builtin._run_cmux(["browser", "--surface", "s", "get", "url"]))
+        # Let it get past the spawn and into communicate() before cancelling.
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert proc.killed, "the cmux child was left running"
+    assert proc.waited, "an unreaped child is a zombie until the operator exits"

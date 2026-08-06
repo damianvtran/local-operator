@@ -34,10 +34,15 @@ _AMBIENT_VARS = (
     "LOCAL_OPERATOR_DEBUG",
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
+    # The provider registry's ONLY callable ``env_keys`` resolver prefers this
+    # over the API key, so leaving it ambient can flip both the value a test
+    # resolves and the credential KIND reported for it.
+    "ANTHROPIC_OAUTH_TOKEN",
     "OPENROUTER_API_KEY",
     "DEEPSEEK_API_KEY",
     "MISTRAL_API_KEY",
     "GOOGLE_API_KEY",
+    "GOOGLE_AI_STUDIO_API_KEY",
     "GEMINI_API_KEY",
     "XAI_API_KEY",
     "KIMI_API_KEY",

@@ -77,6 +77,18 @@ def _assert_absent(modules: set[str], top_level: str, why: str) -> None:
 # --- CLI entry point ---------------------------------------------------------
 
 
+def test_cli_import_does_not_load_asyncio(cli_modules: set[str]) -> None:
+    # The single heaviest item on the CLI's import graph: 34.4 ms, +6.5 MB RSS
+    # and +77 modules. Only the interactive TUI/REPL tail in main() needs an
+    # event loop, so `import asyncio` lives inside that branch — `--version`,
+    # `--help`, shell completion and the config/credential/agents/login
+    # subcommands all return before it, and `exec`/`serve` bring their own loop
+    # from exec_mode/the server module. A module-scope `import asyncio` in
+    # cli.py (or in anything cli.py imports) silently reverts the batch's
+    # largest saving, which is exactly what this pin exists to make loud.
+    _assert_absent(cli_modules, "asyncio", "34.4 ms / 6.5 MB; only the interactive tail needs it")
+
+
 def test_cli_import_does_not_load_pillow(cli_modules: set[str]) -> None:
     # Pillow + pillow-heif cost 23.4 ms and +7.6 MB RSS (+75 modules) and exist
     # solely to convert HEIC/HEIF attachments. cli.py imports helpers.py for
@@ -93,9 +105,10 @@ def test_cli_import_does_not_load_local_operator_types(cli_modules: set[str]) ->
     # itself. helpers.py needed exactly one name from it (ResponseJsonSchema, in
     # process_json_response), so it moved to a function-local import plus a
     # TYPE_CHECKING binding for the annotation.
-    assert "local_operator.types" not in cli_modules, (
-        "local_operator.types is back on the CLI import path "
-        "(~35 ms of pydantic model construction); keep it lazy in helpers.py"
+    _assert_absent(
+        cli_modules,
+        "local_operator.types",
+        "~35 ms of pydantic model construction; keep it lazy in helpers.py",
     )
 
 

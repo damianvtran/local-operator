@@ -14,11 +14,16 @@ fails a test rather than silently degrading a session.
 
 from __future__ import annotations
 
+import json
+import time
+import types
+
 import httpx
 import pytest
 
 from local_operator.model import discovery
 from local_operator.model.discovery import (
+    DEFAULT_TIMEOUT_S,
     GEMINI_MAX_PAGES,
     LYING_MAX_TOKENS,
     DiscoveredModel,
@@ -353,6 +358,70 @@ def test_gemini_makes_no_request_without_a_key() -> None:
     assert fetch_models("google", api_key=None, client=client) is None
     # The key is a query parameter, so a keyless request is a guaranteed 403.
     assert client.calls == []
+
+
+class _SlowPaginator:
+    """A Gemini endpoint that is slow but ALIVE: every page answers inside the
+    budget it was granted and hands back a fresh ``nextPageToken`` forever.
+
+    Advances the clock ``discovery`` reads instead of sleeping, so the test can
+    measure the elapsed time of a run that really takes minutes. ``share`` is the
+    fraction of each granted ceiling the page consumes; 1.0 spends the lot.
+    """
+
+    def __init__(self, clock: list[float], *, share: float) -> None:
+        self._clock = clock
+        self._share = share
+        self.calls: list[tuple[str, dict, dict, float]] = []
+
+    def get(self, url: str, *, headers: dict, params: dict, timeout: float) -> _Response:
+        self.calls.append((url, dict(headers), dict(params), timeout))
+        assert timeout > 0, "a request was issued with no budget left to spend"
+        self._clock[0] += timeout * self._share
+        page = len(self.calls)
+        return _gemini_page(_gemini_entry(f"gemini-{page}"), next_token=f"page-{page}")
+
+
+def _fake_clock(monkeypatch, clock: list[float]) -> None:
+    # Only discovery's own reference is replaced: patching ``time.monotonic``
+    # itself would reach every library the test session happens to touch.
+    monkeypatch.setattr(discovery, "time", types.SimpleNamespace(monotonic=lambda: clock[0]))
+
+
+def test_gemini_bounds_the_whole_pagination_run_by_one_timeout(monkeypatch) -> None:
+    """``DEFAULT_TIMEOUT_S`` promises an unreachable -- or merely slow -- host
+    fails in seconds, but it used to bound ONE request while this transport issues
+    up to ``GEMINI_MAX_PAGES``. Measured before the fix with this stub: 25
+    requests and 250 s for a single ``resolve_model_info()``, on the synchronous
+    session-start path and the TUI's ``_cost_for``.
+    """
+    clock = [0.0]
+    _fake_clock(monkeypatch, clock)
+    client = _SlowPaginator(clock, share=0.9)
+
+    fetch_models("google", api_key="AIza", client=client, timeout=DEFAULT_TIMEOUT_S)
+
+    # The ceiling covers the RUN, not each hop: 1e-9 absorbs the accumulation
+    # error of adding fractions of a float, not any real slack.
+    assert clock[0] <= DEFAULT_TIMEOUT_S + 1e-9
+    assert len(client.calls) <= GEMINI_MAX_PAGES
+    # Every hop gets what is LEFT of the budget rather than a fresh ceiling.
+    assert client.calls[1][3] < client.calls[0][3]
+
+
+def test_gemini_fails_the_listing_when_the_deadline_cuts_pagination_short(monkeypatch) -> None:
+    clock = [0.0]
+    _fake_clock(monkeypatch, clock)
+    client = _SlowPaginator(clock, share=1.0)
+
+    rows = fetch_models("google", api_key="AIza", client=client, timeout=DEFAULT_TIMEOUT_S)
+
+    # The same choice the failed-page path makes, for the same reason: the pages
+    # that did arrive are not the catalogue, and offering them as one silently
+    # deletes every model on the pages that did not.
+    assert rows is None
+    assert len(client.calls) == 1
+    assert clock[0] == DEFAULT_TIMEOUT_S
 
 
 # -- failure is not emptiness -------------------------------------------------
@@ -755,21 +824,25 @@ def test_available_models_lists_a_keyless_local_provider(tmp_path) -> None:
     assert [row.id for row in models] == ["qwen3:8b"]
 
 
-def test_available_models_uses_a_cache_key_that_cannot_clobber_the_catalogue(tmp_path) -> None:
-    catalogue_document = tmp_path / "openrouter.models.json"
-    catalogue_document.write_text('{"fetched_at": 0, "payload": {"data": []}}', encoding="utf-8")
+def test_available_models_never_reads_a_document_written_by_the_old_layout(tmp_path) -> None:
+    """An earlier release cached the provider client's RAW ``list_models()``
+    payload under the bare provider id. This reader cannot interpret that shape,
+    and the payload is written before anything maps it, so reusing the name would
+    serve the failure as a fresh cache hit for a full day. The old documents are
+    unreachable by name and swept off disk instead of left to rot there."""
+    legacy_document = tmp_path / "openrouter.models.json"
+    legacy_document.write_text('{"fetched_at": 0, "payload": {"data": []}}', encoding="utf-8")
     body = {"data": [{"id": "vendor/model", "context_length": 1_000}]}
     client = _StubClient([_Response(200, body)])
 
-    _, status = available_models("openrouter", api_key="k", client=client, cache_dir=tmp_path)
+    models, status = available_models("openrouter", api_key="k", client=client, cache_dir=tmp_path)
 
     assert status == "ok"
-    # The aggregator catalogue owns the bare provider name; overwriting it with a
-    # differently-shaped payload would be served as a fresh hit for a full day.
-    assert catalogue_document.read_text(encoding="utf-8") == (
-        '{"fetched_at": 0, "payload": {"data": []}}'
-    )
-    assert (tmp_path / "openrouter.models.models.json").exists()
+    assert "vendor/model" in {row.id for row in models}
+    assert not legacy_document.exists()
+    # One suffix, applied once: the key and the filename builder both adding
+    # ``.models`` is what produced ``openrouter.models.models.json``.
+    assert [path.name for path in tmp_path.iterdir()] == ["openrouter.listing.json"]
 
 
 def test_available_models_survives_a_broken_cache_layer(tmp_path, monkeypatch) -> None:
@@ -785,3 +858,37 @@ def test_available_models_survives_a_broken_cache_layer(tmp_path, monkeypatch) -
     # traceback here would take the whole session down.
     assert status == "static"
     assert {row.id for row in models} == set(static_models("anthropic"))
+
+
+def test_a_cached_document_that_cannot_be_mapped_is_dropped_so_the_next_call_recovers(
+    tmp_path,
+) -> None:
+    """The payload is cached BEFORE anything interprets it, so a document that
+    passes the cache's shape checks and still yields no rows -- here ``models``
+    arriving as an object -- would otherwise be served as a FRESH hit on every
+    start for the full 24h TTL. Measured before the fix: three consecutive calls
+    all returned ``static`` with zero fetches and the document stayed on disk.
+    """
+    poisoned = tmp_path / "openrouter.listing.json"
+    poisoned.write_text(
+        json.dumps({"fetched_at": time.time(), "payload": {"models": {"not": "a list"}}}),
+        encoding="utf-8",
+    )
+    body = {"data": [{"id": "vendor/model", "context_length": 1_000}]}
+    client = _StubClient([_Response(200, body)])
+
+    _, first_status = available_models("openrouter", api_key="k", client=client, cache_dir=tmp_path)
+    fetches_after_first = len(client.calls)
+    poisoned_survived = poisoned.exists()
+    models, second_status = available_models(
+        "openrouter", api_key="k", client=client, cache_dir=tmp_path
+    )
+
+    # The first call cannot do better than the registry -- the document looks
+    # fresh, so nothing is fetched -- but it must not leave the document behind:
+    # recovery has to happen without the user deleting a file by hand.
+    assert (first_status, fetches_after_first) == ("static", 0)
+    assert not poisoned_survived
+    assert second_status == "ok"
+    assert len(client.calls) == 1
+    assert "vendor/model" in {row.id for row in models}

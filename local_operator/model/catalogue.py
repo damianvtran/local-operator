@@ -40,8 +40,9 @@ no entry:
 4. Fetch fails with no cache      -> return None; the caller keeps its static
    fallbacks. A session MUST still start with no network.
 
-The cache is keyed by provider and holds the raw payload, so the mapping in
-``_info_from_listing`` stays the single place that interprets it.
+The cache holds the RAW payload under a key the caller chooses, so mapping stays
+the caller's business and one provider can hold differently-shaped documents
+without either overwriting the other.
 """
 
 from __future__ import annotations
@@ -67,8 +68,45 @@ def default_cache_dir() -> Path:
     return Path("~/.local-operator/cache").expanduser()
 
 
-def _cache_path(provider: str, cache_dir: Path | None) -> Path:
-    return (cache_dir or default_cache_dir()) / f"{provider}.models.json"
+#: Document names written by earlier layouts of this cache. Two generations are
+#: dead: ``<provider>.models.json``, from when the caller's key was the bare
+#: provider id, and ``<provider>.models.models.json``, from when the caller's key
+#: and :func:`_cache_path` each appended ``.models``. One pattern matches both,
+#: and neither can match a current ``<key>.json`` whose key ends in ``.listing``.
+_LEGACY_DOCUMENT_GLOB = "*.models.json"
+
+
+def _cache_path(key: str, cache_dir: Path | None) -> Path:
+    """The document for ``key``; the key is the WHOLE stem, suffix added once.
+
+    This used to append ``.models`` on top of a caller key that already ended in
+    ``.models``, which is how ``openrouter.models.models.json`` reached disk.
+    """
+    return (cache_dir or default_cache_dir()) / f"{key}.json"
+
+
+def purge_legacy_documents(cache_dir: Path | None = None) -> None:
+    """Delete catalogue documents no reader will ever open again.
+
+    Measured on one install: ``openrouter.models.json`` (569,845 bytes) and
+    ``radient.models.json`` (239,019 bytes) left behind by a document-name
+    change, beside the names in use. A cache with no index has no other way to
+    notice that an old entry became unreachable, so without this it is ~800 KB
+    per install that nothing reads and nothing ever removes.
+
+    Stateless on purpose -- no "migration done" marker. The legacy patterns
+    cannot match a current document name, so the sweep is idempotent by
+    construction rather than by remembering that it ran, and it stays correct if
+    the cache directory is cleared or copied between machines. A missing
+    directory globs to nothing rather than raising, so a first run is a no-op.
+    """
+    directory = cache_dir or default_cache_dir()
+    try:
+        for stale in directory.glob(_LEGACY_DOCUMENT_GLOB):
+            stale.unlink(missing_ok=True)
+    except OSError as exc:  # pragma: no cover - read-only or unreadable cache dir
+        # Reclaiming disk is never worth failing a session start over.
+        logger.debug("could not purge legacy catalogue documents: %s", exc)
 
 
 def _read_cache(path: Path) -> tuple[dict[str, Any] | None, float]:
@@ -175,20 +213,27 @@ def _umask() -> int:
 
 
 def cached_listing(
-    provider: str,
+    key: str,
     fetch: Callable[[], dict[str, Any]],
     *,
     ttl_s: float = DEFAULT_TTL_S,
     cache_dir: Path | None = None,
 ) -> dict[str, Any] | None:
-    """The provider's ``list_models()`` payload, from cache when fresh.
+    """A provider's ``list_models()`` payload, from cache when fresh.
+
+    ``key`` names the document, not the provider: the caller owns the naming, so
+    two differently-shaped listings for one provider cannot land on one file.
 
     ``fetch`` returns the payload as a plain dict (``model_dump()`` of the
     client's response). Returns None only when there is no cache AND the fetch
     failed, which is the one case where the caller must keep its static
     fallbacks.
     """
-    path = _cache_path(provider, cache_dir)
+    # Swept here because this module owns the naming scheme: a caller cannot know
+    # which document names went dead, and a dead name has no reader left to
+    # notice it. Costs one directory read once the sweep has nothing to match.
+    purge_legacy_documents(cache_dir)
+    path = _cache_path(key, cache_dir)
     payload, age = _read_cache(path)
     if payload is not None and age < ttl_s:
         return payload
@@ -199,25 +244,28 @@ def cached_listing(
         if payload is not None:
             # Stale beats absent: the numbers are days old at worst, whereas
             # the static fallback is wrong by nearly a factor of six.
-            logger.debug("using stale %s catalogue (%.0fs old): %s", provider, age, exc)
+            logger.debug("using stale %s catalogue (%.0fs old): %s", key, age, exc)
             return payload
-        logger.debug("no %s catalogue available: %s", provider, exc)
+        logger.debug("no %s catalogue available: %s", key, exc)
         return None
 
     _write_cache(path, fresh)
     return fresh
 
 
-def invalidate(provider: str, *, cache_dir: Path | None = None) -> None:
-    """Drop ``provider``'s cached catalogue so the next call refetches.
+def invalidate(key: str, *, cache_dir: Path | None = None) -> None:
+    """Drop the ``key`` document so the next :func:`cached_listing` refetches.
 
-    Needed because the payload is written BEFORE anything tries to interpret
-    it. A document that validates but cannot be mapped (a non-scalar price, a
-    context length arriving as an object) would otherwise be served as a fresh
-    cache hit on every start for the whole TTL, repeating the same failure for a
-    day with no way to recover but deleting the file by hand.
+    Needed because the payload is written BEFORE anything tries to interpret it.
+    A document that validates but cannot be mapped (a ``models`` key that is not
+    an array, a context length arriving as an object) would otherwise be served
+    as a fresh cache hit on every start for the whole TTL, repeating the same
+    failure for a day with no way to recover but deleting the file by hand.
+
+    Called by ``discovery._available_models`` -- the one place that maps a cached
+    payload -- when a document it just read yielded no usable rows.
     """
     try:
-        _cache_path(provider, cache_dir).unlink(missing_ok=True)
+        _cache_path(key, cache_dir).unlink(missing_ok=True)
     except OSError as exc:  # pragma: no cover - read-only cache dir
-        logger.debug("could not invalidate %s catalogue: %s", provider, exc)
+        logger.debug("could not invalidate %s catalogue: %s", key, exc)

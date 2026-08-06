@@ -33,6 +33,7 @@ from local_operator.harness.types import (  # noqa: E402
 )
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.widgets.editor import Editor  # noqa: E402
+from local_operator.tui.widgets.welcome import WelcomeView  # noqa: E402
 
 MARKDOWN = (
     "Here is the **plan** for `parser.py`:\n"
@@ -227,22 +228,46 @@ def _freeze_cursor(pilot) -> None:  # type: ignore[no-untyped-def]
 
     The blink is a timer, so whether the frame catches the cursor ON or OFF
     is a race — and a single inverted cell is enough to fail an SVG compare.
-    That is the whole of the "snapshots are flaky" reputation these tests
-    had; pinning it here makes the frames byte-stable across runs.
     """
     pilot.app.query_one(Editor).cursor_blink = False
+
+
+async def _settle(pilot, ticks: int = 24) -> None:  # type: ignore[no-untyped-def]
+    """Pause until the boot frame stops changing, not for a fixed count.
+
+    ``WelcomeView`` polls every 250 ms until the session reports a model label,
+    then repaints once and stops its own timer (``WelcomeView._sync_timer``).
+    A fixed ``pilot.pause()`` count races that last tick: both outcomes render
+    the SAME characters, so the frame LOOKS identical, but the repaint splits
+    the row into different Rich segments — and ``export_svg`` derives its
+    element-id prefix from ``adler32`` over the segment reprs, so a byte compare
+    fails on an id that has nothing to do with what the user would see.
+
+    That is the residual "snapshots are flaky" tail after the cursor blink was
+    pinned: roughly 1 run in 6. Waiting for the timer to retire makes the
+    captured frame the settled one every time, and asserts a real property —
+    the boot frame reaches a steady state — instead of hiding the race behind a
+    normalised comparison.
+    """
+    welcome = pilot.app.query_one(WelcomeView)
+    for _ in range(ticks):
+        await pilot.pause()
+        if welcome._timer is None:
+            break
+    # One more so the retiring tick's repaint is composited before capture.
+    await pilot.pause()
 
 
 async def _boot_only(pilot) -> None:  # type: ignore[no-untyped-def]
     await pilot.pause()
     _freeze_cursor(pilot)
-    await pilot.pause()
+    await _settle(pilot)
 
 
 async def _populate_and_submit(pilot) -> None:  # type: ignore[no-untyped-def]
     await pilot.pause()
     _freeze_cursor(pilot)
-    await pilot.pause()
+    await _settle(pilot)
     pilot.app.query_one(Editor).focus()
     await pilot.pause()
     for key in "parse the source":

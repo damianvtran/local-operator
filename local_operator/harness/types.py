@@ -313,12 +313,32 @@ class VariableStoreProtocol(Protocol):
 class BrowserSurfaceProtocol(Protocol):
     """Mutable handle to the host browser surface a session has open.
 
-    The browser tool creates one on first ``open`` and stores it back on the
-    context so later calls drive the same surface instead of leaking a fresh
-    one per call.
+    The browser tool records the handle here on ``open`` and every later
+    action drives that surface instead of leaking a fresh one per call.
     """
 
     surface_id: str
+
+
+class BrowserSurface:
+    """The concrete :class:`BrowserSurfaceProtocol` a HOST owns.
+
+    Deliberately host-owned rather than created by the tool on demand: the
+    session rebuilds its :class:`ToolContext` at the start of EVERY turn, so a
+    handle the tool stashed on the context survived only the turn that opened
+    it. That broke the ordinary shape of browsing ("open X" then, next
+    message, "click Y") and stranded a cmux tab per turn that nothing could
+    close. Injected like ``wake_scheduler``, the surface outlives the context
+    and session teardown can close it.
+
+    Lives here beside the protocol, and holds no cmux knowledge, so a host can
+    own one without importing the tool layer.
+    """
+
+    __slots__ = ("surface_id",)
+
+    def __init__(self) -> None:
+        self.surface_id = ""
 
 
 class ToolContext(BaseModel):
@@ -356,7 +376,10 @@ class ToolContext(BaseModel):
     # todo state it can persist alongside the transcript; otherwise the tool
     # falls back to a process-local table.
     todos: dict[str, list[dict[str, str]]] | None = None
-    # Set by the browser tool on first open; see BrowserSurfaceProtocol.
+    # Injected by the HOST (see BrowserSurface), not created by the tool: this
+    # context is rebuilt every turn, so a tool-owned handle would not survive
+    # to the next one. ``None`` degrades the browser tool to a single-call
+    # surface the session can never close.
     browser: BrowserSurfaceProtocol | None = None
 
 

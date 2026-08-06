@@ -122,6 +122,63 @@ print(json.dumps({
 }))
 """
 
+# Child probe: boot the REAL TUI headlessly and report its peak RSS. The
+# interactive surface is what a human actually runs, so measuring only `exec`
+# would report the cheap half of the product. Textual's own import graph is the
+# bulk of the difference, which is the point: the gap between this cell and the
+# `exec` cell below is the evidence that Textual stays LAZY and headless runs
+# never pay for it. A regression that moves `import textual` to module scope in
+# `cli.py` shows up here as the two cells converging.
+#
+# `run_test` drives the app through Textual's own harness rather than a pty, so
+# there is no terminal to own and nothing to restore on the way out.
+_TUI_PROBE = """
+import argparse, asyncio, json, os, resource, sys, time
+from pathlib import Path
+config_dir = os.environ["LO_BENCH_CONFIG_DIR"]
+os.environ["LOCAL_OPERATOR_NO_SHIMMER"] = "1"
+
+t0 = time.perf_counter()
+from local_operator.agents import AgentRegistry
+from local_operator.config import ConfigManager
+from local_operator.credentials import CredentialManager
+from local_operator.session_factory import create_session
+from local_operator.tui.app import OperatorApp
+
+args = argparse.Namespace(
+    hosting="test", model="mock-model", agent_name=None, agent_id=None,
+    yolo=True, train=False, cwd=None,
+)
+
+
+async def boot():
+    async def factory():
+        return await create_session(
+            args,
+            ConfigManager(Path(config_dir)),
+            CredentialManager(Path(config_dir)),
+            AgentRegistry(Path(config_dir)),
+            has_ui=True,
+        )
+
+    app = OperatorApp(factory, "dark", None)
+    async with app.run_test(size=(100, 30)) as pilot:
+        # Type without submitting: the goal is a fully mounted, fully styled
+        # frame with a live session behind it, not a provider round trip.
+        await pilot.pause()
+        await pilot.press(*"hello")
+        await pilot.pause()
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+
+rss = asyncio.run(boot())
+print(json.dumps({
+    "seconds": time.perf_counter() - t0,
+    "ru_maxrss": rss,
+    "modules": len(sys.modules),
+}))
+"""
+
 # Child probe: run the console entry point end to end as its OWN child, then
 # report that child's peak RSS. RUSAGE_CHILDREN is a high-water mark across
 # every child a process has reaped, so it is only attributable when the
@@ -145,9 +202,15 @@ print(json.dumps({
 
 def _child_env(config_dir: Path) -> dict[str, str]:
     """Environment for every probe: an isolated config dir so the benchmark
-    never reads or writes the developer's real ``~/.local-operator``, and no
-    bytecode writes so a cold run is not silently measuring a warm __pycache__
-    on the first iteration and a cold one on the rest."""
+    never reads or writes the developer's real ``~/.local-operator``.
+
+    Bytecode caching is deliberately left ON. Disabling it would make every
+    sample pay source compilation for the whole dependency graph, which is not
+    what a real invocation pays; instead ``_repeat`` discards a warmup run so
+    ``__pycache__`` is populated before the first measured sample and every
+    sample is warm — the state a real invocation is in after the first. Drop
+    that warmup discard and run #1 becomes cold while the rest are warm, which
+    skews min and median in opposite directions."""
     env = dict(os.environ)
     env["LOCAL_OPERATOR_CONFIG_DIR"] = str(config_dir)
     env["LO_BENCH_CONFIG_DIR"] = str(config_dir)
@@ -165,7 +228,20 @@ def _run_probe(code: str, argv: list[str], env: dict[str, str]) -> dict:
     )
     if proc.returncode != 0:
         raise RuntimeError(f"probe failed ({proc.returncode}):\n{proc.stderr[-2000:]}")
-    return json.loads(proc.stdout.strip().splitlines()[-1])
+    payload = json.loads(proc.stdout.strip().splitlines()[-1])
+    # The wrapper interpreter's returncode only proves the PROBE ran. A probe
+    # that spawns the thing under test (_EXEC_PROBE) exits 0 even when that
+    # child crashed, and a crash is FAST — a failing `exec noop` would be
+    # reported as a 45% improvement instead of a regression. Probes that shell
+    # out report the measured command's own returncode; honour it.
+    measured_rc = payload.get("returncode", 0)
+    if measured_rc:
+        raise RuntimeError(
+            f"measured command failed ({measured_rc}): {argv}\n"
+            f"--- stderr ---\n{payload.get('stderr', '')}\n"
+            f"--- stdout ---\n{payload.get('stdout', '')}"
+        )
+    return payload
 
 
 def _repeat(code: str, argv: list[str], env: dict[str, str], runs: int) -> dict:
@@ -257,6 +333,7 @@ def measure(runs: int, top: int, config_dir: Path) -> dict:
         result["importtime_top"][module] = _importtime_self(module, env, top, runs)
 
     result["session_build"] = _repeat(_SESSION_PROBE, [], env, max(1, runs // 2) or 1)
+    result["tui_boot"] = _repeat(_TUI_PROBE, [], env, max(1, runs // 2) or 1)
 
     exec_argv = [
         sys.executable,
@@ -329,6 +406,21 @@ def _rows(result: dict, baseline: dict | None) -> list[tuple]:
     )
     lo_rss, med_rss, before = rss_pair(sess, old_sess)
     rows.append(("  RSS after session build", "MB", lo_rss, med_rss, before))
+
+    tui, old_tui = result["tui_boot"], _dig(baseline, "tui_boot")
+    rows.append(
+        (
+            "TUI boot (mock, headless)",
+            "ms",
+            tui["min_ms"],
+            tui["median_ms"],
+            _dig(old_tui, "min_ms"),
+        )
+    )
+    lo_rss, med_rss, before = rss_pair(tui, old_tui)
+    rows.append(("  RSS after TUI boot", "MB", lo_rss, med_rss, before))
+    tui_mods = float(tui["modules"])
+    rows.append(("  sys.modules after TUI boot", "", tui_mods, tui_mods, _dig(old_tui, "modules")))
 
     ex, old_ex = result["exec_noop"], _dig(baseline, "exec_noop")
     rows.append(
