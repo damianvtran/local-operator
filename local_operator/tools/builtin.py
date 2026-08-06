@@ -69,17 +69,40 @@ from local_operator.harness.types import (
     WakeSchedulerProtocol,
 )
 from local_operator.harness.wake import WakeSchedule, build_wake_schedule, format_duration
+from local_operator.tools.spill import (
+    SPILL_ENTRY_LIMIT_BYTES,
+    SPILL_SCHEME,
+    SPILL_SEARCH_MATCH_LIMIT,
+    SpillMeta,
+    SpillRef,
+    SpillStore,
+    get_store,
+    parse_handle,
+)
 
 # ---------------------------------------------------------------------------
 # Shared limits and helpers
 # ---------------------------------------------------------------------------
 
 #: Single combined budget for captured stdout+stderr (chars, not bytes, since
-#: the output is one decoded transcript): the whole result must fit the
-#: ~30k-char per-tool budget in docs/REWRITE.md, and truncation is
-#: head-then-tail with one marker so both ends survive.
-BASH_OUTPUT_LIMIT_CHARS = 50 * 1024
-BASH_TRUNCATION_MARKER = "\n\n... [output truncated] ...\n\n"
+#: the output is one decoded transcript).
+#:
+#: MEASURED, not chosen by taste. Real log-like output on this repo encodes at
+#: 3.80-4.05 chars/token under cl100k_base (full unit-suite ``pytest -v``:
+#: 298,304 chars / 73,679 tokens = 4.05; ``grep -rn 'def '``: 3.95;
+#: ``git log -p``: 3.80). At the previous 50 KiB cap ONE tool result cost
+#: 12,538-13,100 tokens — over 40% of the 30,000-token start-context budget in
+#: docs/REWRITE.md, spent on a single call. At 8 KiB the same three workloads
+#: cost 2,086-2,169 tokens, a measured 6.1x reduction, and the clip still
+#: carries ~55 lines of head and ~55 lines of tail, which is enough to hold a
+#: pytest failure summary and the exit line — the two places the answer
+#: actually lives. Anything the clip drops is recoverable by handle rather
+#: than destroyed, which is what makes a cap this tight safe at all.
+TOOL_OUTPUT_LIMIT_CHARS = 8 * 1024
+
+#: Back-compat name for the bash-specific budget. Same value: there is one
+#: per-result budget, and a second knob would let the two drift.
+BASH_OUTPUT_LIMIT_CHARS = TOOL_OUTPUT_LIMIT_CHARS
 
 #: Maximum number of matches returned by grep.
 GREP_MATCH_LIMIT = 200
@@ -99,6 +122,20 @@ READ_FILE_LIMIT_BYTES = 2 * 1024 * 1024
 #: Maximum lines read renders; larger files show the head plus a footer
 #: telling the model to continue with a line range.
 READ_LINE_CAP = 2000
+#: Char budget for one ``read`` result. The line cap alone is not a budget:
+#: 2,000 lines of ordinary source is ~80 KB (~20k tokens), so a single read of
+#: a long file blew the same hole in the context that bash did. A file is its
+#: own store — the footer names a ``range`` on the SAME path rather than a
+#: spill handle, because spilling a copy of a file that is already on disk
+#: would double the bytes for nothing.
+READ_OUTPUT_LIMIT_CHARS = TOOL_OUTPUT_LIMIT_CHARS
+#: Lines a footer suggests per expansion call. Sized so one page of ordinary
+#: log text lands inside :data:`TOOL_OUTPUT_LIMIT_CHARS` (~55 head + ~55 tail
+#: lines measured at 8 KiB, so 200 lines of typical 40-char output is the
+#: right order and the page cap catches any overshoot). The point is that the
+#: printed call SUCCEEDS: a suggestion whose own answer gets truncated teaches
+#: the model that expansion does not work.
+SPILL_PAGE_LINES = 200
 #: Per-file size cap for grep; bigger files are skipped and counted.
 GREP_FILE_LIMIT_BYTES = 1 * 1024 * 1024
 
@@ -158,20 +195,200 @@ NON_INTERACTIVE_ENV: dict[str, str] = {
 }
 
 
-def truncate_output(text: str, limit: int = BASH_OUTPUT_LIMIT_CHARS) -> str:
+#: Marker written where the middle of an output was removed. Kept as a public
+#: name because tests and the browser paths reference it; the text now names
+#: the recovery route instead of just announcing a loss.
+BASH_TRUNCATION_MARKER = "\n\n... [output truncated] ...\n\n"
+
+
+def _clip_head_tail(text: str, limit: int) -> tuple[str, str]:
+    """``(head, tail)`` slices of ``text`` totalling at most ``limit`` chars.
+
+    Both cuts snap INWARD to a line boundary, so neither end shows half a
+    line. Half a line is not a cosmetic problem: a truncated ``File "x.py",
+    line 12`` reads as a different path, and a model that acts on it edits the
+    wrong file. When snapping would empty a side — one enormous line with no
+    newline to snap to — the raw character slice is kept, because a fragment
+    of the answer still beats none of it.
+    """
+    head_budget = limit // 2
+    tail_budget = limit - head_budget
+
+    head = text[:head_budget]
+    cut = head.rfind("\n")
+    if cut > 0:
+        head = head[: cut + 1]
+
+    tail = text[len(text) - tail_budget :]
+    cut = tail.find("\n")
+    if 0 <= cut < len(tail) - 1:
+        tail = tail[cut + 1 :]
+
+    return head, tail
+
+
+def truncate_output(text: str, limit: int = TOOL_OUTPUT_LIMIT_CHARS) -> str:
     """Keep the head and tail of ``text`` when it exceeds ``limit``.
 
-    Mirrors the established output truncation: the middle is replaced by a marker so the
-    model sees both the beginning (banners, command echo) and the end (actual
-    error) of a large output without blowing up the transcript. The result is
-    at most ``limit`` chars — the marker lives inside the budget.
+    The plain, store-free form: used where there is nothing to spill to (the
+    browser's page text is re-fetchable by re-reading the page) and as the
+    degraded path when a spill write fails. Prefer :func:`spill_truncate`,
+    which produces the same shape but leaves the elided content recoverable.
     """
     if len(text) <= limit:
         return text
-    budget = limit - len(BASH_TRUNCATION_MARKER)
-    head = budget // 2
-    tail = budget - head
-    return text[:head] + BASH_TRUNCATION_MARKER + text[len(text) - tail :]
+    head, tail = _clip_head_tail(text, limit - len(BASH_TRUNCATION_MARKER))
+    return head + BASH_TRUNCATION_MARKER + tail
+
+
+def _elision_span(text: str, head: str, tail: str) -> tuple[int, int, int]:
+    """``(total_lines, first_elided_line, last_elided_line)``, all 1-based.
+
+    Line numbers are what makes an expansion targeted rather than a blind
+    page: the footer can say "lines 58-3970 are elided" and the model can ask
+    for 40 of them. Counting is done on the same ``splitlines`` basis the
+    store uses to serve a range, so the two agree by construction.
+    """
+    total = len(text.splitlines())
+    head_lines = len(head.splitlines())
+    tail_lines = len(tail.splitlines())
+    return total, head_lines + 1, total - tail_lines
+
+
+def _spill_footer(meta: SpillMeta, suggested: tuple[int, int] | None = None) -> str:
+    """The recovery instructions that replace destroyed content.
+
+    ONE footer per tool result, appended at the very end, never one per
+    stream: a command that truncates both stdout and stderr has still produced
+    a single output with a single handle, and repeating the instructions
+    per-section spends the budget we just fought for on boilerplate the model
+    reads twice.
+
+    Spells out the EXACT call rather than describing it. A footer that says
+    "the full output was saved" and stops is worse than no footer: the model
+    knows something exists, cannot address it, and re-runs the command —
+    paying the original cost again plus the truncation. Both usable forms are
+    shown because they answer different questions: a range when the model
+    knows where to look, a search when it does not.
+    """
+    handle = meta.handle
+    first, last = suggested if suggested else (1, meta.lines)
+    # Suggest ONE PAGE, not the whole gap. A footer that prints
+    # range="462-3596" invites a call whose own answer is truncated at the
+    # same budget, so the agent's first obedient follow-up lands it right back
+    # where it started and it learns the handle does not work. Caught by
+    # test_footer_names_a_call_that_actually_resolves, which runs the printed
+    # call verbatim and requires the content back.
+    page_end = min(last, first + SPILL_PAGE_LINES - 1)
+    span = f"{first}-{page_end}"
+    more = f" (of {first}-{last} elided; page through or search)" if page_end < last else ""
+    partial = (
+        ""
+        if meta.complete
+        else (
+            f"\n  NOTE: output exceeded the {SPILL_ENTRY_LIMIT_BYTES // (1024 * 1024)} MB "
+            "per-entry store cap; the stored copy is itself head+tail of the original."
+        )
+    )
+    return (
+        f"\n[Full output ({meta.lines} lines) is SAVED at {handle} — expand it, "
+        f"do not re-run the command:\n"
+        f'  read(path="{handle}", range="{span}")  -> those lines'
+        f"{more}\n"
+        f'  read(path="{handle}?q=<regex>")  -> find matching line numbers first, '
+        f"then read a range around them{partial}]"
+    )
+
+
+def _spill(text: str, tool_name: str, context: ToolContext | None) -> SpillMeta | None:
+    """Store ``text`` for later expansion; ``None`` when it could not be kept.
+
+    Never raises. A store that cannot be written degrades the result to plain
+    truncation, which is exactly the behaviour that shipped before this module
+    existed — losing expansion is an inconvenience, failing the tool call is a
+    bug.
+    """
+    return get_store().write(
+        text,
+        tool_name=tool_name,
+        session_id=(context.session_id if context else "") or "",
+    )
+
+
+def _elide_inline(text: str, limit: int, offset: int = 0) -> tuple[str, tuple[int, int] | None]:
+    """``(head + marker + tail, elided_span)`` with the span named IN the marker.
+
+    The span is stated where the gap is, rather than only in the trailing
+    footer, so a model scanning a two-stream result can see which lines are
+    missing from WHICH stream. ``offset`` shifts the numbers into the
+    coordinate space of the spilled copy, whose framing may differ from this
+    fragment's (bash stores both streams under their banners in one entry).
+
+    Returns a ``None`` span when nothing was elided.
+    """
+    if len(text) <= limit:
+        return text, None
+    # Two passes: build the marker from a first-pass clip to learn its true
+    # length, then re-clip against the real budget. Sizing the clip with
+    # ``len(BASH_TRUNCATION_MARKER)`` alone would overshoot the limit by the
+    # length of the span annotation, and the limit is the whole point.
+    head, tail = _clip_head_tail(text, limit - len(BASH_TRUNCATION_MARKER))
+    total, first, last = _elision_span(text, head, tail)
+    marker = _elision_marker(last - first + 1, total, first + offset, last + offset)
+    head, tail = _clip_head_tail(text, limit - len(marker))
+    total, first, last = _elision_span(text, head, tail)
+    span = (first + offset, last + offset)
+    marker = _elision_marker(last - first + 1, total, span[0], span[1])
+    return head + marker + tail, span
+
+
+def _elision_marker(elided: int, total: int, first: int, last: int) -> str:
+    """The in-band gap marker.
+
+    Keeps :data:`BASH_TRUNCATION_MARKER` as an exact substring — renderers and
+    tests key off that literal — and adds the line span on its own line, so
+    the model can see WHICH lines are missing right where they are missing
+    rather than only in the trailing footer.
+    """
+    return (
+        f"{BASH_TRUNCATION_MARKER.rstrip()}\n"
+        f"[{elided} of {total} lines elided — they are lines {first}-{last} "
+        f"of the saved output]\n\n"
+    )
+
+
+def spill_truncate(
+    text: str,
+    tool_name: str,
+    context: ToolContext | None,
+    limit: int = TOOL_OUTPUT_LIMIT_CHARS,
+) -> tuple[str, dict[str, Any] | None]:
+    """``(display_text, spill_details)`` for one oversized output.
+
+    ``spill_details`` is ``{"spill": {...}}`` ready to merge into a
+    ``ToolResult.details`` mapping, or ``None`` when nothing was spilled
+    (output fit, or the store refused it). ``details`` never reaches a
+    provider, so recording the handle there costs no prompt tokens while still
+    letting renderers, transcripts and compaction see what happened.
+    """
+    if len(text) <= limit:
+        return text, None
+    meta = _spill(text, tool_name, context)
+    if meta is None:
+        return truncate_output(text, limit), None
+    body, span = _elide_inline(text, limit)
+    return body + _spill_footer(meta, span), {"spill": _spill_detail(meta)}
+
+
+def _spill_detail(meta: SpillMeta) -> dict[str, Any]:
+    """The ``details['spill']`` payload. One shape, so the transcript writer
+    and the renderers cannot disagree about the key names."""
+    return {
+        "handle": meta.handle,
+        "lines": meta.lines,
+        "bytes": meta.bytes,
+        "complete": meta.complete,
+    }
 
 
 def _safe_cwd(context: ToolContext | None) -> str:
@@ -371,6 +588,31 @@ def _bash_output_summary(stdout: str, stderr: str) -> str:
     return "\n".join(parts)
 
 
+def _stream_budgets(stdout: str, stderr: str, budget: int, failed: bool) -> tuple[int, int]:
+    """Split ``budget`` chars between stdout and stderr, stderr first.
+
+    Truncation's real risk is not lost bytes, it is a model that can no longer
+    see why something failed and starts guessing or re-running — which costs
+    more than the truncation saved. So the diagnostic stream gets first claim:
+    stderr takes whatever it needs up to a share of the budget, and stdout
+    takes the rest. The share rises to 3/4 when the command exited non-zero,
+    because on a failing run stderr IS the answer, and stays at 1/2 otherwise
+    so a chatty-but-harmless stderr (progress bars, deprecation warnings)
+    cannot crowd out the stdout the model actually asked for.
+
+    Both sides keep at least one char so neither stream can vanish entirely
+    without a marker explaining that it was there.
+    """
+    stderr_share = (budget * 3) // 4 if failed else budget // 2
+    stderr_budget = min(len(stderr), stderr_share)
+    stdout_budget = budget - stderr_budget
+    # A huge stderr on a failing command can leave stdout nothing; a huge
+    # stdout with tiny stderr leaves stderr nothing. Neither is acceptable as
+    # a zero, because a zero budget renders as an empty stream rather than a
+    # truncated one and the model reads it as "there was no output".
+    return max(stdout_budget, 1), max(stderr_budget, 1)
+
+
 @_guard("bash")
 async def execute_bash(
     tool_call_id: str,
@@ -530,22 +772,49 @@ async def execute_bash(
 
     stdout_raw = b"".join(stdout_chunks).decode("utf-8", errors="replace")
     stderr_raw = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+    return_code = process.returncode if process.returncode is not None else -1
+
     # Both streams may end up carrying a marker, so reserve room for two.
-    budget = BASH_OUTPUT_LIMIT_CHARS - 2 * len(BASH_TRUNCATION_MARKER)
+    budget = TOOL_OUTPUT_LIMIT_CHARS - 2 * len(BASH_TRUNCATION_MARKER)
+    spill_details: dict[str, Any] | None = None
     if len(stdout_raw) + len(stderr_raw) > budget:
-        total = len(stdout_raw) + len(stderr_raw)
-        stdout_budget = max(budget * len(stdout_raw) // total, 1)
-        stderr_budget = max(budget - stdout_budget, 1)
-        stdout = truncate_output(stdout_raw, stdout_budget)
-        stderr = truncate_output(stderr_raw, stderr_budget)
+        # ONE spill for the WHOLE transcript, in exactly the framing the model
+        # already sees. Spilling the two streams separately would hand out two
+        # handles for one command and make "line 900" ambiguous; spilling a
+        # differently-framed copy would make the footer's line numbers point
+        # somewhere other than where they resolve.
+        combined = _bash_output_summary(stdout_raw, stderr_raw)
+        meta = _spill(combined, "bash", context)
+        stdout_budget, stderr_budget = _stream_budgets(
+            stdout_raw, stderr_raw, budget, failed=(return_code != 0 or timed_out)
+        )
+        footer = ""
+        if meta is None:
+            stdout = truncate_output(stdout_raw, stdout_budget)
+            stderr = truncate_output(stderr_raw, stderr_budget)
+        else:
+            spill_details = {"spill": _spill_detail(meta)}
+            # Offsets map each stream's local line numbers onto the combined
+            # transcript the handle serves: line 1 is the '--- stdout ---'
+            # banner, and the stderr banner sits after the whole stdout block.
+            stdout_lines = len(stdout_raw.splitlines()) if stdout_raw else 1
+            stdout, stdout_span = _elide_inline(stdout_raw, stdout_budget, offset=1)
+            stderr, stderr_span = _elide_inline(stderr_raw, stderr_budget, offset=2 + stdout_lines)
+            # Suggest the STDERR gap when the command failed and stderr is the
+            # stream that lost content: on a failing run that is where the
+            # model needs to look, and a footer that points at the stdout gap
+            # instead sends it to the least useful region of the output.
+            failed = return_code != 0 or timed_out
+            suggested = (stderr_span if failed and stderr_span else None) or stdout_span
+            footer = _spill_footer(meta, suggested)
     else:
         stdout, stderr = stdout_raw, stderr_raw
+        footer = ""
 
-    return_code = process.returncode if process.returncode is not None else -1
     parts = [f"exit code: {return_code}", _bash_output_summary(stdout, stderr)]
     if timed_out:
         parts.insert(0, f"TIMEOUT after {params.timeout}s (process killed)")
-    return _text(tool_call_id, "bash", "\n".join(parts))
+    return _text(tool_call_id, "bash", "\n".join(parts) + footer, details=spill_details)
 
 
 def build_bash_tool() -> AgentTool:
@@ -574,14 +843,18 @@ class ReadParams(BaseModel):
     path: str = Field(
         description=(
             "File path (absolute or relative to the working directory), or an "
-            "internal URL such as skill://<name>."
+            "internal URL: skill://<name>, or spill://<id> to expand an output "
+            "that was truncated (append '?q=<regex>' to search inside it "
+            "instead of paging through it)."
         )
     )
     range: str | None = Field(
         default=None,
         description=(
             "Optional 1-based inclusive line range 'start-end' (e.g. '10-40') "
-            "or 'start-' to read to the end. Ignored for internal URLs."
+            "or 'start-' to read to the end. Applies to files and to "
+            "spill:// handles; on a spill search ('?q=') it selects which "
+            "MATCHES to return, not which lines. Ignored for other internal URLs."
         ),
     )
 
@@ -607,6 +880,193 @@ def _number_lines(lines: list[str], start: int) -> str:
     return "\n".join(f"{start + i:>{width}}| {line}" for i, line in enumerate(lines))
 
 
+def _clamp_file_body(body: str, path: Path, start: int, total: int) -> str:
+    """Hold one ``read`` result inside the char budget.
+
+    A file needs no spill entry: the file IS the store, it is already on disk,
+    and the footer names a range on the same path. Copying it into the spill
+    directory would double the bytes to recover something ``read`` can already
+    address — the exact unbounded-retention mistake this work exists to avoid.
+
+    Only the HEAD is kept here, unlike command output. A file is random-access
+    by line and the model chose the offset, so the useful continuation is
+    "carry on from where this stopped"; splicing in a tail would break the
+    contiguity that makes a numbered listing readable.
+    """
+    if len(body) <= READ_OUTPUT_LIMIT_CHARS:
+        return body
+    clipped = body[:READ_OUTPUT_LIMIT_CHARS]
+    cut = clipped.rfind("\n")
+    if cut > 0:
+        clipped = clipped[:cut]
+    next_line = start + len(clipped.splitlines())
+    return (
+        f"{clipped}\n\n[truncated at {READ_OUTPUT_LIMIT_CHARS} chars; "
+        f"{total - next_line + 1} of {total} lines not shown. Continue with "
+        f'read(path="{path}", range="{next_line}-{next_line + 200}") '
+        f"or narrow with grep]"
+    )
+
+
+def _capped_list_body(
+    full: str, shown: str, tool_name: str, context: ToolContext | None
+) -> tuple[str, dict[str, Any] | None]:
+    """Body + spill details for a list result that has TWO caps on it.
+
+    ``glob`` and ``grep`` cap by item count first (500 paths, 200 matches) and
+    then still have to fit the char budget — 200 grep hits on long lines is
+    comfortably over it. Both caps discard content, so the handle is written
+    from ``full`` (everything found) while only ``shown`` (the count-capped
+    prefix) is measured against the budget. Writing the spill from ``shown``
+    would make the handle a copy of what the model can already see, which is
+    the one thing an expansion path must never be.
+    """
+    if full == shown and len(shown) <= TOOL_OUTPUT_LIMIT_CHARS:
+        return shown, None
+    meta = _spill(full, tool_name, context)
+    if meta is None:
+        return truncate_output(shown, TOOL_OUTPUT_LIMIT_CHARS), None
+    if len(shown) <= TOOL_OUTPUT_LIMIT_CHARS:
+        # Fits the prompt, but the count cap still hid entries. Point at the
+        # rest explicitly rather than leaving "(capped at N)" as a dead end.
+        hidden_from = len(shown.splitlines()) + 1
+        return shown + _spill_footer(meta, (hidden_from, meta.lines)), {
+            "spill": _spill_detail(meta)
+        }
+    body, span = _elide_inline(shown, TOOL_OUTPUT_LIMIT_CHARS)
+    return body + _spill_footer(meta, span), {"spill": _spill_detail(meta)}
+
+
+def _read_spill(tool_call_id: str, target: str, range_spec: str | None) -> ToolResult:
+    """Serve a ``spill://`` handle: a line range, or a regex search inside it.
+
+    Routed here BEFORE the host's internal-URL resolver rather than registered
+    as another resolver, because a resolver returns one opaque string and this
+    path is the whole point of the store: it must apply a RANGE. Reusing
+    ``read``'s existing range parsing and line numbering is also what keeps
+    this from becoming a second convention — an agent addresses a spilled
+    output exactly the way it addresses a file.
+    """
+    ref = parse_handle(target)
+    if ref is None:
+        return _error(
+            tool_call_id,
+            "read",
+            f"Malformed spill handle '{target}'. Expected "
+            f"'{SPILL_SCHEME}<32 hex chars>' optionally followed by '?q=<regex>'.",
+        )
+    store = get_store()
+    meta = store.stat(ref.handle)
+    if meta is None:
+        # A bounded store evicts, so this is an ordinary outcome and the
+        # message says what to do about it rather than reading as a fault.
+        return _error(
+            tool_call_id,
+            "read",
+            f"Spilled output {ref.handle} is no longer available (the store is "
+            "size-bounded and evicts least-recently-used entries). Re-run the "
+            "command that produced it if you still need the full output.",
+        )
+
+    if ref.query:
+        return _search_spill(tool_call_id, store, ref, meta, range_spec)
+
+    start, end = 1, None
+    if range_spec:
+        try:
+            start, end = _parse_line_range(range_spec)
+        except ValueError as exc:
+            return _error(tool_call_id, "read", str(exc))
+    result = store.read_lines(ref.handle, start, end)
+    if result is None:
+        return _error(tool_call_id, "read", f"Spilled output {ref.handle} could not be read.")
+    selected, total = result
+    details: dict[str, Any] = {"url": ref.handle, "range": range_spec or "full"}
+    if not selected:
+        return _text(
+            tool_call_id,
+            "read",
+            f"(range {range_spec} is beyond the end of {ref.handle}; it has {total} lines)",
+            useless=True,
+            details={**details, "useless": True},
+        )
+    body = _number_lines(selected, start)
+    # An unranged read of a spill is itself capped: expanding "the whole
+    # thing" must not undo the truncation that created the handle. The footer
+    # points back at the same handle with a concrete next range, so a model
+    # that really does want to walk the output can, one bounded page at a time.
+    if len(body) > READ_OUTPUT_LIMIT_CHARS:
+        head, tail = _clip_head_tail(body, READ_OUTPUT_LIMIT_CHARS - len(BASH_TRUNCATION_MARKER))
+        shown = len(head.splitlines())
+        body = (
+            head
+            + BASH_TRUNCATION_MARKER
+            + tail
+            + f"\n[this page was itself truncated. Continue with "
+            f'read(path="{ref.handle}", range="{start + shown}-{start + shown + 200}") '
+            f'or narrow first with read(path="{ref.handle}?q=<regex>")]'
+        )
+    header = f"{ref.handle} — lines {start}-{start + len(selected) - 1} of {total}"
+    if not meta.complete:
+        header += " (stored copy is head+tail of an over-cap output)"
+    return _text(tool_call_id, "read", f"{header}\n{body}", details=details)
+
+
+def _search_spill(
+    tool_call_id: str,
+    store: SpillStore,
+    ref: SpillRef,
+    meta: SpillMeta,
+    range_spec: str | None,
+) -> ToolResult:
+    """``?q=<regex>`` over one spilled output: line numbers, then a range.
+
+    This is the difference between expansion being usable and being a slower
+    way to re-run the command. Paging a 4,000-line pytest log at ~2k tokens a
+    page to find one traceback costs more than the truncation ever saved;
+    finding the line number for ~200 tokens and reading 40 lines around it
+    costs almost nothing.
+    """
+    try:
+        found = store.search(ref.handle, ref.query, SPILL_SEARCH_MATCH_LIMIT)
+    except re.error as exc:
+        return _error(tool_call_id, "read", f"invalid regex '{ref.query}': {exc}")
+    if found is None:
+        return _error(tool_call_id, "read", f"Spilled output {ref.handle} could not be read.")
+    matches, total_matches, total_lines = found
+    if range_spec:
+        # Documented in the schema: on a search the range pages through
+        # MATCHES. Slicing lines here instead would silently return nothing
+        # whenever the matches fell outside the requested line window.
+        try:
+            start, end = _parse_line_range(range_spec)
+        except ValueError as exc:
+            return _error(tool_call_id, "read", str(exc))
+        matches = matches[start - 1 : end]
+    details = {"url": f"{ref.handle}?q={ref.query}"}
+    if not matches:
+        return _text(
+            tool_call_id,
+            "read",
+            f"No lines match '{ref.query}' in {ref.handle} ({total_lines} lines searched).",
+            useless=True,
+            details={**details, "useless": True},
+        )
+    width = len(str(matches[-1][0]))
+    body = "\n".join(f"{number:>{width}}| {line}" for number, line in matches)
+    header = (
+        f"{len(matches)} of {total_matches} match(es) for '{ref.query}' in "
+        f"{ref.handle} ({total_lines} lines)"
+    )
+    if total_matches > len(matches):
+        header += "; 'range' pages through matches"
+    footer = (
+        f'\n[read around a hit with read(path="{ref.handle}", '
+        f'range="{max(matches[0][0] - 10, 1)}-{matches[0][0] + 30}")]'
+    )
+    return _text(tool_call_id, "read", f"{header}:\n{body}{footer}", details=details)
+
+
 @_guard("read")
 async def execute_read(
     tool_call_id: str,
@@ -623,6 +1083,13 @@ async def execute_read(
     target = params.path.strip()
     if not target:
         return _error(tool_call_id, "read", "path must be a non-empty string")
+
+    # Spill handles are served by this module, not the host resolver: the
+    # resolver contract returns one whole string, and the whole value of a
+    # handle is that it answers a RANGE. Checked first so a host that also
+    # claims 'spill://' cannot shadow the expansion path a footer promised.
+    if target.startswith(SPILL_SCHEME):
+        return _read_spill(tool_call_id, target, params.range)
 
     # Internal URLs (skill://...) go through the session-installed resolver.
     if "://" in target and not target.startswith(("http://", "https://", "file://")):
@@ -702,7 +1169,7 @@ async def execute_read(
         return _text(
             tool_call_id,
             "read",
-            _number_lines(selected, start),
+            _clamp_file_body(_number_lines(selected, start), path, start, len(lines)),
             # The range rides in details: compaction's supersede key must
             # distinguish ranged reads of the same file, or a read of lines
             # 900-1000 blanks an unrelated 1-100 read as "superseded".
@@ -715,13 +1182,14 @@ async def execute_read(
         return _text(
             tool_call_id,
             "read",
-            f"{body}\n\n[{remaining} more lines in file. Use range to continue]",
+            _clamp_file_body(body, path, 1, len(lines))
+            + f"\n\n[{remaining} more lines in file. Use range to continue]",
             details={"path": str(path)},
         )
     return _text(
         tool_call_id,
         "read",
-        _number_lines(lines, 1) if lines else "(empty file)",
+        _clamp_file_body(_number_lines(lines, 1), path, 1, len(lines)) if lines else "(empty file)",
         details={"path": str(path)},
     )
 
@@ -985,12 +1453,17 @@ async def execute_glob(
             useless=True,
             details={"useless": True},
         )
-    capped = len(matches) > GLOB_RESULT_LIMIT
-    matches = matches[:GLOB_RESULT_LIMIT]
-    header = f"{len(matches)} match(es) for '{params.pattern}'"
-    if capped:
-        header += f" (capped at {GLOB_RESULT_LIMIT})"
-    return _text(tool_call_id, "glob", header + ":\n" + "\n".join(matches))
+    # Spill the COMPLETE list before capping. The 500-path cap silently threw
+    # the tail away, so a model looking for a file that sorted late was told
+    # it did not exist; now the whole list is one range read away.
+    total = len(matches)
+    full = "\n".join(matches)
+    shown = matches[:GLOB_RESULT_LIMIT]
+    body, spill_details = _capped_list_body(full, "\n".join(shown), "glob", context)
+    header = f"{len(shown)} match(es) for '{params.pattern}'"
+    if total > len(shown):
+        header += f" of {total} (capped at {GLOB_RESULT_LIMIT})"
+    return _text(tool_call_id, "glob", header + ":\n" + body, details=spill_details)
 
 
 def build_glob_tool() -> AgentTool:
@@ -1073,6 +1546,15 @@ def _walk_files(root: Path) -> list[Path]:
 #: scan that hits it returns what it has so far.
 GREP_SCAN_DEADLINE_S = 30.0
 
+#: How many matches the scan COLLECTS, versus the 200 it displays. The
+#: displayed cap protects the prompt; this one protects the machine, and they
+#: are different numbers because the spill sits between them — an agent that
+#: greps a large tree gets 200 matches in context and the other 4,800 behind a
+#: handle it can search. Stopping the scan at 200, as it used to, made the
+#: handle a copy of what was already on screen and left "capped at 200" as a
+#: dead end with no way to see match 201.
+GREP_SPILL_MATCH_LIMIT = 5000
+
 
 def _grep_scan(
     files: list[Path],
@@ -1117,9 +1599,9 @@ def _grep_scan(
         for lineno, line in enumerate(text.splitlines(), start=1):
             if regex.search(line):
                 matches.append(f"{rel}:{lineno}:{line}")
-                if len(matches) >= GREP_MATCH_LIMIT:
+                if len(matches) >= GREP_SPILL_MATCH_LIMIT:
                     break
-        if len(matches) >= GREP_MATCH_LIMIT:
+        if len(matches) >= GREP_SPILL_MATCH_LIMIT:
             break
     return matches, files_searched, files_skipped
 
@@ -1186,12 +1668,16 @@ async def execute_grep(
             useless=True,
             details={"useless": True},
         )
-    header = f"{len(matches)} match(es) for '{params.pattern}'"
-    if len(matches) >= GREP_MATCH_LIMIT:
-        header += f" (capped at {GREP_MATCH_LIMIT})"
+    total = len(matches)
+    shown = matches[:GREP_MATCH_LIMIT]
+    body, spill_details = _capped_list_body("\n".join(matches), "\n".join(shown), "grep", context)
+    header = f"{len(shown)} match(es) for '{params.pattern}'"
+    if total > len(shown):
+        header += f" of {total}{'+' if total >= GREP_SPILL_MATCH_LIMIT else ''}"
+        header += f" (showing first {GREP_MATCH_LIMIT})"
     if files_skipped:
         header += f" ({files_skipped} file(s) skipped over the 1MB cap)"
-    return _text(tool_call_id, "grep", header + ":\n" + "\n".join(matches))
+    return _text(tool_call_id, "grep", header + ":\n" + body, details=spill_details)
 
 
 def build_grep_tool() -> AgentTool:

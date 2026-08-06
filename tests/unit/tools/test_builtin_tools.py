@@ -303,16 +303,22 @@ async def test_read_range_beyond_eof_is_useless(tools, context) -> None:
 
 @pytest.mark.asyncio
 async def test_read_large_file_capped_with_footer(tools, context, tmp_path) -> None:
-    # RT-06: files over the line cap render the head plus a footer.
+    # RT-06: files over the budget render the head plus a footer naming the
+    # exact call that continues. The binding cap is now CHARS, not the 2,000-
+    # line cap: 2,000 lines of source is ~80 KB, which measured at ~20k tokens
+    # for a single read — the line cap was never a context budget.
     lines = [f"line {i}" for i in range(1, 2501)]
     (tmp_path / "big.txt").write_text("\n".join(lines))
     result = await _call(tools, "read", {"path": "big.txt"}, context)
     assert result.is_error is False
-    assert "line 2000" in result.text
-    assert "line 2001" not in result.text
-    assert "[500 more lines in file. Use range to continue]" in result.text
+    assert "line 1" in result.text
+    assert "line 2500" not in result.text
+    assert len(result.text) <= builtin.READ_OUTPUT_LIMIT_CHARS + 400  # body + footer
+    # The footer must name a concrete, usable continuation, not just report a
+    # loss: an agent that cannot tell how to get the rest re-reads or guesses.
+    assert "read(path=" in result.text and 'range="' in result.text
 
-    # The range continues past the cap.
+    # The range genuinely continues past wherever the cap landed.
     more = await _call(tools, "read", {"path": "big.txt", "range": "2001-2500"}, context)
     assert "line 2500" in more.text
 

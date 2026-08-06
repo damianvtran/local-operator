@@ -27,6 +27,7 @@ from local_operator.harness.types import (
     AbortSignal,
     ChatRequest,
     ModelSpec,
+    RenderedStreamError,
     StreamEvent,
 )
 
@@ -39,11 +40,15 @@ if TYPE_CHECKING:  # import cycle: both modules import this one at runtime
 # ---------------------------------------------------------------------------
 
 
-class ProviderError(Exception):
+class ProviderError(RenderedStreamError):
     """A provider call failed. ``status`` is the HTTP status when known.
 
     ``retryable`` reflects whether the SAME credential may succeed again
     (429/5xx/network); auth errors are retryable only via rotation.
+
+    A provider's answer, not a defect: ``RenderedStreamError`` tells the loop
+    that ``__str__`` below is the complete diagnosis, so it logs the line
+    without a stack.
     """
 
     def __init__(

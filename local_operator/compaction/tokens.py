@@ -91,13 +91,27 @@ def _get_encoding() -> object | None:
     return _ENCODING
 
 
+#: Passed to every ``encode`` call. tiktoken REFUSES by default to encode text
+#: containing a special-token literal such as ``<|endoftext|>`` and raises
+#: ``ValueError``. Everything counted here is untrusted content — tool output,
+#: file contents, model text — so that default turns any transcript that
+#: merely MENTIONS the literal into a crash in the estimator, and the
+#: estimator runs on every turn from pruning and the compaction threshold
+#: check. Reproduced: a bash result containing ``<|endoftext|>`` raised out of
+#: ``estimate_tokens``. An empty set means "treat them as ordinary text",
+#: which is both non-raising and the correct count for content that is being
+#: measured rather than sent as a control token.
+_DISALLOWED_SPECIAL: tuple[str, ...] = ()
+
+
 def _encode_len(text: str) -> int:
     """Token count of ``text`` via cl100k_base, or the chars/4 fallback."""
     if not text:
         return 0
     encoding = _get_encoding()
     if encoding is not None:
-        return len(encoding.encode(text))  # type: ignore[attr-defined]
+        encode = encoding.encode  # type: ignore[attr-defined]
+        return len(encode(text, disallowed_special=_DISALLOWED_SPECIAL))
     return len(text) // _CHARS_PER_TOKEN_FALLBACK
 
 
@@ -149,7 +163,8 @@ def count_text_tokens(text: str, model: str | None = None) -> int:
         return 0
     encoding = _get_model_encoding(model) if model else _get_encoding()
     if encoding is not None:
-        return len(encoding.encode(text))  # type: ignore[attr-defined]
+        encode = encoding.encode  # type: ignore[attr-defined]
+        return len(encode(text, disallowed_special=_DISALLOWED_SPECIAL))
     return len(text) // _CHARS_PER_TOKEN_FALLBACK
 
 
@@ -164,7 +179,8 @@ def truncate_to_tokens(text: str, max_tokens: int) -> str:
         return ""
     encoding = _get_encoding()
     if encoding is not None:
-        ids = encoding.encode(text)  # type: ignore[attr-defined]
+        encode = encoding.encode  # type: ignore[attr-defined]
+        ids = encode(text, disallowed_special=_DISALLOWED_SPECIAL)
         if len(ids) <= max_tokens:
             return text
         return encoding.decode(ids[:max_tokens])  # type: ignore[attr-defined]

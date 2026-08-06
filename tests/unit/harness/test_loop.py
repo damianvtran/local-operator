@@ -4,6 +4,7 @@ interrupts, validation errors back to the model, gates, follow-ups."""
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
@@ -25,6 +26,7 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
+from local_operator.providers.failover import ProviderError
 
 MODEL = ModelSpec(provider="test", model_id="m")
 
@@ -573,3 +575,39 @@ async def test_exec_tier_prompts_exactly_once_per_call():
     assert executed == ["echo"]
     assert len(prompts) == 1
     assert prompts[0][0] == "echo"
+
+
+@pytest.mark.parametrize(
+    "exc, wants_traceback",
+    [
+        (ProviderError(400, "`temperature` is deprecated for this model."), False),
+        (RuntimeError("dict changed size during iteration"), True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_rendered_provider_errors_are_logged_without_a_stack(exc, wants_traceback, caplog):
+    """A provider's 400 is an answer, not a defect. The loop hands it to the UI
+    as `error`, which the TUI prints as one "× HTTP 400: ..." line; logging the
+    same failure a second time as a traceback painted forty lines of stack over
+    the interface. A genuine bug keeps its stack — the frames are the only clue
+    there is."""
+
+    def boom(request, signal):
+        async def gen():
+            raise exc
+            yield  # pragma: no cover - generator marker
+
+        return gen()
+
+    caplog.set_level(logging.WARNING, logger="local_operator.harness.loop")
+    events = [
+        e
+        async for e in AgentLoop().run([Message.user("go")], LoopContext(), make_config(boom), None)
+    ]
+
+    end = next(e for e in events if isinstance(e, AgentEndEvent))
+    assert str(exc) in (end.error or ""), "the caller must still receive the message"
+    records = [r for r in caplog.records if r.message.startswith("model stream failed")]
+    assert len(records) == 1
+    assert bool(records[0].exc_info) is wants_traceback
+    assert str(exc) in records[0].getMessage()

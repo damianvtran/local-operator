@@ -146,6 +146,31 @@ def _iter_sse_lines(response: httpx.Response) -> AsyncIterator[str]:
     return _gen()
 
 
+def _sampling_params(request: ChatRequest, *, top_p_key: str = "top_p") -> dict[str, float]:
+    """The sampling pair for this request, or nothing when the model rejects it.
+
+    Empty dict rather than ``{"temperature": None}``: httpx serialises ``None``
+    as JSON ``null``, and a provider that rejects the key rejects it just as
+    hard with a null value — the whole point is that the key must not appear.
+
+    An explicit ``request.temperature`` loses to the capability on purpose. A
+    caller-set value the model cannot accept is a turn that 400s, not a
+    preference worth honouring, and every caller inherits the spec's defaults
+    anyway so "explicit" here rarely means "deliberate".
+
+    ``top_p_key`` exists only because Gemini spells it ``topP``; the capability
+    itself is provider-independent and lives on the spec.
+    """
+    if not request.model.supports_sampling_params:
+        return {}
+    return {
+        "temperature": (
+            request.temperature if request.temperature is not None else request.model.temperature
+        ),
+        top_p_key: request.top_p if request.top_p is not None else request.model.top_p,
+    }
+
+
 def _message_to_openai(message: Message) -> dict[str, Any]:
     """Render one harness message into OpenAI chat-completions shape."""
     if message.role == "assistant" and message.tool_calls:
@@ -321,12 +346,7 @@ class OpenAICompatClient:
         max_tokens = request.max_tokens or request.model.max_output_tokens
         if max_tokens and max_tokens > 0:
             body["max_tokens"] = max_tokens
-        temperature = (
-            request.temperature if request.temperature is not None else request.model.temperature
-        )
-        body["temperature"] = temperature
-        top_p = request.top_p if request.top_p is not None else request.model.top_p
-        body["top_p"] = top_p
+        body.update(_sampling_params(request))
         if request.stop_sequences:
             body["stop"] = list(request.stop_sequences)
         return body
@@ -410,12 +430,7 @@ class OpenAICompatClient:
         max_tokens = request.max_tokens or request.model.max_output_tokens
         if max_tokens and max_tokens > 0:
             body["max_output_tokens"] = max_tokens
-        temperature = (
-            request.temperature if request.temperature is not None else request.model.temperature
-        )
-        body["temperature"] = temperature
-        top_p = request.top_p if request.top_p is not None else request.model.top_p
-        body["top_p"] = top_p
+        body.update(_sampling_params(request))
         if request.stop_sequences:
             body["stop"] = list(request.stop_sequences)
         return body
@@ -615,13 +630,29 @@ class AnthropicClient:
         if self._owns_client:
             await self._http.aclose()
 
+    @staticmethod
+    def _is_oauth(oauth_access: "OAuthAccess | None") -> bool:
+        """True when this request carries a subscription (OAuth) credential.
+
+        One definition, because two things now depend on it and they MUST agree:
+        the auth header scheme and the Claude Code identity block. A request that
+        sends the Bearer token without the block is refused, and one that sends
+        the block with ``x-api-key`` alters an API-key user's prompt for nothing.
+        """
+        return (
+            oauth_access is not None
+            and oauth_access.kind == "oauth"
+            and bool(oauth_access.access_token)
+        )
+
     def _headers(
         self, api_key: str | None, oauth_access: "OAuthAccess | None" = None
     ) -> dict[str, str]:
         headers = {"anthropic-version": ANTHROPIC_VERSION, "Content-Type": "application/json"}
-        if oauth_access is not None and oauth_access.kind == "oauth" and oauth_access.access_token:
+        if self._is_oauth(oauth_access):
             # Claude Pro/Max OAuth: Bearer + the oauth beta header (the
             # ``x-api-key`` scheme 401s OAuth-issued access tokens).
+            assert oauth_access is not None  # narrowed by _is_oauth
             headers["Authorization"] = f"Bearer {oauth_access.access_token}"
             headers["anthropic-beta"] = "oauth-2025-04-20"
         elif api_key:
@@ -631,6 +662,22 @@ class AnthropicClient:
     # Anthropic caps cache_control markers per request; the harness keeps the
     # first 3 stable system blocks breakpointed and never exceeds the cap.
     MAX_CACHE_BREAKPOINTS = 4
+
+    #: Anthropic gates OAuth (Claude Pro/Max subscription) credentials to Claude
+    #: Code: a request whose FIRST system block is not this exact identity is
+    #: refused. The refusal is an opaque ``HTTP 429 Error``, not a 401 or a 403,
+    #: so it reads as rate limiting and sends the operator looking at their quota
+    #: instead of at their request. Measured against the live endpoint with a
+    #: valid subscription token and ``model: claude-opus-5``:
+    #:
+    #:     no system block          -> HTTP 429
+    #:     ordinary system block    -> HTTP 429
+    #:     this block first         -> HTTP 200
+    #:
+    #: API-key credentials are NOT gated and must not receive it — an identity
+    #: line changes how the model answers, and paying customers did not ask to be
+    #: told they are a CLI.
+    CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 
     @classmethod
     def _system_blocks(cls, blocks: Sequence[str]) -> list[dict[str, Any]]:
@@ -729,7 +776,7 @@ class AnthropicClient:
             if isinstance(block, dict):
                 block["cache_control"] = {"type": "ephemeral"}
 
-    def _build_body(self, request: ChatRequest) -> dict[str, Any]:
+    def _build_body(self, request: ChatRequest, *, oauth: bool = False) -> dict[str, Any]:
         messages: list[dict[str, Any]] = []
         for message in request.messages:
             if message.role == "assistant" and message.tool_calls:
@@ -775,8 +822,16 @@ class AnthropicClient:
             "messages": messages,
             "max_tokens": request.max_tokens or request.model.max_output_tokens,
         }
-        if request.system_blocks:
-            body["system"] = self._system_blocks(request.system_blocks)
+        # The identity block is PREPENDED, not appended, because Anthropic checks
+        # the first block specifically. It is a constant, so it makes ideal
+        # cache-prefix material and keeps the prefix byte-stable across turns —
+        # and because it is added on every OAuth request, the breakpoint policy
+        # below sees the same block count each time rather than shifting.
+        blocks = list(request.system_blocks)
+        if oauth:
+            blocks.insert(0, self.CLAUDE_CODE_IDENTITY)
+        if blocks:
+            body["system"] = self._system_blocks(blocks)
         # System-only breakpoints stop the cached prefix before the first
         # message: the entire growing conversation would be re-processed at
         # full price on every request. Mark the last content block of the
@@ -800,12 +855,7 @@ class AnthropicClient:
                 "none": {"type": "none"},
                 "required": {"type": "any"},
             }.get(request.tool_choice, {"type": "auto"})
-        temperature = (
-            request.temperature if request.temperature is not None else request.model.temperature
-        )
-        body["temperature"] = temperature
-        top_p = request.top_p if request.top_p is not None else request.model.top_p
-        body["top_p"] = top_p
+        body.update(_sampling_params(request))
         if request.stop_sequences:
             body["stop_sequences"] = list(request.stop_sequences)
         return body
@@ -824,7 +874,7 @@ class AnthropicClient:
         async with self._http.stream(
             "POST",
             url,
-            json=self._build_body(request),
+            json=self._build_body(request, oauth=self._is_oauth(oauth_access)),
             headers=self._headers(api_key, oauth_access),
         ) as response:
             if response.status_code >= 400:
@@ -958,12 +1008,7 @@ class GoogleClient:
         max_tokens = request.max_tokens or request.model.max_output_tokens
         if max_tokens and max_tokens > 0:
             generation_config["maxOutputTokens"] = max_tokens
-        generation_config["temperature"] = (
-            request.temperature if request.temperature is not None else request.model.temperature
-        )
-        generation_config["topP"] = (
-            request.top_p if request.top_p is not None else request.model.top_p
-        )
+        generation_config.update(_sampling_params(request, top_p_key="topP"))
         if request.stop_sequences:
             generation_config["stopSequences"] = list(request.stop_sequences)
         body["generationConfig"] = generation_config

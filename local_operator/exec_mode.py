@@ -275,7 +275,7 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
 def _make_default_session_factory(exec_args: ExecArgs) -> SessionFactory:
     """Bind the shared composition root to this exec invocation.
 
-    Builds the legacy managers from the fixed config dir and an argparse
+    Builds the legacy managers from the app config dir and an argparse
     namespace carrying the effective selectors. All engine imports stay
     inside :mod:`local_operator.session_factory`; ``create_session`` is
     async, so this factory returns an awaitable the runner awaits.
@@ -285,12 +285,21 @@ def _make_default_session_factory(exec_args: ExecArgs) -> SessionFactory:
         from local_operator.agents import AgentRegistry
         from local_operator.config import ConfigManager
         from local_operator.credentials import CredentialManager
+        from local_operator.paths import config_dir
         from local_operator.session_factory import create_session
 
-        config_dir = Path.home() / ".local-operator"
-        config_manager = ConfigManager(config_dir)
-        credential_manager = CredentialManager(config_dir)
-        agent_registry = AgentRegistry(config_dir)
+        # config_dir(), not ``Path.home() / ".local-operator"``: this was the
+        # last hardcoded copy of that path, and it made `exec` the one entry
+        # point that ignored LOCAL_OPERATOR_CONFIG_DIR — so an exec run wrote
+        # its transcript, its autosave agent and its session directory into
+        # the developer's real config dir even when the environment pointed
+        # somewhere else, which is precisely the divergence paths.py exists
+        # to prevent (and which makes exec impossible to isolate in a test or
+        # a benchmark).
+        base_dir = config_dir()
+        config_manager = ConfigManager(base_dir)
+        credential_manager = CredentialManager(base_dir)
+        agent_registry = AgentRegistry(base_dir)
 
         session_args = argparse.Namespace(
             hosting=exec_args.hosting,

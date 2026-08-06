@@ -20,6 +20,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+#: The failure key that means "the MCP layer itself", not a server. Discovery
+#: raising, and a machine whose configured servers all failed for one setup
+#: reason, are both recorded under this one key — a front end that renders
+#: ``MCP {name} failed`` must never name a server that does not exist, and three
+#: spellings of "not a server" (``discovery``, ``.mcp.json``, an install hint
+#: repeated per server) would each need their own special case.
+MCP_DISCOVERY_KEY = "discovery"
+
 
 @dataclass(frozen=True)
 class McpStartupOutcome:

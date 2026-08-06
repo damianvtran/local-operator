@@ -98,6 +98,13 @@ def _sdk_available() -> bool:
     return importlib.util.find_spec("mcp") is not None
 
 
+#: What every configured server's error says when the SDK is absent. A module
+#: constant, not an inline string, because the session layer collapses these N
+#: identical entries back into ONE report and compares against this exact value
+#: rather than sniffing the text — the alternative is a substring match that goes
+#: quietly wrong the day the wording changes.
+MCP_SDK_MISSING_ERROR = missing_extra_error("mcp", "Connecting to MCP servers")
+
 # Fast-startup gate: how long discovery blocks before deferring slow servers.
 STARTUP_GATE_MS = 250
 
@@ -657,9 +664,10 @@ class McpManager:
             # One actionable line instead of the same opaque
             # "No module named 'mcp'" repeated per configured server. The
             # session treats MCP as enrichment, so this surfaces as a warning
-            # and the turn proceeds with zero MCP tools.
-            message = missing_extra_error("mcp", "Connecting to MCP servers")
-            result.errors.update({name: message for name in configs})
+            # and the turn proceeds with zero MCP tools. Every server carries the
+            # SAME message, which is what lets the session layer recognise the
+            # cause and report it once (see MCP_SDK_MISSING_ERROR).
+            result.errors.update({name: MCP_SDK_MISSING_ERROR for name in configs})
             return result
 
         tasks: dict[str, asyncio.Task[ServerConnection]] = {}

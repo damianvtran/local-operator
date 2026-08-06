@@ -91,10 +91,12 @@ class ArgumentChoice:
     """One value offered for a slash command's ARGUMENT.
 
     ``detail`` is state rather than explanation — "logged in", "needs login" —
-    and is rendered right-aligned, away from ``description``, because the two
-    answer different questions: what this thing IS versus where it stands right
-    now. A user typing ``/logout`` is choosing by state, so putting the state in
-    the description column would bury the only column they are scanning.
+    and is rendered in a COLUMN pinned to the row's trailing edge, away from
+    ``description``, because the two answer different questions: what this thing
+    IS versus where it stands right now. The column is what makes the states
+    scannable, so the strings inside it are left-aligned against one shared
+    edge; right-aligning each string to its own row started three states at
+    three different columns and left nothing to scan.
     """
 
     name: str

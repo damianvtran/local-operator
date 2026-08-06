@@ -48,6 +48,7 @@ from local_operator.harness.types import (
     MessageStartEvent,
     MessageUpdateEvent,
     NoticeEvent,
+    RenderedStreamError,
     StaleAside,
     StreamEndEvent,
     StreamTextDelta,
@@ -396,7 +397,14 @@ class AgentLoop:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.warning("model stream failed", exc_info=True)
+            # `error` below is handed straight to the UI, which prints it as a
+            # single "× HTTP 400: ..." line. Re-emitting the same failure as a
+            # traceback duplicated it across whatever was on screen for zero
+            # extra information. Unexpected types keep the stack — for a defect
+            # the frames are the only clue there is.
+            logger.warning(
+                "model stream failed: %s", exc, exc_info=not isinstance(exc, RenderedStreamError)
+            )
             stop_reason = "aborted" if (signal is not None and signal.aborted) else "error"
             error = error or str(exc)
 

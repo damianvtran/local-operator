@@ -105,9 +105,10 @@ _MIN_GROUP_GAP = 4
 #:   `49.6%/1M`: it kept the field nobody re-reads and dropped the one that
 #:   says compaction is coming.
 #: * ``cost``, then ``cwd``, then ``context``, then ``mcp``: context usage is the
-#:   one an operator acts on, and the MCP indicator outlives even that because
-#:   it is the cheapest segment to keep and the only one that can turn into an
-#:   alarm (see its rung below).
+#:   one an operator acts on, and the MCP indicator outlives even that WHEN IT IS
+#:   AN ALARM — it is the cheapest segment to keep and the only one that can turn
+#:   into one. A healthy count is only a courtesy, so it sheds like one; see
+#:   :func:`drop_ladder`.
 #:
 #: The brand glyph, the streaming spinner and the model label are NEVER dropped.
 #: When even the irreducible row overflows, ``_render`` emits spinner, glyph and a
@@ -140,18 +141,46 @@ _DROP_LADDER: tuple[str, ...] = (
     # these the other way round, which contradicted this very ladder's rationale.
     "cwd",
     "context",
-    # DEAD LAST, mirroring the reference's `flexShrink={0}` on this indicator.
-    # Two reasons it outlives even the context number. It is the narrowest
-    # segment in the band — `⊙ 3 MCP` is 7 cells against context's ~9 and a
-    # path's 7-plus — so dropping it buys the least width of anything here.
-    # And its failure branch is an ALARM: the danger-tinted glyph is the only
-    # place the band admits the agent is missing tools it was configured to
-    # have, and a cramped terminal is exactly where a user would otherwise
-    # conclude the tools were never configured. Kept in the ladder rather than
-    # omitted from it so the very narrowest widths still get one graceful
-    # aligned step before ``_render`` falls back to the truncated tail.
+    # DEAD LAST *when it is an alarm*, mirroring the reference's
+    # `flexShrink={0}` on this indicator. Two reasons it then outlives even the
+    # context number. It is the narrowest segment in the band — `⊙ 3 MCP` is 7
+    # cells against context's ~9 and a path's 7-plus — so dropping it buys the
+    # least width of anything here. And its failure branch is an ALARM: the
+    # danger-tinted glyph is the only place the band admits the agent is missing
+    # tools it was configured to have, and a cramped terminal is exactly where a
+    # user would otherwise conclude the tools were never configured. Kept in the
+    # ladder rather than omitted from it so the very narrowest widths still get
+    # one graceful aligned step before ``_render`` falls back to the truncated
+    # tail.
     "mcp",
 )
+
+
+def _mcp_before_cwd(ladder: tuple[str, ...]) -> tuple[str, ...]:
+    """``ladder`` with the mcp rung moved to just ahead of ``cwd``."""
+    rungs = [step for step in ladder if step != "mcp"]
+    rungs.insert(rungs.index("cwd"), "mcp")
+    return tuple(rungs)
+
+
+#: The ladder for a band whose MCP segment is NOT an alarm. Precomputed rather
+#: than rebuilt per render: ``_render`` walks a ladder on every repaint, and the
+#: spinner repaints it eight times a second.
+_DROP_LADDER_QUIET: tuple[str, ...] = _mcp_before_cwd(_DROP_LADDER)
+
+
+def drop_ladder(status: McpStatus) -> tuple[str, ...]:
+    """Which reduction order this band uses, given its MCP state.
+
+    The mcp rung's place is earned by the ALARM, not by the segment. Unconditional
+    last place meant a healthy `⊙ 2 MCP` outranked both the working directory and
+    the full model label: at 40 cells the band read `◆ model › ⊙ 2 MCP` where the
+    same terminal with no MCP configured showed `◆ test/model › ⌂ local-operator`.
+    A count nobody has to act on was costing the user "where am I" AND "which
+    provider". So a neutral count sheds early, just ahead of the working
+    directory, and a danger one still outlives everything.
+    """
+    return _DROP_LADDER if mcp_semantic(status) == "danger" else _DROP_LADDER_QUIET
 
 
 def format_context_tokens(tokens: int) -> str:
@@ -253,9 +282,9 @@ def format_jobs(count: int) -> str:
 
 @dataclass(frozen=True)
 class McpStatus:
-    """The three facts the MCP segment renders from.
+    """The facts the MCP segment renders from.
 
-    Passed as ONE value rather than three ``update`` keywords: the band's
+    Passed as ONE value rather than four ``update`` keywords: the band's
     update signature is already at ten segments, and the count is meaningless
     without knowing whether anything was configured — splitting them invites a
     caller to set one and leave the others stale.
@@ -263,12 +292,19 @@ class McpStatus:
     ``configured`` is how many servers the config asked for, ``connected`` how
     many are actually up right now, and ``failed`` whether any of them did not
     come up. All three are read LIVE from the manager; ``configured`` alone
-    decides whether the segment exists at all.
+    decides whether the segment carries a COUNT, and ``discovery_failed``
+    (below) is the one state that renders without one.
     """
 
     configured: int = 0
     connected: int = 0
     failed: bool = False
+    #: Discovery itself failed, so there is no server list to count. Distinct
+    #: from ``configured == 0``, which means "this machine does not use MCP":
+    #: here the machine HAS a config and it could not be read, and a segment
+    #: hidden for the same reason as an unconfigured one would report a broken
+    #: setup as an absent feature.
+    discovery_failed: bool = False
 
 
 def format_mcp(status: McpStatus) -> str:
@@ -287,7 +323,16 @@ def format_mcp(status: McpStatus) -> str:
     machine with no ``.mcp.json`` is seven cells asserting the absence of a
     feature the user never asked for. Zero CONNECTED with servers configured
     does render, because that is a real and interesting state.
+
+    A DISCOVERY failure renders the bare initialism with no number. The config
+    layer never produced a server list on that path, so every count would be a
+    fiction — ``0 MCP`` in particular would claim the machine asked for nothing,
+    which is the opposite of what happened. The toast that reports the failure
+    dismisses itself after ten seconds; without this the band it leaves behind
+    is indistinguishable from a machine with no MCP at all.
     """
+    if status.discovery_failed:
+        return "MCP"
     if status.configured <= 0:
         return ""
     return f"{status.connected} MCP"
@@ -296,28 +341,30 @@ def format_mcp(status: McpStatus) -> str:
 def mcp_semantic(status: McpStatus) -> str:
     """Which semantic tint the ``⊙`` glyph carries.
 
-    FAILURE WINS, even when other servers connected. A partial outcome is the
-    dangerous one: `⊙ 2 MCP` in success green on a machine where a third server
-    died looks like everything is fine, and the user then spends the turn
-    wondering why the agent cannot reach that server's tools. Green here has to
-    mean "all of it is up".
+    An ALARM OR NOTHING. Only the failure branch gets a colour of its own:
+    `danger` when a configured server did not come up, and the band's neutral
+    ramp otherwise. FAILURE WINS even when other servers connected — a partial
+    outcome is the dangerous one, because a `⊙ 2 MCP` that looks fine on a
+    machine where a third server died costs the user a turn wondering why the
+    agent cannot reach that server's tools.
 
-    Success only when something is actually connected; otherwise dim, because
-    "configured, nothing up yet, nothing failed yet" is a transient the startup
-    gate produces on every launch and it is not worth a colour.
-
-    Note this is NOT the accent green — the accent means "a turn is live" and
-    nothing else (see the tcss minimalism contract). `success` is the separate
-    outcome green the tool cards already use.
+    The healthy rung used to be `success` #57c785. That is 5.08 dE2000 from the
+    accent #38c96a — for scale, this file's own comments reject 3.06 as
+    imperceptible, and this glyph is ONE cell. The band's single accent site is
+    the running indicator, so a healthy count put a second, indistinguishable
+    green ten cells from the spinner and "green means a turn is live" stopped
+    being true. The neutral ramp says the same three things without spending the
+    accent: `muted` once something is up, `dim` while nothing is (16.66 dE2000
+    apart, and both are already band vocabulary).
 
     Public because the startup toast paints the same lamp: two surfaces deriving
     the same state independently is how they end up disagreeing, and a toast
     saying green while the band says red is worse than either alone.
     """
-    if status.failed:
+    if status.failed or status.discovery_failed:
         return "danger"
     if status.connected > 0:
-        return "success"
+        return "muted"
     return "dim"
 
 
@@ -490,7 +537,7 @@ class StatusLine:
         # string joins and the ladder is nine steps, so the worst case is ten
         # cheap rebuilds on a resize — far cheaper than measuring segments
         # independently and getting the separator arithmetic subtly wrong.
-        for step in (None, *_DROP_LADDER):
+        for step in (None, *drop_ladder(self._mcp)):
             if step is not None:
                 target = step.partition("shorten-")[2]
                 (short if target else dropped).add(target or step)

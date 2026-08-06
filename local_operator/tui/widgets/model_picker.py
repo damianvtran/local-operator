@@ -84,11 +84,15 @@ _MINOR_VERSION_PATTERN = re.compile(r"(?<![\d.])(\d+)-(\d{1,2})(?![\d])")
 class ModelRow:
     """One offerable model.
 
-    ``connected`` is the provider's credential state, not the model's: an
-    unconnected row is still SHOWN, because "which models would I get if I logged
-    in to Anthropic" is exactly the question a user cannot otherwise answer, and
-    hiding them is what made a newly released model undiscoverable. Choosing one
-    starts a login instead of a switch — see :meth:`ModelPicker.highlighted`.
+    ``connected`` is the provider's credential state, not the model's. The app
+    filters unreachable rows out before they get here — a picker is a list of
+    choices — so a False row is one of the two the filter deliberately keeps: the
+    session's CURRENT model when its provider stopped being usable, or every row
+    at once when the credential store could not be read. Both need to look
+    different from a model that will run, which is what this flag drives (dim id,
+    `login required` where the numbers go, and last place in the ranking).
+    Choosing one starts a login instead of a switch — see
+    :meth:`ModelPicker.highlighted`.
     """
 
     provider: str

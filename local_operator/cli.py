@@ -45,6 +45,7 @@ from local_operator.config import ConfigManager
 from local_operator.paths import config_dir
 from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config
+from local_operator.logger import configure_cli_logging, file_logging
 from local_operator.optional import missing_extra_error
 
 if TYPE_CHECKING:
@@ -577,6 +578,12 @@ def config_list_command() -> int:
         "compaction": "Compaction engine settings (enabled, strategy, thresholds); "
         "replaces conversation_length/detail_length",
         "tui": "TUI settings (theme)",
+        "session_retention_max_sessions": "Maximum ephemeral session directories to keep "
+        "under sessions/ (0 disables the ceiling)",
+        "session_retention_max_bytes": "Maximum total bytes across sessions/ before the "
+        "oldest directories are evicted (0 disables the ceiling)",
+        "session_retention_max_age_days": "Age after which an ephemeral session directory "
+        "is evicted (0 disables the ceiling)",
     }
 
     print("\n\033[1;32m╭─ Configuration Options ───────────────────────\033[0m")
@@ -1159,6 +1166,10 @@ async def _run_with_scheduler(run_fn, *run_args) -> int:
 
 
 def main() -> int:
+    # FIRST, before anything else can log. `helpers.py` used to configure the
+    # root logger as an import side effect; now the entry point owns it, which
+    # is what lets the TUI branch below swap the console handler for a file.
+    configure_cli_logging()
     try:
         parser = build_cli_parser()
         args = parser.parse_args()
@@ -1473,13 +1484,24 @@ def main() -> int:
                 # starts cleanly. functools.partial pins it by name so a future
                 # signature change cannot re-introduce that silent failure.
                 tui_entry = functools.partial(run_tui, provider_controller=tui_controller)
-                return asyncio.run(
-                    _run_with_scheduler(
-                        tui_entry,
-                        session_factory,
-                        theme_name,
+                # The silence starts HERE, not inside ``run_tui``. The
+                # scheduler is started by the wrapper below and logs
+                # "Scheduler started" at INFO before the app has painted a
+                # single cell — observed on the alternate screen at launch.
+                # ``run_tui`` opens the same window itself (the guarantee
+                # belongs to the TUI, not to one of its callers); the context
+                # manager is re-entrant, so the inner block is a no-op.
+                # ``_run_with_scheduler`` is shared with the headless REPL,
+                # which must keep its console output, so the wrapping goes on
+                # this call site rather than inside it.
+                with file_logging():
+                    return asyncio.run(
+                        _run_with_scheduler(
+                            tui_entry,
+                            session_factory,
+                            theme_name,
+                        )
                     )
-                )
             finally:
                 try:
                     tui_auth_store.close()

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Awaitable, Callable
 
+from local_operator.logger import file_logging
 from local_operator.session.protocol import SessionProtocol
 
 
@@ -23,16 +24,26 @@ async def run_tui(
     before session construction (providers, skills, MCP discovery). The
     factory shape — rather than a pre-built session — is what lets the app
     own the construction error path and the dispose lifecycle.
+
+    Everything runs inside :func:`~local_operator.logger.file_logging`: while
+    Textual owns the terminal, a log record on stderr is painted straight over
+    the frame and stays there until the next full repaint. The context manager
+    detaches every console handler, sends records to a bounded rotating file
+    instead, and restores the handlers on the way out so the plain REPL and
+    ``exec`` — which can run in this same process — are unaffected. It is the
+    OUTERMOST thing here on purpose: session construction is the noisiest part
+    of startup (provider probes, MCP discovery) and it happens inside the app.
     """
     from local_operator.tui.app import OperatorApp  # lazy: Textual import
 
-    app = OperatorApp(
-        session_factory,
-        theme_name=theme_name,
-        provider_controller=provider_controller,
-    )
-    try:
-        await app.run_async()
-        return int(app.return_code or 0)
-    except KeyboardInterrupt:
-        return 130
+    with file_logging():
+        app = OperatorApp(
+            session_factory,
+            theme_name=theme_name,
+            provider_controller=provider_controller,
+        )
+        try:
+            await app.run_async()
+            return int(app.return_code or 0)
+        except KeyboardInterrupt:
+            return 130

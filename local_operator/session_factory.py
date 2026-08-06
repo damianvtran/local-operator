@@ -520,6 +520,15 @@ async def _prepare(
     transcript_dir, agent_id = _transcript_dir_and_agent_id(agent, args, agent_registry)
     transcript_dir.mkdir(parents=True, exist_ok=True)
 
+    # Bound the ephemeral session store before this run adds to it. Startup
+    # is the only moment at which the live directory is unambiguous, which is
+    # what makes "never evict the session that is running" enforceable rather
+    # than a race. Best-effort by construction (see retention.sweep_sessions):
+    # reclaiming disk must never be the reason a session fails to start.
+    from local_operator.session.retention import sweep_from_config
+
+    sweep_from_config(config_manager, Path(agent_registry.config_dir), transcript_dir)
+
     # --- model + stream fn (stream B contracts) ---------------------------
     from local_operator.env import get_env_config
     from local_operator.model.configure import configure_model, create_stream_fn
@@ -644,52 +653,71 @@ async def wire_mcp_into_session(
     enrichment, never a startup requirement. Returns the manager (caller
     owns its disposal via :func:`attach_mcp_dispose`) or ``None``.
     """
-    from local_operator.session.mcp_status import McpStartupOutcome
+    from local_operator.session.mcp_status import MCP_DISCOVERY_KEY, McpStartupOutcome
 
     try:
         from local_operator.mcp import discover_and_load_mcp_tools
+        from local_operator.mcp.manager import MCP_SDK_MISSING_ERROR
     except ImportError:
         if not has_ui:
             print(
                 "\033[1;33mWarning: MCP support unavailable, continuing without MCP tools\033[0m",
                 file=sys.stderr,
             )
-        # An EMPTY outcome, not a recorded failure: without the MCP package we
-        # cannot even read the config files, so we do not know whether this
-        # machine wanted MCP at all. Announcing "MCP is broken" on every host
-        # that simply never installed the SDK is noise, and the far commoner
-        # case is exactly that.
+        # This does NOT catch a missing MCP SDK. Every SDK import in the package
+        # is either ``TYPE_CHECKING`` or function-local, so ``local_operator.mcp``
+        # imports cleanly with the SDK absent and that case lands in the error
+        # loop below instead. What reaches here is our OWN package failing to
+        # import — a partial or broken install. An EMPTY outcome is still the
+        # right record for it: without the config layer we cannot read the config
+        # files, so we do not know whether this machine wanted MCP at all, and
+        # "MCP is broken" on a host that never used it is noise.
         session.mcp_startup = McpStartupOutcome()
         return None
 
     try:
         manager, mcp_tools, errors = await discover_and_load_mcp_tools(cwd, auth_store=auth_store)
     except Exception as exc:  # noqa: BLE001 — degradation is the contract
+        # Discovery raising IS reportable, unlike the import gap above: reaching
+        # this line means the config layer was present and still could not be
+        # read, so the user has an MCP setup that is not working.
         if not has_ui:
             print(
                 f"\033[1;33mWarning: MCP discovery failed, continuing without MCP tools: "
                 f"{exc}\033[0m",
                 file=sys.stderr,
             )
-        # Discovery raising IS reportable, unlike the import gap above: reaching
-        # this line means the config layer was present and still could not be
-        # read, so the user has an MCP setup that is not working.
-        session.mcp_startup = McpStartupOutcome(failures={"discovery": str(exc)})
+        session.mcp_startup = McpStartupOutcome(failures={MCP_DISCOVERY_KEY: str(exc)})
         return None
 
     # One pass over the error entries: the record keys on the BARE server name
     # (the discovery wrapper reports paths as ``mcp:<server>``) because that is
-    # what the user typed in ``.mcp.json`` and what ``/mcp`` lists back.
+    # what the user typed in ``.mcp.json`` and what ``/mcp`` lists back. Entries
+    # WITHOUT that prefix are the layer failing rather than a server — the
+    # wrapper's synthetic hard-failure entry says ``.mcp.json`` — so they take
+    # the same key the raising arm above uses. One synthetic key, not three
+    # spellings of "not a server".
     failures: dict[str, str] = {}
     for entry in errors:
         path = str(entry.get("path", "?"))
         message = str(entry.get("error", "unknown error"))
-        failures[path.partition("mcp:")[2] or path] = message
-        if not has_ui:
-            print(
-                f"\033[1;33mWarning: MCP server {path}: {message}\033[0m",
-                file=sys.stderr,
-            )
+        failures[path.partition("mcp:")[2] or MCP_DISCOVERY_KEY] = message
+
+    if failures and set(failures.values()) == {MCP_SDK_MISSING_ERROR}:
+        # The SDK is not installed, so the manager failed every configured server
+        # with the same install instruction. Reported ONCE, as the setup problem
+        # it is: N identical 90-character notices (one toast line plus one
+        # transcript error per server, every launch) is noise proportional to
+        # server count for a single cause, and it accuses the servers of a fault
+        # that is not theirs. Compared by identity against the manager's own
+        # constant rather than by substring, so re-wording it cannot silently
+        # disable this.
+        failures = {MCP_DISCOVERY_KEY: MCP_SDK_MISSING_ERROR}
+
+    if not has_ui:
+        for name, message in failures.items():
+            subject = "MCP discovery" if name == MCP_DISCOVERY_KEY else f"MCP server {name}"
+            print(f"\033[1;33mWarning: {subject}: {message}\033[0m", file=sys.stderr)
 
     session.mcp_startup = McpStartupOutcome(
         configured=tuple(manager.get_all_server_names()),

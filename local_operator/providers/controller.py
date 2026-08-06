@@ -166,6 +166,34 @@ class ProviderController:
             return True
         return bool(resolve_env_key(provider))
 
+    def usable_providers(self) -> set[str] | None:
+        """Every provider id a turn could run on now — or ``None`` when unknowable.
+
+        ``None`` is not "none of them": it means the credential store could not be
+        read at all, which is a different answer and the only one that is honest
+        when SQLite is locked. A caller that filters on this set has to show
+        EVERYTHING in that case, because an empty model list reads as "you own no
+        models" — a claim the app cannot make when it read zero rows.
+
+        One store scan for the whole registry, where :meth:`is_usable` costs one
+        per provider: the catalogue asks this question about a dozen providers on
+        the keystroke that opens the picker.
+        """
+        try:
+            stored = {row.provider for row in self.auth_store.list_credentials(provider=None)}
+        except Exception:  # noqa: BLE001 — an unreadable store is reported, not raised
+            return None
+        usable: set[str] = set()
+        for definition in PROVIDER_REGISTRY:
+            storage = definition.store_credentials_as or definition.id
+            if (
+                definition.allows_missing_api_key  # a local Ollama needs no credential
+                or storage in stored
+                or resolve_env_key(definition.id)
+            ):
+                usable.add(definition.id)
+        return usable
+
     def usage_enabled_providers(self) -> list[str]:
         """Provider ids with a live quota endpoint, sorted.
 
@@ -312,8 +340,14 @@ class ProviderController:
         replaces it when the network answers.
         """
         entries: list[CatalogueEntry] = []
+        # ONE store read for the whole registry, and one that survives a store
+        # that cannot be read: `is_usable` per provider would raise straight
+        # through a picker that is about to paint. An unknowable state is
+        # reported as connected — see :meth:`usable_providers` for why the
+        # degradation runs that way and not toward an empty list.
+        usable = self.usable_providers()
         for definition in PROVIDER_REGISTRY:
-            connected = self.is_usable(definition.id)
+            connected = usable is None or definition.id in usable
             for model_id, info in static_models(definition.id).items():
                 entries.append(
                     CatalogueEntry(
@@ -349,8 +383,9 @@ class ProviderController:
         """
         entries: list[CatalogueEntry] = []
         statuses: dict[str, str] = {}
+        usable = self.usable_providers()
         for definition in PROVIDER_REGISTRY:
-            connected = self.is_usable(definition.id)
+            connected = usable is None or definition.id in usable
             api_key: str | None = None
             is_oauth = False
             if connected:

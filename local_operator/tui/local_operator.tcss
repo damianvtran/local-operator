@@ -46,9 +46,11 @@ Screen {
     /* A second layer for the toast overlay. Layers are arranged independently
      * over the whole region, which is the property that matters: without one,
      * a toast at the top of the screen would STEAL a row from the transcript
-     * and reflow the conversation for five seconds. Everything else stays on
-     * `default` (Textual's name for the unset layer), so this declaration
-     * changes no existing placement. */
+     * and reflow the conversation for five seconds. It stops the LAYOUT
+     * reflowing — it does NOT stop the screen being erased, so the host is
+     * sized to its card (see `#toast-host`) and not to the width. Everything
+     * else stays on `default` (Textual's name for the unset layer), so this
+     * declaration changes no existing placement. */
     layers: default toast;
 }
 
@@ -269,10 +271,14 @@ Editor .text-area--suggestion {
 
 /* ── startup toast ───────────────────────────────────────────────────────
  *
- * Top-right transient overlay. The HOST spans the width on the `toast` layer
- * and right-aligns its one child; the card itself hugs its text (`width:
- * auto`) with a Python-set `max-width` (see widgets/toast.py — the cap depends
- * on the terminal width, which a stylesheet cannot ask for).
+ * Top-right transient overlay. The host HUGS its card (`width: auto`) and both
+ * are positioned by a Python-set offset and `max-width` (see widgets/toast.py —
+ * both depend on the terminal width, which a stylesheet cannot ask for).
+ *
+ * The host must never be wider than the card. Textual hands a widget its whole
+ * region and blanks all of it, so `width: 1fr` here painted the card's 35 cells
+ * of notice and erased the remaining 59 cells of transcript on the same rows —
+ * the layer keeps the toast out of the layout, not off the screen.
  *
  * Top rather than bottom-right, which is where Textual's own notifications go:
  * the input dock and status band are docked to the bottom, so a bottom toast
@@ -290,9 +296,8 @@ Editor .text-area--suggestion {
  * card does not apply here. */
 #toast-host {
     layer: toast;
-    width: 1fr;
+    width: auto;
     height: auto;
-    align-horizontal: right;
 }
 
 Toast {
@@ -354,7 +359,10 @@ Toast {
  * `Screen.boot` is the whole switch, and the app flips it in the same call that
  * shows or hides the splash (OperatorApp._set_welcome_visible). Two layouts,
  * ONE condition: a second notion of "the session is empty" is exactly how a
- * centred boot card ends up on screen beside a populated transcript.
+ * centred boot card ends up on screen beside a populated transcript. A second
+ * class, `.boot-card`, rides on top of it — not a third layout, a MEASUREMENT:
+ * whether this terminal is wide enough for the card to read as one (see the rule
+ * below).
  *
  * The clamp is `max(75, 70% of the content box)`, never wider than the content
  * box. It takes three declarations because tcss has no `max()`: `width` is the
@@ -375,11 +383,16 @@ Toast {
  * one row past the bottom of the screen, where a scrollbar appears and reflows
  * the width of everything.
  *
- * The bottom is also where the pair belongs. The splash needs every row it is
- * given at the sizes this app is used at — a 28-row terminal leaves it about 20
- * and the full block wants all of them — so reserving rows below the card to
- * float the pair in the middle would spend the logo, the one thing that screen
- * exists to show, to buy air. The slack goes above, where nothing needs it.
+ * WHERE the pair sits is not this rule's, though — it only says the splash and the
+ * card touch. The pair is the composition, and a composition resting on the bottom
+ * of a 48-row terminal left the upper two thirds of the screen empty, so the app
+ * reserves rows BELOW the card as well (OperatorApp._sync_boot_composition) and the
+ * two slacks come out even. Reserving them is conditional on their being spare:
+ * every row the composition takes is a row the splash's budget loses, and the
+ * splash pays in whole sections — at 28 rows the block wants all 20 it is offered,
+ * and buying air there would spend the mark, the one thing that screen exists to
+ * show. So a short terminal keeps exactly the old behaviour: the pair on the
+ * bottom, all the slack above, where nothing needs it.
  *
  * The panel stays DOCKED here. In the flow it would be the last thing placed
  * and the first thing clipped, and on a terminal too short for the splash above
@@ -390,12 +403,52 @@ Toast {
  * of a docked panel reads as a glitch in a terminal, not as motion. */
 Screen.boot TranscriptView {
     align-vertical: bottom;
+    /* The one row the boot layout does not need — and the LEFT cell restated,
+     * because Textual resolves `padding` as one value per rule: a lone
+     * `padding-top` here would win the whole declaration and take the spine's
+     * left cell with it, moving every row in the region one column out of line
+     * with the input chevron below.
+     *
+     * In the conversation layout the top row keeps a turn's first line off the
+     * terminal's top edge, where it would read as clipped. Here the column is
+     * bottom-aligned against the card, so that row can only ever be slack — and
+     * the screen's own one-cell inset is still above it, so nothing touches the
+     * edge either way. It is not free slack, though: under the shared-region
+     * budget (WelcomeView.get_content_height) every row this region spends is a
+     * row the splash's degradation ladder has to pay for, and the ladder pays in
+     * whole sections. Reclaiming a row that buys nothing is what lets the mark
+     * survive a `/clear` receipt AND two failed MCP servers at 96x28. Frames with
+     * slack are unchanged: the block is bottom-aligned, so a taller region only
+     * grows the empty space above. */
+    padding: 0 0 0 1;
 }
 
-Screen.boot #input-shell {
+/* The clamp lives on `.boot-card`, not on `Screen.boot`, because a clamp with no
+ * lower guard is worse than no clamp. `max(75, 70%)` insets the panel by 1 to 3
+ * cells between 78 and 84 columns — at 80, the commonest terminal, 2 cells on the
+ * left and 3 on the right — and an inset smaller than the app's own one-cell
+ * gutter does not read as a card. It reads as a full-width bar that is off
+ * centre, which is the one thing a borderless surface must never look like:
+ * there is no edge to attribute the offset to.
+ *
+ * So the app measures the card once per resize and adds this class only when the
+ * inset is at least 4 cells a side (OperatorApp.on_resize; computing a width in
+ * Python is the same move Toast._refit already makes, because a stylesheet cannot
+ * ask how wide the terminal is). Below that threshold the panel stays the
+ * full-width docked bar the base rule already gives it — the same honest
+ * degradation 40 and 20 cells get, arrived at 40 columns earlier.
+ *
+ * `max-width` is the CAP, in cells, not the old `100%`: unbounded, `70%` resolves
+ * to 131 cells on a 190-column terminal and the panel is a bar again — a
+ * borderless fill reads as a card only while the ground beside it is legible as
+ * margin, and past a hundred cells the fill IS the frame. The `100%` guard it
+ * replaces is not lost: the class is only applied where the resolved width leaves
+ * at least 8 cells of box, and the geometry suite measures every rendered row
+ * against the terminal at 16 and 20 cells, where the floor would overflow. */
+Screen.boot.boot-card #input-shell {
     width: 70%;
     min-width: 75;
-    max-width: 100%;
+    max-width: 100;
 }
 
 /* ── slash-command picker ────────────────────────────────────────────────

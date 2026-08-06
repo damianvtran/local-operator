@@ -61,6 +61,23 @@ from typing_extensions import TypeVar
 from local_operator.harness.wake import WakeSchedule
 
 # ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+
+class RenderedStreamError(Exception):
+    """A stream failure whose ``str()`` is the whole story for the user.
+
+    Raised by wire clients for provider responses (``HTTP 400: ...``) as
+    opposed to defects. The loop catches both, but only the latter is worth a
+    traceback: a handled provider answer that the UI already prints as one
+    clean line does not also need forty lines of stack painted over the
+    interface. Lives here rather than in ``providers`` because the harness must
+    not import the provider layer — the dependency only runs the other way.
+    """
+
+
+# ---------------------------------------------------------------------------
 # Content blocks
 # ---------------------------------------------------------------------------
 
@@ -712,6 +729,14 @@ class ModelSpec(BaseModel):
     temperature: float = 0.2
     top_p: float = 0.9
     reasoning: bool = False
+    # Whether the model accepts ``temperature``/``top_p`` at all. Some families
+    # (Anthropic's Claude 5 generation, OpenAI's reasoning models) reject the
+    # parameters outright with HTTP 400, so the defaults above are unsendable
+    # and the wire clients must omit the keys rather than send a value.
+    # Derived once in ``build_model_spec`` so the wire clients stay free of
+    # model-name knowledge; see the note there for why it keys on the model
+    # rather than the provider.
+    supports_sampling_params: bool = True
 
 
 class ChatRequest(BaseModel):

@@ -117,6 +117,12 @@ class Editor(TextArea):
     #: the command word uses, in its argument mode.
     PROVIDER_COMMANDS = ("login", "logout")
 
+    #: Provider commands that DESTROY something. `/logout` removes a credential
+    #: and an OAuth one costs another browser round trip to get back, so its rows
+    #: are gated harder than the shared ambiguity rule gates the rest: see
+    #: :meth:`_picker_choice_is_unambiguous` and :meth:`_apply_command`.
+    DESTRUCTIVE_COMMANDS = ("logout",)
+
     #: Every command whose argument drives a list. Completing one of these opens
     #: that list, which IS the outcome of the keystroke — running the bare command
     #: as well would echo a no-op into the transcript and clear the buffer the
@@ -159,6 +165,19 @@ class Editor(TextArea):
     def model_picker(self) -> ModelPicker:
         """The model list shown while the buffer holds ``/model <query>``."""
         return self._model_picker
+
+    @property
+    def provider_command(self) -> str | None:
+        """Which provider command the buffer's argument list is open for, if any.
+
+        Exposed so the app can check that a ``ProviderQueryOpened`` it is handling
+        still describes the buffer. The message is one message-loop tick old, and
+        a tick is enough for the user to have typed over the command — answering a
+        stale one attaches a notice to a command that no longer exists. The buffer
+        stays the single authority; this is how a reader outside the widget asks
+        it, rather than parsing the text a second time.
+        """
+        return self._provider_command
 
     def set_model_handler(self, handler: Callable[[ModelRow], None] | None) -> None:
         """Install what a chosen model DOES.
@@ -255,6 +274,17 @@ class Editor(TextArea):
                     event.stop()
                     event.prevent_default()
                     return
+        if key == "escape" and self._picker.is_pending():
+            # The rows are one message-loop tick behind the keystroke that opened
+            # the list — the app answers ProviderQueryOpened — and for that tick
+            # the picker is in argument mode holding nothing, so an `is_open()`
+            # gate DROPPED the Esc: the user dismissed the list and then watched
+            # it appear anyway. Dismissing an empty argument list records the
+            # query, which is what the arriving rows are checked against.
+            self._picker.dismiss()
+            event.stop()
+            event.prevent_default()
+            return
         if self._picker.is_open():
             if key == "escape":
                 self._picker.dismiss()
@@ -466,28 +496,48 @@ class Editor(TextArea):
 
         Unambiguous means one of three things:
 
-        * there is exactly one match, so the highlighted row is the only command
-          the query could mean;
-        * the user typed the name in full, so they named it rather than letting
-          the matcher choose; or
         * the user ARROWED onto this row. The gate exists because the matcher may
           have picked the row on the user's behalf, and an explicit move is the
           direct answer to that — the user read the list and chose. It is also the
           muscle memory every comparable picker (fzf, an editor command palette)
-          has already taught: move, Enter, done.
+          has already taught: move, Enter, done;
+        * the user typed the name in full, so they named it rather than letting
+          the matcher choose; or
+        * there is exactly one match, so the highlighted row is the only command
+          the query could mean — EXCEPT on a destructive list, below.
 
         Everything else completes and waits for a second Enter. The point is the
         registry's uneven blast radius: `/usage` is harmless and `/loop` and
         `/logout` are not, so a fuzzy pick must not be *run* on one keystroke.
+
+        "Exactly one match" is not evidence on a DESTRUCTIVE list, and that is the
+        one place the distinction pays. The matcher is a subsequence matcher, so a
+        query that spells nothing can still leave a single survivor: `/logout oer`
+        reached openrouter, `/logout dpsk` deepseek and `/logout xoh` xai-oauth —
+        each one Enter away from deleting a credential the user never named. A
+        typo one letter off a real id lands in exactly this shape. So `/logout`
+        asks for the id in full or an explicit move, and nothing else counts.
         """
         query = self._picker_query()
         if query is None:
             return False
-        if len(self._picker.suggestions()) <= 1:
-            return True
         if self._picker.chosen_by_hand:
             return True
-        return query.strip().lower() == name.strip().lower()
+        if query.strip().lower() == name.strip().lower():
+            return True
+        return not self._argument_is_destructive() and len(self._picker.suggestions()) <= 1
+
+    def _argument_is_destructive(self) -> bool:
+        """Whether the OPEN argument list removes something when a row is chosen.
+
+        Read off the buffer's command word rather than the rows: what a keystroke
+        destroys is a property of the command, and a per-row flag would make the
+        gate depend on data the app happened to fill in.
+        """
+        return (
+            self._picker.mode is PickerMode.ARGUMENT
+            and self._provider_command in self.DESTRUCTIVE_COMMANDS
+        )
 
     def _picker_query(self) -> str | None:
         """The text the open list is matching against, or ``None`` when closed.
@@ -505,11 +555,19 @@ class Editor(TextArea):
     def _apply_command(self, name: str) -> None:
         """What CHOOSING a row does — the picker's ``on_choose`` callback.
 
-        A command word is completed into the buffer and left there. An argument
-        row is RUN, matching the model picker: a click names one exact row with a
-        pointer, which is not the guess the keyboard ambiguity gate protects
-        against, and a click that only filled the field would leave the user
-        reaching for Enter to finish a choice they already made.
+        A command word is completed into the buffer and left there. A NON-
+        destructive argument row is RUN, matching the model picker: a click names
+        one exact row with a pointer, which is not the guess the keyboard
+        ambiguity gate protects against, and a click that only filled the field
+        would leave the user reaching for Enter to finish a choice they already
+        made.
+
+        A `/logout` row is filled in instead. The picker sits directly above the
+        input row — the row a user clicks to place the caret — so "one click, one
+        credential gone" is a misclick away, and an OAuth credential is not
+        recoverable without another browser login. Confirming with Enter is the
+        same two-step the keyboard gate already requires of the same command, so
+        the mouse is not learning a separate rule.
 
         For a command the trailing space is load-bearing, not cosmetic: most
         commands take an argument (``/model provider/id``), and it is also what
@@ -517,6 +575,9 @@ class Editor(TextArea):
         drops away on the same keystroke that chose from it.
         """
         if self._picker.mode is PickerMode.ARGUMENT:
+            if self._argument_is_destructive():
+                self._complete_argument(name)
+                return
             self._run_argument(name)
             return
         context = slash_context(self.text)

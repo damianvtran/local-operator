@@ -13,17 +13,23 @@ here rather than eyeballed:
 
 from __future__ import annotations
 
+import math
 import re
 
 from rich.cells import cell_len
 
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.status_line import (
+    _DROP_LADDER,
+    _DROP_LADDER_QUIET,
+    _MIN_GROUP_GAP,
+    _SPINNER_FRAMES,
+    ICON_CWD,
     ICON_MCP,
     ICON_MODEL,
     McpStatus,
     StatusLine,
-    _MIN_GROUP_GAP,
+    drop_ladder,
     format_agents,
     format_context_usage,
     format_cost,
@@ -398,6 +404,86 @@ def _fills(row) -> dict[str, str]:
     return out
 
 
+def _to_lab(hex_color: str) -> tuple[float, float, float]:
+    """sRGB hex → CIE L*a*b* (D65), the input CIEDE2000 needs."""
+    value = hex_color.lstrip("#")
+    rgb = [int(value[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+    linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb]
+    r, g, b = linear
+    x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047
+    y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883
+
+    def f(t: float) -> float:
+        return t ** (1 / 3) if t > 216 / 24389 else (841 / 108) * t + 4 / 29
+
+    fx, fy, fz = f(x), f(y), f(z)
+    return (116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz))
+
+
+def _delta_e_2000(first: str, second: str) -> float:
+    """CIEDE2000 between two hex colours.
+
+    The metric this codebase states its colour decisions in ("dE 3.06 is
+    imperceptible", "the healthy lamp was 5.08 from the accent"), computed here
+    so a colour assertion can defend the PERCEPTUAL gap rather than a palette
+    name — a third green added to the ramp would slip past a name check.
+    """
+    l1, a1, b1 = _to_lab(first)
+    l2, a2, b2 = _to_lab(second)
+    c1 = math.hypot(a1, b1)
+    c2 = math.hypot(a2, b2)
+    c_bar = (c1 + c2) / 2
+    g = 0.5 * (1 - math.sqrt(c_bar**7 / (c_bar**7 + 25**7))) if c_bar else 0.0
+    a1p, a2p = (1 + g) * a1, (1 + g) * a2
+    c1p, c2p = math.hypot(a1p, b1), math.hypot(a2p, b2)
+    h1p = math.degrees(math.atan2(b1, a1p)) % 360 if (a1p or b1) else 0.0
+    h2p = math.degrees(math.atan2(b2, a2p)) % 360 if (a2p or b2) else 0.0
+
+    d_lp = l2 - l1
+    d_cp = c2p - c1p
+    if c1p * c2p == 0:
+        d_hp = 0.0
+    elif abs(h2p - h1p) <= 180:
+        d_hp = h2p - h1p
+    else:
+        d_hp = h2p - h1p - 360 if h2p > h1p else h2p - h1p + 360
+    d_hp = 2 * math.sqrt(c1p * c2p) * math.sin(math.radians(d_hp) / 2)
+
+    l_bar = (l1 + l2) / 2
+    c_barp = (c1p + c2p) / 2
+    if c1p * c2p == 0:
+        h_barp = h1p + h2p
+    elif abs(h1p - h2p) <= 180:
+        h_barp = (h1p + h2p) / 2
+    elif h1p + h2p < 360:
+        h_barp = (h1p + h2p + 360) / 2
+    else:
+        h_barp = (h1p + h2p - 360) / 2
+
+    t = (
+        1
+        - 0.17 * math.cos(math.radians(h_barp - 30))
+        + 0.24 * math.cos(math.radians(2 * h_barp))
+        + 0.32 * math.cos(math.radians(3 * h_barp + 6))
+        - 0.20 * math.cos(math.radians(4 * h_barp - 63))
+    )
+    s_l = 1 + (0.015 * (l_bar - 50) ** 2) / math.sqrt(20 + (l_bar - 50) ** 2)
+    s_c = 1 + 0.045 * c_barp
+    s_h = 1 + 0.015 * c_barp * t
+    r_t = (
+        -2
+        * math.sqrt(c_barp**7 / (c_barp**7 + 25**7))
+        * math.sin(math.radians(60 * math.exp(-(((h_barp - 275) / 25) ** 2))))
+    )
+    return math.sqrt(
+        (d_lp / s_l) ** 2
+        + (d_cp / s_c) ** 2
+        + (d_hp / s_h) ** 2
+        + r_t * (d_cp / s_c) * (d_hp / s_h)
+    )
+
+
 def test_the_accent_marks_a_live_turn_not_the_brand_glyph() -> None:
     """The accent budget's whole point is that seeing green MEANS something.
 
@@ -483,15 +569,61 @@ def test_mcp_glyph_is_a_single_cell_like_every_other_segment_icon() -> None:
     assert cell_len(ICON_MCP) == 1
 
 
-def test_a_failed_server_wins_over_the_ones_that_did_connect() -> None:
-    """A PARTIAL failure is the dangerous outcome: green beside a count of 2 on
-    a machine where the third server died reads as "all good", and the user then
-    spends the turn wondering why the agent cannot reach those tools."""
+def test_the_mcp_lamp_is_an_alarm_or_nothing() -> None:
+    """A PARTIAL failure is the dangerous outcome: a healthy-looking count of 2
+    on a machine where the third server died reads as "all good", and the user
+    then spends the turn wondering why the agent cannot reach those tools.
+
+    Healthy takes the NEUTRAL ramp, not a second green. `success` #57c785 is
+    5.08 dE2000 from the accent #38c96a — this file's own comments reject 3.06
+    as imperceptible — and the accent is the band's "a turn is live". `muted`
+    against `dim` is 16.66 dE2000 apart, so the three states still read.
+    """
     assert mcp_semantic(McpStatus(configured=3, connected=2, failed=True)) == "danger"
-    assert mcp_semantic(McpStatus(configured=3, connected=3)) == "success"
+    assert mcp_semantic(McpStatus(configured=3, connected=3)) == "muted"
     # Configured, nothing up, nothing failed: the startup gate's normal state on
-    # every launch, so it gets no colour at all.
+    # every launch, so it takes the dimmest step of the ramp.
     assert mcp_semantic(McpStatus(configured=3, connected=0)) == "dim"
+    # Discovery itself failed: an alarm, and the only state with no count.
+    assert mcp_semantic(McpStatus(discovery_failed=True)) == "danger"
+
+
+def test_a_healthy_mcp_count_puts_no_second_green_on_a_streaming_band() -> None:
+    """The accent means ONE thing on this row: a turn is live. Measured on the
+    rendered row rather than on the rule, because the defect was two single-cell
+    green glyphs ten cells apart — `⊙` in `success` at column 47 and the spinner
+    in `accent` at 57 — which no assertion about the rule alone would catch.
+
+    dE2000 between the two was 5.08, so this asserts the accent family appears
+    on exactly ONE span and no other span carries a near neighbour of it.
+    """
+    status, _clock = _full_band()
+    status.update(mcp=McpStatus(configured=2, connected=2), streaming=True)
+    row = status.render_text(200)
+    fills = _fills(row)
+    accent = theme_mod.semantic_color("accent").lower()
+    accented = [text for text, fill in fills.items() if fill == accent]
+    assert len(accented) == 1, f"accent spent on {accented!r}"
+    assert accented[0] in _SPINNER_FRAMES
+    # No near neighbour of the accent anywhere else on the row (dE2000 < 10 is
+    # the same-colour band at one cell; the old `success` lamp measured 5.08).
+    for text, fill in fills.items():
+        if text == accented[0]:
+            continue
+        assert _delta_e_2000(fill, accent) >= 10.0, f"{text!r} {fill} is a second green"
+
+
+def test_a_discovery_failure_keeps_the_alarm_without_inventing_a_count() -> None:
+    """`configured == 0` means two different things: a machine with no
+    ``.mcp.json`` (stay away) and one whose config could not be read at all. The
+    second renders the bare initialism — every count would be a fiction, and
+    ``0 MCP`` in particular would claim the machine asked for nothing."""
+    assert format_mcp(McpStatus(discovery_failed=True)) == "MCP"
+    status = StatusLine(FakeDock(200))
+    status.update(model_label="test/model", mcp=McpStatus(discovery_failed=True))
+    row = status.render_text(200)
+    assert f"{ICON_MCP} MCP" in row.plain
+    assert _fills(row)[f"{ICON_MCP} "] == theme_mod.semantic_color("danger").lower()
 
 
 def test_only_the_mcp_glyph_carries_the_state_colour() -> None:
@@ -506,12 +638,12 @@ def test_only_the_mcp_glyph_carries_the_state_colour() -> None:
     assert fills["2 MCP"] == fg
 
 
-def test_the_mcp_segment_outlives_every_other_droppable_segment() -> None:
+def test_an_ALARMING_mcp_segment_outlives_every_other_droppable_segment() -> None:
     """It is the reference's ``flexShrink={0}`` indicator, and the ladder's last
-    rung. Two reasons, both asserted here by outcome: it is the cheapest segment
-    in the band to keep, and its failure branch is the only alarm the band can
-    raise — a cramped terminal is exactly where hiding it would make a user
-    conclude the tools were never configured.
+    rung WHEN IT IS AN ALARM. Two reasons, both asserted here by outcome: it is
+    the cheapest segment in the band to keep, and its failure branch is the only
+    alarm the band can raise — a cramped terminal is exactly where hiding it
+    would make a user conclude the tools were never configured.
     """
     status, _clock = _full_band()
     status.update(mcp=McpStatus(configured=3, connected=2, failed=True))
@@ -526,3 +658,46 @@ def test_the_mcp_segment_outlives_every_other_droppable_segment() -> None:
     # At its final width every other droppable segment is already gone.
     for gone in ("49.6%/1M", "$12.40", "high", "3 agents", "41m1s"):
         assert gone not in last_seen, f"{gone} outlived the MCP segment: {last_seen!r}"
+
+
+def test_a_healthy_mcp_count_sheds_before_the_cwd_and_the_model_label() -> None:
+    """The rung's place is earned by the ALARM, not by the segment.
+
+    Unconditional last place meant a count nobody has to act on outranked "where
+    am I": at 40 cells the band read `◆ model › ⊙ 2 MCP` where the same terminal
+    with no MCP configured showed `◆ test/model › ⌂ local-operator`. A courtesy
+    sheds like one — just ahead of the cwd, and the two SHORTEN steps still come
+    before it because they keep a segment instead of dropping one.
+    """
+    status = StatusLine(FakeDock(40))
+    status.update(model_label="test/model", cwd="/Users/tester/work/local-operator")
+
+    # Swept rather than pinned to one width: the invariant is an ORDER, and a
+    # single width only ever samples one rung of it.
+    status.update(mcp=McpStatus(configured=2, connected=2))
+    for width in range(60, 9, -1):
+        row = status.render_text(width).plain
+        if ICON_MCP in row:
+            # A healthy count never outlives the working directory.
+            assert ICON_CWD in row, f"width {width}: mcp outlived the cwd: {row!r}"
+
+    # The alarm does outlive both, which is the rung's whole justification.
+    status.update(mcp=McpStatus(configured=2, connected=1, failed=True))
+    alarm_alone = [
+        width
+        for width in range(60, 9, -1)
+        if f"{ICON_MCP} 1 MCP" in status.render_text(width).plain
+        and ICON_CWD not in status.render_text(width).plain
+    ]
+    assert alarm_alone, "a danger count must survive a width the cwd cannot"
+
+
+def test_the_two_ladders_differ_only_in_where_the_mcp_rung_sits() -> None:
+    """One ordering, two positions for one rung — not two hand-maintained
+    ladders that can drift apart on the next reordering."""
+    assert drop_ladder(McpStatus(configured=2, connected=1, failed=True)) is _DROP_LADDER
+    assert drop_ladder(McpStatus(configured=2, connected=2)) is _DROP_LADDER_QUIET
+    assert drop_ladder(McpStatus()) is _DROP_LADDER_QUIET
+    assert _DROP_LADDER[-1] == "mcp"
+    assert _DROP_LADDER_QUIET.index("mcp") == _DROP_LADDER_QUIET.index("cwd") - 1
+    assert [s for s in _DROP_LADDER if s != "mcp"] == [s for s in _DROP_LADDER_QUIET if s != "mcp"]

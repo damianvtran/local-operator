@@ -528,13 +528,44 @@ class WelcomeView(Static):
         self._poll()
 
     def get_content_height(self, container: Size, viewport: Size, width: int) -> int:
-        """Rows this block needs, capped at the rows the region offers.
+        """Rows this block needs, out of the rows the region has LEFT.
 
         Textual asks this before the widget is laid out, so the region comes from
         ``container`` rather than from ``self.size``, which is still the previous
         frame's at this point.
+
+        The region is SHARED. A system notice — one row per MCP server that failed
+        to start — and the ``/clear`` receipt are siblings in this same scrollable
+        column, and they are placed whatever this returns. Budgeting the whole
+        region therefore overdraws it by exactly their rows: the transcript's
+        virtual height passes its viewport, and because the boot layout
+        bottom-aligns the column, what scrolls out of sight is the TOP OF THE
+        LOGO — with a scrollbar thumb appearing beside it. Measured at 96x28 one
+        failing server cost the mark's first row, two cost two.
+
+        Subtracting a fixed row would only cover the one-notice case; the count is
+        unbounded (a server per notice), so the siblings' own heights are what the
+        budget has to come from. Margins count too: the ``.gap-above`` row under a
+        visible splash is a row of this region like any other.
         """
-        return len(build_welcome_lines(self._info, width, container.height))
+        return len(
+            build_welcome_lines(self._info, width, max(0, container.height - self._rows_taken()))
+        )
+
+    def _rows_taken(self) -> int:
+        """Rows the sibling blocks already spend out of the shared region.
+
+        ``outer_size`` is the placed size and excludes margin, so the gap class is
+        added back explicitly — a block with a blank row above it occupies two
+        rows of the region, not one.
+        """
+        total = 0
+        for sibling in self.siblings:
+            if not sibling.display:
+                continue
+            margin = sibling.styles.margin
+            total += sibling.outer_size.height + margin.top + margin.bottom
+        return total
 
     def render(self) -> RenderableType:
         # `self.size.height` is what `get_content_height` returned, so the block
