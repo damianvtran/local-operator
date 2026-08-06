@@ -9,6 +9,7 @@ from local_operator.compaction.tokens import (
     estimate_messages_tokens,
     estimate_tokens,
     invalidate_message_cache,
+    messages_tokens_upper_bound,
     register_invalidator,
 )
 from local_operator.harness.types import ImageContent, Message, TextContent, ToolCall, Usage
@@ -143,3 +144,69 @@ def test_user_messages_always_cache():
     user = Message.user("hello")
     estimate_tokens(user)
     assert user.id in tokens_mod._ESTIMATE_CACHE
+
+
+# --- Upper bound (the cheap pre-check the compaction trigger relies on) ------
+
+
+def test_upper_bound_never_undercounts_across_scripts():
+    """``messages_tokens_upper_bound`` must NEVER fall below the exact estimate.
+
+    ``Session._maybe_compact`` substitutes this bound into the monotonic
+    ``context_tokens > threshold`` test to avoid loading tiktoken's 43.6 MB BPE
+    table on sessions nowhere near their threshold. That substitution is only
+    sound while the bound genuinely dominates, so this sweeps the character
+    classes where a naive ``len(text)`` bound breaks: a single CJK glyph or
+    emoji is one code point but several cl100k tokens.
+    """
+    import random
+
+    alphabets = [
+        "abcdefghijklmnopqrstuvwxyz ABCDEFGHIJ0123456789 \n\t.,;:!?/\\-_=+*&^%$#@()[]{}",
+        "日本語のテキストです。漢字とひらがな、カタカナ。",
+        "🙂🚀🧠🔥💥🎉👩‍👩‍👧‍👦",
+        "Ωμέγα ΑΒΓΔ ЖЗИЙ عربى עברית",
+        "\u0001\u0002\ufffd\u200b\u2028",
+    ]
+    rng = random.Random(1234)
+
+    def text() -> str:
+        alphabet = rng.choice(alphabets)
+        return "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 200)))
+
+    for trial in range(400):
+        blocks = [TextContent(text=text()) for _ in range(rng.randint(0, 4))]
+        calls = []
+        if rng.random() < 0.3:
+            calls = [
+                ToolCall(id=f"c{trial}", name=text()[:20] or "t", arguments={"k": text()[:50]})
+            ]
+        message = Message(
+            role=rng.choice(["user", "assistant", "tool"]), content=blocks, tool_calls=calls
+        )
+        assert messages_tokens_upper_bound([message]) >= estimate_tokens(message)
+
+
+def test_upper_bound_counts_images_and_is_additive():
+    """Images are charged at the same flat rate as the exact estimator, and the
+    bound sums over messages — an image-heavy history must not slip under."""
+    image = Message(role="user", content=[ImageContent(url="data:image/png;base64,AA==")])
+    assert messages_tokens_upper_bound([image]) == IMAGE_TOKEN_ESTIMATE
+    assert messages_tokens_upper_bound([image, image]) == 2 * IMAGE_TOKEN_ESTIMATE
+    assert messages_tokens_upper_bound([image]) >= estimate_tokens(image)
+
+
+def test_upper_bound_does_not_load_tiktoken(monkeypatch):
+    """The bound must reach its answer without the tokenizer.
+
+    Pinned by making the encoding loader explode: any accidental call into the
+    estimator from the bound turns into a hard failure instead of a silent
+    43.6 MB regression.
+    """
+
+    def _boom():
+        raise AssertionError("upper bound must not touch the tiktoken encoding")
+
+    monkeypatch.setattr(tokens_mod, "_get_encoding", _boom)
+    messages = [Message.user("hello " * 500), Message.assistant("world " * 500)]
+    assert messages_tokens_upper_bound(messages) > 0

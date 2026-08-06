@@ -650,3 +650,142 @@ Each of these was invisible to unit tests and only appeared in a real frame:
 | live TUI model picker | `/model` → 465 rows → `opus` → switched to `anthropic/claude-opus-5` |
 | live exec `--json` | exit 0, `write` tool ran, `ok.txt` contains `verified` |
 | snapshot determinism | 3 consecutive clean runs after the caret-blink pin |
+
+## 13. Model metadata, usage quota, base overhead (2026-08-06)
+
+### The bug the model picker exposed
+
+Shipping the picker made a latent defect routine. The picker offers whatever a
+provider's live listing returns, so a user could select `anthropic/claude-opus-5`
+— a real model the shipped registry does not describe — and the session would run
+with `context_window = -1`. Compaction thresholds derive from that number, so
+compaction silently never fired and the turn eventually 400'd on the provider's
+real limit.
+
+Two separate holes, both closed:
+
+1. **Enrichment only covered the aggregators.** The gate was
+   `canonical in LISTING_PROVIDERS` (openrouter, radient). It is now every
+   provider, routed through `model/discovery.py`, and only reached when the
+   registry has no window — so a shipped model still costs no HTTP call.
+2. **`build_model_spec` bypassed the enrichment entirely**, calling
+   `get_model_info` rather than `resolve_model_info`. The spec is what the session
+   RUNS on, so a 1M-context OpenRouter model was resolved correctly and then
+   executed as a 128k one.
+
+Measured after the fix:
+
+| Selector | spec window before | after |
+|---|---|---|
+| `openrouter/anthropic/claude-opus-5` | 128,000 | **1,000,000** |
+| `openrouter/deepseek/deepseek-v4-flash-0731` | 128,000 | **1,048,576** |
+| `anthropic/claude-opus-4-20250514` | 200,000 | 200,000 (registry, untouched) |
+
+Enrichment also could not see OAuth credentials — the one kind Anthropic's
+`/login` writes — because it read only the environment and the credential file.
+It now reads the OAuth store through its synchronous row accessor and reports the
+credential KIND, because Anthropic authenticates a key with `x-api-key` and a
+token with `Authorization: Bearer`.
+
+The dead `_info_from_catalogue` / `_catalogue_source` pair and the orphaned
+`LISTING_PROVIDERS` constant were deleted rather than left beside the new path.
+
+### Usage quota: what the set claimed versus what worked
+
+An audit of `providers/usage.py` found 8 advertised providers of which 2 could
+produce a report for a typical user:
+
+| Defect | Fix |
+|---|---|
+| `zai` was in `USAGE_PROVIDERS` with a working fetcher and **no `ProviderDefinition`** — `/login zai` raised, its env var was never read, no code path could supply its credential | deleted (fetcher, set entry, test) |
+| One fetcher per provider, so Kimi's OAuth-only route made `KIMI_API_KEY` users unreachable; `/provider` advertised quota and the table was empty forever | `_FETCHERS` is now `(oauth, api_key)` pairs; added `fetch_moonshot_balance` (plain Bearer, the key the registry already stores) |
+| DeepSeek had no fetcher despite a documented endpoint and a stored key | added `fetch_deepseek_balance`, one limit per currency (a CNY balance rendered as USD is wrong by ~7x) |
+| Three surfaces disagreed: `/provider` used `is_usable`, bare `/usage` used `has_any_credential`, `/usage <p>` resolved the env tier | all unified on `is_usable` |
+| `OAUTH_USAGE_PROVIDERS` was hand-written, had drifted, and was read by nothing | derived from the dispatch table |
+| `UsageReport.identity` was never assigned, so the TUI's annotation was unreachable | populated from the OAuth email/account id |
+| `/usage` could not distinguish "no endpoint" from "endpoint you cannot reach" | `usage_kinds()` reports both routes; the TUI now names the missing credential |
+| OpenRouter called the undocumented `/api/v1/auth/key` alias | pinned to the documented `/api/v1/key` (both verified live, identical bodies) |
+
+Live: `/usage openrouter` returns `openrouter:spend $519.85 usd` through the
+documented endpoint.
+
+### Base overhead, measured then reduced
+
+`scripts/bench_base_overhead.py` (re-runnable; cold imports in a fresh
+interpreter, RSS net of the 18.3 MB interpreter floor, top offenders from
+`-X importtime`). Independently re-measured after the change:
+
+| Measurement | Before | After | Delta |
+|---|---|---|---|
+| cold import `local_operator.cli` | 102.7 ms | **58.0 ms** | −43% |
+| RSS after that import | 23.0 MB | **13.9 MB** | −40% |
+| `sys.modules` after that import | 344 | **255** | −26% |
+| session build (mock provider) | 231.2 ms | **197.2 ms** | −15% |
+| no-op `exec` end to end | 370.1 ms | **354.6 ms** | −4% |
+| **peak RSS of a no-op `exec`** | 106.8 MB | **58.5 MB** | **−45%** |
+
+What moved off the startup path, with its measured cost: PIL + pillow-heif
+(23.4 ms, 7.6 MB, 75 modules — only HEIC conversion needs it),
+`local_operator.types` (51.7 ms of pydantic model construction for one name),
+`asyncio` in `cli.py` (34.4 ms, 6.5 MB, 77 modules), `requests` in
+`model/configure.py`. Pinned by `tests/unit/test_import_graph.py`, whose
+assertions carry the cost of the module each one guards; reverting the PIL import
+to module scope was verified to fail it with a message naming the cost.
+
+The largest single item in a short session's peak RSS was tiktoken's BPE table
+(~84 ms, ~43.6 MB), loaded so a threshold check on a few thousand tokens could
+return False. `messages_tokens_upper_bound()` is a rigorous, non-allocating bound
+— byte-level BPE means `tokens <= utf8_bytes` — checked before the exact estimate
+is bought. Verified over 400 adversarial messages (CJK, emoji, combining marks,
+zero-width, BOM, multi-block, images, tool calls): the bound never fell below the
+exact estimate, tightest observed slack 13 tokens.
+
+### Complex-task cost, verified by the benchmark rather than the agent
+
+`scripts/bench_task_cost.py` scaffolds four real codebases, runs the agent
+headlessly, and checks the outcome ITSELF — restoring each contract test from a
+pristine copy the agent cannot reach, adding a hold-out suite it never saw, and
+grepping for surviving duplication. Every check was validated to FAIL on the
+unmodified fixture before the live runs.
+
+| Task | Turns | Tools | Prompt tok | Cached | Warm cache | Cost | Wall | Verified |
+|---|---|---|---|---|---|---|---|---|
+| refactor (3-file, keep tests green) | 6 | 8 | 21,644 | 18,432 | 84.2% | $0.0008 | 20 s | PASS (31 tests) |
+| debug (seeded bug, failing test) | 6 | 5 | 19,321 | 17,152 | 87.9% | $0.0007 | 21 s | PASS (11 tests) |
+| build (INI parser + round-trip CLI) | 7 | 6 | 27,192 | 21,056 | 76.7% | $0.0013 | 51 s | PASS |
+| longhaul (15-cell formula grid) | 18 | 17 | 145,138 | 129,088 | **90.6%** | $0.0072 | 264 s | PASS (15/15) |
+| **total** | 37 | 36 | | | **88.1%** | **$0.0100** | 355 s | **4/4** |
+
+Uncached equivalent $0.0233 — a **57% saving**. The answer to the question the
+prompt layout was arranged for: the warm cache rate does **not** degrade on long
+multi-turn work, it *improves* (90.6% on the 18-turn task against 76.7% on the
+shortest), because the stable prefix grows while the volatile tail does not.
+
+### Browser support
+
+The existing cmux browser tool was extended in place (`tools/builtin.py`,
+28 → 61 tests) rather than moved to a new module, since every builtin lives in
+that file. Detection is PATH + `CMUX_BUNDLED_CLI_PATH`, no subprocess, and
+returns None when unavailable so the tool is never advertised without a working
+backend. `CMUX_SOCKET` turned out to be exported as the empty string in a real
+session, so the pre-existing check for it could never fire.
+
+Live driving found six real cmux behaviours the tool now defends against, each
+with captured evidence — `get url` reporting the requested rather than the live
+URL (so navigation settles on `readyState` **and** URL agreement), `goto`
+behaving as an omnibox that silently Googles a non-URL, `get text` returning
+empty on a never-laid-out background surface, and `screenshot` exiting 0 without
+a usable file. Details in `docs/BROWSER.md`.
+
+### Final state
+
+| Gate | Result |
+|---|---|
+| unit tests | **1,939 passed**, 3 skipped |
+| `flake8` | clean |
+| `black --check` | clean |
+| `pyright` | 0 errors, 0 warnings |
+| live TUI picker | `/model` → 465 rows → `opus` → switched to `anthropic/claude-opus-5` |
+| live `exec --json` | `done.txt` contains `shipped` |
+| live `/usage openrouter` | `$519.85` spend via the documented endpoint |
+| leaked processes | none (two stray headless Chrome trees from the browser work were killed) |

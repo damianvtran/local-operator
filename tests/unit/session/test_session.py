@@ -351,6 +351,9 @@ async def test_compaction_runs_when_due(tmp_path, monkeypatch):
     fake_api.CompactionSettings = CompactionSettings
     fake_api.prune_tool_outputs = prune_tool_outputs
     fake_api.estimate_messages_tokens = lambda messages: 90_000
+    # Rigorous upper bound (>= the exact estimate) used by the cheap pre-check
+    # that keeps tiktoken off the no-compaction path.
+    fake_api.messages_tokens_upper_bound = lambda messages: 95_000
     fake_api.compaction_context_tokens = lambda provider, local: max(provider or 0, local)
     fake_api.find_cut_point = lambda messages, keep: 1  # cut after first message
     fake_api.resolve_threshold_tokens = lambda window, settings: settings.threshold_tokens
@@ -395,7 +398,9 @@ async def test_compaction_runs_when_due(tmp_path, monkeypatch):
     await session.prompt("do work")
 
     # Default threshold applied at the call site: min(100_000 * 0.8, 600_000).
-    assert seen_threshold == [80_000]
+    # Twice, because the trigger is two-stage: the cheap upper bound is tested
+    # first and only a bound that clears the threshold buys the exact estimate.
+    assert seen_threshold == [80_000, 80_000]
     # Prune ran BEFORE the trigger with millisecond timestamps.
     assert prune_calls and prune_calls[0][0] > 10**12
 
@@ -420,6 +425,63 @@ async def test_compaction_runs_when_due(tmp_path, monkeypatch):
         "compaction_start",
         "compaction_end",
     ]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_compaction_below_bound_never_pays_for_the_exact_estimate(tmp_path, monkeypatch):
+    """A conversation the cheap UPPER bound already clears must not reach the
+    exact estimator.
+
+    The exact estimator is what loads tiktoken's cl100k_base table (~84 ms and
+    ~43.6 MB RSS), and compaction runs after every turn, so a session that
+    never approaches its threshold must never touch it. Asserting the call
+    simply did not happen is the only way to pin that: the outcome (no
+    compaction) is identical either way, so a behavioural assertion cannot
+    tell the fast path from the slow one.
+    """
+    from pydantic import BaseModel, Field
+
+    class CompactionSettings(BaseModel):
+        enabled: bool = True
+        reserve_tokens: int = 16384
+        keep_recent_tokens: int = 20000
+        threshold_percent: float = -1.0
+        threshold_tokens: int = Field(default=-1)
+        auto_continue: bool = True
+
+    exact_calls: list[int] = []
+
+    fake_api = types.ModuleType("local_operator.compaction.api")
+    fake_api.CompactionSettings = CompactionSettings
+    fake_api.prune_tool_outputs = lambda messages, *a, **k: (list(messages), False)
+    fake_api.messages_tokens_upper_bound = lambda messages: 1_000
+
+    def estimate_messages_tokens(messages):
+        exact_calls.append(len(messages))
+        return 1_000
+
+    fake_api.estimate_messages_tokens = estimate_messages_tokens
+    fake_api.compaction_context_tokens = lambda provider, local: max(provider or 0, local)
+    fake_api.resolve_threshold_tokens = lambda window, settings: settings.threshold_tokens
+    fake_api.should_compact = lambda ctx, window, settings: ctx > settings.threshold_tokens
+    fake_api.RECOVERY_BAND = 0.8
+
+    fake_pkg = types.ModuleType("local_operator.compaction")
+    fake_pkg.api = fake_api
+    monkeypatch.setitem(sys.modules, "local_operator.compaction", fake_pkg)
+    monkeypatch.setitem(sys.modules, "local_operator.compaction.api", fake_api)
+    fake_thresholds = types.ModuleType("local_operator.compaction.thresholds")
+    monkeypatch.setitem(sys.modules, "local_operator.compaction.thresholds", fake_thresholds)
+    fake_snap = types.ModuleType("local_operator.compaction.snapcompact")
+    monkeypatch.setitem(sys.modules, "local_operator.compaction.snapcompact", fake_snap)
+
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream, compaction_settings=CompactionSettings())
+    await session.prompt("do work")
+
+    assert exact_calls == []  # bound alone settled it; tiktoken never needed
+    assert [e.type for e in session._transcript.entries() if e.type == "compaction"] == []
     await session.dispose()
 
 

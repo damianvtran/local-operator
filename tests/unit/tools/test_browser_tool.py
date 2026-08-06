@@ -1,14 +1,17 @@
-"""Tests for the CMUX browser tool (open / goto / screenshot).
+"""Tests for the CMUX browser tool.
 
 The tool shells out to the ``cmux`` CLI; tests monkeypatch ``_run_cmux`` and
-``cmux_browser_available`` on the builtin module so no real subprocess or
-browser is touched. The detection and command-construction contracts are
-what is pinned here.
+``cmux_browser_available`` on the builtin module so no real subprocess and no
+real browser is touched. What is pinned here is detection, the command
+construction that keeps the user's cmux layout intact, and the guards against
+cmux's two silent-success behaviours (a navigation that never lands, and a
+``goto`` that turns a non-URL into a Google search).
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 
 from typing import Any
 
@@ -17,6 +20,9 @@ from pathlib import Path
 
 import local_operator.tools.builtin as builtin
 from local_operator.harness.types import ToolContext
+
+#: Enough of a PNG to satisfy the magic-byte guard without shipping a fixture.
+FAKE_PNG = builtin.PNG_MAGIC + b"\x00" * 64
 
 
 def _ctx() -> ToolContext:
@@ -27,22 +33,172 @@ def _run(tool, tool_call_id: str, args: dict[str, Any], ctx: ToolContext):
     return asyncio.run(tool.execute(tool_call_id, args, context=ctx))
 
 
-def test_detection_true_with_cmux_env(monkeypatch) -> None:
-    monkeypatch.setenv("CMUX_SOCKET", "/tmp/cmux.sock")
-    monkeypatch.delenv("CMUX_SURFACE_ID", raising=False)
-    assert builtin.cmux_browser_available() is True
+def _with_surface(surface_id: str = "surface:3") -> ToolContext:
+    ctx = _ctx()
+    ctx.browser = builtin._BrowserSession()
+    ctx.browser.surface_id = surface_id
+    return ctx
 
 
-def test_detection_true_with_surface_id(monkeypatch) -> None:
+class FakeCmux:
+    """Stand-in for the ``cmux`` CLI, routed by argv.
+
+    Modelled on the real command surface as verified against cmux on macOS:
+    ``--json new-surface`` answers with ``surface_ref``, ``browser --surface
+    <id> eval`` answers with the live document, ``get url`` answers with the
+    URL cmux is POINTING AT, and ``screenshot --out`` writes the file.
+
+    ``href`` (live document) and ``pointing`` (what cmux was asked for) are
+    separately settable on purpose: their disagreement IS the stale-navigation
+    failure the tool exists to catch, and a fake that collapsed them into one
+    field could not express the bug.
+    """
+
+    def __init__(
+        self,
+        *,
+        href: str = "https://example.com/",
+        pointing: str | None = None,
+        title: str = "Example Domain",
+        ready: str = "complete",
+        text: str = "Example Domain\n\nThis domain is for use in examples.",
+        dom_text: str = "",
+        follow_goto: bool = True,
+    ) -> None:
+        self.href = href
+        self.pointing = href if pointing is None else pointing
+        self.title = title
+        self.ready = ready
+        self.text = text
+        # What the layout-independent DOM walk returns when innerText is empty.
+        self.dom_text = dom_text
+        # Cleared whenever the document is replaced, mirroring a real page
+        # losing a window property across a navigation.
+        self.marked = False
+        # False emulates a navigation cmux accepts and never completes.
+        self.follow_goto = follow_goto
+        self.value = ""
+        self.calls: list[list[str]] = []
+
+    def verbs(self) -> list[str]:
+        """The cmux subcommand of each call, for asserting on command choice."""
+        return [call[3] if call[:1] == ["browser"] else call[0] for call in self.calls]
+
+    async def __call__(self, argv, timeout: float = 30.0):
+        argv = list(argv)
+        self.calls.append(argv)
+        if argv[:2] == ["--json", "new-surface"]:
+            url = argv[argv.index("--url") + 1]
+            self.pointing = url
+            if self.follow_goto:
+                self.href = url
+            return 0, '{"pane_ref":"pane:2","surface_ref":"surface:73","type":"browser"}'
+        if argv[0] == "close-surface":
+            return 0, "OK"
+        rest = argv[3:]  # strip ["browser", "--surface", "<id>"]
+        verb = rest[0]
+        if verb == "eval":
+            script = rest[rest.index("--script") + 1]
+            if script == builtin._NAV_TOKEN_SET_JS:
+                self.marked = True
+                return 0, "ok"
+            if script == builtin._NAV_TOKEN_GET_JS:
+                return 0, "1" if self.marked else "0"
+            if script.startswith("(function(sel)"):
+                return 0, self.dom_text
+            return 0, json.dumps([self.ready, self.href, self.title])
+        if verb == "goto":
+            self.pointing = rest[1]
+            if self.follow_goto:
+                self.href = rest[1]
+                self.marked = False  # a new document does not carry the marker
+            return 0, "OK"
+        if verb == "get":
+            what = rest[1]
+            if what == "url":
+                return 0, self.pointing
+            if what == "text":
+                return 0, self.text
+            if what == "value":
+                return 0, self.value
+            return 1, f"unsupported get: {what}"
+        if verb == "click":
+            return 0, "OK"
+        if verb == "fill":
+            self.value = rest[rest.index("--text") + 1]
+            return 0, "OK"
+        if verb == "snapshot":
+            return 0, '- document "Example Domain"\n  - link "Learn more" [ref=e4]'
+        if verb == "screenshot":
+            Path(rest[rest.index("--out") + 1]).write_bytes(FAKE_PNG)
+            return 0, "OK"
+        return 1, f"unexpected argv: {argv}"
+
+
+def _install(monkeypatch, fake: FakeCmux) -> FakeCmux:
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    monkeypatch.setattr(builtin, "_run_cmux", fake)
+    # Polling delay is pure latency in a test; the settle loop is exercised by
+    # its exit conditions, not by wall-clock time.
+    monkeypatch.setattr(builtin, "BROWSER_NAV_POLL_S", 0.0)
+    monkeypatch.setattr(builtin, "BROWSER_NAV_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(builtin, "BROWSER_CLICK_GRACE_S", 0.0)
+    return fake
+
+
+def test_detection_requires_the_binary_not_just_the_environment(monkeypatch) -> None:
+    """CMUX_* is inherited by every descendant of a cmux session, including
+    ones that crossed into a container or an ssh host with no cmux CLI.
+    Detecting on the marker alone advertised a tool whose every action could
+    only answer "cmux is not on PATH"."""
     monkeypatch.setenv("CMUX_SURFACE_ID", "s123")
-    monkeypatch.delenv("CMUX_SOCKET", raising=False)
+    monkeypatch.setenv("CMUX_SOCKET_PATH", "/tmp/cmux.sock")
+    monkeypatch.delenv("CMUX_BUNDLED_CLI_PATH", raising=False)
+    monkeypatch.setattr("shutil.which", lambda _n: None)
+    assert builtin.cmux_browser_available() is False
+
+
+def test_detection_true_with_binary_on_path(monkeypatch) -> None:
+    monkeypatch.setattr("shutil.which", lambda _n: "/opt/homebrew/bin/cmux")
     assert builtin.cmux_browser_available() is True
+    assert builtin._cmux_binary() == "/opt/homebrew/bin/cmux"
+
+
+def test_detection_falls_back_to_the_bundled_cli(monkeypatch, tmp_path) -> None:
+    """cmux's shell integration prepends the app bundle's bin to PATH; a venv
+    activation or a login shell that rebuilds PATH drops it while every CMUX_*
+    marker survives. CMUX_BUNDLED_CLI_PATH is what recovers that session."""
+    bundled = tmp_path / "cmux"
+    bundled.write_text("#!/bin/sh\n")
+    bundled.chmod(0o755)
+    monkeypatch.setattr("shutil.which", lambda _n: None)
+    monkeypatch.setenv("CMUX_BUNDLED_CLI_PATH", str(bundled))
+    assert builtin._cmux_binary() == str(bundled)
+
+
+def test_detection_ignores_a_bundled_path_that_is_not_executable(monkeypatch, tmp_path) -> None:
+    stale = tmp_path / "cmux"
+    stale.write_text("")
+    stale.chmod(0o644)
+    monkeypatch.setattr("shutil.which", lambda _n: None)
+    monkeypatch.setenv("CMUX_BUNDLED_CLI_PATH", str(stale))
+    assert builtin.cmux_browser_available() is False
 
 
 def test_detection_false_without_cmux(monkeypatch) -> None:
-    monkeypatch.delenv("CMUX_SOCKET", raising=False)
-    monkeypatch.delenv("CMUX_SURFACE_ID", raising=False)
+    monkeypatch.delenv("CMUX_BUNDLED_CLI_PATH", raising=False)
     monkeypatch.setattr("shutil.which", lambda _n: None)
+    assert builtin.cmux_browser_available() is False
+
+
+def test_detection_never_raises(monkeypatch) -> None:
+    """Detection runs while the tool inventory is being built. An exception
+    here would take down session start, so it degrades to "no browser"."""
+
+    def boom(_name):
+        raise OSError("PATH is unreadable")
+
+    monkeypatch.setattr("shutil.which", boom)
     assert builtin.cmux_browser_available() is False
 
 
@@ -68,21 +224,14 @@ def test_open_without_url_errors(monkeypatch) -> None:
 
 
 def test_open_runs_new_surface_and_records_id(monkeypatch) -> None:
-    captured: dict[str, Any] = {}
-
-    async def fake_run(argv, timeout=30.0):
-        captured["argv"] = list(argv)
-        # The shape real cmux emits — surface_ref, not surface/surface_id/id.
-        return 0, '{"pane_ref":"pane:2","surface_ref":"surface:73","type":"browser"}'
-
-    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
-    monkeypatch.setattr(builtin, "_run_cmux", fake_run)
+    fake = _install(monkeypatch, FakeCmux(href="https://example.com"))
     tool = builtin.build_browser_tool(_ctx())
     ctx = _ctx()
     result = _run(tool, "t1", {"action": "open", "url": "https://example.com"}, ctx)
     assert not result.is_error
-    # Focus must stay with the agent's own pane (--focus false, no focus).
-    assert captured["argv"] == [
+    # Focus must stay with the agent's own pane, and the surface must be added
+    # as a TAB: `browser open`/`open-split`/`new` split the user's pane.
+    assert fake.calls[0] == [
         "--json",
         "new-surface",
         "--type",
@@ -97,22 +246,26 @@ def test_open_runs_new_surface_and_records_id(monkeypatch) -> None:
     assert ctx.browser.surface_id == "surface:73"
 
 
-def test_goto_reuses_recorded_surface(monkeypatch) -> None:
-    captured: dict[str, Any] = {}
-
-    async def fake_run(argv, timeout=30.0):
-        captured["surface"] = argv[argv.index("--surface") + 1]
-        return 0, "ok"
-
-    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
-    monkeypatch.setattr(builtin, "_run_cmux", fake_run)
+def test_open_reuses_the_surface_it_already_has(monkeypatch) -> None:
+    """A fresh surface per navigation leaves a drift of dead browser tabs the
+    user closes one at a time, so 'open' becomes 'goto' once one exists."""
+    fake = _install(monkeypatch, FakeCmux())
     tool = builtin.build_browser_tool(_ctx())
-    ctx = _ctx()
-    ctx.browser = builtin._BrowserSession()
-    ctx.browser.surface_id = "surface:9"
+    ctx = _with_surface("surface:9")
+    result = _run(tool, "t1", {"action": "open", "url": "https://foo.bar"}, ctx)
+    assert not result.is_error
+    assert "new-surface" not in fake.verbs()
+    assert "goto" in fake.verbs()
+    assert ctx.browser.surface_id == "surface:9"
+
+
+def test_goto_reuses_recorded_surface(monkeypatch) -> None:
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    ctx = _with_surface("surface:9")
     result = _run(tool, "t1", {"action": "goto", "url": "https://foo.bar"}, ctx)
     assert not result.is_error
-    assert captured["surface"] == "surface:9"
+    assert all(call[2] == "surface:9" for call in fake.calls if call[0] == "browser")
     assert "foo.bar" in result.text
 
 
@@ -126,29 +279,19 @@ def test_goto_without_open_errors(monkeypatch) -> None:
 
 
 def test_screenshot_writes_default_path(monkeypatch) -> None:
-    captured: dict[str, Any] = {}
-
-    async def fake_run(argv, timeout=30.0):
-        captured["argv"] = list(argv)
-        # cmux writes the file; emulate that so the existence guard passes.
-        out_path = argv[argv.index("--out") + 1]
-        captured["path"] = out_path
-        Path(out_path).write_bytes(b"PNG")
-        return 0, "ok"
-
-    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
-    monkeypatch.setattr(builtin, "_run_cmux", fake_run)
+    fake = _install(monkeypatch, FakeCmux())
     tool = builtin.build_browser_tool(_ctx())
-    ctx = _ctx()
-    ctx.browser = builtin._BrowserSession()
-    ctx.browser.surface_id = "surface:3"
-    result = _run(tool, "t1", {"action": "screenshot"}, ctx)
+    result = _run(tool, "t1", {"action": "screenshot"}, _with_surface())
     assert not result.is_error
-    # The destination MUST be passed as --out; positionally cmux ignores it.
-    assert "--out" in captured["argv"]
-    assert captured["path"].endswith(".png")
-    assert "Screenshot saved" in result.text
-    Path(captured["path"]).unlink(missing_ok=True)
+    shot = next(call for call in fake.calls if call[3] == "screenshot")
+    # The destination MUST be passed as --out; positionally cmux ignores it,
+    # writes into its own temp dir and still exits 0.
+    assert "--out" in shot
+    written = Path(shot[shot.index("--out") + 1])
+    assert written.suffix == ".png"
+    assert "Screenshot" in result.text
+    assert str(len(FAKE_PNG)) in result.text, "the byte count is the model's only size signal"
+    written.unlink(missing_ok=True)
 
 
 def test_screenshot_exit_zero_without_file_is_an_error(monkeypatch, tmp_path) -> None:
@@ -417,3 +560,419 @@ def test_goto_refuses_a_flag_shaped_url(monkeypatch) -> None:
         assert result.is_error, f"{bad!r} should be refused"
         assert "flag-shaped" in result.text
     assert not calls, "a refused URL must never reach the subprocess"
+
+
+# --- navigation must be PROVEN, not assumed ---------------------------------
+#
+# `cmux browser get url` answers with the URL cmux was last ASKED for, not the
+# URL of the live document, and `goto` exits 0 the instant the request is
+# accepted. Measured against real cmux: a 301 the WKWebView never completed
+# left `get url` reporting the requested URL for 20+ seconds while the page,
+# its title and its screenshot were all still the PREVIOUS document.
+
+
+def test_goto_that_never_lands_is_an_error(monkeypatch) -> None:
+    fake = _install(
+        monkeypatch,
+        FakeCmux(href="https://rust-lang.org/learn/", title="Learn Rust", follow_goto=False),
+    )
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool, "t1", {"action": "goto", "url": "https://iana.org/domains/example"}, _with_surface()
+    )
+    assert result.is_error, "a navigation that never landed must not report success"
+    # Both readings are in the message: the model cannot debug "did not
+    # complete" without knowing what it is actually looking at.
+    assert "iana.org/domains/example" in result.text
+    assert "rust-lang.org/learn" in result.text
+    assert fake.href == "https://rust-lang.org/learn/"
+
+
+def test_goto_settles_through_a_redirect(monkeypatch) -> None:
+    """Both readings report POST-redirect state, so www -> apex must settle
+    rather than look like a stalled navigation."""
+    fake = FakeCmux(follow_goto=False)
+
+    async def redirecting(argv, timeout: float = 30.0):
+        code, out = await fake(argv, timeout)
+        if list(argv)[3:4] == ["goto"]:
+            fake.href = fake.pointing = "https://rust-lang.org/learn/"
+            fake.title = "Learn Rust"
+        return code, out
+
+    _install(monkeypatch, fake)
+    monkeypatch.setattr(builtin, "_run_cmux", redirecting)
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool, "t1", {"action": "goto", "url": "https://www.rust-lang.org/learn"}, _with_surface()
+    )
+    assert not result.is_error
+    # The LANDED url is reported, never the requested one.
+    assert "https://rust-lang.org/learn/" in result.text
+    assert "Learn Rust" in result.text
+
+
+def test_open_that_never_loads_keeps_the_handle(monkeypatch) -> None:
+    """The surface exists whatever the page did. Dropping the handle would
+    leak a tab that nothing — not even 'close' — could reach."""
+    _install(
+        monkeypatch,
+        FakeCmux(href="about:blank", pointing="https://slow.example", follow_goto=False),
+    )
+    tool = builtin.build_browser_tool(_ctx())
+    ctx = _ctx()
+    result = _run(tool, "t1", {"action": "open", "url": "https://slow.example"}, ctx)
+    assert result.is_error
+    assert ctx.browser is not None and ctx.browser.surface_id == "surface:73"
+
+
+def test_navigation_gives_up_early_when_the_document_is_unreadable(monkeypatch) -> None:
+    """A disabled browser panel or a closed surface fails every eval. Waiting
+    out the full timeout only delays an error we can already give."""
+
+    calls: list[list[str]] = []
+
+    async def eval_always_fails(argv, timeout: float = 30.0):
+        argv = list(argv)
+        calls.append(argv)
+        if argv[3:4] == ["eval"]:
+            return 1, "Error: browser disabled"
+        return 0, "https://example.com/"
+
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    monkeypatch.setattr(builtin, "_run_cmux", eval_always_fails)
+    monkeypatch.setattr(builtin, "BROWSER_NAV_POLL_S", 0.0)
+    monkeypatch.setattr(builtin, "BROWSER_NAV_TIMEOUT_S", 30.0)
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(tool, "t1", {"action": "goto", "url": "https://x.y"}, _with_surface())
+    assert result.is_error
+    assert "browser disabled" in result.text
+    assert len([c for c in calls if c[3:4] == ["eval"]]) == 3, "bails after 3 failed probes"
+
+
+# --- reading ----------------------------------------------------------------
+
+
+def test_read_returns_page_text_with_its_real_url(monkeypatch) -> None:
+    fake = _install(monkeypatch, FakeCmux(text="Hello from the page"))
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(tool, "t1", {"action": "read"}, _with_surface())
+    assert not result.is_error
+    assert "Hello from the page" in result.text
+    # Title and URL ride WITH the text so a redirect cannot be filed under the
+    # URL the model asked for.
+    assert "Example Domain" in result.text
+    assert "https://example.com/" in result.text
+    read = next(call for call in fake.calls if call[3:5] == ["get", "text"])
+    # cmux refuses `get text` with no selector; "body" is what "read the page"
+    # means.
+    assert read[read.index("--selector") + 1] == "body"
+
+
+def test_read_falls_back_to_the_dom_when_innertext_is_empty(monkeypatch) -> None:
+    """`get text` is innerText, which needs LAYOUT, and a browser surface in a
+    background tab may never lay out. Measured on a real results page: both
+    `get text --selector body` and `document.body.innerText` returned "" while
+    textContent held 15 247 characters. Reporting "(no text)" for a page the
+    model can see in its own screenshot is the worst possible answer."""
+    _install(monkeypatch, FakeCmux(text="", dom_text="Results for local-operator"))
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(tool, "t1", {"action": "read"}, _with_surface())
+    assert not result.is_error
+    assert "Results for local-operator" in result.text
+
+
+def test_read_reports_no_text_only_when_the_dom_is_empty_too(monkeypatch) -> None:
+    _install(monkeypatch, FakeCmux(text="", dom_text=""))
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(tool, "t1", {"action": "read"}, _with_surface())
+    assert not result.is_error
+    assert "(no text)" in result.text
+
+
+def test_read_scopes_to_a_selector(monkeypatch) -> None:
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(tool, "t1", {"action": "read", "selector": "main#content"}, _with_surface())
+    assert not result.is_error
+    read = next(call for call in fake.calls if call[3:5] == ["get", "text"])
+    assert read[read.index("--selector") + 1] == "main#content"
+
+
+def test_read_truncates_a_huge_page(monkeypatch) -> None:
+    """Page text is model input: an unbounded body would spend the whole
+    context window in one tool call."""
+    _install(monkeypatch, FakeCmux(text="x" * (builtin.BROWSER_TEXT_LIMIT_CHARS + 5000)))
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(tool, "t1", {"action": "read"}, _with_surface())
+    assert not result.is_error
+    assert len(result.text) < builtin.BROWSER_TEXT_LIMIT_CHARS + 500
+    assert builtin.BASH_TRUNCATION_MARKER.strip() in result.text
+
+
+def test_snapshot_asks_for_the_compact_tree(monkeypatch) -> None:
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(tool, "t1", {"action": "snapshot"}, _with_surface())
+    assert not result.is_error
+    assert "[ref=e4]" in result.text, "refs are what make click/type usable"
+    snapshot = next(call for call in fake.calls if call[3] == "snapshot")
+    assert "--compact" in snapshot
+
+
+# --- interaction ------------------------------------------------------------
+
+
+def test_type_uses_fill_so_a_retry_cannot_double_the_input(monkeypatch) -> None:
+    """cmux `type` APPENDS keystrokes (verified: typing "XY" into a box holding
+    "abc" left "abcXY"); `fill` replaces. A model retrying after a timeout
+    would otherwise submit doubled input with no cheap way to notice."""
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    ctx = _with_surface()
+    args = {"action": "type", "selector": "input[name=q]", "text": "hello"}
+    assert not _run(tool, "t1", args, ctx).is_error
+    result = _run(tool, "t2", args, ctx)
+    assert not result.is_error
+    assert "fill" in fake.verbs()
+    assert "type" not in fake.verbs()
+    assert fake.value == "hello", "a second call must not append"
+    # The read-back is the only confirmation the model gets that it landed.
+    assert "'hello'" in result.text
+
+
+def test_type_without_a_selector_errors(monkeypatch) -> None:
+    _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(tool, "t1", {"action": "type", "text": "hello"}, _with_surface())
+    assert result.is_error
+    assert "requires a selector" in result.text
+
+
+def test_click_that_does_not_navigate_says_so(monkeypatch) -> None:
+    """Most clicks open a menu or toggle something. Waiting out a load that
+    was never going to happen is pure latency."""
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(tool, "t1", {"action": "click", "selector": "e4"}, _with_surface())
+    assert not result.is_error
+    assert "no navigation" in result.text
+    assert "Example Domain" in result.text
+    click = next(call for call in fake.calls if call[3] == "click")
+    assert click[click.index("--selector") + 1] == "e4"
+
+
+def test_click_that_navigates_reports_the_page_it_landed_on(monkeypatch) -> None:
+    """The click race, from the other side: cmux is still pointing at the old
+    URL for a moment after the click, so a settle sampled immediately agrees
+    with itself and reports success on the page we navigated AWAY from."""
+    fake = FakeCmux()
+
+    async def click_then_navigate(argv, timeout: float = 30.0):
+        code, out = await fake(argv, timeout)
+        if list(argv)[3:4] == ["click"]:
+            fake.pointing = fake.href = "https://www.iana.org/help/example-domains"
+            fake.title = "Example Domains"
+        return code, out
+
+    _install(monkeypatch, fake)
+    monkeypatch.setattr(builtin, "_run_cmux", click_then_navigate)
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(tool, "t1", {"action": "click", "selector": "a"}, _with_surface())
+    assert not result.is_error
+    assert "no navigation" not in result.text
+    assert "Example Domains" in result.text
+    assert "iana.org/help/example-domains" in result.text
+
+
+def test_click_detects_a_post_that_replaces_the_document(monkeypatch) -> None:
+    """A form POST to the SAME url changes no URL at all. Measured against
+    DuckDuckGo's no-JS search form: the document marker cleared ~0.6 s after
+    submit while the URL never moved, and without that signal the result was
+    labelled "no navigation" though the whole document had been replaced."""
+    fake = FakeCmux(href="https://html.duckduckgo.com/html/", title="DuckDuckGo HTML")
+
+    async def submit_posts(argv, timeout: float = 30.0):
+        code, out = await fake(argv, timeout)
+        if list(argv)[3:4] == ["click"]:
+            # Same URL, new document — exactly what a POST looks like.
+            fake.marked = False
+            fake.title = "local-operator harness at DuckDuckGo"
+        return code, out
+
+    _install(monkeypatch, fake)
+    monkeypatch.setattr(builtin, "_run_cmux", submit_posts)
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool, "t1", {"action": "click", "selector": "input[type=submit]"}, _with_surface()
+    )
+    assert not result.is_error
+    assert "no navigation" not in result.text
+    assert "local-operator harness at DuckDuckGo" in result.text
+
+
+def test_click_that_starts_a_navigation_which_stalls_is_an_error(monkeypatch) -> None:
+    """Measured: clicking a link left `get url` on the target while the
+    document, title and screenshot were all still the previous page."""
+    fake = FakeCmux()
+
+    async def click_then_stall(argv, timeout: float = 30.0):
+        code, out = await fake(argv, timeout)
+        if list(argv)[3:4] == ["click"]:
+            fake.pointing = "https://iana.org/domains/example"
+        return code, out
+
+    _install(monkeypatch, fake)
+    monkeypatch.setattr(builtin, "_run_cmux", click_then_stall)
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(tool, "t1", {"action": "click", "selector": "a"}, _with_surface())
+    assert result.is_error
+    assert "describes the old page" in result.text
+
+
+@pytest.mark.parametrize("action", ["click", "type"])
+def test_flag_shaped_selectors_are_refused(monkeypatch, action: str) -> None:
+    """cmux accepts the selector positionally as well as via --selector, and no
+    CSS selector or snapshot ref begins with a dash."""
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool, "t1", {"action": action, "selector": "--help", "text": "x"}, _with_surface()
+    )
+    assert result.is_error
+    assert "flag-shaped" in result.text
+    assert not fake.calls, "a refused selector must never reach the subprocess"
+
+
+# --- goto is an omnibox -----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "not a url at all",
+        "data:text/html,<p>hi</p>",
+        "example.com",
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+    ],
+)
+def test_non_http_urls_are_refused_before_cmux_sees_them(monkeypatch, url: str) -> None:
+    """Verified against real cmux: `goto 'not a url at all'` landed on
+    https://www.google.com/search?q=not%20a%20url%20at%20all and exited 0 "OK".
+    A search-results page would then be read and screenshotted as if it were
+    the requested site."""
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(tool, "t1", {"action": "goto", "url": url}, _with_surface())
+    assert result.is_error
+    assert not fake.calls, "a refused URL must never reach the subprocess"
+
+
+# --- screenshots ------------------------------------------------------------
+
+
+def test_screenshot_rejects_a_file_that_is_not_a_png(monkeypatch, tmp_path) -> None:
+    """A capture of a surface that never painted lands empty or truncated and
+    cmux still exits 0. Catching it here beats failing in an image reader
+    several turns away from the cause."""
+
+    target = tmp_path / "shot.png"
+
+    async def writes_garbage(argv, timeout: float = 30.0):
+        if list(argv)[3:4] == ["screenshot"]:
+            target.write_bytes(b"")
+            return 0, "OK"
+        return 0, "https://example.com/"
+
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    monkeypatch.setattr(builtin, "_run_cmux", writes_garbage)
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(tool, "t1", {"action": "screenshot", "path": str(target)}, _with_surface())
+    assert result.is_error
+    assert "not a PNG" in result.text
+
+
+def test_screenshot_resolves_a_relative_path_against_the_session_cwd(monkeypatch, tmp_path) -> None:
+    """Relative paths used to resolve against the operator process CWD, and
+    `~` was never expanded — it created a literal "~" directory."""
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    ctx = _with_surface()
+    ctx.cwd = str(tmp_path)
+    result = _run(tool, "t1", {"action": "screenshot", "path": "shots/page.png"}, ctx)
+    shot = next(call for call in fake.calls if call[3] == "screenshot")
+    written = Path(shot[shot.index("--out") + 1])
+    # cmux itself creates the parent, so the fake failing to write is the
+    # expected outcome here; the resolved path is what this pins.
+    assert written == tmp_path / "shots" / "page.png"
+    assert result.is_error or written.exists()
+
+
+# --- closing ----------------------------------------------------------------
+
+
+def test_close_closes_the_surface_and_clears_the_handle(monkeypatch) -> None:
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    ctx = _with_surface("surface:73")
+    result = _run(tool, "t1", {"action": "close"}, ctx)
+    assert not result.is_error
+    assert fake.calls == [["close-surface", "--surface", "surface:73"]]
+    assert ctx.browser.surface_id == ""
+
+
+def test_close_with_nothing_open_is_a_no_op(monkeypatch) -> None:
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(tool, "t1", {"action": "close"}, _ctx())
+    assert not result.is_error
+    assert not fake.calls
+
+
+def test_close_drops_the_handle_even_when_cmux_fails(monkeypatch) -> None:
+    """The tab may already be gone (the user closed it, or cmux restarted).
+    Keeping a dead handle strands the session: 'open' reuses it too."""
+
+    async def always_fails(argv, timeout: float = 30.0):
+        return 1, "Error: invalid_params: Missing or invalid surface_id"
+
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    monkeypatch.setattr(builtin, "_run_cmux", always_fails)
+    tool = builtin.build_browser_tool(_ctx())
+    ctx = _with_surface("surface:73")
+    result = _run(tool, "t1", {"action": "close"}, ctx)
+    assert ctx.browser.surface_id == ""
+    assert "dropped the handle" in result.text
+
+
+# --- degrading when there is no cmux ----------------------------------------
+
+
+def test_every_action_degrades_without_cmux(monkeypatch) -> None:
+    """Absence is not an error state: the tool is not advertised at all, and a
+    host that forces it on gets one clear message per action, never a raise."""
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    assert builtin.build_browser_tool(_ctx()) is None
+    forced = builtin.AgentTool(
+        name="browser",
+        label="Browser",
+        description="d",
+        parameters={},
+        approval_tier="write",
+        concurrency="shared",
+        execute=builtin.execute_browser,
+    )
+    for action in builtin.BROWSER_ACTIONS:
+        result = _run(forced, "t1", {"action": action, "url": "https://x.y"}, _ctx())
+        assert result.is_error, action
+        assert "not available" in result.text
+
+
+def test_unknown_action_lists_the_real_ones(monkeypatch) -> None:
+    _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(tool, "t1", {"action": "teleport"}, _ctx())
+    assert result.is_error
+    for action in builtin.BROWSER_ACTIONS:
+        assert action in result.text

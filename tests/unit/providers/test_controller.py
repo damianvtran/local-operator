@@ -135,8 +135,8 @@ async def test_fetch_one_no_credential_returns_none(controller) -> None:
 def test_usage_enabled_provider_ids(controller) -> None:
     ids = controller.usage_enabled_providers()
     assert "openrouter" in ids
-    assert "zai" in ids
-    assert "deepseek" not in ids
+    assert "deepseek" in ids
+    assert "zai" not in ids, "unreachable: no ProviderDefinition exists for it"
     assert ids == sorted(ids)
 
 

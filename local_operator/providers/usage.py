@@ -41,13 +41,14 @@ import httpx
 #: Human labels for the unit a usage amount is measured in.
 UNIT_LABELS = {"usd": "USD", "percent": "%", "tokens": "tokens", "requests": "req", "unknown": ""}
 
-#: OpenRouter's who-am-I endpoint doubles as the credit statement. Returns
-#: 200 with ``data`` for a valid key, 401 for an invalid one. It is the canonical
-#: who-am-I probe; the credits it returns are parsed here into a report.
-OPENROUTER_AUTH_KEY_URL = "https://openrouter.ai/api/v1/auth/key"
-
-#: z.AI / GLM token-plan quota — accepts BOTH api_key and oauth credentials.
-ZAI_QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit"
+#: OpenRouter's key endpoint doubles as the credit statement. Returns 200 with
+#: ``data`` for a valid key, 401 for an invalid one.
+#:
+#: The DOCUMENTED path, deliberately. `/api/v1/auth/key` still answers with an
+#: identical body but is no longer in the docs, so it is an undocumented alias —
+#: the kind of thing that keeps working right up until it does not, in a fetcher
+#: whose failure mode is a silently empty table.
+OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 
 #: Anthropic OAuth usage (subscription plan). OAuth-only; server unreachable
 #: with a raw API key.
@@ -59,14 +60,38 @@ OPENAI_WHAM_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 #: Kimi coding-plan usage (OAuth).
 KIMI_USAGE_URL = "https://api.kimi.com/coding/v1/usages"
 
+#: Moonshot/Kimi account balance, reachable with the PLAIN API key the registry
+#: already stores. Its absence was the widest gap in this module: a KIMI_API_KEY
+#: user was told by `/provider` that Kimi reports quota and then got an empty
+#: table forever, because the only Kimi fetcher wanted an OAuth token.
+MOONSHOT_BALANCE_URL = "https://api.moonshot.ai/v1/users/me/balance"
+
+#: DeepSeek account balance — plain Bearer with the key already in the registry.
+DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
+
 #: xAI Grok subscription usage (OAuth).
 XAI_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing"
 
 #: Providers with a live quota endpoint. Kept as a set so the registry and
 #: the TUI can answer "does this provider report usage?" without importing
 #: every fetcher.
+#:
+#: ``zai`` was removed rather than fixed. It had a working fetcher and a passing
+#: test, but no ``ProviderDefinition`` — so `/login zai` raised, its env var was
+#: never read, and no code path could insert the credential row the fetcher
+#: needed. It was unreachable by construction, and a set that advertises an
+#: unreachable provider is worse than one that is merely incomplete.
 USAGE_PROVIDERS: frozenset[str] = frozenset(
-    {"openrouter", "zai", "anthropic", "openai", "openai-device", "kimi", "xai", "xai-oauth"}
+    {
+        "openrouter",
+        "anthropic",
+        "openai",
+        "openai-device",
+        "kimi",
+        "deepseek",
+        "xai",
+        "xai-oauth",
+    }
 )
 
 
@@ -164,14 +189,14 @@ async def _get_json(
 
 
 async def fetch_openrouter(client: httpx.AsyncClient, api_key: str) -> UsageReport | None:
-    """OpenRouter credit statement from ``/api/v1/auth/key``.
+    """OpenRouter credit statement from ``/api/v1/key``.
 
     The response carries the key's own usage so it is the closest thing to a
     "how much have I spent / how much is left" without a separate billing
     API. ``is_free_tier`` (unlimited, rate-limited) is surfaced as a note
     rather than a 0/0 budget.
     """
-    payload = await _get_json(client, OPENROUTER_AUTH_KEY_URL, _bearer(api_key))
+    payload = await _get_json(client, OPENROUTER_KEY_URL, _bearer(api_key))
     if payload is None:
         return None
     data = payload.get("data")
@@ -211,53 +236,86 @@ async def fetch_openrouter(client: httpx.AsyncClient, api_key: str) -> UsageRepo
     return UsageReport(provider="openrouter", limits=limits, notes=notes)
 
 
-async def fetch_zai(client: httpx.AsyncClient, token: str) -> UsageReport | None:
-    """z.AI toll plan quota. NOTE: raw token, no ``Bearer`` prefix (matches
-    z.AI's own CLI). Accepts both OAuth access tokens and API keys."""
-    payload = await _get_json(client, ZAI_QUOTA_URL, {"Authorization": token})
+async def fetch_moonshot_balance(client: httpx.AsyncClient, api_key: str) -> UsageReport | None:
+    """Moonshot/Kimi account balance from the PLAIN API key.
+
+    The counterpart to :func:`fetch_kimi_oauth`, and the one most Kimi users can
+    actually reach: the registry stores ``KIMI_API_KEY`` and the coding-plan
+    endpoint only accepts an OAuth token, so an API-key user had a provider that
+    claimed to report quota and never did.
+
+    Balances are USD. ``available_balance`` is the actionable number — it already
+    nets the voucher and cash components the response also breaks out — so it is
+    reported as ``remaining`` with no limit. There is no spend figure to pair it
+    with, and inventing ``used = limit - remaining`` from a limit we were never
+    given would draw a progress bar out of an assumption.
+    """
+    payload = await _get_json(client, MOONSHOT_BALANCE_URL, _bearer(api_key))
     if payload is None:
         return None
     data = payload.get("data")
     if not isinstance(data, dict):
         return None
-    raw_limits = data.get("limits")
-    if not isinstance(raw_limits, list):
+    available = _num(data.get("available_balance"))
+    if available is None:
+        return None
+    notes: str | None = None
+    voucher = _num(data.get("voucher_balance"))
+    cash = _num(data.get("cash_balance"))
+    if voucher is not None and cash is not None:
+        notes = f"voucher ${voucher:.2f} + cash ${cash:.2f}"
+    return UsageReport(
+        provider="kimi",
+        limits=[
+            UsageLimit(
+                id="kimi:balance",
+                label="Balance",
+                amount=UsageAmount(remaining=available, unit="usd"),
+                window="lifetime",
+            )
+        ],
+        notes=notes,
+    )
+
+
+async def fetch_deepseek_balance(client: httpx.AsyncClient, api_key: str) -> UsageReport | None:
+    """DeepSeek account balance from the key the registry already stores.
+
+    DeepSeek returns one entry per currency, so the currency is part of the limit
+    id rather than assumed: a CNY balance rendered as USD would be wrong by roughly
+    a factor of seven. ``is_available`` is the provider's own "can this account
+    still serve requests" flag and is worth surfacing, because a zero balance and a
+    suspended account look identical in the numbers alone.
+    """
+    payload = await _get_json(client, DEEPSEEK_BALANCE_URL, _bearer(api_key))
+    if payload is None:
+        return None
+    infos = payload.get("balance_infos")
+    if not isinstance(infos, list):
         return None
     limits: list[UsageLimit] = []
-    for item in raw_limits:
+    for item in infos:
         if not isinstance(item, dict):
             continue
-        try:
-            used = float(item.get("usage") or item.get("currentValue") or 0.0)
-            remaining = float(item.get("remaining") or 0.0)
-            limit = float(item.get("number") or 0.0) or (used + remaining)
-        except (TypeError, ValueError):
+        total = _num(item.get("total_balance"))
+        if total is None:
             continue
-        pct = item.get("percentage")
-        used_fraction: float | None = None
-        if pct is not None:
-            try:
-                used_fraction = float(pct) / 100.0
-            except (TypeError, ValueError):
-                used_fraction = None
-        name = str(item.get("type") or item.get("name") or "quota")
-        resets = item.get("nextResetTime")
+        currency = str(item.get("currency") or "").upper() or "USD"
         limits.append(
             UsageLimit(
-                id=f"zai:{name}",
-                label=name,
-                amount=UsageAmount(
-                    used=used,
-                    limit=limit or None,
-                    remaining=remaining or None,
-                    used_fraction=used_fraction,
-                    unit="unknown",
-                ),
-                window="window",
-                resets_at=str(resets) if resets else None,
+                id=f"deepseek:balance:{currency.lower()}",
+                label=f"Balance ({currency})",
+                # `unit` is the renderer's vocabulary, not the vendor's: only USD
+                # has a symbol here, so a CNY balance is reported unitless with the
+                # currency in the label rather than mislabelled as dollars.
+                amount=UsageAmount(remaining=total, unit="usd" if currency == "USD" else "unknown"),
+                window="lifetime",
             )
         )
-    return UsageReport(provider="zai", limits=limits) if limits else None
+    if not limits:
+        return None
+    notes = None if payload.get("is_available", True) else "account not available for requests"
+    return UsageReport(provider="deepseek", limits=limits, notes=notes)
 
 
 async def fetch_anthropic_oauth(client: httpx.AsyncClient, access_token: str) -> UsageReport | None:
@@ -433,25 +491,45 @@ def _num(value: Any, default: float | None = None) -> float | None:
 #: The fetcher a provider id routes to. Naming the kinds keeps the dispatch
 #: table and the if-chain in :func:`fetch_usage` in lockstep.
 FetcherKind = Literal[
-    "openrouter", "zai", "anthropic-oauth", "openai-oauth", "kimi-oauth", "xai-oauth"
+    "openrouter",
+    "anthropic-oauth",
+    "openai-oauth",
+    "kimi-oauth",
+    "moonshot-balance",
+    "deepseek-balance",
+    "xai-oauth",
 ]
 
-#: Provider id (canonical) -> fetcher. The ``-oauth`` kinds take the OAuth
-#: access token; a bare kind takes an API key.
-_FETCHERS: dict[str, FetcherKind] = {
-    "openrouter": "openrouter",
-    "zai": "zai",
-    "anthropic": "anthropic-oauth",
-    "openai": "openai-oauth",
-    "openai-device": "openai-oauth",
-    "kimi": "kimi-oauth",
-    "xai": "xai-oauth",
-    "xai-oauth": "xai-oauth",
+#: Provider id (canonical) -> ``(oauth_fetcher, api_key_fetcher)``.
+#:
+#: A PAIR, because a provider's two credential kinds often mean two different
+#: endpoints rather than two ways of authenticating one. Kimi is the clearest
+#: case: the coding-plan usage route wants an OAuth token, while the account
+#: balance wants the plain API key the registry already stores, and they live on
+#: different hosts and return different shapes. Under the old one-fetcher-per-
+#: provider mapping the API-key half was simply unreachable — `/provider`
+#: advertised that Kimi and xAI report quota and both rendered an empty table
+#: forever, because the single fetcher hard-returned None without a token.
+#:
+#: ``None`` in either slot means "that credential kind has no route here", which
+#: is what :func:`usage_kinds` reports so the UI can say WHICH credential is
+#: missing instead of showing nothing.
+_FETCHERS: dict[str, tuple[FetcherKind | None, FetcherKind | None]] = {
+    "openrouter": (None, "openrouter"),
+    "anthropic": ("anthropic-oauth", None),
+    "openai": ("openai-oauth", None),
+    "openai-device": ("openai-oauth", None),
+    "kimi": ("kimi-oauth", "moonshot-balance"),
+    "deepseek": (None, "deepseek-balance"),
+    "xai": ("xai-oauth", None),
+    "xai-oauth": ("xai-oauth", None),
 }
 
-#: Providers whose usage requires an OAuth access token (not an API key).
+#: Providers whose usage needs an OAuth access token and has NO API-key route.
+#: Derived, so it can never drift from the dispatch table above — the hand-written
+#: version had already drifted and was read by nothing.
 OAUTH_USAGE_PROVIDERS: frozenset[str] = frozenset(
-    {"anthropic", "openai", "openai-device", "kimi", "xai", "xai-oauth"}
+    provider for provider, (oauth, api_key) in _FETCHERS.items() if oauth and not api_key
 )
 
 
@@ -462,44 +540,63 @@ async def fetch_usage(
     access_token: str | None = None,
     account_id: str | None = None,
 ) -> UsageReport | None:
-    """Dispatch a provider id to its fetcher.
+    """Dispatch a provider id to whichever fetcher its credentials can reach.
 
-    ``api_key`` is the resolved API-key cascade value; ``access_token`` is
-    the OAuth access token. OAuth-only usage providers require
-    ``access_token`` and return None when absent. Unknown providers return
-    None (no live quota endpoint).
+    ``api_key`` is the resolved API-key cascade value; ``access_token`` is the
+    OAuth access token. The OAuth route is preferred when both are present,
+    because for every provider that has both it reports the SUBSCRIPTION the user
+    is actually spending (plan windows) while the API-key route reports a
+    pay-as-you-go balance that a subscription user does not draw down.
+
+    Returns None when the provider has no endpoint, or has one but not for the
+    credential kind on hand. Never raises.
     """
-    kind = _FETCHERS.get(provider)
-    if kind is None:
+    routes = _FETCHERS.get(provider)
+    if routes is None:
         return None
+    oauth_kind, api_kind = routes
+    if access_token and oauth_kind is not None:
+        return await _run_fetcher(client, oauth_kind, access_token, account_id)
+    if api_key and api_kind is not None:
+        return await _run_fetcher(client, api_kind, api_key, account_id)
+    return None
+
+
+async def _run_fetcher(
+    client: httpx.AsyncClient,
+    kind: FetcherKind,
+    secret: str,
+    account_id: str | None,
+) -> UsageReport | None:
+    """One fetcher by kind. Split out so the credential choice above stays legible."""
     if kind == "openrouter":
-        if not api_key:
-            return None
-        return await fetch_openrouter(client, api_key)
-    if kind == "zai":
-        token = access_token or api_key
-        if not token:
-            return None
-        return await fetch_zai(client, token)
+        return await fetch_openrouter(client, secret)
     if kind == "anthropic-oauth":
-        if not access_token:
-            return None
-        return await fetch_anthropic_oauth(client, access_token)
+        return await fetch_anthropic_oauth(client, secret)
     if kind == "openai-oauth":
-        if not access_token:
-            return None
-        return await fetch_openai_oauth(client, access_token, account_id)
+        return await fetch_openai_oauth(client, secret, account_id)
     if kind == "kimi-oauth":
-        if not access_token:
-            return None
-        return await fetch_kimi_oauth(client, access_token)
+        return await fetch_kimi_oauth(client, secret)
+    if kind == "moonshot-balance":
+        return await fetch_moonshot_balance(client, secret)
+    if kind == "deepseek-balance":
+        return await fetch_deepseek_balance(client, secret)
     if kind == "xai-oauth":
-        if not access_token:
-            return None
-        return await fetch_xai_oauth(client, access_token)
+        return await fetch_xai_oauth(client, secret)
     return None
 
 
 def usage_supported(provider: str) -> bool:
-    """Whether ``provider`` has a live quota endpoint (OAuth or API key)."""
+    """Whether ``provider`` has a live quota endpoint at all (either credential)."""
     return provider in USAGE_PROVIDERS
+
+
+def usage_kinds(provider: str) -> tuple[bool, bool]:
+    """``(has_oauth_route, has_api_key_route)`` for ``provider``.
+
+    Exists so a UI can distinguish "this provider has no quota endpoint" from
+    "it has one but not for the credential you hold". Those look identical in an
+    empty table, and the second is the one the user can act on.
+    """
+    oauth_kind, api_kind = _FETCHERS.get(provider, (None, None))
+    return oauth_kind is not None, api_kind is not None

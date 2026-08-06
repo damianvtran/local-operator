@@ -35,7 +35,15 @@ def mock_credential_manager():
 
 @pytest.fixture
 def mock_requests_get():
-    with patch("local_operator.model.configure.requests.get") as mock_get:
+    # Patch target is ``requests.get``, NOT
+    # ``local_operator.model.configure.requests.get``: configure.py imports
+    # requests inside ``validate_model`` (it is on the per-session import path
+    # and requests costs +2.9 MB / +127 modules there), so the module has no
+    # ``requests`` attribute to reach through. Patching the real module works
+    # for both binding styles — the function-local import resolves to the same
+    # already-patched module object from sys.modules. Every ``@patch`` in this
+    # file uses the same target for the same reason.
+    with patch("requests.get") as mock_get:
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = {"data": [{"id": "test-model"}]}
         yield mock_get
@@ -396,7 +404,7 @@ def test_validate_model_unknown_hosting_returns_true():
     assert validate_model("test", "anything", SecretStr("k")) is True
 
 
-@patch("local_operator.model.configure.requests.get")
+@patch("requests.get")
 def test_validate_model_failure(mock_get):
     mock_response = MagicMock()
     mock_response.status_code = 404
@@ -404,14 +412,14 @@ def test_validate_model_failure(mock_get):
     assert validate_model("openai", "test_model", SecretStr("test_key")) is False
 
 
-@patch("local_operator.model.configure.requests.get")
+@patch("requests.get")
 def test_validate_model_exception(mock_get):
     mock_get.side_effect = requests.exceptions.RequestException("API error")
     with pytest.raises(requests.exceptions.RequestException, match="API error"):
         validate_model("openai", "test_model", SecretStr("test_key"))
 
 
-@patch("local_operator.model.configure.requests.get")
+@patch("requests.get")
 def test_validate_model_no_model_found(mock_get):
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -420,7 +428,7 @@ def test_validate_model_no_model_found(mock_get):
     assert validate_model("openai", "test_model", SecretStr("test_key")) is False
 
 
-@patch("local_operator.model.configure.requests.get")
+@patch("requests.get")
 def test_validate_model_ollama_success(mock_get):
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -429,7 +437,7 @@ def test_validate_model_ollama_success(mock_get):
     assert validate_model("ollama", "test_model", SecretStr("test_key")) is True
 
 
-@patch("local_operator.model.configure.requests.get")
+@patch("requests.get")
 def test_validate_model_ollama_failure(mock_get):
     mock_response = MagicMock()
     mock_response.status_code = 200

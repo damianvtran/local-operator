@@ -30,7 +30,6 @@ Example Usage:
 from __future__ import annotations
 
 import argparse
-import asyncio
 import functools
 import math
 import os
@@ -911,6 +910,8 @@ async def _run_headless_repl(
     REPL, assistant text streamed to stdout as it arrives, tool rows dim on
     stderr, Ctrl+C aborts the running turn (not the REPL), Ctrl+D/EOF exits.
     """
+    import asyncio
+
     from rich.console import Console
 
     from local_operator.headless_print import PrintRenderer
@@ -1011,13 +1012,13 @@ def _preflight_api_key(hosting: str, credential_manager: CredentialManager) -> i
         return None
 
     try:
-        import asyncio as _asyncio
+        import asyncio
 
         from local_operator.providers.auth_store import AuthStore
 
         auth_store = AuthStore(credential_manager=credential_manager)
         try:
-            api_key = _asyncio.run(auth_store.get_api_key(canonical))
+            api_key = asyncio.run(auth_store.get_api_key(canonical))
         finally:
             auth_store.close()
     except Exception:  # noqa: BLE001 — resolution failures pass through
@@ -1426,6 +1427,15 @@ def main() -> int:
                     )
                     return -1
                 use_tui = False
+
+        # asyncio is imported HERE, not at module scope. It is the heaviest
+        # single item on the CLI's import graph (34.4 ms, +6.5 MB RSS, +77
+        # modules measured by scripts/bench_base_overhead.py) and only the
+        # interactive TUI/REPL tail below needs it — `--version`, `--help`,
+        # shell completion and the config/credential/agents/login subcommands
+        # all return before this point, and `exec`/`serve` bring their own
+        # event loop from exec_mode/the server module.
+        import asyncio
 
         if use_tui and run_tui is not None:
             tui_config = config_manager.get_config_value("tui", None)

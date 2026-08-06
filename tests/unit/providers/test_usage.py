@@ -69,27 +69,68 @@ async def test_openrouter_no_limit_reports_spend_only() -> None:
 
 
 @pytest.mark.asyncio
-async def test_zai_parses_limits_and_percentage() -> None:
+async def test_kimi_api_key_reaches_the_balance_endpoint() -> None:
+    """The widest gap this module had: the registry stores `KIMI_API_KEY` while the
+    only Kimi fetcher wanted an OAuth token, so an API-key user was told Kimi
+    reports quota and got an empty table forever."""
     payload = {
-        "data": {
-            "limits": [
-                {
-                    "type": "tokens",
-                    "usage": 800,
-                    "currentValue": 800,
-                    "percentage": 80,
-                    "nextResetTime": "2026-08-05T00:00:00Z",
-                }
-            ]
-        }
+        "data": {"available_balance": 12.5, "voucher_balance": 2.5, "cash_balance": 10.0},
     }
     client = _client_for(payload)
     async with client:
-        report = await fetch_usage(client, "zai", api_key="rawtoken")
+        report = await fetch_usage(client, "kimi", api_key="sk-moonshot")
     assert report is not None
     limit = report.limits[0]
-    assert limit.effective_status() == "ok"  # 80% < 0.85 warning threshold
-    assert limit.amount.fraction() == pytest.approx(0.8)
+    assert limit.id == "kimi:balance"
+    assert limit.amount.remaining == pytest.approx(12.5)
+    assert limit.amount.unit == "usd"
+    assert report.notes is not None and "voucher" in report.notes
+
+
+@pytest.mark.asyncio
+async def test_an_oauth_token_still_wins_where_both_routes_exist() -> None:
+    """For a provider with both, the OAuth route reports the SUBSCRIPTION the user
+    is actually spending; the balance a subscription user never draws down is the
+    less useful answer."""
+    payload = {"data": {"limits": [{"name": "coding", "used": 1, "limit": 10}]}}
+    client = _client_for(payload)
+    async with client:
+        report = await fetch_usage(client, "kimi", api_key="sk-moonshot", access_token="tok")
+    assert report is not None
+    assert all(lim.id != "kimi:balance" for lim in report.limits), report.limits
+
+
+@pytest.mark.asyncio
+async def test_deepseek_reports_a_balance_per_currency() -> None:
+    """A CNY balance rendered as USD would be wrong by roughly a factor of seven,
+    so the currency is part of the id and only USD claims the dollar unit."""
+    payload = {
+        "is_available": True,
+        "balance_infos": [
+            {"currency": "CNY", "total_balance": "70.00"},
+            {"currency": "USD", "total_balance": "9.85"},
+        ],
+    }
+    client = _client_for(payload)
+    async with client:
+        report = await fetch_usage(client, "deepseek", api_key="sk-ds")
+    assert report is not None
+    ids = [lim.id for lim in report.limits]
+    assert ids == ["deepseek:balance:cny", "deepseek:balance:usd"]
+    units = {lim.id: lim.amount.unit for lim in report.limits}
+    assert units["deepseek:balance:cny"] == "unknown"
+    assert units["deepseek:balance:usd"] == "usd"
+
+
+@pytest.mark.asyncio
+async def test_an_unavailable_deepseek_account_says_so() -> None:
+    """A zero balance and a suspended account look identical in the numbers."""
+    payload = {"is_available": False, "balance_infos": [{"currency": "USD", "total_balance": 0.0}]}
+    client = _client_for(payload)
+    async with client:
+        report = await fetch_usage(client, "deepseek", api_key="sk-ds")
+    assert report is not None
+    assert report.notes == "account not available for requests"
 
 
 @pytest.mark.asyncio
@@ -136,9 +177,32 @@ async def test_unknown_provider_returns_none() -> None:
 
 def test_usage_supported() -> None:
     assert usage_supported("openrouter") is True
-    assert usage_supported("zai") is True
-    assert usage_supported("deepseek") is False
+    assert usage_supported("deepseek") is True
     assert usage_supported("nonsense") is False
+    # `zai` had a working fetcher and no ProviderDefinition, so no code path could
+    # ever supply its credential: `/login zai` raised, its env var was never read,
+    # and the set advertised a provider nobody could reach.
+    assert usage_supported("zai") is False
+
+
+def test_usage_kinds_distinguishes_no_endpoint_from_no_credential() -> None:
+    """Those look identical in an empty table, and only the second is actionable."""
+    from local_operator.providers.usage import usage_kinds
+
+    assert usage_kinds("anthropic") == (True, False)  # OAuth only
+    assert usage_kinds("openrouter") == (False, True)  # API key only
+    assert usage_kinds("kimi") == (True, True)  # both routes
+    assert usage_kinds("google") == (False, False)  # no endpoint at all
+
+
+def test_the_oauth_only_set_is_derived_from_the_dispatch_table() -> None:
+    """The hand-written version had already drifted from the table and was read by
+    nothing, which is how it stayed wrong."""
+    from local_operator.providers.usage import OAUTH_USAGE_PROVIDERS
+
+    assert "anthropic" in OAUTH_USAGE_PROVIDERS
+    assert "kimi" not in OAUTH_USAGE_PROVIDERS, "kimi now has an API-key route"
+    assert "openrouter" not in OAUTH_USAGE_PROVIDERS
 
 
 @pytest.mark.asyncio

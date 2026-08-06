@@ -251,6 +251,56 @@ def estimate_messages_tokens(messages: Sequence[Message]) -> int:
     return sum(estimate_tokens(m) for m in messages)
 
 
+def messages_tokens_upper_bound(messages: Sequence[Message]) -> int:
+    """A cheap value that is NEVER below :func:`estimate_messages_tokens`.
+
+    Exists so a caller can prove "nowhere near the compaction threshold"
+    without touching tiktoken. The first real estimate in a process loads the
+    cl100k_base BPE table, which costs ~84 ms and ~43.6 MB RSS (measured with
+    scripts/bench_base_overhead.py) — the single largest item in the peak RSS
+    of a short session, spent so a threshold check on a few thousand tokens can
+    return False.
+
+    The bound is rigorous, not heuristic, which is what lets a caller
+    substitute it into a monotonic ``context_tokens > threshold`` test:
+
+    * cl100k_base is a byte-level BPE, so every token consumes at least one
+      UTF-8 byte and ``tokens <= utf8_bytes`` always holds. The chars/4
+      fallback used when tiktoken is missing is smaller still.
+    * ``str.isascii()`` is an O(1) flag read on CPython, so the common
+      all-ASCII block gets the tight bound ``len(text)`` for free; anything
+      else uses ``4 * len(text)``, the maximum UTF-8 width per code point.
+      Neither path encodes the string, so nothing is allocated.
+    * Images and tool calls are counted exactly as :func:`_compute_tokens`
+      counts them, so the bound cannot slip under the real estimate when a
+      history is mostly images.
+
+    Deliberately NOT memoized: it is already cheaper than a dict lookup plus
+    the settle-gate check, and a second cache keyed on message id would be one
+    more thing owners must invalidate on in-place mutation.
+    """
+    total = 0
+    for message in messages:
+        text_blocks = 0
+        for block in message.content:
+            if isinstance(block, TextContent):
+                text = block.text
+                total += len(text) if text.isascii() else 4 * len(text)
+                text_blocks += 1
+            else:
+                total += IMAGE_TOKEN_ESTIMATE
+        # _compute_tokens encodes the text blocks as ONE "\n"-joined string, so
+        # the separators are inside what it tokenizes. Charging them here keeps
+        # the bound above the estimate for a many-block message whose parts are
+        # each a single token.
+        total += max(0, text_blocks - 1)
+        for call in message.tool_calls or ():
+            args = call.raw_arguments or json.dumps(call.arguments, sort_keys=True)
+            text = call.name + args
+            total += len(text) if text.isascii() else 4 * len(text)
+    return total
+
+
 def invalidate_message_cache(message: Message) -> None:
     """Drop the cached estimate for ``message`` and notify subscribers.
 
