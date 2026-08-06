@@ -63,7 +63,15 @@ class IslandSyntaxTheme(SyntaxTheme):
             Name.Function: Style(color=_C("muted")),
             Name.Class: Style(color=_C("muted")),
             Name.Builtin: Style(color=_C("muted")),
-            String: Style(color=_C("string")),
+            # `warning` (amber), NOT `string`. The `string` token resolves to the
+            # same hex as `success`, which is the diff-added green — so a fence
+            # containing a literal put `"ok"` and a write row's `+12` in one
+            # viewport in one colour, and that pairing (a code block beside a
+            # tool row) is the single most common shape of agent output. Amber
+            # already carries Number and Keyword.Constant, so this groups every
+            # LITERAL under one hue and leaves the green meaning only "added or
+            # succeeded".
+            String: Style(color=_C("warning")),
             Number: Style(color=_C("warning")),
             Operator: Style(color=_C("muted")),
             Punctuation: Style(color=_C("dim")),

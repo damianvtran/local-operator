@@ -81,21 +81,31 @@ def _info(missing: str | None = "openrouter") -> WelcomeInfo:
 
 #: A box every section fits in; the degradation tests measure the SAME facts
 #: at smaller boxes, so a section disappearing can only mean the box shrank.
-ROOMY_W, ROOMY_H = 77, 23
+ROOMY_W, ROOMY_H = 77, 27
 
 
 # --- pure geometry: the lockup is exact -------------------------------------
 
 
 def test_logo_lockup_widths_are_exact() -> None:
-    """The mark and both wordmarks are the three fixed widths the lockup is
-    drawn against. A single off-by-one cell would silently break every
-    centering offset, so the widths are pinned here rather than implied."""
+    """The mark and both wordmarks are the fixed widths the lockup is drawn
+    against. A single off-by-one cell would silently break every centering
+    offset, so the widths are pinned here rather than implied.
+
+    The mark is NOT the same width as the plain wordmark. The old hand-drawn
+    monogram happened to be 14 cells like ``WORDMARK`` and a previous version of
+    this test asserted that coincidence as though it were the lockup's contract.
+    The real mark's aspect ratio fixes it at 15 for eight rows, and squeezing it
+    to 14 would turn every ring into an ellipse.
+    """
     assert all(cell_len(row) == MARK_WIDTH for row in LOGO_MARK)
-    assert cell_len(WORDMARK) == MARK_WIDTH
+    assert MARK_WIDTH == 22
+    assert cell_len(WORDMARK) == 14
     assert cell_len(WORDMARK_SPACED) == LOGO_FULL_MIN_WIDTH
-    assert MARK_WIDTH == 14
     assert LOGO_FULL_MIN_WIDTH == 27
+    # Ten rows is what keeps all three of the mark's rings reading as
+    # rings rather than quantising into squares.
+    assert len(LOGO_MARK) == 10
 
 
 # --- pure geometry: width tiers ----------------------------------------------
@@ -109,17 +119,17 @@ def test_width_tier_full_lockup() -> None:
 
 
 def test_width_tier_tight_lockup() -> None:
-    """14-26 cells: the mark sits DIRECTLY over the plain wordmark — both are
-    exactly 14 cells, so they lock flush and the separating blank row would
-    only loosen a lockup that no longer has the room to be loose."""
-    lines = _lines(_info(), 21, ROOMY_H)
+    """MARK_WIDTH..26 cells: the mark sits DIRECTLY over the plain wordmark, no
+    separating blank row — at this width the lockup no longer has the room to be
+    loose."""
+    lines = _lines(_info(), 24, ROOMY_H)
     assert _has_mark(lines)
     assert _has_plain_wordmark(lines)
     assert not _has_spaced_wordmark(lines)
 
 
 def test_width_tier_wordmark_only() -> None:
-    """Below the mark's own width (14 cells) the plain wordmark alone remains.
+    """Below the mark's own width the plain wordmark alone remains.
     Every box in this tier is narrower than the wordmark itself, so it always
     truncates — what is pinned is that the mark is gone while no OTHER section
     is."""
@@ -165,39 +175,59 @@ def test_hint_descriptions_never_truncate_into_nonsense() -> None:
 # --- pure geometry: height tiers ---------------------------------------------
 
 
-def test_height_tiers_drop_logo_then_hints_then_status() -> None:
-    """The degradation order, pinned at three heights of the SAME facts:
+def test_height_tiers_shed_in_cost_to_the_user_order() -> None:
+    """The degradation order, pinned at four heights of the SAME facts.
 
-    1. a box with room: logo, status, hints — everything;
-    2. a box missing one section: the LOGO is what goes, and nothing else;
-    3. a box missing two sections: hints go next, status stays.
+    The order is by what each step COSTS THE USER, which is deliberately NOT
+    plain decoration-before-information:
 
-    Decoration sheds before teaching; teaching sheds before information.
+    1. a box with room: everything, with the lockup's breathing row;
+    2. one row short: the lockup goes FLUSH — one row of air is the cheapest
+       thing on the screen;
+    3. tighter: the VERSION row goes. It is the least actionable fact here, and
+       spending it to keep the mark is a better trade than losing the product's
+       identity on the one screen that exists to show it. At a 28-row terminal
+       this single row is exactly the difference;
+    4. tighter still: the mark goes, then the hints last, because the hints are
+       a first-time user's way in.
+
+    The credential warning survives all of it — see the test below.
     """
     info = _info()
-    # The natural block height, measured the way the widget measures it: at a
-    # box taller than the content, the builder top-pads, so the content extent
-    # is the run from the first to the last drawn row.
+    # The natural block height, measured the way the widget measures it: at a box
+    # taller than the content the builder top-pads, so the content extent is the
+    # run from the first to the last drawn row.
     roomy = _lines(info, ROOMY_W, 99)
     drawn = [i for i, row in enumerate(roomy) if row.strip()]
     full_h = drawn[-1] - drawn[0] + 1
-    # 6 logo (mark 4 + blank + wordmark) + 1 blank + 4 status + 1 blank + 3 hints
-    assert full_h == 15
+    # 12 logo (mark 10 + blank + wordmark) + 1 blank + 4 status + 1 blank + 3 hints
+    assert full_h == 21
 
-    # One section short (13 < 15): the LOGO is what goes, nothing else — the
-    # hints and every status row are still on screen.
+    # A box of exactly the natural height: one row is held back so the block
+    # never touches the dock, so the lockup goes FLUSH — the mark survives and so
+    # does every fact.
+    flush = _lines(info, ROOMY_W, full_h)
+    assert _has_mark(flush)
+    assert _has_hints(flush)
+    assert f"v{info.version}" in "\n".join(flush)
+
+    # One row tighter: the version row is spent to keep the mark.
+    traded = _lines(info, ROOMY_W, full_h - 1)
+    assert _has_mark(traded), "the mark is worth more than the version number"
+    assert f"v{info.version}" not in "\n".join(traded)
+    assert _has_hints(traded)
+
+    # One row tighter again: there is nothing cheap left, so the mark goes.
     mid = _lines(info, ROOMY_W, full_h - 2)
     assert not _has_mark(mid)
     assert _has_hints(mid)
     assert _has_any_status(mid, info)
-    assert f"v{info.version}" in "\n".join(mid)
 
-    # Two sections short (7): hints go next; the status block stays whole.
+    # Far shorter: hints go last; the status rows stay.
     short = _lines(info, ROOMY_W, 7)
     assert not _has_mark(short)
     assert not _has_hints(short)
     assert _has_any_status(short, info)
-    assert f"v{info.version}" in "\n".join(short)
 
 
 def test_status_rows_shed_lowest_priority_first_and_the_warning_never() -> None:
@@ -289,12 +319,17 @@ class FakeSession:
 
 
 class FakeProviders:
-    """A credential facade with a programmable answer per provider."""
+    """A credential facade with a programmable answer per provider.
+
+    Answers `is_usable`, which is what the splash asks: an ENVIRONMENT key is a
+    working credential, and the narrower stored-credential question told those
+    users "not logged in" on the first screen.
+    """
 
     def __init__(self, missing: dict[str, bool]) -> None:
         self.missing = missing
 
-    def has_any_credential(self, provider_id: str) -> bool:
+    def is_usable(self, provider_id: str) -> bool:
         return not self.missing.get(provider_id, False)
 
 
@@ -302,7 +337,7 @@ class ExplodingProviders:
     """A credential store that blows up on every read: the welcome view must
     degrade to NO warning rather than take the app's first frame down."""
 
-    def has_any_credential(self, provider_id: str) -> bool:
+    def is_usable(self, provider_id: str) -> bool:
         raise RuntimeError("credential store unavailable")
 
 
@@ -339,14 +374,27 @@ async def test_visible_on_boot() -> None:
         assert _has_spaced_wordmark(lines)
         assert _has_hints(lines)
 
-        # Centered: the mark's row carries the SAME left padding as every other
-        # mark row, and the wordmark sits below it at the block's horizontal
-        # center (the spaced wordmark is 27 cells in a 97-cell box).
-        top_pad = next(i for i, row in enumerate(lines) if row.strip())
-        assert top_pad > 0  # not jammed at the top
+        # A 28-row terminal gives this region 20 rows and the full lockup wants
+        # 19 of them, so there is exactly one spare row — and it is deliberately
+        # spent on the BOTTOM. The one row the builder holds back exists so the
+        # block never sits against the input dock, and at this size holding it
+        # back is the whole of the slack. What is pinned, then, is not a top pad
+        # (there is nothing left to pay one with) but that the mark is on screen
+        # at the standard terminal size and the last row stays clear.
+        assert len(lines) < welcome.size.height, "the block must not touch the dock"
+
+        # Centered horizontally: the mark's first row sits at the block's
+        # centring offset.
+        #
+        # Measured as leading SPACES, not as `cell_len(row) - len(lstrip)` — that
+        # earlier form subtracted a stripped length from the row's full width and
+        # only agreed with the offset while the mark had no indent of its own. The
+        # real mark's first row begins with several spaces, so the expected leading
+        # run is the centring pad PLUS the mark's own indent.
         mark_row = next(row for row in lines if LOGO_MARK[0] in row)
-        left = cell_len(mark_row) - len(mark_row.lstrip(" "))
-        assert left == (welcome.size.width - MARK_WIDTH) // 2
+        own_indent = len(LOGO_MARK[0]) - len(LOGO_MARK[0].lstrip(" "))
+        leading = len(mark_row) - len(mark_row.lstrip(" "))
+        assert leading == (welcome.size.width - MARK_WIDTH) // 2 + own_indent
 
 
 @pytest.mark.asyncio

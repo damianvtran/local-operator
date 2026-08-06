@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.widgets import TextArea
 
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.transcript import TranscriptView
@@ -27,6 +28,12 @@ def hermetic_tui_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setenv("TERM", "xterm-256color")
     monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+    # The editor's caret BLINKS on a wall-clock timer, so whether a captured frame
+    # contains it depends on when the capture happened to land. That made the boot
+    # snapshot fail intermittently against a file it had just regenerated — a
+    # 50/50 coin flip dressed up as a regression. Pinned rather than tolerated:
+    # this suite asserts layout and colour, and a caret phase is neither.
+    monkeypatch.setattr(TextArea, "cursor_blink", False, raising=False)
 
 
 class StyledTranscriptApp(App[None]):

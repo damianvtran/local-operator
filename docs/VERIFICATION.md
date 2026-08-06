@@ -571,3 +571,82 @@ document.
 | `pyright` | 0 errors, 0 warnings across `local_operator/` |
 | live TUI (OpenRouter) | splash, picker, real turn, `hello.txt` written, band showing `0.2%/1.0M · $0.0005 · 1s` |
 | live exec `--json` | exit 0, pure-JSON stdout, 1 `agent_start`/1 `agent_end`, start context 2,407 tokens, **89.8%** warm cache rate, agent's own pytest passing and independently re-verified |
+## 12. Live model discovery and the `/model` picker (2026-08-06)
+
+### The complaint this answers
+
+> "Currently it's not evident how to switch to the anthropic opus 5 model for
+> example after logging in."
+
+Before this, `/model` with no argument printed the current label and stopped, and
+the only way to switch was to type a model id the user had no way to learn. The
+shipped registry knew 8 Anthropic models, none of them `claude-opus-5`, so the
+model the user wanted was unreachable by any sequence of keystrokes.
+
+### What was verified
+
+Driven through the REAL app with a real session and real provider credentials
+(`/tmp/lo-picker/drive.py`, Textual pilot, 100x30):
+
+| Step | Observed |
+|---|---|
+| `/model` (7 keystrokes) | buffer `/model `, list open, **86** rows from the registry, painted synchronously |
+| live refresh lands | **465** rows (registry + OpenRouter's 340 + Anthropic's live listing) |
+| type `opus` | **18** matches, first is `anthropic/claude-opus-5` |
+| `Enter` | session model `openrouter/deepseek/deepseek-v4-flash-0731` → **`anthropic/claude-opus-5`** |
+| buffer after pick | empty, list closed |
+| retype `/model gpt` | list reopens, 9 matches |
+| `Esc` | list closes, the typed text survives |
+
+Discovery measured directly against the live endpoints:
+
+| Call | Result |
+|---|---|
+| `available_models("openrouter", api_key=None)` | `ok`, **340** models in **0.11s** (public listing, no credential) |
+| same call again | `cached`, 340 models in **0.001s** |
+| `available_models("anthropic", api_key=None)` | `unauthenticated`, 8 static models — never a crash, never empty |
+| a provider with no listing endpoint | `static`, 0 live rows, **no request issued** |
+
+### Defects found by running it, and fixed
+
+Each of these was invisible to unit tests and only appeared in a real frame:
+
+- **Absent prices rendered as `free`.** Anthropic's `/v1/models` carries no
+  pricing at all, so every live-discovered Anthropic model showed `free` — the
+  one error in that column a user would act on. Unknown is now a distinct
+  sentinel from zero, and zero survives only for providers that need no
+  credential (a local Ollama really is free per token).
+- **`$18.75` rendered as `$19`.** A price column may be terse; it may not quote a
+  rate the provider does not charge.
+- **`kimi-k2-0905` outranked `kimi-k3`.** The version was taken as the largest
+  number in the id, so a `0905` serial scored 905. It is now the FIRST number,
+  which is where every id in this catalogue puts the family version.
+- **`kimi-k2` matched no version at all.** The pattern excluded a digit glued to a
+  letter, so `k2`, `qwen3` and `v4` were invisible to it.
+- **`openrouter/anthropic/claude-opus-5` outranked `anthropic/claude-opus-5`.**
+  Same model, two routes; after logging in to Anthropic the direct one is what the
+  user meant. Resellers now sort after direct providers.
+- **`! not logged in — /login openrouter` on the splash while `OPENROUTER_API_KEY`
+  was set and working.** The credential check only saw the AuthStore, not the
+  environment tier the stream cascade actually resolves. `/provider` had the same
+  blindness and now reports three states (`logged in`, `env key`, `—`).
+- **OpenRouter's 340-model listing was never fetched.** Its catalogue is public,
+  but the fetch was gated on the flag that means "inference needs no bearer".
+- **`/model` echoed into the transcript and cleared the buffer** only for the app
+  to put the query back and reopen a list the same keystroke had already opened.
+  Completing a command whose argument drives its own list no longer submits it.
+- **The boot snapshot was non-deterministic** — the editor's caret blinks on a
+  wall-clock timer, so it failed intermittently against a file it had just
+  regenerated. Pinned off in the TUI fixture; three consecutive runs green.
+
+### Final state
+
+| Gate | Result |
+|---|---|
+| unit tests | **1,883 passed**, 3 skipped (314 TUI, 1,397 core, 172 server) |
+| `flake8` | clean |
+| `black --check` | clean |
+| `pyright` | 0 errors, 0 warnings across `local_operator/` |
+| live TUI model picker | `/model` → 465 rows → `opus` → switched to `anthropic/claude-opus-5` |
+| live exec `--json` | exit 0, `write` tool ran, `ok.txt` contains `verified` |
+| snapshot determinism | 3 consecutive clean runs after the caret-blink pin |

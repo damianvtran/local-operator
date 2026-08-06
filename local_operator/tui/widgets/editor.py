@@ -32,8 +32,15 @@ from textual.message import Message
 from textual.widgets import TextArea
 from textual.widgets.text_area import Edit, EditResult
 
+from typing import Callable
+
 from local_operator.tui.autocomplete import SlashCommand
-from local_operator.tui.widgets.command_picker import CommandPicker, slash_context
+from local_operator.tui.widgets.command_picker import (
+    CommandPicker,
+    slash_argument,
+    slash_context,
+)
+from local_operator.tui.widgets.model_picker import ModelPicker, ModelRow
 
 
 class EditorSubmitted(Message):
@@ -58,11 +65,29 @@ class EditorQuit(Message):
         super().__init__()
 
 
+class ModelQueryOpened(Message):
+    """Posted when the buffer enters ``/model …`` and the model list appears.
+
+    The editor knows WHEN the list opens (it parses the buffer) but nothing about
+    what belongs in it, and the app knows the catalogue but not the keystrokes.
+    This message is the seam. It fires on the closed→open TRANSITION only, so
+    typing a query does not re-trigger a provider fetch per character.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+
+
 class Editor(TextArea):
     """Multiline prompt editor with submit-on-Enter, history, slash-completion."""
 
     #: Maximum remembered prompts.
     HISTORY_LIMIT = 200
+
+    #: Command words whose ARGUMENT is a model selector. Both spellings, because
+    #: `/models` is a registered alias and a user who typed the alias should get
+    #: the same list.
+    MODEL_COMMANDS = ("model", "models")
 
     def __init__(
         self,
@@ -73,12 +98,14 @@ class Editor(TextArea):
         # initial document, which funnels through load_text() and therefore
         # through _sync_picker().
         self._picker = CommandPicker(self._apply_command)
+        self._model_picker = ModelPicker(self._apply_model)
         # tab_behavior="indent": Tab NEVER moves focus (TUI-013). Command
         # completion consumes the key first; otherwise it indents.
         super().__init__(placeholder=placeholder, soft_wrap=True, tab_behavior="indent")
         self._history: list[str] = []
         self._history_index: int | None = None  # None = not navigating
         self._draft: str = ""  # buffer text saved when history nav starts
+        self._on_model_chosen: Callable[[ModelRow], None] | None = None
         self.set_commands(commands or [])
 
     # -- public API ---------------------------------------------------------
@@ -86,6 +113,21 @@ class Editor(TextArea):
     def picker(self) -> CommandPicker:
         """The slash-command picker. The app mounts it below the input row."""
         return self._picker
+
+    @property
+    def model_picker(self) -> ModelPicker:
+        """The model list shown while the buffer holds ``/model <query>``."""
+        return self._model_picker
+
+    def set_model_handler(self, handler: Callable[[ModelRow], None] | None) -> None:
+        """Install what a chosen model DOES.
+
+        A callback rather than a message, because the two outcomes are different
+        kinds of thing — switching the session model, or starting a login for a
+        provider that has no credential — and only the app knows how to do either.
+        The editor's job ends at "the user chose this row".
+        """
+        self._on_model_chosen = handler
 
     def prompt_history(self) -> list[str]:
         """Recorded prompts, oldest first.
@@ -106,6 +148,20 @@ class Editor(TextArea):
         self.text = ""
         self._history_index = None
 
+    def begin_model_query(self) -> None:
+        """Put the buffer into the state that shows the model list.
+
+        Exists so the app can reopen the list after ``/model`` has been submitted
+        (the command picker completes the word, which terminates it, which submits
+        it and clears the buffer) without reaching into the editor's private cursor
+        helpers. Writing the text rather than poking the widget is deliberate: the
+        buffer is what decides which picker is open, so anything that opens one has
+        to go through the buffer or be undone by the next resync.
+        """
+        self.text = "/model "
+        self.move_cursor(self._end_of_buffer())
+        self._history_index = None
+
     # -- key interception ---------------------------------------------------
     async def _on_key(self, event: events.Key) -> None:
         """Handle chat keys before TextArea's insert path sees them."""
@@ -115,6 +171,49 @@ class Editor(TextArea):
         # syncing here means routing never depends on a queued Changed
         # message having been drained first.
         self._sync_picker()
+        if self._model_picker.is_open():
+            # Checked BEFORE the command picker, though the two are mutually
+            # exclusive by construction (`slash_context` closes on the space that
+            # `slash_argument` opens on). Ordering it first makes that invariant
+            # cheap to keep: if the two ever did overlap, the picker the user is
+            # looking at is the one holding a query they just typed into.
+            if key == "escape":
+                # Esc closes the LIST, not the command: the text survives so a
+                # user who wanted to type the id by hand can carry on.
+                self._model_picker.close()
+                event.stop()
+                event.prevent_default()
+                return
+            if key in ("up", "down"):
+                self._model_picker.move(-1 if key == "up" else +1)
+                event.stop()
+                event.prevent_default()
+                return
+            if key in ("pageup", "pagedown"):
+                self._model_picker.page(-1 if key == "pageup" else +1)
+                event.stop()
+                event.prevent_default()
+                return
+            if key in ("home", "end"):
+                self._model_picker.jump(to_end=key == "end")
+                event.stop()
+                event.prevent_default()
+                return
+            if key in ("tab", "enter"):
+                row = self._model_picker.highlighted()
+                if row is not None:
+                    # Tab COMPLETES the selector into the buffer, Enter ACTS on
+                    # it. Unlike the command picker there is no ambiguity gate:
+                    # every row here names one concrete model, and the worst case
+                    # of a wrong pick is a switch the user reverses with another
+                    # `/model` — not autonomous work or a deleted credential.
+                    if key == "tab":
+                        self._complete_model(row)
+                    else:
+                        self._model_picker.choose(self._model_picker.selected_index)
+                    event.stop()
+                    event.prevent_default()
+                    return
         if self._picker.is_open():
             if key == "escape":
                 self._picker.dismiss()
@@ -149,10 +248,35 @@ class Editor(TextArea):
                     # rewrites the text and re-syncs the picker, so asking
                     # afterwards would measure the completed word (always one
                     # exact match) and submit unconditionally.
-                    send = key == "enter" and self._picker_choice_is_unambiguous(name)
-                    self._apply_command(name)
-                    if send:
-                        self._submit()
+                    if self._picker_choice_is_unambiguous(name):
+                        self._apply_command(name)
+                        # A command whose ARGUMENT drives its own list is not run
+                        # by completing it — completing it IS opening the list. The
+                        # trailing space `_apply_command` adds is what opens the
+                        # model picker, so submitting as well echoed `/model` into
+                        # the transcript, cleared the buffer, and made the app put
+                        # the query back to reopen a list the keystroke had already
+                        # opened. One keystroke, one outcome.
+                        if key == "enter" and name.lower() not in self.MODEL_COMMANDS:
+                            self._submit()
+                    elif key == "tab":
+                        # Tab never sends, so it can safely take the highlighted
+                        # row: that is the whole point of a completion key.
+                        self._apply_command(name)
+                    else:
+                        # Ambiguous Enter. Grow the word to the matches' longest
+                        # COMMON prefix and leave the list open, rather than
+                        # completing to the highlighted row.
+                        #
+                        # Completing to the row put the highest-blast-radius
+                        # candidate into the buffer ready to run — `/lo`
+                        # highlights `loop`, so a reflex double-Enter started
+                        # autonomous work for a user reaching for `/login`. The
+                        # common prefix cannot be the wrong command by
+                        # construction: it is the part every candidate agrees on.
+                        # This is also the shell idiom, which means the two-Enter
+                        # rule stops being a special case users have to learn.
+                        self._extend_to_common_prefix()
                     event.stop()
                     event.prevent_default()
                     return
@@ -223,17 +347,66 @@ class Editor(TextArea):
         self._sync_picker()
 
     def _sync_picker(self) -> None:
+        """Re-derive BOTH lists from the buffer.
+
+        The buffer is the single authority, so neither picker holds state the
+        other could contradict: `slash_context` is live while the command word is
+        open and `slash_argument` takes over on the terminating space, which makes
+        "exactly one list is showing" a property of the parse rather than a rule
+        two widgets have to cooperate on.
+        """
         self._picker.sync(self.text)
+        argument = slash_argument(self.text, self.MODEL_COMMANDS)
+        if argument is None:
+            if self._model_picker.is_open():
+                self._model_picker.close()
+            return
+        if self._model_picker.is_open():
+            self._model_picker.set_query(argument)
+        else:
+            self._model_picker.open(argument)
+            # Transition only. Posting per keystroke would re-fetch every provider
+            # for each character the user types into the query.
+            self.post_message(ModelQueryOpened())
+
+    def _complete_model(self, row: ModelRow) -> None:
+        """Put ``row``'s selector in the buffer without acting on it.
+
+        No trailing space, unlike a command completion: the selector IS the whole
+        argument, and a trailing space would terminate it and close the list — so
+        Tab would appear to both fill the field and give up on it.
+        """
+        self.text = f"/model {row.selector}"
+        self.move_cursor(self._end_of_buffer())
+
+    def _apply_model(self, row: ModelRow) -> None:
+        """Hand a chosen row to the app and clear the buffer.
+
+        The buffer is cleared HERE rather than by the handler because the command
+        never reaches the submit path: choosing from the list is the whole
+        interaction, so leaving `/model anthropic/claude-opus-5` behind would
+        invite a second Enter that ran the switch again.
+        """
+        self._model_picker.close()
+        handler = self._on_model_chosen
+        self.clear_content()
+        if handler is not None:
+            handler(row)
 
     def _picker_choice_is_unambiguous(self, name: str) -> bool:
         """Whether Enter may SEND the highlighted command, not just insert it.
 
-        Unambiguous means one of two things:
+        Unambiguous means one of three things:
 
         * there is exactly one match, so the highlighted row is the only command
-          the query could mean; or
+          the query could mean;
         * the user typed the name in full, so they named it rather than letting
-          the matcher choose.
+          the matcher choose; or
+        * the user ARROWED onto this row. The gate exists because the matcher may
+          have picked the row on the user's behalf, and an explicit move is the
+          direct answer to that — the user read the list and chose. It is also the
+          muscle memory every comparable picker (fzf, an editor command palette)
+          has already taught: move, Enter, done.
 
         Everything else completes and waits for a second Enter. The point is the
         registry's uneven blast radius: `/usage` is harmless and `/loop` and
@@ -243,6 +416,8 @@ class Editor(TextArea):
         if context is None:
             return False
         if len(self._picker.suggestions()) <= 1:
+            return True
+        if self._picker.chosen_by_hand:
             return True
         return context.query.strip().lower() == name.strip().lower()
 
@@ -261,6 +436,36 @@ class Editor(TextArea):
         # makes it a command word), so the prefix is all that must survive.
         self.text = f"{self.text[: context.start]}/{name} "
         self.move_cursor(self._end_of_buffer())
+
+    def _extend_to_common_prefix(self) -> None:
+        """Grow the typed word to the matches' longest common prefix, no further.
+
+        No trailing space and NO close, unlike :meth:`_apply_command`: the word is
+        still a prefix of several commands, so the list has to stay up for the
+        user to keep narrowing. Returns having changed nothing when the query is
+        already the common prefix — the honest outcome, since there is no
+        keystroke-free way to tell the candidates apart at that point.
+        """
+        context = slash_context(self.text)
+        if context is None:
+            return
+        names = [name for name, _ in self._picker.suggestions()]
+        if not names:
+            return
+        # Case-insensitively, since the query is matched that way. The surviving
+        # prefix is taken from the FIRST name so the inserted text keeps the
+        # registry's own casing rather than the user's.
+        shared = names[0]
+        for name in names[1:]:
+            while shared and not name.lower().startswith(shared.lower()):
+                shared = shared[:-1]
+            if not shared:
+                return
+        if len(shared) <= len(context.query):
+            return
+        self.text = f"{self.text[: context.start]}/{shared}"
+        self.move_cursor(self._end_of_buffer())
+        self._sync_picker()
 
     # -- history ------------------------------------------------------------
     def _caret_row(self) -> int:

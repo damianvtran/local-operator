@@ -49,6 +49,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -97,7 +98,14 @@ def _read_cache(path: Path) -> tuple[dict[str, Any] | None, float]:
     if not isinstance(payload, dict):
         return None, float("inf")
     age = time.time() - fetched_at
-    if age < 0:
+    # `not (age >= 0)` rather than `age < 0`, so NaN lands here too. A NaN
+    # `fetched_at` is reachable: `json.loads` accepts the bare literal, and
+    # `float("NaN")` accepts the string. Under `age < 0` it fell through as a NaN
+    # age, which then compared False against the TTL and so happened to be
+    # treated as stale — the right outcome by accident of IEEE comparison rather
+    # than by this function's stated rule, and it printed "using stale catalogue
+    # (nans old)" on the way past.
+    if not (age >= 0):
         return payload, float("inf")
     return payload, age
 
@@ -105,32 +113,69 @@ def _read_cache(path: Path) -> tuple[dict[str, Any] | None, float]:
 def _write_cache(path: Path, payload: dict[str, Any]) -> None:
     """Persist a payload, best-effort.
 
-    Written to a temp file and renamed, because ``rename`` within a directory
-    is atomic: a concurrent reader sees either the old document or the new one,
+    Written to a temp file and renamed, because ``rename`` within a directory is
+    atomic: a concurrent reader sees either the old document or the new one,
     never a partial write.
 
-    The temp name carries the PID. A name derived only from the target (the
-    obvious ``path.with_suffix('.tmp')``) is SHARED by every concurrent writer,
-    so two sessions starting together interleave their writes into one file and
-    then rename the resulting corrupt document into place — turning the atomic
-    rename into a guarantee that the corruption is delivered intact.
+    The temp name comes from :func:`tempfile.mkstemp`, which is the only way to
+    get a name no other writer holds. Every derived name has a sharing bug of
+    the same shape: the obvious ``path.with_suffix('.tmp')`` is shared by every
+    concurrent writer, and adding the PID still leaves it shared by every THREAD
+    in one process — which is the case that actually occurs here, since
+    ``configure_model`` is called from request handlers in a long-lived server.
+    Two writers on one temp file interleave their bytes and then rename the
+    result into place, turning the atomic rename into a guarantee that the
+    corruption is delivered intact. It parses as JSON and passes every shape
+    check, so the damage is silently-wrong prices and context windows served for
+    the full TTL. A ~190 KB listing spans many write syscalls, so this is
+    routine rather than a narrow race.
+
+    ``mkstemp`` creates in the target directory (not the system temp dir) so the
+    rename stays within one filesystem, and at mode 0600 — the caller's umask is
+    reapplied after the rename, because a cache of public model metadata that
+    only the owner can read would break a shared install.
     """
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    fd: int | None = None
+    tmp: Path | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(
-            json.dumps({"fetched_at": time.time(), "payload": payload}),
-            encoding="utf-8",
-        )
+        handle, name = tempfile.mkstemp(dir=str(path.parent), prefix=f"{path.name}.", suffix=".tmp")
+        fd, tmp = handle, Path(name)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            fd = None  # fdopen owns it now; closing the wrapper closes the fd
+            json.dump({"fetched_at": time.time(), "payload": payload}, stream)
+        os.chmod(tmp, 0o644 & ~_umask())
         tmp.replace(path)
+        tmp = None
     except OSError as exc:  # pragma: no cover - disk full, read-only home
         logger.debug("could not cache %s catalogue: %s", path.name, exc)
+    finally:
         # A failed write can strand the temp file; it would otherwise accumulate
         # one per failing start.
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _umask() -> int:
+    """The process umask, read without leaving it changed.
+
+    ``os.umask`` has no getter: the only way to read it is to set it, which is
+    why this is a helper rather than an inline call. Racy in principle against
+    another thread setting the umask in the same instant; that is a
+    process-global setting no library should be touching, and the consequence
+    here is at worst one cache file with slightly different permissions.
+    """
+    current = os.umask(0o022)
+    os.umask(current)
+    return current
 
 
 def cached_listing(

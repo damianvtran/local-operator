@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import json
 import time
+from unittest import mock
 
 import pytest
 
 from local_operator.model import catalogue
+from local_operator.model import configure as configure_mod
 from local_operator.model.catalogue import cached_listing
 
 
@@ -259,26 +261,57 @@ def test_a_future_timestamp_is_stale_not_permanently_fresh(tmp_path) -> None:
     assert got["data"][0]["context_length"] == 7
 
 
-def test_the_temp_file_name_is_unique_per_process(tmp_path) -> None:
-    """``path.with_suffix('.tmp')`` is SHARED by every concurrent writer, so two
-    sessions starting together interleave into one file and then rename the
-    corrupt result into place — the atomic rename guaranteeing the corruption
-    arrives intact. The name must therefore be per-writer.
+def test_two_writers_never_share_a_temp_file_name(tmp_path, monkeypatch) -> None:
+    """Two writers sharing one temp file interleave their bytes into it, and the
+    atomic rename then delivers the interleaved document intact. It parses as
+    JSON and passes every shape check, so the result is silently-wrong prices and
+    windows served for the whole TTL.
+
+    Pinned by NAME rather than by racing threads, deliberately: a race test cannot
+    fail reliably, and it could not have caught the earlier PID-suffixed name at
+    all, because threads in one process share a PID — every writer computed one
+    identical name, so the fixed and unfixed paths were literally the same code.
+
+    Observed at the RENAME, not at whatever call produces the name, so the test
+    pins the property (each writer stages into a file of its own) rather than the
+    mechanism that provides it.
     """
+    path = tmp_path / "openrouter.models.json"
+    staged: list[str] = []
+    real_replace = catalogue.Path.replace
+
+    def record(self, target):  # noqa: ANN001
+        staged.append(self.name)
+        return real_replace(self, target)
+
+    monkeypatch.setattr(catalogue.Path, "replace", record)
+    # One PID for both writes: the case the PID suffix could not cover, and the
+    # one that actually occurs, since configure_model runs inside server request
+    # handlers on a thread pool.
+    monkeypatch.setattr(catalogue.os, "getpid", lambda: 4242)
+
+    catalogue._write_cache(path, _payload())
+    catalogue._write_cache(path, _payload(window=42))
+
+    assert len(staged) == 2, "each write must stage through a temp file"
+    assert staged[0] != staged[1], "two writers in one process must not share a temp file"
+    assert not list(tmp_path.glob("*.tmp")), "temp files must be renamed away"
+    assert (
+        json.loads(path.read_text(encoding="utf-8"))["payload"]["data"][0]["context_length"] == 42
+    )
+
+
+def test_another_writers_temp_file_cannot_corrupt_this_write(tmp_path) -> None:
+    """A stranded temp file from some other writer must not be adopted."""
     import os
 
     path = tmp_path / "openrouter.models.json"
-    catalogue._write_cache(path, _payload())
-    assert not list(tmp_path.glob("*.tmp")), "temp file must be renamed away"
-
-    # Simulate a second writer holding a half-written temp file: it must not be
-    # the name this process would use.
-    other = tmp_path / f"{path.name}.{os.getpid() + 1}.tmp"
-    other.write_text("{partial", encoding="utf-8")
+    (tmp_path / f"{path.name}.{os.getpid()}.tmp").write_text("{partial", encoding="utf-8")
+    (tmp_path / f"{path.name}.tmp").write_text("{partial", encoding="utf-8")
     catalogue._write_cache(path, _payload(window=42))
     assert (
         json.loads(path.read_text(encoding="utf-8"))["payload"]["data"][0]["context_length"] == 42
-    ), "another writer's temp file must not corrupt this write"
+    )
 
 
 def test_a_failed_write_does_not_strand_a_temp_file(tmp_path, monkeypatch) -> None:
@@ -295,29 +328,37 @@ def test_a_failed_write_does_not_strand_a_temp_file(tmp_path, monkeypatch) -> No
     assert not list(tmp_path.glob("*.tmp"))
 
 
-def test_the_in_process_memo_cannot_outlive_the_disk_ttl() -> None:
+def test_the_in_process_memo_expires_with_the_wall_clock() -> None:
     """A bare ``lru_cache`` would pin whatever metadata a long-lived process saw
     at boot: the HTTP server and scheduler workers run for days, the disk cache
     would refresh underneath them, and nothing would ever read the new numbers.
-    The memo key carries a TTL bucket so an older bucket misses.
+
+    Driven entirely through the PUBLIC entry point, and by advancing a patched
+    clock. Calling the memoized inner function with a hand-made bucket argument
+    instead — the earlier form of this test — only demonstrated that
+    ``lru_cache`` keys on its parameters, which is a language guarantee: it held
+    for any third argument, so hardcoding the bucket to a constant (restoring the
+    never-expiring memo exactly) left it passing. What needs pinning is that
+    ``resolve_model_info`` derives the bucket from the CLOCK.
     """
-    from local_operator.model.configure import (
-        _resolve_model_info_cached,
-        resolve_model_info,
-    )
+    from local_operator.model.configure import _resolve_model_info_cached, resolve_model_info
 
-    bucket = int(time.time() // catalogue.DEFAULT_TTL_S)
-    resolve_model_info("anthropic", "claude-sonnet-4-20250514")
-    before = _resolve_model_info_cached.cache_info().misses
+    model = "claude-sonnet-4-20250514"
+    now = 1_700_000_000.0
+    with mock.patch.object(configure_mod.time, "time", lambda: now):
+        resolve_model_info("anthropic", model)
+        hits = _resolve_model_info_cached.cache_info().hits
+        # Same instant: a hit, or the memo is pointless.
+        resolve_model_info("anthropic", model)
+        assert _resolve_model_info_cached.cache_info().hits == hits + 1
 
-    # Same model, previous TTL window: must MISS, proving expiry is real.
-    _resolve_model_info_cached("anthropic", "claude-sonnet-4-20250514", bucket - 1)
-    assert _resolve_model_info_cached.cache_info().misses == before + 1
-
-    # Same model, same window: must HIT, or the memo is pointless.
-    hits = _resolve_model_info_cached.cache_info().hits
-    resolve_model_info("anthropic", "claude-sonnet-4-20250514")
-    assert _resolve_model_info_cached.cache_info().hits == hits + 1
+    misses = _resolve_model_info_cached.cache_info().misses
+    # One TTL later the bucket has rolled, so the same call must MISS and go back
+    # to the disk cache. Under a fixed bucket this is a hit and the assertion
+    # fails, which is the point.
+    with mock.patch.object(configure_mod.time, "time", lambda: now + catalogue.DEFAULT_TTL_S):
+        resolve_model_info("anthropic", model)
+    assert _resolve_model_info_cached.cache_info().misses == misses + 1
 
 
 # -- credential resolution (S1) ----------------------------------------------
@@ -393,17 +434,33 @@ def _drifted_payload() -> dict:
     }
 
 
-def test_a_payload_that_validates_but_cannot_map_does_not_raise(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "bad_window, raised_by_python",
+    [
+        ({"max": 1000}, "TypeError"),
+        ("not-a-number", "ValueError"),
+        (float("nan"), "ValueError"),
+        (float("inf"), "OverflowError"),
+    ],
+)
+def test_a_payload_that_validates_but_cannot_map_does_not_raise(
+    tmp_path, monkeypatch, bad_window, raised_by_python
+) -> None:
     """Validation is NOT a guarantee that the mapping will succeed. The listing
-    schemas set ``extra="allow"``, so non-scalar extras validate cleanly and
-    then raise TypeError inside the conversions — and only ValueError was
-    caught, so session start FAILED: the exact outcome this module prevents.
+    schemas set ``extra="allow"``, so a wrong-shaped extra validates cleanly and
+    then raises inside the conversions, failing session start outright.
+
+    All four shapes are parametrized because they raise three DIFFERENT
+    exceptions and each was a separate hole: catching ValueError alone let the
+    dict through, and adding TypeError still left ``Infinity`` — which
+    ``json.loads`` accepts as a bare literal and ``int()`` then rejects with
+    OverflowError, a subclass of neither.
     """
     from local_operator.clients.openrouter import OpenRouterListModelsResponse
-    from local_operator.model import configure as configure_mod
     from local_operator.model.registry import ModelInfo
 
     payload = _drifted_payload()
+    payload["data"][0]["context_length"] = bad_window
     # The premise of the finding: pydantic accepts it.
     assert OpenRouterListModelsResponse.model_validate(payload) is not None
 
@@ -425,21 +482,28 @@ def test_a_payload_that_validates_but_cannot_map_does_not_raise(tmp_path, monkey
     assert config.spec.context_window == configure_mod.UNKNOWN_CONTEXT_WINDOW
 
 
-def test_an_unmappable_payload_is_purged_rather_than_served_for_a_day(
-    tmp_path, monkeypatch
-) -> None:
-    """``cached_listing`` writes BEFORE anything interprets the payload, so an
-    unmappable document would be served as a FRESH cache hit on every start for
-    the whole TTL — repeating the failure for a day with no refetch. It must be
-    dropped so the next start can recover on its own.
+def test_one_unmappable_entry_keeps_the_rest_of_the_catalogue(tmp_path, monkeypatch) -> None:
+    """A bad entry is not a bad document.
+
+    An earlier revision purged the whole cache file here, reasoning that a
+    payload which cannot be mapped should not be served for the TTL. But the
+    conversions only ever run for the ONE model whose id matched, out of a listing
+    that carries several hundred: purging discarded metadata that was correct for
+    all the others, and since the upstream document is unchanged the refetch
+    re-poisons the cache immediately. The lasting effect was an extra HTTP call
+    per start plus a refetch for every other model.
     """
     from local_operator.clients.openrouter import OpenRouterListModelsResponse
-    from local_operator.model import configure as configure_mod
     from local_operator.model.registry import ModelInfo
+
+    bad = _drifted_payload()["data"][0]
+    good = _payload(model_id="good/model", window=999_000)["data"][0]
+    fetches: list[int] = []
 
     class FakeClient:
         def list_models(self):
-            return OpenRouterListModelsResponse.model_validate(_drifted_payload())
+            fetches.append(1)
+            return OpenRouterListModelsResponse.model_validate({"data": [good, bad]})
 
     monkeypatch.setattr(
         configure_mod,
@@ -447,11 +511,16 @@ def test_an_unmappable_payload_is_purged_rather_than_served_for_a_day(
         lambda _p: (FakeClient(), OpenRouterListModelsResponse),
     )
     monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+    template = ModelInfo(id="v", name="v", description="")
 
-    configure_mod._info_from_catalogue(
-        "openrouter", "v/m", ModelInfo(id="v", name="v", description="")
-    )
-    assert not (tmp_path / "openrouter.models.json").exists()
+    # The bad entry falls back without taking the document with it.
+    assert configure_mod._info_from_catalogue("openrouter", bad["id"], template) is template
+    assert (tmp_path / "openrouter.models.json").exists(), "one bad entry purged the whole cache"
+
+    # So the good entry still resolves from cache — no second fetch.
+    resolved = configure_mod._info_from_catalogue("openrouter", "good/model", template)
+    assert resolved.context_window == 999_000
+    assert len(fetches) == 1, "the good entry had to be refetched"
 
 
 def test_invalidate_is_safe_when_there_is_no_cache(tmp_path) -> None:

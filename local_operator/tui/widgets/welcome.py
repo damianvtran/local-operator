@@ -56,19 +56,39 @@ from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.status_line import format_model_label
 from local_operator.tui.widgets.transcript import NOTICE_GLYPHS
 
-#: The monogram: an angular ``L`` beside a rounded ``O``. Only the three
-#: universal block-element glyphs are used (█ ▀ ▄, all in U+258x) — the half
-#: blocks round the ``O``'s corners without depending on box-drawing or
-#: braille coverage, so the mark survives a bare xterm font.
+#: The real local-operator mark, downsampled from the shipped raster asset
+#: (``static/local-operator-icon-2-light-clear.png``, also the app icon in
+#: local-operator-ui) rather than hand-drawn. It depicts a FIGURE WITH A RAISED
+#: HAND that doubles as a node graph: three open rings — a large head and two
+#: smaller nodes — an arm sweeping from the shoulder up to the top-right node,
+#: and two stems of deliberately unequal length, the left one ending in a node
+#: and the right running unbroken to the baseline. That asymmetry is what makes
+#: it read as a person rather than an abstract cluster, so it must survive any
+#: future resizing.
 #:
-#: Every row is exactly :data:`MARK_WIDTH` cells wide, and so is
-#: :data:`WORDMARK` — that equality is the whole lockup, and it is asserted by
-#: the tests rather than left as a coincidence for someone to break.
+#: Only the three universal block-element glyphs are used (█ ▀ ▄, all in
+#: U+258x): half blocks give each cell two square subcells, which is what lets
+#: a 2:1 character cell carry round shapes at all, and they need neither
+#: box-drawing nor braille coverage — so the mark survives a bare xterm font.
+#:
+#: TEN rows. Eight was the smallest size at which the shapes were technically
+#: distinguishable, and it looked it: the head quantised to a blobby rectangle
+#: with a one-subcell counter and both small rings closed into squares. Twelve
+#: is marginally crisper still but does not fit the splash region of a 28-row
+#: terminal, and a mark that is usually absent is worse than one that is
+#: slightly softer. At ten every ring reads as a ring, the arm is a single
+#: sweeping stroke rather than a staircase, and the strokes hold an even weight.
 LOGO_MARK: tuple[str, ...] = (
-    "██      ▄████▄",
-    "██      ██  ██",
-    "██      ██  ██",
-    "██████  ▀████▀",
+    "     ▄█████▄    ▄▄██▄▄",
+    "    ██     ██   ██  ██",
+    "    ██    ▄█▀    ▀██▀ ",
+    "    ▄██████▄     ██   ",
+    "  ▄█▀▀     ▀█████▀    ",
+    "  ██        ██        ",
+    "  ██        ██        ",
+    "▄▄██▄       ██        ",
+    "██ ▄█       ██        ",
+    " ▀▀▀        ██        ",
 )
 
 #: The wordmark, in the product's own lowercase voice.
@@ -79,7 +99,12 @@ WORDMARK = "local operator"
 #: letterspaced wordmark wants — no separate word-gap constant to keep in sync.
 WORDMARK_SPACED = " ".join(WORDMARK)
 
-#: Cell width of the mark, and of the plain wordmark under it.
+#: Cell width of the mark. Deliberately NOT equal to the plain wordmark's width
+#: any more: the old hand-drawn monogram happened to be 14 cells like
+#: ``WORDMARK``, and a test asserted that coincidence as though it were the
+#: lockup's contract. The real mark's aspect ratio fixes its width at 15 for
+#: eight rows, and distorting it to match a string length would turn every ring
+#: into an ellipse.
 MARK_WIDTH = max(cell_len(row) for row in LOGO_MARK)
 
 #: Width at or above which the full lockup (mark over the letterspaced
@@ -154,12 +179,17 @@ def session_welcome_info(session: Any | None, providers: Any | None) -> WelcomeI
     Takes the session and provider facade rather than the app so the whole
     gathering step lives here instead of leaking into ``app.py``.
 
+    The credential question is ``is_usable``, not ``has_any_credential``. A key in
+    the ENVIRONMENT is what the stream-time cascade resolves, so a session started
+    that way runs perfectly — and the narrower check told those users "not logged in
+    — /login openrouter" on the first screen, pointing them at a login they do not
+    need and cannot usefully perform.
+
     Both reads are defended. ``model_label`` touches a session that may be
-    mid-teardown, and ``has_any_credential`` touches the credential store on
-    disk; either raising here would take down the app's very first render.
-    A failed credential read degrades to *no warning* rather than to a false
-    alarm: telling a correctly configured user they are logged out is worse
-    than staying quiet.
+    mid-teardown, and the credential check touches the store on disk; either raising
+    here would take down the app's very first render. A failed read degrades to *no
+    warning* rather than to a false alarm: telling a correctly configured user they
+    are logged out is worse than staying quiet.
     """
     label = ""
     if session is not None:
@@ -173,7 +203,7 @@ def session_welcome_info(session: Any | None, providers: Any | None) -> WelcomeI
     missing: str | None = None
     if provider and providers is not None:
         try:
-            if not providers.has_any_credential(provider):
+            if not providers.is_usable(provider):
                 missing = provider
         except Exception:
             missing = None
@@ -223,58 +253,64 @@ def _center(line: Text, width: int) -> Text:
     return out
 
 
-def _center_block(lines: list[Text], width: int) -> list[Text]:
-    """Center a GROUP of lines on their widest member, keeping one left edge.
+def _center_blocks(groups: list[list[Text]], width: int) -> list[list[Text]]:
+    """Center SEVERAL groups on one shared left edge, block by block.
 
-    Centering each line independently ragged the status stack into a diamond —
-    with a real OpenRouter label the version, model, cwd and warning rows had
-    four different left edges, which is the one composition move that reads as
-    un-designed, on the first frame every user sees (D9).
+    Each group keeps its own internal alignment; what is shared is the pad, taken
+    from the widest line across all of them. Centring each line on its own width
+    produced a diamond of four ragged edges — un-designed, on the first frame
+    every user sees — and centring each BLOCK on its own width merely moved the
+    problem up a level: the status stack and the hint stack landed on different
+    columns, and the offset even changed sign with the length of the model label.
 
     It also removes a visible twitch: ``model_label`` starts as ``connecting…``
     (12 cells) and resolves to as many as 38, so the row used to re-centre and
-    re-widen a second into every boot. Block width is set by the widest row, so
-    the stack now holds still.
-
-    ``_hint_lines`` already worked this way and documents why; the status rows
-    are the same kind of thing — several facts about one session.
+    re-widen a second into every boot. The pad is set by the widest line, so the
+    stack holds still.
     """
+    lines = [line for group in groups for line in group]
     if not lines:
-        return []
+        return groups
     block = max(cell_len(line.plain) for line in lines)
     pad = max(0, (width - block) // 2)
     if pad == 0:
-        return lines
-    out: list[Text] = []
-    for line in lines:
-        padded = Text(" " * pad, no_wrap=True)
-        padded.append_text(line)
-        out.append(padded)
+        return groups
+    out: list[list[Text]] = []
+    for group in groups:
+        padded_group: list[Text] = []
+        for line in group:
+            padded = Text(" " * pad, no_wrap=True)
+            padded.append_text(line)
+            padded_group.append(padded)
+        out.append(padded_group)
     return out
 
 
-def _logo_lines(width: int) -> list[Text]:
-    """The logo lockup at whichever of three width tiers ``width`` allows.
+def _logo_lines(width: int, *, flush: bool = False) -> list[Text]:
+    """The logo lockup at whichever width tier ``width`` allows.
 
     - ``>= LOGO_FULL_MIN_WIDTH`` (27): the mark, a blank row, then the
       letterspaced wordmark — a small dense mark over a wide open name.
-    - ``>= MARK_WIDTH`` (14): the mark directly over the plain wordmark. Both
-      are exactly 14 cells, so they lock flush and the separating row would
-      only loosen a lockup that no longer has the width to be loose.
+    - ``>= MARK_WIDTH``: the mark directly over the plain wordmark, flush,
+      because a lockup without the width to be loose should not pretend.
     - narrower: the plain wordmark alone, which the caller then truncates.
+
+    ``flush`` drops the breathing row in the wide tier. It is a HEIGHT
+    concession, not a width one: on a short terminal the choice is between a
+    tighter lockup and no mark at all, and one row of air is not worth the
+    product's own identity. The caller escalates to it before shedding sections.
     """
-    # `dim`, not `muted`. The intended hierarchy is a small dense mark UNDER a
-    # wide open name, but the mark is four rows of solid block glyphs (~40 filled
-    # cells) against a wordmark of one row and ~11 cells of ink, so one ramp step
-    # could not overcome a 4x area difference and the eye landed on the blocks
-    # first. Two steps down makes the blocks read as a watermark behind the name
-    # — which is also what stops the rounded `O` reading as a zero (D12).
+    # `dim`, not `muted`. The intended hierarchy is a compact mark UNDER a wide
+    # open name, but the mark is ten rows of solid block glyphs against a
+    # wordmark of one row, so one ramp step could not overcome the area
+    # difference and the eye landed on the blocks first. Two steps down makes
+    # them read as a watermark behind the name.
     mark_style = Style(color=theme_mod.semantic_color("dim"))
     word_style = Style(color=theme_mod.semantic_color("fg"))
     mark = [_center(Text(row, style=mark_style, no_wrap=True), width) for row in LOGO_MARK]
     if width >= LOGO_FULL_MIN_WIDTH:
         spaced = _center(Text(WORDMARK_SPACED, style=word_style, no_wrap=True), width)
-        return [*mark, Text(""), spaced]
+        return [*mark, spaced] if flush else [*mark, Text(""), spaced]
     plain = _center(Text(WORDMARK, style=word_style, no_wrap=True), width)
     if width >= MARK_WIDTH:
         return [*mark, plain]
@@ -352,14 +388,18 @@ def _hint_lines(width: int) -> list[Text]:
         if block <= width:
             key_column = candidate
             break
+    # UNPADDED, on purpose. The caller pads this block and the status block from
+    # one shared width, so the splash has a single left edge below the wordmark.
+    # Each block centring on its own widest member put the two on different
+    # columns, and the offset changed sign with the length of the model label —
+    # the same ragged-edge effect that was removed from inside the status stack,
+    # surviving one level up.
     if not key_column:
-        return [_center(Text(key, style=key_style, no_wrap=True), width) for key, _ in HINTS]
+        return [Text(key, style=key_style, no_wrap=True) for key, _ in HINTS]
 
-    block = max(key_column + cell_len(desc) for _, desc in HINTS)
-    pad = max(0, (width - block) // 2)
     lines: list[Text] = []
     for key, desc in HINTS:
-        line = Text(" " * pad, no_wrap=True)
+        line = Text(no_wrap=True)
         line.append(key.ljust(key_column), style=key_style)
         line.append(desc, style=desc_style)
         lines.append(line)
@@ -389,7 +429,8 @@ def build_welcome_lines(info: WelcomeInfo, width: int, height: int) -> list[Text
         return []
 
     logo = _logo_lines(width)
-    status = _status_rows(info, width)
+    status_full = _status_rows(info, width)
+    status = list(status_full)
     hints = _hint_lines(width)
     show_logo = True
     show_hints = True
@@ -398,20 +439,35 @@ def build_welcome_lines(info: WelcomeInfo, width: int, height: int) -> list[Text
         # One blank row joins each visible section to the status rows.
         return rows + (len(logo) + 1 if show_logo else 0) + (len(hints) + 1 if show_hints else 0)
 
-    # A row is held back so the block never touches the input dock's rule.
-    # Opening the picker shrinks this region to exactly the block's height, so
-    # the old arithmetic centered at pad 0 and rendered edge-to-edge: the mark
+    # A row is held back so the block never touches the dock below it. Opening
+    # the picker shrinks this region to about the block's own height, so the
+    # earlier arithmetic centered at pad 0 and rendered edge to edge: the mark
     # looked like it was sliding off the top and `ctrl+d  quit` sat directly on
-    # the rule. That is reachable in ONE keystroke from the state the splash
-    # itself teaches, since a hint row says "/  command picker" (D11).
+    # the panel. That is reachable in ONE keystroke from the state the splash
+    # itself teaches, since a hint row says "/  command picker".
     #
-    # The margin is a nicety and yields to content: it is worth shedding the
-    # logo or the hints for, but not a status row. At three rows the credential
-    # warning and the model matter more than breathing room, so the first pass
-    # asks for the margin and the second gives it up rather than shed a fact.
+    # The margin is a nicety and yields to content, so the first pass asks for it
+    # and the second gives it up rather than lose anything else.
     for usable in (max(1, height - 1), height):
         show_logo = True
         show_hints = True
+        logo = _logo_lines(width)
+        status = list(status_full)
+        # Escalate by what each step COSTS THE USER, which is not the same as
+        # decoration-before-information:
+        #
+        # 1. tighten the lockup — costs one row of air.
+        # 2. drop the weakest status row — the version number, which is the
+        #    least actionable thing on the screen. Spending it to keep the mark
+        #    is a better trade than losing the product's identity on the one
+        #    screen that exists to show it, and at a 28-row terminal (a 20-row
+        #    region) this single row is exactly the difference.
+        # 3. drop the mark.
+        # 4. drop the hints — a first-time user's way in, so it goes last.
+        if total(len(status)) > usable:
+            logo = _logo_lines(width, flush=True)
+        if total(len(status)) > usable and len(status) > 1:
+            status.pop(min(range(len(status)), key=lambda index: status[index][0]))
         if total(len(status)) > usable:
             show_logo = False
         if total(len(status)) > usable:
@@ -423,16 +479,28 @@ def build_welcome_lines(info: WelcomeInfo, width: int, height: int) -> list[Text
         weakest = min(range(len(status)), key=lambda index: status[index][0])
         status.pop(weakest)
 
+    # One shared pad across the status stack and the hint stack, so the splash has
+    # a single left edge below the wordmark whatever the model label turns out to
+    # be. The logo is centred separately because it is centred as a LOCKUP —
+    # sharing the pad would left-align the mark against the text blocks.
+    status_lines, hints = _center_blocks([[line for _, line in status], hints], width)
     body: list[Text] = []
     if show_logo:
         body.extend(logo)
         body.append(Text(""))
-    body.extend(_center_block([line for _, line in status], width))
+    body.extend(status_lines)
     if show_hints:
         body.append(Text(""))
         body.extend(hints)
 
-    top = max(0, (usable - len(body)) // 2)
+    # Round the top pad UP, so a single spare row lands above the block rather
+    # than below it. The region's neighbours are not symmetric in what they
+    # already contribute: below sits the input dock, which pads its own top row,
+    # while above sits only the screen's one-row inset. A block flush with row 0
+    # therefore reads as sliding off the top — the exact complaint the picker's
+    # shrunken region produced — whereas a block flush with the last row still
+    # has the dock's air beneath it. Clamped so the last row is never cut.
+    top = min(max(0, (usable - len(body) + 1) // 2), max(0, height - len(body)))
     lines = [Text("") for _ in range(top)]
     lines.extend(body)
     for line in lines:

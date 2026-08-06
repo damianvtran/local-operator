@@ -662,3 +662,88 @@ async def test_anthropic_login_via_browser_redirect_without_paste(
     assert creds["org_id"] == "org-1"
     assert auth_urls[0].startswith(AUTHORIZE_URL)
     await http.aclose()
+
+
+# -- the loopback is the real path; no human types a code --------------------
+
+
+@pytest.mark.asyncio
+async def test_the_loopback_completes_a_login_with_no_manual_input() -> None:
+    """The whole point of the callback server: authorize in the browser and the
+    flow finishes on its own.
+
+    Reported defect: `/login anthropic` printed a URL and then demanded a pasted
+    code. Anthropic IS a loopback provider — it redirects to
+    `http://localhost:54545/callback` — so a code prompt should never be the
+    path. This drives the real flow with a stubbed token endpoint and supplies
+    NO manual-input callback at all.
+    """
+    from local_operator.providers.oauth.anthropic import login_anthropic
+    from local_operator.providers.oauth.callback_server import LoginCallbacks
+
+    seen: dict[str, str] = {}
+    progress: list[str] = []
+
+    def on_auth_url(url: str, instructions: str | None = None) -> None:
+        seen["url"] = url
+
+    async def browser() -> int:
+        for _ in range(200):
+            if "url" in seen:
+                break
+            await asyncio.sleep(0.02)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(seen["url"]).query)
+        # The redirect target must be a loopback URL the browser can actually
+        # reach, not a provider-hosted page that shows a code.
+        assert query["redirect_uri"][0].startswith("http://localhost:")
+        async with httpx.AsyncClient(timeout=10.0) as http:
+            response = await http.get(
+                query["redirect_uri"][0],
+                params={"code": "auth-code", "state": query["state"][0]},
+            )
+        return response.status_code
+
+    class StubTokens(httpx.AsyncClient):
+        async def post(self, url, **kwargs):  # noqa: ANN001, ANN003
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "at",
+                    "refresh_token": "rt",
+                    "expires_in": 3600,
+                    "account": {"uuid": "u1", "email_address": "you@example.com"},
+                },
+                request=httpx.Request("POST", url),
+            )
+
+        async def get(self, url, **kwargs):  # noqa: ANN001, ANN003
+            return httpx.Response(200, json={}, request=httpx.Request("GET", url))
+
+    credentials, status = await asyncio.gather(
+        login_anthropic(
+            LoginCallbacks(on_auth_url=on_auth_url, on_progress=progress.append),
+            open_browser=lambda _url: None,
+            http_client=StubTokens(),
+        ),
+        browser(),
+    )
+
+    assert status == 200, "the browser's redirect must be answered by our server"
+    assert credentials["access"] == "at"
+    assert credentials["refresh"], "a refresh token must be stored or the session dies at expiry"
+    assert credentials["email"] == "you@example.com"
+
+
+def test_only_anthropic_offers_a_pasted_code_and_none_require_one() -> None:
+    """`paste_code_flow` is a FALLBACK marker, not a requirement.
+
+    It matches the reference implementation exactly: Anthropic is the one
+    loopback provider that also accepts a pasted code (for a browser on another
+    machine), and it is raced against the callback rather than awaited. Every
+    other interactive provider must be loopback-or-device-code only, because a
+    provider that silently demands typing is indistinguishable from a hang.
+    """
+    from local_operator.providers.registry import PROVIDER_REGISTRY
+
+    paste = {p.id for p in PROVIDER_REGISTRY if p.login is not None and p.paste_code_flow}
+    assert paste == {"anthropic"}, paste

@@ -31,8 +31,8 @@ def test_tcss_has_no_literal_hex() -> None:
     assert not _HEX_RE.search(text), f"literal hex in tcss: {_HEX_RE.findall(text)}"
 
 
-def test_tcss_pins_one_row_for_tool_cards_and_the_status_band() -> None:
-    """The collapsed card and the status band are both pinned to one row.
+def test_tcss_pins_card_and_band_heights_rather_than_leaving_them_auto() -> None:
+    """The collapsed card and the status band are both pinned, not ``auto``.
 
     Pinning is not decoration here. A card builds its first row before it is
     laid out, against a guessed width; under ``height: auto`` that first
@@ -40,8 +40,12 @@ def test_tcss_pins_one_row_for_tool_cards_and_the_status_band() -> None:
     turning a ledger of one-line traces into a double-spaced list. The pin
     makes the worst case a clipped cell for one frame instead.
 
-    Exactly one selector may opt out: an EXPANDED card, whose whole purpose
-    is to be taller than one row.
+    The band is TWO rows for one row of content: its top padding row is the gap
+    that separates it from the input line above, and because the band and the
+    input panel share one fill, a padded row is indistinguishable from a gap.
+
+    Exactly one selector may opt out: an EXPANDED card, whose whole purpose is
+    to be taller than one row.
     """
     text = TCSS.read_text()
     tool_block = re.search(r"^ToolCard\s*\{([^}]*)\}", text, re.MULTILINE)
@@ -49,7 +53,9 @@ def test_tcss_pins_one_row_for_tool_cards_and_the_status_band() -> None:
     band_block = re.search(r"^#status-band\s*\{([^}]*)\}", text, re.MULTILINE)
     assert tool_block is not None and "height: 1;" in tool_block.group(1)
     assert expanded is not None and "height: auto;" in expanded.group(1)
-    assert band_block is not None and "height: 1;" in band_block.group(1)
+    assert band_block is not None and "height: 2;" in band_block.group(1)
+    # One row of that height is the gap; the band itself still renders one row.
+    assert "padding: 1 1 0 0;" in band_block.group(1)
 
 
 def test_block_selectors_declare_no_margin_or_padding() -> None:

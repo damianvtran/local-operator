@@ -132,7 +132,13 @@ def truncate_cells(text: str, width: int, ellipsis: str = "…") -> str:
             break
         out.append(char)
         used += w
-    return "".join(out) + ellipsis
+    # `rstrip()` so the cut never lands as "word …". Without it the same message
+    # truncates in two different typographic styles depending on the terminal
+    # width — tight at one width, with a stray space at the next — which is most
+    # visible on the error row, whose whole job is to read cleanly beside the
+    # outcome glyph. Every caller benefits (band model label, picker
+    # descriptions, tool arguments), and the result is never WIDER than before.
+    return "".join(out).rstrip() + ellipsis
 
 
 def compact_path(text: str) -> str:
@@ -620,7 +626,7 @@ class ToolCard(TranscriptBlock):
             if cap:
                 label = truncate_cells(label, cap, ellipsis="")
             return [(label, dim)]
-        # Error message danger, glyph and duration dim — three runs.
+        # Error message and glyph danger, duration dim — three runs.
         #
         # The GLYPH sits in the status column with the duration, not at the head
         # of the message (D20). The right edge is where an operator scans a run

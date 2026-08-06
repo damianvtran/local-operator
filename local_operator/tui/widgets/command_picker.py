@@ -131,6 +131,36 @@ def slash_context(text: str) -> SlashContext | None:
     return SlashContext(start, stripped[1:])
 
 
+def slash_argument(text: str, commands: tuple[str, ...]) -> str | None:
+    """The ARGUMENT being typed after one of ``commands``, else ``None``.
+
+    The mirror image of :func:`slash_context`: that one is live while the command
+    word is still open, this one takes over the instant the word is terminated by
+    a space. Together they mean a single buffer drives two different lists without
+    either having to know about the other — ``/mo`` offers commands, ``/model ``
+    offers models, and the handover happens on the space the user was going to
+    type anyway.
+
+    Returns the argument text, which may be ``""`` (the command word is complete
+    but nothing has been typed after it — the state that should show the whole
+    catalogue). ``None`` means this is not one of ``commands``.
+
+    Single-line only, matching ``slash_context``: a newline means the user is
+    composing a message, not picking from a list.
+    """
+    lines = text.split("\n")
+    first = next((index for index, line in enumerate(lines) if line.strip()), None)
+    if first is None or len(lines) > first + 1:
+        return None
+    stripped = lines[first].lstrip()
+    if not stripped.startswith("/"):
+        return None
+    word, sep, argument = stripped[1:].partition(" ")
+    if not sep or word.lower() not in commands:
+        return None
+    return argument
+
+
 #: Below this many typed characters the fuzzy tail is suppressed. A one- or
 #: two-letter query matches an arbitrary-looking set by subsequence — `/u`
 #: offered `usage, quit, accounts, logout` and `/g` offered
@@ -152,8 +182,14 @@ def command_suggestions(query: str, commands: list[SlashCommand]) -> list[tuple[
     the keystroke whose entire purpose is "show me the commands". The full
     registry, in registration order, IS the answer to ``/``.
 
-    Short queries keep only prefix matches — see
-    :data:`FUZZY_MIN_QUERY_CHARS`.
+    Short queries PREFER prefix matches — see :data:`FUZZY_MIN_QUERY_CHARS` — but
+    only when there are some. An empty return closes the picker, and a closed
+    picker takes the Tab and Enter guards down with it: Tab falls through to
+    stock TextArea behaviour and indents the user's message, Enter submits the
+    raw text to the agent. So the gate is a preference, not a filter. It has to
+    be, because the queries with no prefix match at all are exactly the natural
+    abbreviations the fuzzy matcher exists for — `/lg` for login and logout,
+    `/ls` for models and skills, `/qt` for quit, `/md` for model.
     """
     if not query:
         return [(command.name, command) for command in commands]
@@ -161,7 +197,8 @@ def command_suggestions(query: str, commands: list[SlashCommand]) -> list[tuple[
     if len(query) >= FUZZY_MIN_QUERY_CHARS:
         return matches
     lowered = query.lower()
-    return [pair for pair in matches if pair[0].lower().startswith(lowered)]
+    prefixed = [pair for pair in matches if pair[0].lower().startswith(lowered)]
+    return prefixed or matches
 
 
 def _pad_to(row: Text, width: int, style: Style) -> Text:
@@ -198,6 +235,10 @@ class CommandPicker(Static):
         self._hovered: int | None = None
         self._query = ""
         self._dismissed_query: str | None = None
+        # Set by an arrow press, cleared whenever the candidate set changes: the
+        # difference between "the matcher put the highlight here" and "I moved it
+        # here", which is what the editor's Enter gate needs to know.
+        self._chosen_by_hand = False
         # Closed picker takes no layout space at all — `visible: hidden` would
         # still reserve the rows and leave a hole above the status band.
         self.display = False
@@ -225,6 +266,11 @@ class CommandPicker(Static):
     def selected_index(self) -> int:
         """Index of the highlighted row within :meth:`suggestions`."""
         return self._selected
+
+    @property
+    def chosen_by_hand(self) -> bool:
+        """True when the user arrowed onto the current row themselves."""
+        return self._chosen_by_hand
 
     @property
     def hovered_index(self) -> int | None:
@@ -266,9 +312,11 @@ class CommandPicker(Static):
         if [name for name, _ in matches] != [name for name, _ in self._matches]:
             # A different candidate set means the old highlight pointed at a
             # different command; keeping the index would silently move the
-            # selection under the user's fingers.
+            # selection under the user's fingers. It also retires an explicit
+            # choice — the row the user arrowed onto is gone.
             self._selected = 0
             self._window_start = 0
+            self._chosen_by_hand = False
         self._matches = matches
         self.display = True
         self._scroll_to_selection()
@@ -279,6 +327,11 @@ class CommandPicker(Static):
         if not self._matches:
             return
         self._selected = (self._selected + delta) % len(self._matches)
+        # An arrow press is the user reading the list and picking a row, which
+        # is the whole of what the ambiguity check is worried about. Recording it
+        # is what lets Enter send on the first press after a deliberate move
+        # while still requiring two on a word the matcher chose alone.
+        self._chosen_by_hand = True
         self._scroll_to_selection()
         self._repaint()
 
@@ -377,11 +430,22 @@ class CommandPicker(Static):
         # feedback about which row a click would run. `tint-select` is the same
         # move `tint-danger` already makes on a failed tool row: elevation says
         # "this is a row", hue says "this is its state" (D8).
+        # Hover is ADDITIVE and selection stays dominant. Written the other way
+        # round — hover overwriting the ground — pointing at the selected row
+        # swapped its clearly-tinted ground for the faintest step in the ramp, so
+        # the highlight vanished under the pointer and the row read as LESS
+        # selected than its neighbours. A mouse user arrowing to a row and then
+        # reaching for the mouse watched the picker appear to lose its place.
         ground = theme_mod.semantic_color("surface")
-        if selected:
-            ground = theme_mod.semantic_color("tint-select")
         if hovered:
-            ground = theme_mod.semantic_color("raised")
+            # `overlay`, not `raised`: raised measures dE2000 3.06 against
+            # surface, which is the very step the comment above rejects as
+            # imperceptible. Every row here is a click target that RUNS a command
+            # and some of them are destructive, so "which row will this click
+            # hit" has to be answerable.
+            ground = theme_mod.semantic_color("overlay")
+        if selected:
+            ground = theme_mod.semantic_color("tint-select-hi" if hovered else "tint-select")
         row_bg = Style(bgcolor=ground)
         name_style = row_bg + Style(color=theme_mod.semantic_color("accent" if selected else "fg"))
         # `dim`, not `faint`. An alias is a typeable command, and the picker is
@@ -389,7 +453,11 @@ class CommandPicker(Static):
         # that discovery rendered at 1.7:1 against its own ground, so the row
         # promised two names and hid one. `faint` stays what it is: chrome, for
         # the band's separators (D2).
-        alias_style = row_bg + Style(color=theme_mod.semantic_color("dim"))
+        #
+        # One step up on the selected row: `dim` over the green-tinted ground
+        # falls to 3.97:1, just under AA, and the selected row is the one the user
+        # is actually reading. The three-tier hierarchy holds everywhere else.
+        alias_style = row_bg + Style(color=theme_mod.semantic_color("muted" if selected else "dim"))
         description_style = row_bg + Style(color=theme_mod.semantic_color("muted"))
         # The cursor is MUTED, not the accent name style: the input's focused
         # chevron is already accent at the same column on the adjacent row, so
