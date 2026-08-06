@@ -40,6 +40,7 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.widgets import Static
 
+from local_operator.session import naming
 from local_operator.session.protocol import SessionProtocol
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import SlashCommand
@@ -72,6 +73,7 @@ from local_operator.tui.widgets.editor import (
 )
 from local_operator.tui.widgets.status_line import StatusLine, format_cost
 from local_operator.tui.widgets.tool_card import ToolCard
+from local_operator.tui.widgets.welcome import WelcomeView, session_welcome_info
 
 #: Slash commands handled synchronously before any prompt is sent. One
 #: registry entry per command; aliases live on the entry (TUI-014).
@@ -109,8 +111,12 @@ LOOP_PROMPT = (
     "If the goal is already fully met, say so plainly and stop."
 )
 
-#: One dim line shown until the first transcript block lands (D9).
-BOOT_HINT = "type a message, or /help for commands"
+#: How often the band re-counts running background jobs. Nothing emits an
+#: event when a job settles, so the subagent segment either polls or goes
+#: stale while the user watches it; a 1 Hz pass over a dict of at most a few
+#: dozen rows is the cheaper of those two costs. The band is only repainted
+#: when the count actually CHANGES.
+JOB_POLL_INTERVAL_S = 1.0
 
 
 class NoticeFn(Protocol):
@@ -153,9 +159,17 @@ class OperatorApp(App[None]):
         self._status: StatusLine | None = None
         self._streaming_block: AssistantBlock | None = None
         self._tool_cards: dict[str, ToolCard] = {}
-        self._boot_hint: NoticeBlock | None = None
+        self._welcome: WelcomeView | None = None
         self._working_block: WorkingBlock | None = None
         self._total_cost: float = 0.0
+        # Auto-naming fires ONCE per session. Latched here rather than on the
+        # session holder because the app is what schedules the call, and a
+        # second submit arriving while the first title is still in flight
+        # must not queue a second provider request.
+        self._name_requested: bool = False
+        # Last subagent count painted, so the 1 Hz poll repaints only on a
+        # real change instead of every tick.
+        self._subagents_shown: int = 0
         # Serializes interactive login flows so two /login commands can never
         # race the one suspended terminal.
         self._login_lock: Any | None = None
@@ -166,16 +180,30 @@ class OperatorApp(App[None]):
 
     # -- composition --------------------------------------------------------
     def compose(self) -> ComposeResult:
-        yield TranscriptView()
+        # The welcome splash is the transcript's EMPTY STATE, so it is mounted
+        # INSIDE the transcript rather than beside it: that hands it exactly
+        # the region above the input dock, and `1fr` (see the tcss) lets it
+        # yield rows to any block appended under it instead of overflowing the
+        # scroll area. It supersedes the old D9 boot-hint line, which was a
+        # real transcript block and would have hidden the splash on mount.
+        with TranscriptView():
+            yield WelcomeView(lambda: session_welcome_info(self._session, self._providers))
         # The status line IS the input box's top row: the band
         # docks at the top of the input panel and carries the structural rule
         # styling, so it can never be overdrawn or pushed off-screen by the
         # editor. One row does double duty — zero extra height (D3/D17).
         with Container(id="input-dock"):
             yield Static(id="status-band")
+            editor = Editor(commands=SLASH_COMMANDS)
             with Horizontal(id="input-row"):
                 yield Static("❯", id="prompt-chevron")
-                yield Editor(commands=SLASH_COMMANDS)
+                yield editor
+            # The picker is the editor's, but it cannot be the editor's CHILD:
+            # it has to draw across the full dock width, outside the chevron
+            # row. Mounted here it lands between the input row and the
+            # bottom-docked status band — under the text it completes, above
+            # the footer — and it claims zero rows while closed.
+            yield editor.picker
 
     def get_css_variables(self) -> dict[str, str]:
         """Brand tokens as the stylesheet's single source of truth."""
@@ -195,13 +223,15 @@ class OperatorApp(App[None]):
 
         transcript = self.query_one(TranscriptView)
         transcript.set_on_clear(self._on_transcript_cleared)  # TUI-009 hook
+        # Cached: every appended block asks the splash to hide, and that path
+        # should not pay for a DOM query per block.
+        self._welcome = self.query_one(WelcomeView)
 
         self._status = StatusLine(self.query_one("#status-band", Static))
         self._status.update(model_label="connecting…", cwd=os.getcwd())
         self.query_one(Editor).focus()
-
-        self._boot_hint = NoticeBlock(BOOT_HINT, "info")
-        transcript.append_block(self._boot_hint)
+        # The count has no event to hang off (see JOB_POLL_INTERVAL_S).
+        self.set_interval(JOB_POLL_INTERVAL_S, self._poll_subagents)
 
         # Await the session in a worker so the app paints first.
         self.run_worker(self._boot_session(), thread=False, group="session")
@@ -217,7 +247,12 @@ class OperatorApp(App[None]):
         self._controller = EventController(session, self)
         self._controller.subscribe()
         assert self._status is not None
-        self._status.update(model_label=session.model_label)
+        self._status.update(
+            model_label=session.model_label,
+            effort=_effort_label(session),
+            context_window=_context_window(session),
+            conversation_name=session.conversation_name,
+        )
 
     def _on_boot_failed(self, error: Exception) -> None:
         self._append_block(NoticeBlock(f"session failed to start: {error}", "error"))
@@ -236,7 +271,15 @@ class OperatorApp(App[None]):
                 pass
             self._session = None
         assert self._status is not None
-        self._status.update(model_label="connecting…", streaming=False)
+        # A reload is a new conversation: its title and its one naming
+        # attempt both reset, or the old name would outlive its session.
+        self._name_requested = False
+        self._status.update(
+            model_label="connecting…",
+            streaming=False,
+            effort="",
+            conversation_name="",
+        )
         await self._boot_session()
 
     # -- resize (TUI-017 / D5) ----------------------------------------------
@@ -294,7 +337,15 @@ class OperatorApp(App[None]):
             self._working_block = None
         self._streaming_block = None
         self._tool_cards = {}
-        self._boot_hint = None
+        # An empty transcript is the welcome view's whole precondition, so the
+        # clear hook is also what brings it back — one mechanism for both
+        # directions rather than a second "should the splash show" rule that
+        # could disagree with this one. The "transcript cleared" notice
+        # appended right after this lands UNDER the splash (it goes through
+        # TranscriptView.append_block, not _append_block), which is why the
+        # receipt for the action survives alongside the restored splash.
+        if self._welcome is not None:
+            self._welcome.set_visible(True)
 
     async def on_unmount(self) -> None:
         if self._status is not None:
@@ -325,13 +376,76 @@ class OperatorApp(App[None]):
                 self._status.update(streaming=False)
 
         self.run_worker(run_prompt(), thread=False, group="turns")
+        # Detached, and deliberately AFTER the turn is dispatched: the title
+        # is decoration, and decoration must never sit in front of the user's
+        # first reply.
+        self._maybe_name_conversation(text)
+
+    # -- conversation naming --------------------------------------------------
+    def _maybe_name_conversation(self, text: str) -> None:
+        """Schedule the one auto-naming call for this conversation.
+
+        Skipping a low-signal opener does NOT spend the attempt: "hi" is
+        usually followed by the actual request, and latching on the greeting
+        would leave the conversation permanently unnamed.
+        """
+        session = self._session
+        if session is None or self._name_requested:
+            return
+        if session.conversation_name:
+            return  # already named: a restored session, or an explicit rename
+        if naming.is_low_signal(text):
+            return
+        self._name_requested = True
+        self.run_worker(self._name_conversation_worker(session, text), thread=False, group="naming")
+
+    async def _name_conversation_worker(self, session: SessionProtocol, text: str) -> None:
+        """Await the title off the turn's path and paint it when it lands.
+
+        ``generate_title`` absorbs every failure and bounds its own wait, so
+        there is nothing to catch here — a provider that raises or hangs just
+        leaves the band nameless, which is the intended degradation.
+        """
+        title = await naming.generate_title(text, session.complete_once)
+        if not title or session is not self._session:
+            return  # no title, or the session was reloaded out from under it
+        stored = session.set_conversation_name(title, user_set=False)
+        if self._status is not None:
+            self._status.update(conversation_name=stored)
+
+    # -- background jobs ------------------------------------------------------
+    def _poll_subagents(self) -> None:
+        """Repaint the subagent segment only when the running count changes."""
+        count = self._subagent_count()
+        if count == self._subagents_shown:
+            return
+        self._subagents_shown = count
+        if self._status is not None:
+            self._status.update(subagents=count)
+
+    def _subagent_count(self) -> int:
+        """Running ``task`` jobs — the ones that carry a subagent.
+
+        ``bash`` jobs are the operator's own backgrounded shell work, not
+        agents, so counting them would inflate the badge with something the
+        tool cards already show. Never raises: a status segment must not be
+        able to take the app down.
+        """
+        manager = getattr(self._session, "jobs", None)
+        if manager is None:
+            return 0
+        try:
+            return sum(
+                1 for job in manager.list() if job.status == "running" and job.type == "task"
+            )
+        except Exception:
+            return 0
 
     # -- transcript helpers ---------------------------------------------------
     def _append_block(self, block) -> None:
-        """Append a block, lifting the boot hint on the first real block."""
-        if self._boot_hint is not None:
-            self.query_one(TranscriptView).remove_block(self._boot_hint)
-            self._boot_hint = None
+        """Append a block, retiring the welcome view on the first one."""
+        if self._welcome is not None:
+            self._welcome.set_visible(False)
         self.query_one(TranscriptView).append_block(block)
 
     # -- slash commands -----------------------------------------------------
@@ -423,7 +537,14 @@ class OperatorApp(App[None]):
         old_label = session.model_label
         session.set_model(spec)
         if self._status is not None:
-            self._status.update(model_label=session.model_label)
+            # The window and the effort belong to the SPEC, not the session:
+            # a switch that repainted only the label would leave the context
+            # percentage measured against the previous model's window.
+            self._status.update(
+                model_label=session.model_label,
+                effort=_effort_label(session),
+                context_window=_context_window(session),
+            )
         notice(f"model: {old_label} → {session.model_label} (next turn)")
         if old_label.partition("/")[0] != provider:
             notice("switched provider — make sure you are logged in", "warning")
@@ -833,7 +954,12 @@ class OperatorApp(App[None]):
             # explicit "unavailable" so the segment's absence reads as that,
             # not as "free".
             cost_text = "$—"
-        self._status.update(streaming=False, context_tokens=context_tokens, cost=cost_text)
+        self._status.update(
+            streaming=False,
+            context_tokens=context_tokens,
+            context_window=_context_window(self._session),
+            cost=cost_text,
+        )
         if message.error:
             self._append_block(NoticeBlock(message.error, "error"))
         elif message.aborted:
@@ -847,18 +973,22 @@ class OperatorApp(App[None]):
             self._working_block = None
 
     def _cost_for(self, usage) -> float | None:
-        """Best-effort turn cost from the registry pricing (never raises)."""
+        """Best-effort turn cost from the resolved pricing (never raises)."""
         if usage is None or self._session is None:
             return None
         try:
-            from local_operator.model.configure import calculate_cost
-            from local_operator.model.registry import get_model_info
+            from local_operator.model.configure import calculate_cost, resolve_model_info
 
             provider, _, model_id = self._session.model_label.partition("/")
-            info = get_model_info(provider, model_id)
+            # resolve_model_info, NOT get_model_info: aggregators carry a
+            # placeholder registry entry with zero prices, so the static lookup
+            # reported "pricing unknown" for every OpenRouter model even though
+            # the session had already resolved the real numbers. Memoized, so
+            # this is a dict hit after the first turn.
+            info = resolve_model_info(provider, model_id)
             if not (info.input_price or info.output_price):
-                # No pricing in the registry: a confident $0.0000 would read
-                # as "this turn was free" — treat as unknown instead.
+                # Genuinely no pricing: a confident $0.0000 would read as
+                # "this turn was free" — treat as unknown instead.
                 return None
             return calculate_cost(
                 info, getattr(usage, "input_tokens", 0), getattr(usage, "output_tokens", 0)
@@ -945,6 +1075,45 @@ class OperatorApp(App[None]):
             self._append_block(NoticeBlock("retry succeeded", "info"))
         else:
             self._append_block(NoticeBlock("retry failed", "error"))
+
+
+def _model_spec(session) -> Any | None:
+    """The session's active ``ModelSpec``, or ``None`` when it has none.
+
+    Defensive because the TUI also runs against reduced hosts — embedders
+    and the pilot fakes supply a session without the spec accessor — and a
+    status segment must degrade to "unknown" rather than take the app down.
+    """
+    return getattr(session, "model", None)
+
+
+def _context_window(session) -> int:
+    """The active model's context window, or 0 when it is unknown.
+
+    Zero is meaningful downstream: the usage segment renders ``12.4k/?``
+    rather than inventing a denominator to divide by.
+    """
+    window = getattr(_model_spec(session), "context_window", 0) or 0
+    return int(window) if window > 0 else 0
+
+
+def _effort_label(session) -> str:
+    """The model's reasoning-effort label, or "" when it has none.
+
+    ``ModelSpec.reasoning_effort`` is read first so a provider-level effort
+    knob shows its actual level ("high") the moment the spec grows one.
+    Until then the only reasoning signal on the spec is the boolean, and a
+    model that reasons at the provider's default effort is reported as
+    ``reasoning`` — non-reasoning models render nothing, which is what makes
+    the segment's presence informative.
+    """
+    spec = _model_spec(session)
+    if spec is None:
+        return ""
+    explicit = getattr(spec, "reasoning_effort", None)
+    if explicit:
+        return str(explicit).strip().lower()
+    return "reasoning" if getattr(spec, "reasoning", False) else ""
 
 
 def _first_line(text: str) -> str:

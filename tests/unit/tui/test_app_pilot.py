@@ -23,6 +23,7 @@ class FakeSession:
     def __init__(self) -> None:
         self.prompts: list[str] = []
         self.aborts: list[str] = []
+        self.completions: list[tuple[str, str]] = []
         self.disposed = False
         self._handlers: list[Any] = []
 
@@ -59,6 +60,21 @@ class FakeSession:
                 self._handlers.remove(handler)
 
         return unsubscribe
+
+    @property
+    def conversation_name(self) -> str:
+        return getattr(self, "_name", "")
+
+    def set_conversation_name(self, text: str, *, user_set: bool = True) -> str:
+        self._name = (text or "").strip()
+        return self._name
+
+    async def complete_once(self, system: str, prompt: str) -> str:
+        # No title: the naming worker must be inert in the pilot tests, and
+        # an empty completion is exactly the "model said nothing usable"
+        # path that generate_title resolves to None.
+        self.completions.append((system, prompt))
+        return ""
 
     async def dispose(self) -> None:
         self.disposed = True
@@ -266,7 +282,8 @@ async def test_shift_enter_inserts_newline_without_submit() -> None:
 
 @pytest.mark.asyncio
 async def test_tab_completes_slash_without_losing_focus() -> None:
-    """Tab completes /he -> /help and focus stays on the editor (TUI-013)."""
+    """Tab completes /he -> /help (trailing space = the argument slot) and
+    focus stays on the editor (TUI-013)."""
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(80, 24)) as pilot:
@@ -277,7 +294,7 @@ async def test_tab_completes_slash_without_losing_focus() -> None:
         await pilot.press("slash", "h", "e")
         await pilot.press("tab")
         await pilot.pause()
-        assert editor.text == "/help"
+        assert editor.text == "/help "
         assert editor.has_focus  # completion never moves focus
 
 
@@ -387,7 +404,6 @@ async def test_skills_and_mcp_commands_never_crash() -> None:
 # --- autocomplete scoring (sync, I/O-free) --------------------------------
 from local_operator.tui.autocomplete import (  # noqa: E402
     SlashCommand,
-    complete_command,
     match_commands,
     score_command_text_match,
 )
@@ -416,19 +432,25 @@ def test_match_orders_by_score_then_registry() -> None:
     assert [name for name, _ in match_commands("/hi", commands)] == ["history"]
 
 
-def test_complete_only_when_unambiguous() -> None:
-    commands = [SlashCommand("help"), SlashCommand("history"), SlashCommand("exit")]
-    assert complete_command("/hel", commands) == "/help"
-    assert complete_command("/ex", commands) == "/exit"
-    assert complete_command("/h", commands) is None  # help vs history ambiguous
-    assert complete_command("hello", commands) is None  # not a slash token
+def test_completion_takes_the_top_match_when_ambiguous() -> None:
+    """With several matches the picker highlights the top-ranked one and Tab
+    applies it — registration order breaking ties, same ranking the scoring
+    produces (there is no more "refuse when ambiguous" completion)."""
+    editor = Editor(commands=[SlashCommand("help"), SlashCommand("history"), SlashCommand("exit")])
+    editor.text = "/h"  # help and history tie at 900; registry order wins
+    assert editor.picker.highlighted_name() == "help"
+    editor.text = "/hello"  # nothing matches: the picker closes
+    assert not editor.picker.is_open()
 
 
-def test_complete_matches_alias() -> None:
-    """TUI-014: the collapsed exit/quit command still completes via alias."""
-    commands = [SlashCommand("exit", "Quit", aliases=("quit",))]
-    assert complete_command("/q", commands) == "/quit"
-    assert complete_command("/ex", commands) == "/exit"
+def test_completion_matches_alias() -> None:
+    """TUI-014: the collapsed exit/quit command still completes via alias —
+    the alias wins the ranking slot, so the inserted word is the alias."""
+    editor = Editor(commands=[SlashCommand("exit", "Quit", aliases=("quit",))])
+    editor.text = "/q"
+    assert editor.picker.highlighted_name() == "quit"
+    editor.picker.choose(0)  # the mouse path: select row 0 and complete
+    assert editor.text == "/quit "
 
 
 # --- provider-controller slash commands -----------------------------------

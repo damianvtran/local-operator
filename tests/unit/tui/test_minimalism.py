@@ -116,5 +116,8 @@ def test_status_band_renders_a_single_row() -> None:
     status._cost = "$0.0021"
     row = status.render_text(80)
     assert "\n" not in row.plain
-    assert "12.4k tok" in row.plain
+    # No context window was set, so the spend reports against an explicit
+    # unknown denominator rather than inventing a percentage.
+    assert "12.4k/—" in row.plain
     assert "$0.0021" in row.plain
+    assert cell_len(row.plain) <= 80

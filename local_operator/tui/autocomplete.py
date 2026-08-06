@@ -1,16 +1,22 @@
-"""Synchronous slash-command completion for the input editor.
+"""Slash-command matching and ranking for the input editor.
 
-Purely sync and I/O-free by design (the synchronous slash path):
-the slash path runs on every keystroke and must resolve deterministically
+Purely sync and I/O-free by design: matching runs on every keystroke, feeds
+the picker that draws under the editor, and must resolve deterministically
 before Enter is dispatched. File/path completion is async work and lives
-elsewhere (later); only commands complete here.
+elsewhere (later); only commands rank here.
+
+This module ranks, it does not decide: :mod:`local_operator.tui.widgets.
+command_picker` owns which match is highlighted and what gets inserted. Two
+places computing "the" match is how the highlighted row and the applied
+command drift apart, so there is exactly one — :func:`match_commands`.
 
 Scoring contract:
 
 - exact match: 1000
 - prefix match: 900, flat — registry order breaks ties
 - fuzzy subsequence: 1..40, denser matches score higher
-- otherwise 0 (no match)
+- otherwise 0 (no match), which includes the empty prefix: "nothing typed"
+  is not a match, and the bare-``/`` menu is the picker's call to make
 """
 
 from __future__ import annotations
@@ -102,15 +108,3 @@ def match_commands(
             scored.append((-best, registry_index, best_name, command))
     scored.sort(key=lambda item: (item[0], item[1]))
     return [(name, command) for _, _, name, command in scored]
-
-
-def complete_command(text_before_cursor: str, commands: list[SlashCommand]) -> str | None:
-    """Return the completed ``/command`` text, or None when ambiguous/no match.
-
-    Only completes when exactly one command matches; that keeps Tab/Enter
-    deterministic without a picker widget (picker is later work).
-    """
-    matches = match_commands(text_before_cursor, commands)
-    if len(matches) != 1:
-        return None
-    return f"/{matches[0][0]}"

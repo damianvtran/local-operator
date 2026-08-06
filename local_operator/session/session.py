@@ -75,6 +75,7 @@ from local_operator.harness.wake import (
     format_wake_delivery_text,
 )
 from local_operator.session.goal import GoalState
+from local_operator.session.naming import ConversationName
 from local_operator.session.transcript import Transcript
 
 if TYPE_CHECKING:
@@ -232,6 +233,7 @@ class Session:
         skill_resolver: Callable[[str], str | None] | None = None,
         request_approval: Callable[[str, str], Awaitable[bool]] | None = None,
         goal_state: GoalState | None = None,
+        conversation_name: ConversationName | None = None,
         system_blocks_provider: Callable[[], list[str]] | Callable[[], Awaitable[list[str]]],
     ) -> None:
         self._model = model
@@ -243,6 +245,13 @@ class Session:
         # The goal rides the prompt's volatile tail; the holder is shared with
         # the system-blocks provider so an edit applies from the next turn.
         self._goal_state = goal_state if goal_state is not None else GoalState()
+        # The conversation's title. A holder rather than a plain string for
+        # the same reason the goal is one: the title arrives on a DETACHED
+        # naming task after the host already built its status chrome, and
+        # both sides must see the same object rather than a stale copy.
+        self._conversation_name = (
+            conversation_name if conversation_name is not None else ConversationName()
+        )
         self._system_blocks_provider = system_blocks_provider
         self._convert_to_llm = convert_to_llm or _default_convert_to_llm
         self._compaction_settings = _coerce_compaction_settings(compaction_settings)
@@ -377,6 +386,26 @@ class Session:
         next turn and only invalidates that tail — never the cached prefix.
         """
         return self._goal_state.set(text)
+
+    @property
+    def conversation_name(self) -> str:
+        """The conversation's title ("" until one is set or generated)."""
+        return self._conversation_name.text
+
+    @property
+    def conversation_name_state(self) -> ConversationName:
+        """The title holder itself — hosts need the ``user_set`` precedence
+        flag and the once-only request latch, not just the string."""
+        return self._conversation_name
+
+    def set_conversation_name(self, text: str, *, user_set: bool = True) -> str:
+        """Name the conversation; returns the title in force afterwards.
+
+        ``user_set=True`` (an explicit rename) wins permanently: a generated
+        title landing later is discarded rather than overwriting a name the
+        user chose. Auto-naming passes ``user_set=False``.
+        """
+        return self._conversation_name.set(text, user_set=user_set)
 
     @property
     def wake_scheduler(self) -> WakeScheduler:
@@ -929,6 +958,18 @@ class Session:
                 return str(snap["text"])
             return entry.payload.get("summary")
         return None
+
+    async def complete_once(self, system: str, prompt: str) -> str:
+        """One non-tool provider call, exposed for host-side helpers.
+
+        Hosts need the session's configured provider and credentials for
+        small side errands — conversation auto-naming is the first — and
+        rebuilding a client from the spec would duplicate the whole auth
+        cascade. The call carries no tools, no history and no abort signal:
+        it is not a turn, must not appear in the transcript, and must never
+        be awaited on the turn's critical path.
+        """
+        return await self._one_shot_complete(system, prompt)
 
     async def _one_shot_complete(self, system: str, prompt: str) -> str:
         """One non-tool provider call used to produce the compaction summary."""
