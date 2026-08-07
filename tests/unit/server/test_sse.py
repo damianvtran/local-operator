@@ -19,6 +19,7 @@ import json
 
 import pytest
 
+from local_operator.jobs import JobStatus
 from local_operator.server.routes.sse import (
     job_channel,
     message_channel,
@@ -38,6 +39,8 @@ from local_operator.server.utils.sse import (
 )
 from local_operator.server.utils.sse_publisher import (
     legacy_record_frame,
+    publish_agent_event,
+    publish_job_status,
     publish_record,
 )
 from local_operator.server.utils.websocket_manager import WebsocketConnectionType
@@ -485,3 +488,38 @@ async def test_resume_backlog_is_not_swallowed_by_the_terminal_shortcut(
     assert '"n":2' in text
     assert '"n":1' not in text
     assert f"event: {EventName.TERMINAL}" in text
+
+
+def test_cancelled_job_publishes_a_terminal_frame() -> None:
+    """Regression (review B-1): cancel bypasses the child's status queue, so the
+    pump must publish CANCELLED itself or job streams keepalive forever."""
+    broker = EventBroker()
+    publish_job_status(broker, "job-c", JobStatus.CANCELLED, {"error": "Job cancelled"})
+    names = [e.name for e in broker.retained(job_channel("job-c"))]
+    assert names == [EventName.JOB_STATUS, EventName.TERMINAL]
+    assert broker.is_terminal(job_channel("job-c"))
+
+
+def test_resume_into_recreated_channel_reports_a_gap() -> None:
+    """Regression (review B-3): after TTL eviction / restart the channel is
+    recreated fresh; a resume cursor must report a gap, not a clean resume."""
+    broker = EventBroker()
+    sub = broker.subscribe("job:gone", after_seq=5)
+    assert sub.resumed_with_gap is True
+    sub.close()
+
+
+def test_message_delta_routes_to_the_record_channel_via_nested_id() -> None:
+    """Regression (review B-4): engine message events carry the id nested at
+    ``message.id``; the record channel must still receive ``message.delta``."""
+    broker = EventBroker()
+    publish_agent_event(
+        broker,
+        "job-1",
+        {"type": "message_update", "message": {"id": "rec-1"}, "delta": "x"},
+    )
+    record_events = broker.retained(message_channel("rec-1"))
+    assert [e.name for e in record_events] == [EventName.MESSAGE_DELTA]
+    # Tool events keep routing by top-level tool_call_id.
+    publish_agent_event(broker, "job-1", {"type": "tool_execution_start", "tool_call_id": "rec-1"})
+    assert broker.retained(message_channel("rec-1"))[-1].name == EventName.TOOL_START

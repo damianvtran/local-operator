@@ -385,8 +385,15 @@ def create_and_start_job_process_with_queue(
                             logger.warning(f"Received message with unexpected format: {message}")
                 await asyncio.sleep(0.01)
         except asyncio.CancelledError:
-            # Task was cancelled, clean up
-            pass
+            # Cancel bypasses the child's status queue (JobManager.cancel_job
+            # terminates the process and cancels this task), so without this the
+            # SSE job channel would keepalive forever - the exact "stream hangs"
+            # defect the transport exists to kill (review B-1). publish_job_status
+            # maps CANCELLED onto stream.terminal.
+            publish_job_status(
+                event_broker, current_job_id, JobStatus.CANCELLED, {"error": "Job cancelled"}
+            )
+            raise
         except Exception as e:
             logger.exception(f"Error monitoring status queue for job {current_job_id}: {str(e)}")
 

@@ -29,8 +29,11 @@ from typing import Any, Dict, Mapping, Optional
 
 from local_operator.jobs import JobStatus
 from local_operator.server.models.schemas import WebsocketConnectionType
-from local_operator.server.routes.sse import job_channel, message_channel
-from local_operator.server.utils.event_broker import EventBroker
+from local_operator.server.utils.event_broker import (
+    EventBroker,
+    job_channel,
+    message_channel,
+)
 from local_operator.server.utils.sse import EventName, envelope
 from local_operator.types import CodeExecutionResult
 
@@ -126,6 +129,23 @@ def publish_record(
         logger.warning("failed to publish record to SSE broker", exc_info=True)
 
 
+def _record_id_for(payload: Mapping[str, Any]) -> Any:
+    """The record id an event belongs to, for the record-keyed channel.
+
+    Engine message events carry the id nested at ``message.id`` (there is no
+    top-level ``message_id``), while tool events use a top-level
+    ``tool_call_id``; honour both so ``message.*`` reaches the parity endpoint
+    (review B-4).
+    """
+    top = payload.get("message_id")
+    if top:
+        return top
+    nested = payload.get("message")
+    if isinstance(nested, Mapping):
+        return nested.get("id")
+    return payload.get("tool_call_id")
+
+
 def publish_agent_event(
     broker: Optional[EventBroker],
     job_id: Optional[str],
@@ -149,7 +169,7 @@ def publish_agent_event(
         if job_id:
             body["job_id"] = job_id
         channels = [job_channel(job_id)] if job_id else []
-        message_id = body.get("message_id") or body.get("tool_call_id")
+        message_id = _record_id_for(payload)
         if message_id:
             channels.append(message_channel(str(message_id)))
         for channel in channels:
