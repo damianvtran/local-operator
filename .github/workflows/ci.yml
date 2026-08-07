@@ -141,7 +141,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           # Run CLI to create test file
-          local-operator --hosting openrouter --model x-ai/grok-4-fast exec "create a file called test.txt with the text 'hello world' in it" || exit 1
+          local-operator --hosting openrouter --model deepseek/deepseek-v4-flash-0731 exec "create a file called test.txt with the text 'hello world' in it" || exit 1
 
           # Check if file exists and contains correct text
           if [ ! -f test.txt ]; then
@@ -167,7 +167,7 @@ jobs:
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
-          local-operator --hosting openrouter --model x-ai/grok-4-fast \
+          local-operator --hosting openrouter --model deepseek/deepseek-v4-flash-0731 \
             --yolo exec --json "create a file called contract.txt containing ok" \
             > run.jsonl 2> run.err || exit 1
           python scripts/check_streaming_contract.py run.jsonl || {
@@ -181,7 +181,7 @@ jobs:
         run: |
           set +e
           env -u OPENROUTER_API_KEY local-operator --hosting openrouter \
-            --model x-ai/grok-4-fast exec --json "hi" > err_out.jsonl 2> err_err.txt
+            --model deepseek/deepseek-v4-flash-0731 exec --json "hi" > err_out.jsonl 2> err_err.txt
           set -e
           if [ -s err_out.jsonl ]; then
             # `|| [ -n "$line" ]`: bash read returns non-zero at EOF on an
@@ -248,7 +248,7 @@ jobs:
             -d '{
               "prompt": "create a file called test.txt with the text '\''hello world'\'' in it",
               "hosting": "openrouter",
-              "model": "x-ai/grok-4-fast",
+              "model": "deepseek/deepseek-v4-flash-0731",
               "context": [],
               "options": {
                 "temperature": 0.7,
