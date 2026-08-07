@@ -56,6 +56,21 @@ def _frame(app: OperatorApp) -> list[str]:
     return [strip.text for strip in app.screen._compositor.render_strips()]
 
 
+async def _settled_frame(pilot, app: OperatorApp) -> list[str]:
+    """Wait until the frame stops changing (boot composition retired), then
+    return it. Capturing a baseline mid-boot would diff against the settled
+    frame even with logging fully silent — a load-dependent race (CI under
+    coverage boots slower than a laptop)."""
+    previous = None
+    for _ in range(100):
+        await pilot.pause(0.1)
+        current = _frame(app)
+        if current == previous:
+            return current
+        previous = current
+    return previous or _frame(app)
+
+
 @pytest.mark.asyncio
 async def test_logging_does_not_touch_the_frame_or_the_terminal(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -81,8 +96,7 @@ async def test_logging_does_not_touch_the_frame_or_the_terminal(
 
     with file_logging():
         async with app.run_test(size=(80, 24)) as pilot:
-            await pilot.pause()
-            before = _frame(app)
+            before = await _settled_frame(pilot, app)
 
             logger.warning("HTTP 400: `temperature` is deprecated for this model")
             try:
