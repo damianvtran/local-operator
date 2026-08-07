@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Iterator
 from pathlib import Path
-from typing import Any, IO, Union
+from typing import IO, Any, Union
 
 __all__ = ["InvalidLineError", "dump_jsonl", "read_jsonl", "write_jsonl"]
 

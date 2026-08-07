@@ -394,7 +394,9 @@ def _make_skill_resolver(hooks: _SkillsHooks) -> Callable[[str], str | None]:
     return ``None`` so callers can chain resolvers.
     """
     try:
-        from local_operator.skills.api import make_skill_resolver  # type: ignore[attr-defined]
+        from local_operator.skills.api import (
+            make_skill_resolver,  # type: ignore[attr-defined]
+        )
 
         return make_skill_resolver(hooks.by_name)
     except (ImportError, AttributeError):

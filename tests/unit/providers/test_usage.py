@@ -8,8 +8,8 @@ exercised through it.
 
 from __future__ import annotations
 
-import pytest
 import httpx
+import pytest
 
 from local_operator.providers.usage import (
     UsageAmount,

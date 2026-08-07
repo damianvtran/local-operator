@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 
+import pytest
 from mcp.types import (
     BlobResourceContents,
     CallToolResult,
@@ -13,8 +14,6 @@ from mcp.types import (
     TextResourceContents,
     Tool,
 )
-
-import pytest
 
 from local_operator.mcp.tool_bridge import (
     INTENT_FIELD,

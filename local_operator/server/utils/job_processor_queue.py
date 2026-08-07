@@ -19,15 +19,15 @@ from local_operator.env import EnvConfig
 from local_operator.jobs import JobContext, JobContextRecord, JobManager, JobStatus
 from local_operator.server.models.schemas import ChatOptions
 from local_operator.server.utils.event_broker import EventBroker
-from local_operator.server.utils.sse_publisher import (
-    publish_agent_event,
-    publish_job_status,
-    publish_record,
-)
 from local_operator.server.utils.operator import (
     ExecutorInitError,
     StatusQueue,
     create_operator,
+)
+from local_operator.server.utils.sse_publisher import (
+    publish_agent_event,
+    publish_job_status,
+    publish_record,
 )
 from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import ConversationRecord

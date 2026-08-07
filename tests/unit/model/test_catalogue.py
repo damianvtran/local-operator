@@ -422,7 +422,10 @@ def test_the_in_process_memo_expires_with_the_wall_clock() -> None:
     never-expiring memo exactly) left it passing. What needs pinning is that
     ``resolve_model_info`` derives the bucket from the CLOCK.
     """
-    from local_operator.model.configure import _resolve_model_info_cached, resolve_model_info
+    from local_operator.model.configure import (
+        _resolve_model_info_cached,
+        resolve_model_info,
+    )
 
     model = "claude-sonnet-4-20250514"
     now = 1_700_000_000.0

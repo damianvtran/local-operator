@@ -13,10 +13,10 @@ import pytest
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentStartEvent,
+    Message,
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
-    Message,
     NoticeEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,

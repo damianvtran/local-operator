@@ -7,10 +7,7 @@ import asyncio
 
 import pytest
 
-from local_operator.harness.jobs import (
-    DEFAULT_MAX_RUNNING_JOBS,
-    AsyncJobManager,
-)
+from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS, AsyncJobManager
 
 
 async def wait_for(predicate, timeout: float = 2.0) -> None:

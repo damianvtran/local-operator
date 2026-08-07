@@ -145,12 +145,11 @@ class TestCalibration:
         """RS-23: end-to-end through SkillIndex at the SHIPPED threshold —
         for each calibration-style query, the matching skill is selected and
         every unrelated skill is excluded, with absolute score assertions."""
+        import tempfile
         from pathlib import Path
 
         from local_operator.skills.discovery import Skill
         from local_operator.skills.index import SkillIndex
-
-        import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

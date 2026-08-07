@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 from local_operator.harness.types import (  # noqa: E402
     AgentEndEvent,
     AgentStartEvent,

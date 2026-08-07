@@ -36,7 +36,10 @@ from local_operator.server.utils.sse import (
     keepalive,
     open_payload,
 )
-from local_operator.server.utils.sse_publisher import legacy_record_frame, publish_record
+from local_operator.server.utils.sse_publisher import (
+    legacy_record_frame,
+    publish_record,
+)
 from local_operator.server.utils.websocket_manager import WebsocketConnectionType
 from local_operator.types import (
     CodeExecutionResult,

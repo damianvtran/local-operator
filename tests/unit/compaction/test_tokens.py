@@ -12,7 +12,13 @@ from local_operator.compaction.tokens import (
     messages_tokens_upper_bound,
     register_invalidator,
 )
-from local_operator.harness.types import ImageContent, Message, TextContent, ToolCall, Usage
+from local_operator.harness.types import (
+    ImageContent,
+    Message,
+    TextContent,
+    ToolCall,
+    Usage,
+)
 
 
 @pytest.fixture(autouse=True)

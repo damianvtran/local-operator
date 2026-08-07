@@ -40,8 +40,8 @@ attached a scheduler to the ``ToolContext``.
 from __future__ import annotations
 
 import asyncio
-import difflib
 import contextlib
+import difflib
 import fnmatch
 import json
 import os
@@ -68,7 +68,11 @@ from local_operator.harness.types import (
     VariableStoreProtocol,
     WakeSchedulerProtocol,
 )
-from local_operator.harness.wake import WakeSchedule, build_wake_schedule, format_duration
+from local_operator.harness.wake import (
+    WakeSchedule,
+    build_wake_schedule,
+    format_duration,
+)
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
     SPILL_SCHEME,

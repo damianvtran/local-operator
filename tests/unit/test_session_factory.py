@@ -18,12 +18,12 @@ import pytest
 from local_operator import session_factory
 from local_operator.session_factory import (
     _transcript_dir_and_agent_id,
+    attach_mcp_dispose,
     build_initial_blocks,
     coerce_compaction_settings,
     create_session,
     resolve_hosting_model,
     wire_mcp_into_session,
-    attach_mcp_dispose,
 )
 
 # --- Fakes ---------------------------------------------------------------------
@@ -159,9 +159,9 @@ async def test_dict_compaction_config_flows_through_prompt(tmp_config_dir: Path)
         "    strategy: auto\n",
         encoding="utf-8",
     )
+    from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
     from local_operator.credentials import CredentialManager
-    from local_operator.agents import AgentRegistry
 
     config_manager = ConfigManager(tmp_config_dir)
     raw = config_manager.get_config_value("compaction", None)

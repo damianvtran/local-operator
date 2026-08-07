@@ -12,11 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-
+from pathlib import Path
 from typing import Any
 
 import pytest
-from pathlib import Path
 
 import local_operator.tools.builtin as builtin
 from local_operator.harness.types import BrowserSurface, ToolContext

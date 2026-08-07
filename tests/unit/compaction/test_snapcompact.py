@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from PIL import Image
 
+from local_operator.compaction.api import TOOL_ARGS_MAX_CHARS, TOOL_RESULT_MAX_CHARS
 from local_operator.compaction.snapcompact import (
     FRAME_DATA_BYTES_BUDGET,
     FRAME_TOKEN_ESTIMATE,
@@ -20,7 +21,6 @@ from local_operator.compaction.snapcompact import (
     serialize_for_snapcompact,
     strategy_for_model,
 )
-from local_operator.compaction.api import TOOL_ARGS_MAX_CHARS, TOOL_RESULT_MAX_CHARS
 from local_operator.harness.types import (
     ImageContent,
     Message,

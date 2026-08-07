@@ -44,7 +44,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from local_operator.harness.types import AgentMessage, CustomMessage, Message, TextContent
+from local_operator.harness.types import (
+    AgentMessage,
+    CustomMessage,
+    Message,
+    TextContent,
+)
 
 logger = logging.getLogger(__name__)
 

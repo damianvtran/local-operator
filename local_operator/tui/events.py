@@ -52,9 +52,9 @@ from local_operator.harness.types import (
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolExecutionUpdateEvent,
-    Usage,
     TurnEndEvent,
     TurnStartEvent,
+    Usage,
 )
 
 #: Streaming updates flush at ~30 fps (the coalesced cadence).

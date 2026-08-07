@@ -31,7 +31,10 @@ from local_operator.providers.oauth.callback_server import (
     LoginError,
     maybe_await,
 )
-from local_operator.providers.oauth.device_code import DevicePollResult, poll_device_code_flow
+from local_operator.providers.oauth.device_code import (
+    DevicePollResult,
+    poll_device_code_flow,
+)
 
 CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098"
 DEFAULT_AUTH_HOST = "https://auth.kimi.com"

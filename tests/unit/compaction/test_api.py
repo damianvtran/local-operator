@@ -3,7 +3,6 @@
 import importlib.resources
 import re
 
-
 from local_operator.compaction import api as compaction_api
 from local_operator.compaction.api import (
     MAX_SUMMARY_TOKENS,

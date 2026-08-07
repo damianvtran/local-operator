@@ -32,10 +32,10 @@ from local_operator.tui.widgets.welcome import (
     LOGO_MARK,
     MARK_WIDTH,
     MODEL_PENDING,
-    WelcomeInfo,
-    WelcomeView,
     WORDMARK,
     WORDMARK_SPACED,
+    WelcomeInfo,
+    WelcomeView,
     build_welcome_lines,
 )
 

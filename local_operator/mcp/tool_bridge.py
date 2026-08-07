@@ -15,7 +15,12 @@ import re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from local_operator.harness.types import AgentTool, TextContent, ToolExecuteFn, ToolResult
+from local_operator.harness.types import (
+    AgentTool,
+    TextContent,
+    ToolExecuteFn,
+    ToolResult,
+)
 
 if TYPE_CHECKING:
     # Annotation-only: the SDK is an optional extra, and this module must

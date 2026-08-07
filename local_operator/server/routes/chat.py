@@ -43,6 +43,7 @@ from local_operator.server.models.schemas import (
     JobResultSchema,
 )
 from local_operator.server.utils.attachment_utils import process_attachments
+from local_operator.server.utils.event_broker import EventBroker
 
 # Import job processor utilities when needed
 from local_operator.server.utils.job_processor_queue import (
@@ -51,7 +52,6 @@ from local_operator.server.utils.job_processor_queue import (
     run_job_in_process_with_queue,
 )
 from local_operator.server.utils.operator import ExecutorInitError, create_operator
-from local_operator.server.utils.event_broker import EventBroker
 from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import ConversationRecord, ConversationRole
 
