@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.16.0"
+version = "0.16.1"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damian@radienthq.com" }]
@@ -51,6 +51,21 @@ dependencies = [
     "textual>=8.0.0",
     "rich>=13.7",
     "pygments>=2.13",
+    # The desktop UI's installer runs a BARE `pip install local-operator` and
+    # then launches `local-operator serve`, so the default set must stay fully
+    # functional (0.15.10 had these in base; splitting them into extras broke
+    # every already-shipped UI against 0.16.0). The [server]/[mcp]/[images]/
+    # [tokenizer] extras remain as aliases for hosts that install by name.
+    "fastapi",
+    "starlette",
+    "uvicorn",
+    "python-multipart",
+    "websockets>=15.0.1",
+    "apscheduler",
+    "dill",
+    "tiktoken",
+    "mcp>=1.2",
+    "pillow-heif",
 ]
 requires-python = ">=3.12"
 
