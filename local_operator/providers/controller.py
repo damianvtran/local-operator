@@ -22,7 +22,9 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol
 import httpx
 
 from local_operator.harness.types import ModelSpec
-from local_operator.model.configure import build_model_spec  # noqa: F401  (used by callers)
+from local_operator.model.configure import (  # noqa: F401  (used by callers)
+    build_model_spec,
+)
 from local_operator.model.discovery import available_models
 from local_operator.model.registry import static_models
 from local_operator.providers.registry import (

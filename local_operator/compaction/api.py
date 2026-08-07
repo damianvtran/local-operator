@@ -26,12 +26,7 @@ from typing import Any, Awaitable, Callable, Sequence
 
 from pydantic import BaseModel
 
-from local_operator.harness.types import (
-    AgentMessage,
-    CustomMessage,
-    Message,
-    ToolCall,
-)
+from local_operator.harness.types import AgentMessage, CustomMessage, Message, ToolCall
 
 from .cutpoint import find_cut_point, prepare_partitions
 from .pruning import (

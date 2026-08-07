@@ -24,11 +24,7 @@ from local_operator.mcp.auth import (
     parse_oauth_callback_input,
     wire_oauth_auth,
 )
-from local_operator.mcp.config import (
-    MCPAuthConfig,
-    MCPHttpServerConfig,
-    MCPOAuthConfig,
-)
+from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig, MCPOAuthConfig
 
 
 @dataclass

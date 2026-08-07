@@ -13,13 +13,13 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from rich.cells import cell_len
-from pathlib import Path
+from textual.widgets import Static
 
 from local_operator.tui.widgets.status_line import StatusLine
 from local_operator.tui.widgets.tool_card import ToolCard
-from textual.widgets import Static
 
 TCSS = Path(__file__).parent.parent.parent.parent / "local_operator" / "tui" / "local_operator.tcss"
 _HEX_RE = re.compile(r"#[0-9a-fA-F]{3,8}\b")

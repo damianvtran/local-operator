@@ -34,12 +34,12 @@ can never be open at once.
 
 from __future__ import annotations
 
+from typing import Callable
+
 from textual import events
 from textual.message import Message
 from textual.widgets import TextArea
 from textual.widgets.text_area import Edit, EditResult
-
-from typing import Callable
 
 from local_operator.tui.autocomplete import SlashCommand
 from local_operator.tui.widgets.command_picker import (

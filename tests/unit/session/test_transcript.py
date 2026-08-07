@@ -7,11 +7,7 @@ import json
 import pytest
 
 from local_operator.harness.types import CustomMessage, Message
-from local_operator.session.transcript import (
-    ENTRY_MESSAGE,
-    Transcript,
-    TranscriptEntry,
-)
+from local_operator.session.transcript import ENTRY_MESSAGE, Transcript, TranscriptEntry
 
 
 @pytest.fixture

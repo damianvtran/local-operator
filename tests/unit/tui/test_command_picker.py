@@ -29,8 +29,11 @@ from local_operator.tui.widgets.command_picker import (
     command_suggestions,
     slash_context,
 )
-from local_operator.tui.widgets.editor import Editor, EditorSubmitted, ProviderQueryOpened
-
+from local_operator.tui.widgets.editor import (
+    Editor,
+    EditorSubmitted,
+    ProviderQueryOpened,
+)
 from tests.unit.tui.conftest import TCSS_PATH
 
 # ---------------------------------------------------------------------------

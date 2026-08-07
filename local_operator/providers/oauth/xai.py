@@ -22,7 +22,10 @@ from local_operator.providers.oauth.callback_server import (
     LoginError,
     maybe_await,
 )
-from local_operator.providers.oauth.device_code import DevicePollResult, poll_device_code_flow
+from local_operator.providers.oauth.device_code import (
+    DevicePollResult,
+    poll_device_code_flow,
+)
 
 CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
 SCOPES = "openid profile email offline_access grok-cli:access api:access"

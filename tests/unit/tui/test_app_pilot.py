@@ -13,7 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from local_operator.session.mcp_status import McpStartupOutcome
-from local_operator.tui.app import BOOT_LAYOUT_CLASS, OperatorApp, SLASH_COMMANDS
+from local_operator.tui.app import BOOT_LAYOUT_CLASS, SLASH_COMMANDS, OperatorApp
 from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.toast import Toast
@@ -95,9 +95,9 @@ async def _factory(session: FakeSession) -> FakeSession:
 
 def _renderable_plain(renderable) -> str:
     """Recursively flatten a Rich renderable (incl. Group/Padding) to text."""
-    from rich.text import Text
     from rich.console import Group
     from rich.padding import Padding
+    from rich.text import Text
 
     if isinstance(renderable, Text):
         return renderable.plain

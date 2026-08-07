@@ -25,15 +25,15 @@ from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
     AgentStartEvent,
+    Message,
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
     TextContent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
+    ToolResult,
 )
-from local_operator.harness.types import Message
-from local_operator.harness.types import ToolResult
 from local_operator.headless_print import PrintRenderer, printable_event, run_print_mode
 
 # --- Fakes ---------------------------------------------------------------------

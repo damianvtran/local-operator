@@ -56,9 +56,9 @@ from local_operator.session.retention import (  # noqa: E402
     sweep_sessions,
 )
 from local_operator.session.transcript import (  # noqa: E402
-    ENTRY_PRUNE,
     CUSTOM_KIND_MESSAGE,
     ENTRY_MESSAGE,
+    ENTRY_PRUNE,
     Transcript,
     _entry_to_message,
     encode_message_payload,

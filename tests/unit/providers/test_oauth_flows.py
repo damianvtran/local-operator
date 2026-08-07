@@ -19,16 +19,19 @@ from local_operator.providers.oauth.callback_server import (
     ConfigurationError,
     LoginCallbacks,
     LoginCancelledError,
+    LoginError,
     OAuthCallbackFlow,
 )
-from local_operator.providers.oauth.device_code import DevicePollResult, poll_device_code_flow
+from local_operator.providers.oauth.device_code import (
+    DevicePollResult,
+    poll_device_code_flow,
+)
 from local_operator.providers.oauth.openai import (
     decode_jwt_claims,
     identity_from_id_token,
 )
 from local_operator.providers.oauth.pkce import create_pkce_challenge, create_pkce_pair
 from local_operator.providers.oauth.xai import validate_xai_endpoint
-from local_operator.providers.oauth.callback_server import LoginError
 
 pytestmark = pytest.mark.asyncio
 
@@ -372,7 +375,7 @@ async def test_anthropic_authorize_uses_claude_ai_host() -> None:
 async def test_openai_redirect_uri_pinned_to_1455() -> None:
     """OpenAI allowlists the literal http://localhost:1455/auth/callback;
     no port fallback, no 127.0.0.1 rewrite."""
-    from local_operator.providers.oauth.openai import OpenAIOAuthFlow, REDIRECT_URI
+    from local_operator.providers.oauth.openai import REDIRECT_URI, OpenAIOAuthFlow
 
     flow = OpenAIOAuthFlow(LoginCallbacks(), open_browser=lambda url: None)
     assert REDIRECT_URI == "http://localhost:1455/auth/callback"
@@ -404,7 +407,11 @@ async def test_callback_server_rejects_state_mismatch() -> None:
 
 async def test_openai_exchange_sends_state() -> None:
     """PR-13: the token exchange echoes the verified state."""
-    from local_operator.providers.oauth.openai import OpenAIOAuthFlow, TOKEN_URL, REDIRECT_URI
+    from local_operator.providers.oauth.openai import (
+        REDIRECT_URI,
+        TOKEN_URL,
+        OpenAIOAuthFlow,
+    )
 
     captured: dict[str, Any] = {}
 
@@ -464,7 +471,10 @@ def test_openai_credentials_apply_five_minute_skew() -> None:
     """PR-08: minted expiry is expires_in minus the 5-minute skew."""
     import time
 
-    from local_operator.providers.oauth.openai import _credentials_from_token, EXPIRY_SKEW_MS
+    from local_operator.providers.oauth.openai import (
+        EXPIRY_SKEW_MS,
+        _credentials_from_token,
+    )
 
     now = int(time.time() * 1000)
     creds = _credentials_from_token(
@@ -607,10 +617,7 @@ async def test_anthropic_login_via_browser_redirect_without_paste(
 ) -> None:
     """PR-02 end-to-end: an anthropic login completes from the simulated
     browser redirect alone, with NO paste callback attached."""
-    from local_operator.providers.oauth.anthropic import (
-        AUTHORIZE_URL,
-        TOKEN_URL,
-    )
+    from local_operator.providers.oauth.anthropic import AUTHORIZE_URL, TOKEN_URL
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert str(request.url) == TOKEN_URL

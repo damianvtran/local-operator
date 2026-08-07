@@ -20,6 +20,7 @@ import sys
 import types
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 
 from local_operator import cli

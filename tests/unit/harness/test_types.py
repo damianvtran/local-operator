@@ -7,11 +7,7 @@ a UI defect waiting to happen rather than a style question.
 
 from __future__ import annotations
 
-from local_operator.harness.types import (
-    TextContent,
-    ToolExecutionEndEvent,
-    ToolResult,
-)
+from local_operator.harness.types import TextContent, ToolExecutionEndEvent, ToolResult
 
 
 def test_tool_end_error_flag_cannot_disagree_with_result():

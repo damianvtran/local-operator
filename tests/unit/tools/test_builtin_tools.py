@@ -14,12 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.harness.types import (
-    AbortSignal,
-    AgentTool,
-    ToolContext,
-    ToolResult,
-)
+from local_operator.harness.types import AbortSignal, AgentTool, ToolContext, ToolResult
 from local_operator.tools import builtin
 from local_operator.tools.registry import create_tools
 

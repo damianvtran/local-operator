@@ -36,12 +36,7 @@ from typing import Any, Literal, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from local_operator.harness.types import (
-    ImageContent,
-    Message,
-    ModelSpec,
-    TextContent,
-)
+from local_operator.harness.types import ImageContent, Message, ModelSpec, TextContent
 
 from .api import TOOL_ARGS_MAX_CHARS, TOOL_RESULT_MAX_CHARS
 from .png import encode_grayscale_png

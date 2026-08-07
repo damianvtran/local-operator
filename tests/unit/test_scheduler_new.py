@@ -22,8 +22,8 @@ from typing import Any
 
 import pytest
 
-from local_operator import session_factory
 from local_operator import scheduler_service as scheduler_module
+from local_operator import session_factory
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel

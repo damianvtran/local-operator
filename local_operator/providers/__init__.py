@@ -20,17 +20,17 @@ from local_operator.providers.auth_store import (  # noqa: F401
     OAuthAccess,
     StoredCredential,
 )
+from local_operator.providers.clients import WireClient  # noqa: F401
 from local_operator.providers.clients import (  # noqa: F401
     AnthropicClient,
     GoogleClient,
     MockClient,
     OpenAICompatClient,
-    WireClient,  # noqa: F401
 )
+from local_operator.providers.failover import RetrySettings  # noqa: F401
 from local_operator.providers.failover import (  # noqa: F401
     AuthRetryKeyState,
     ProviderError,
-    RetrySettings,  # noqa: F401
     backoff_delay_ms,
     expand_fallback_candidates,
     resolve_chain,

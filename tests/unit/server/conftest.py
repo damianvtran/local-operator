@@ -23,8 +23,8 @@ from local_operator.model.configure import ModelConfiguration
 from local_operator.model.registry import ModelInfo
 from local_operator.scheduler_service import SchedulerService
 from local_operator.server.app import app
-from local_operator.server.utils.operator import ExecutorInitError
 from local_operator.server.utils.event_broker import EventBroker
+from local_operator.server.utils.operator import ExecutorInitError
 from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import (
     ActionType,

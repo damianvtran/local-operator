@@ -2,7 +2,11 @@
 
 import pytest
 
-from local_operator.compaction.cutpoint import _message_tokens, find_cut_point, prepare_partitions
+from local_operator.compaction.cutpoint import (
+    _message_tokens,
+    find_cut_point,
+    prepare_partitions,
+)
 from local_operator.compaction.tokens import _encode_len, estimate_tokens
 from local_operator.harness.types import CustomMessage, Message, ToolCall
 

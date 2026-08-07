@@ -30,7 +30,10 @@ from local_operator.providers.oauth.callback_server import (
     OAuthCallbackFlow,
     maybe_await,
 )
-from local_operator.providers.oauth.device_code import DevicePollResult, poll_device_code_flow
+from local_operator.providers.oauth.device_code import (
+    DevicePollResult,
+    poll_device_code_flow,
+)
 from local_operator.providers.oauth.pkce import create_pkce_pair
 
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"

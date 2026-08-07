@@ -28,7 +28,12 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from pydantic import BaseModel, SecretStr
 
-from local_operator.harness.types import AbortSignal, ChatRequest, ModelSpec, StreamEvent
+from local_operator.harness.types import (
+    AbortSignal,
+    ChatRequest,
+    ModelSpec,
+    StreamEvent,
+)
 from local_operator.model.catalogue import DEFAULT_TTL_S
 from local_operator.model.registry import (
     ModelInfo,

@@ -24,15 +24,6 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple, Protocol
 
-from local_operator.tui.widgets.welcome import MODEL_PENDING
-from local_operator.tui.widgets.transcript import (
-    GAP_CLASS,
-    NoticeBlock,
-    RichBlock,
-    TranscriptView,
-    UserBlock,
-    WorkingBlock,
-)
 from rich.console import Group
 from rich.style import Style
 from rich.terminal_theme import TerminalTheme
@@ -66,21 +57,36 @@ from local_operator.tui.events import (
     TurnEnded,
     TurnStarted,
 )
-from local_operator.tui.markdown_theme import brand_markdown_theme, install_markdown_theme
+from local_operator.tui.markdown_theme import (
+    brand_markdown_theme,
+    install_markdown_theme,
+)
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import (
-    ModelQueryOpened,
     Editor,
     EditorQuit,
     EditorSubmitted,
     InterruptRequested,
+    ModelQueryOpened,
     ProviderQueryOpened,
 )
 from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.status_line import McpStatus, StatusLine, format_cost
 from local_operator.tui.widgets.toast import Toast, format_mcp_startup
 from local_operator.tui.widgets.tool_card import ToolCard
-from local_operator.tui.widgets.welcome import WelcomeView, session_welcome_info
+from local_operator.tui.widgets.transcript import (
+    GAP_CLASS,
+    NoticeBlock,
+    RichBlock,
+    TranscriptView,
+    UserBlock,
+    WorkingBlock,
+)
+from local_operator.tui.widgets.welcome import (
+    MODEL_PENDING,
+    WelcomeView,
+    session_welcome_info,
+)
 
 if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from local_operator.providers.controller import CatalogueEntry
@@ -1888,7 +1894,10 @@ class OperatorApp(App[None]):
         if usage is None or self._session is None:
             return None
         try:
-            from local_operator.model.configure import calculate_cost, resolve_model_info
+            from local_operator.model.configure import (
+                calculate_cost,
+                resolve_model_info,
+            )
 
             provider, _, model_id = self._session.model_label.partition("/")
             # resolve_model_info, NOT get_model_info: aggregators carry a

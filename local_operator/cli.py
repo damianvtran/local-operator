@@ -42,14 +42,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from local_operator.config import ConfigManager
-from local_operator.paths import config_dir
 from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config
 from local_operator.logger import configure_cli_logging, file_logging
 from local_operator.optional import missing_extra_error
+from local_operator.paths import config_dir
 
 if TYPE_CHECKING:
     from local_operator.agents import AgentRegistry
+
 from local_operator.helpers import setup_cross_platform_environment
 
 CLI_DESCRIPTION = """
@@ -1357,7 +1358,11 @@ def main() -> int:
         if invalid is not None:
             return invalid
 
-        from local_operator.agents import AgentData, AgentEditFields, AgentRegistry  # lazy
+        from local_operator.agents import (  # lazy
+            AgentData,
+            AgentEditFields,
+            AgentRegistry,
+        )
 
         agent_registry = AgentRegistry(base_dir)
 

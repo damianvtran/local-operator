@@ -7,10 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.skills.api import (
-    default_skill_roots,
-    make_skill_resolver,
-)
+from local_operator.skills.api import default_skill_roots, make_skill_resolver
 from local_operator.skills.discovery import Skill
 from local_operator.skills.protocol import MAX_READ_BYTES
 
