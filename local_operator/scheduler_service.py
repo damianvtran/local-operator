@@ -79,7 +79,10 @@ from local_operator.jobs import JobContextRecord, JobManager, JobStatus
 from local_operator.types import ConversationRole, OperatorType, Schedule, ScheduleUnit
 
 if TYPE_CHECKING:
+    from local_operator.server.utils.event_broker import EventBroker
     from local_operator.server.utils.websocket_manager import WebSocketManager
+
+from local_operator.server.utils.sse_publisher import publish_job_status
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +127,7 @@ class SchedulerService:
         verbosity_level: VerbosityLevel,
         job_manager: JobManager,
         websocket_manager: "WebSocketManager",
+        event_broker: "EventBroker | None" = None,
     ) -> None:
         self.agent_registry = agent_registry
         self.config_manager = config_manager
@@ -133,6 +137,11 @@ class SchedulerService:
         self.verbosity_level = verbosity_level
         self.job_manager = job_manager
         self.websocket_manager = websocket_manager
+        # Optional SSE fan-out. Scheduled runs execute inline in the parent (no
+        # pump), so without this their job streams would open and keepalive
+        # forever; publishing here gives them the same terminal contract as
+        # async chat jobs (review B-2).
+        self.event_broker = event_broker
 
         self.scheduler = AsyncIOScheduler(timezone="UTC")
         self._run_tasks: set[asyncio.Task[Any]] = set()
@@ -872,6 +881,10 @@ class SchedulerService:
         except Exception:
             logger.exception(f"Failed to record job status {status} for job {job_id}.")
         await self._broadcast_status(job_id, status, result)
+        # Mirror the status onto the SSE broker so scheduled job streams get the
+        # same job.status / stream.terminal contract as async chat jobs (B-2).
+        if self.event_broker is not None:
+            publish_job_status(self.event_broker, job_id, status, result)
 
     async def _broadcast_status(
         self,

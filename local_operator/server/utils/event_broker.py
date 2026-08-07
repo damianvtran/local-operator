@@ -57,6 +57,25 @@ DEFAULT_REPLAY_BUFFER = 256
 # gap notice instead.
 DEFAULT_SUBSCRIBER_QUEUE = 512
 
+
+#: Channel key prefixes. The two namespaces are kept distinct so a job id can
+#: never collide with a record id (both are opaque strings). Defined here, not
+#: in the routes module, so non-HTTP producers (the scheduler) can build channel
+#: keys without importing the FastAPI layer (which would cycle).
+MESSAGE_CHANNEL = "message"
+JOB_CHANNEL = "job"
+
+
+def message_channel(message_id: str) -> str:
+    """The record-keyed channel, parity with the legacy WebSocket key."""
+    return f"{MESSAGE_CHANNEL}:{message_id}"
+
+
+def job_channel(job_id: str) -> str:
+    """The job-keyed channel, openable before any record id exists."""
+    return f"{JOB_CHANNEL}:{job_id}"
+
+
 # A channel with no subscribers and no traffic is evicted after this long.
 # Terminal channels are kept for the same window so a client that reconnects
 # just after completion still observes the terminal frame.
@@ -254,7 +273,12 @@ class EventBroker:
         chan = self._channels.get(channel)
         if chan is None:
             chan = self._open_channel(channel)
-        chan.last_activity = time.monotonic()
+        # Attaching to an already-terminal channel must not refresh its TTL: a
+        # client that reconnects after `stream.terminal` (auto-retry at the
+        # `retry:` hint) would otherwise pin the channel's memory forever
+        # (review B-5).
+        if not chan.terminal:
+            chan.last_activity = time.monotonic()
 
         sub = _Subscriber(queue=asyncio.Queue(maxsize=self._subscriber_queue))
         chan.subscribers.add(sub)
@@ -267,6 +291,11 @@ class EventBroker:
             if chan.buffer and after_seq + 1 < chan.buffer[0].seq:
                 gap = True
             elif not chan.buffer and after_seq + 1 < chan.next_seq:
+                gap = True
+            elif not chan.buffer and chan.next_seq == 1 and after_seq >= 1:
+                # The channel was recreated (TTL eviction or server restart) so
+                # all history the cursor referred to is gone; report the gap
+                # instead of claiming a clean resume (review B-3).
                 gap = True
             for event in backlog:
                 try:

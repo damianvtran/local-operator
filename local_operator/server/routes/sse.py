@@ -38,7 +38,11 @@ from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import StreamingResponse
 
 from local_operator.server.dependencies import get_event_broker, get_job_manager
-from local_operator.server.utils.event_broker import EventBroker
+from local_operator.server.utils.event_broker import (
+    EventBroker,
+    job_channel,
+    message_channel,
+)
 from local_operator.server.utils.sse import (
     HEARTBEAT_INTERVAL_S,
     RETRY_HINT_MS,
@@ -56,19 +60,6 @@ from local_operator.server.utils.sse import (
 
 router = APIRouter(prefix="/v1/sse", tags=["SSE"])
 logger = logging.getLogger("local_operator.server.routes.sse")
-
-#: Channel key prefixes. The two namespaces are kept distinct so a job id can
-#: never collide with a record id (both are opaque strings).
-MESSAGE_CHANNEL = "message"
-JOB_CHANNEL = "job"
-
-
-def message_channel(message_id: str) -> str:
-    return f"{MESSAGE_CHANNEL}:{message_id}"
-
-
-def job_channel(job_id: str) -> str:
-    return f"{JOB_CHANNEL}:{job_id}"
 
 
 def resolve_cursor(last_event_id: Optional[str], after_seq: Optional[int]) -> Optional[int]:
