@@ -142,12 +142,10 @@ class EventName:
     #: A provider call is being retried, possibly on a fallback model.
     RETRY_START = "retry.start"
     RETRY_END = "retry.end"
-    #: Job status transition. Maps to Minerva's ``run.status_changed``.
+    #: Job status transition. Maps to Minerva's ``run.status_changed``. Scheduled
+    #: jobs use this same event (their job id is the schedule id), so there is no
+    #: separate ``schedule.status`` frame to advertise and never receive (N-3).
     JOB_STATUS = "job.status"
-    #: Scheduled-job status. Kept a distinct name because the legacy socket
-    #: pushed this onto the same channel as execution records, where a client
-    #: could mistake it for one.
-    SCHEDULE_STATUS = "schedule.status"
 
 
 #: Events that mean the stream is finished. The route closes after sending one.

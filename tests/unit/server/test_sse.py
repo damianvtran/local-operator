@@ -523,3 +523,17 @@ def test_message_delta_routes_to_the_record_channel_via_nested_id() -> None:
     # Tool events keep routing by top-level tool_call_id.
     publish_agent_event(broker, "job-1", {"type": "tool_execution_start", "tool_call_id": "rec-1"})
     assert broker.retained(message_channel("rec-1"))[-1].name == EventName.TOOL_START
+
+
+def test_detaching_the_last_listener_of_a_terminal_channel_does_not_pin_it() -> None:
+    """Regression (review N-2): unsubscribe must not refresh a terminal
+    channel's TTL, or a client reconnecting after ``stream.terminal`` pins the
+    channel's memory forever."""
+    broker = EventBroker(channel_ttl_s=0)
+    broker.publish("job:t", EventName.TERMINAL, {"type": EventName.TERMINAL}, terminal=True)
+    sub = broker.subscribe("job:t")
+    sub.close()
+    # Opening another channel runs the eviction pass; the idle terminal channel
+    # must be reclaimed now that detaching no longer refreshes its TTL.
+    broker.publish("job:x", EventName.NOTICE, {"type": EventName.NOTICE})
+    assert "job:t" not in broker.channel_names()
