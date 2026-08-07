@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional, Union
 import requests
 from pydantic import BaseModel, SecretStr
 
+from local_operator.clients._http import response_body
+
 
 class ImageSize(str, Enum):
     """Image size options for the FAL API."""
@@ -147,11 +149,7 @@ class FalClient:
             # Regular async mode response with request_id and status
             return FalRequestStatus(request_id=data["request_id"], status=data["status"])
         except requests.exceptions.RequestException as e:
-            error_body = (
-                e.response.content.decode()
-                if hasattr(e, "response") and e.response
-                else "No response body"
-            )
+            error_body = response_body(e)
             raise RuntimeError(
                 f"Failed to submit FAL API request: {str(e)}, Response Body: {error_body}"
             )
@@ -179,11 +177,7 @@ class FalClient:
 
             return FalRequestStatus(request_id=request_id, status=data["status"])
         except requests.exceptions.RequestException as e:
-            error_body = (
-                e.response.content.decode()
-                if hasattr(e, "response") and e.response
-                else "No response body"
-            )
+            error_body = response_body(e)
             raise RuntimeError(
                 f"Failed to get FAL API request status: {str(e)}, Response Body: {error_body}"
             )
@@ -211,11 +205,7 @@ class FalClient:
 
             return FalImageGenerationResponse.model_validate(data)
         except requests.exceptions.RequestException as e:
-            error_body = (
-                e.response.content.decode()
-                if hasattr(e, "response") and e.response
-                else "No response body"
-            )
+            error_body = response_body(e)
             raise RuntimeError(
                 f"Failed to get FAL API request result: {str(e)}, Response Body: {error_body}"
             )

@@ -1,0 +1,479 @@
+/* Local Operator TUI — island-dark, borderless, one green.
+ *
+ * Brand tokens ($lo-*) are injected by OperatorApp.get_css_variables() from
+ * local_operator.tui.theme (single source of truth; this file never carries
+ * a literal hex). The dark ramp is the product's "island" night.
+ *
+ * Minimalism contract (density is the brand):
+ *   - NO bordered boxes anywhere. Structure comes from symbols, tint, and
+ *     spacing. The only rule in the app is the input panel's thin top line,
+ *     structural $lo-dim — the focus accent moves to the chevron, never the
+ *     rule (D23/D24).
+ *   - NO uniform filler rows. Blocks own no outer margin; separation is
+ *     ADAPTIVE and rides one opt-in class (.gap-above) that the transcript
+ *     container applies only where the rhythm needs it — a run of one-line
+ *     tool traces stays flush, prose and expanded output get a blank row.
+ *   - one line per tool action while collapsed; each action is a subtle
+ *     background-filled card (elevation = a background step, never a border
+ *     or shadow) whose FILL carries the outcome
+ *   - the accent green means ONE thing: a turn is live. It is spent on exactly
+ *     five sites, and the list is exhaustive — `grep -rn 'semantic_color("accent")'
+ *     local_operator/tui` plus `$lo-accent` in this file should find no others:
+ *       1. the working line's shimmer crest      (shimmer.py)
+ *       2. a running tool's glyph                (widgets/tool_card.py)
+ *       3. the status band's streaming spinner   (widgets/status_line.py)
+ *       4. the focused input chevron             (this file, #input-row)
+ *       5. the picker's highlighted command NAME (widgets/command_picker.py)
+ *     Everything else is warm neutrals. Links and file paths are the `signal`
+ *     blue and deliberately NOT green; `/usage` provider headings are `label`;
+ *     the brand glyph in the band is `muted`, because a mark that is always on
+ *     screen cannot also mean "running" — see theme.py. Before adding a sixth,
+ *     take one away: an accent spent everywhere is an accent spent nowhere.
+ *
+ * Edge spacing: one cell at the left, right, and bottom screen edges; NONE
+ * along the top while scrolling (content meets the top edge).
+ */
+
+Screen {
+    background: $lo-bg;
+    color: $lo-fg;
+    /* Outer inset for the WHOLE app, matching the omp reference: the chrome is
+     * borderless, so the breathing room at the terminal's edges is what makes
+     * it read as a deliberate surface rather than text that ran out of room.
+     * One row top and bottom, one cell left and right. Children then only
+     * manage spacing BETWEEN themselves. */
+    padding: 1;
+    /* A second layer for the toast overlay. Layers are arranged independently
+     * over the whole region, which is the property that matters: without one,
+     * a toast at the top of the screen would STEAL a row from the transcript
+     * and reflow the conversation for five seconds. It stops the LAYOUT
+     * reflowing — it does NOT stop the screen being erased, so the host is
+     * sized to its card (see `#toast-host`) and not to the width. Everything
+     * else stays on `default` (Textual's name for the unset layer), so this
+     * declaration changes no existing placement. */
+    layers: default toast;
+}
+
+/* Transcript takes all the space above the input panel. One cell of edge
+ * padding on every side INCLUDING the top: the first line of a turn sitting
+ * flush against the terminal's top edge reads as clipped rather than as the
+ * start of the conversation. The scrollbar column is reserved permanently
+ * (D27) so the right-aligned columns measure stable width. */
+TranscriptView {
+    height: 1fr;
+    /* Right padding is 0 (D21): the permanently reserved scrollbar column
+     * below already supplies the right-hand cell, so `1` there made every
+     * background-filled tool card one cell wider on the left than the right —
+     * visible as an off-centre slab on the one element whose whole job is to
+     * look deliberately borderless. */
+    padding: 1 0 0 1;
+    scrollbar-size-vertical: 1;
+    scrollbar-gutter: stable;
+    scrollbar-background: $lo-bg;
+    /* `edge`, not `dim` (D4). The gutter is reserved permanently so the
+     * right-aligned columns measure a stable width, which means the THUMB is
+     * on screen whenever the transcript overflows by even one row. At `dim`
+     * that is a full-cell saturated column running the height of the view —
+     * the largest continuous fill in a narrow frame, reading as the right-hand
+     * border a borderless design must not have. `edge` keeps it structurally
+     * present; hover still lights it to `dim`. */
+    scrollbar-color: $lo-edge;
+    scrollbar-color-hover: $lo-muted;
+}
+
+/* Blocks: zero outer margin, zero padding — no declarations here by design
+ * (the minimalism defense asserts their absence; anything uniform here would
+ * be the "blank row between everything" regression). */
+TranscriptBlock, UserBlock, NoticeBlock, RichBlock, AssistantBlock, ToolCard {
+    width: 1fr;
+    height: auto;
+}
+
+/* The ONLY separator in the app: one blank row, applied per block by the
+ * transcript container's adaptive spacing rule. */
+.gap-above {
+    margin-top: 1;
+}
+
+UserBlock {
+    color: $lo-fg;
+}
+
+NoticeBlock {
+    color: $lo-dim;
+}
+
+RichBlock {
+    color: $lo-fg;
+}
+
+/* Assistant markdown renders normal weight in the base ink color. */
+AssistantBlock {
+    color: $lo-fg;
+}
+
+/* ONE LINE PER ACTION — the row is a background-filled card, one elevation
+ * step brighter than the ground (kit surface on bg).
+ *
+ * The collapsed height is PINNED rather than left to `auto`, and that is
+ * load-bearing: a card is built before it is laid out, so its very first
+ * row is measured against a guessed width and can be a cell or two wide.
+ * Under `auto` that first measurement resolves to two rows and stays there
+ * even after the resize rebuilds the row to fit — a ledger of one-line
+ * traces silently doubles in height. Pinning makes the worst case a clipped
+ * cell for one frame, which is the right failure. */
+ToolCard {
+    height: 1;
+    background: $lo-surface;
+}
+
+/* Expanded is the ONE case that is content-sized: the summary row plus one
+ * row per line of revealed tool output (each already truncated to width, so
+ * nothing reflows). The class beats the type selector above. */
+ToolCard.tool-expanded {
+    height: auto;
+}
+
+/* State reaches the GROUND, not just the glyph: a live action sits one step
+ * proud of its settled neighbours, and a failure stops being neutral. Both
+ * tints sit near the surface luminance so the ledger never shouts. */
+ToolCard.tool-running {
+    background: $lo-raised;
+}
+
+ToolCard.tool-error {
+    background: $lo-tint-danger;
+}
+
+/* Mouse affordance: the whole row is the click target for expand/collapse,
+ * so the whole row lights on hover. Last rule wins over the state tints —
+ * pointing at a row should always look the same. */
+ToolCard:hover {
+    background: $lo-overlay;
+}
+
+/* The status band is the LAST row of the input panel, below the editor. It reads
+ * as a footer for the whole app rather than a caption on the input, and it puts
+ * the least volatile information at the screen's least volatile edge.
+ *
+ * SAME fill as the input panel, not a step down. A second elevation inside one
+ * panel read as two stacked bars — a strip of chrome bolted under the input
+ * rather than part of it. The panel is one surface; the band is simply its last
+ * row, and the blank row above separates them.
+ *
+ * That blank row is PADDING rather than a vertical margin — the stylesheet
+ * permits exactly one such declaration (the adaptive `.gap-above` rule) and a
+ * second source of it is how adaptive spacing decays into "a blank row between
+ * everything". Because the band and the panel share a fill, a padded row is
+ * visually identical to a gap. */
+#status-band {
+    dock: bottom;
+    height: 2;
+    background: $lo-surface;
+    color: $lo-dim;
+    /* Left padding 0: the dock already insets this panel by one cell, so a
+     * symmetric `0 1` stacked a second cell on and put the band's leading glyph
+     * at column 2 while the input chevron directly above it, the tool glyphs and
+     * the prose all start at column 1. The app has one strong left rail and the
+     * bottom row was the only thing missing it. */
+    padding: 1 1 0 0;
+}
+
+/* Input panel: two widgets for one panel, and the split is load-bearing.
+ *
+ * `#input-dock` is a POSITIONER — docked to the bottom, full width, no fill of
+ * its own. It stays docked in both layouts because a docked child's rows are
+ * reserved by the layout engine before anything else is placed: the input is
+ * the one widget on screen that may never be clipped or pushed off, and in the
+ * flow it would be, on any terminal too short for the splash above it.
+ *
+ * `#input-shell` is the panel the user sees: the fill, the padding, and — in the
+ * boot layout — the clamp that turns it into a centred card. It has to be a
+ * separate widget because Textual places a docked child at its edge and its
+ * parent's `align-horizontal` cannot move it, so a clamped DOCK would sit
+ * against the left edge of the terminal rather than centred. The dock centres
+ * this child instead, which in the full-width layout is a no-op.
+ *
+ * No border of any kind. The elevation step from the transcript's `bg` to this
+ * panel's `surface` is the whole separation — a `border-top` rule read as a
+ * bottom border on the app, which is exactly the bordered-chrome look the kit
+ * exists to avoid. If the panel ever stops reading as separate, the answer is
+ * another elevation step, never a line.
+ *
+ * Padding on all four sides: the editor text used to start flush against the
+ * panel's edges, which read as an unfinished box rather than a deliberate
+ * borderless field. One cell of breathing room is what makes "no border" look
+ * chosen instead of missing. */
+#input-dock {
+    dock: bottom;
+    height: auto;
+    align-horizontal: center;
+}
+
+#input-shell {
+    width: 1fr;
+    height: auto;
+    background: $lo-surface;
+    padding: 1;
+}
+
+#input-row {
+    height: auto;
+}
+
+#prompt-chevron {
+    width: 2;
+    height: auto;
+    color: $lo-dim;
+}
+
+/* Focus moves the accent onto the chevron only — the rule stays dim (D23). */
+#input-dock:focus-within #prompt-chevron {
+    color: $lo-accent;
+}
+
+Editor {
+    width: 1fr;
+    height: auto;
+    min-height: 1;
+    max-height: 8;
+    border: none;
+    background: $lo-surface;
+    color: $lo-fg;
+}
+
+/* TextArea component styling (theme "css" reads these from the widget). */
+Editor .text-area--cursor {
+    color: $lo-surface;
+    background: $lo-fg;
+}
+
+Editor .text-area--selection {
+    background: $lo-edge;
+}
+
+Editor .text-area--placeholder {
+    color: $lo-dim;
+}
+
+Editor .text-area--gutter {
+    color: $lo-dim;
+    background: $lo-surface;
+}
+
+Editor .text-area--cursor-line {
+    background: $lo-surface;
+}
+
+Editor .text-area--suggestion {
+    color: $lo-dim;
+}
+
+/* ── startup toast ───────────────────────────────────────────────────────
+ *
+ * Top-right transient overlay. The host HUGS its card (`width: auto`) and both
+ * are positioned by a Python-set offset and `max-width` (see widgets/toast.py —
+ * both depend on the terminal width, which a stylesheet cannot ask for).
+ *
+ * The host must never be wider than the card. Textual hands a widget its whole
+ * region and blanks all of it, so `width: 1fr` here painted the card's 35 cells
+ * of notice and erased the remaining 59 cells of transcript on the same rows —
+ * the layer keeps the toast out of the layout, not off the screen.
+ *
+ * Top rather than bottom-right, which is where Textual's own notifications go:
+ * the input dock and status band are docked to the bottom, so a bottom toast
+ * would cover the editor the user is typing into.
+ *
+ * The card is BORDERLESS and FILLED — elevation is a background step, never a
+ * line (D4). It takes `overlay`, the ramp's top step, because it floats above
+ * every other surface; `ToolCard` is the same treatment one step lower. The
+ * one cell of horizontal padding is the app's edge-padding unit, so the text
+ * does not touch the fill's edge.
+ *
+ * `height: auto` because the message is one or two lines and the widget
+ * decides which — unlike the tool card, this content is measured only once per
+ * toast and is never re-flowed mid-life, so the auto-height trap that pins the
+ * card does not apply here. */
+#toast-host {
+    layer: toast;
+    width: auto;
+    height: auto;
+}
+
+Toast {
+    width: auto;
+    height: auto;
+    padding: 0 1;
+    background: $lo-overlay;
+    color: $lo-fg;
+}
+
+/* ---- welcome view (new-session empty state) --------------------------- *
+ *
+ * Lives INSIDE the transcript, so it is handed exactly the region above the
+ * input panel without any arithmetic here.
+ *
+ * `auto`, not `1fr`: in the boot layout below, the splash RESTS ON the input
+ * card, and a stretched block cannot rest on anything — it reports the whole
+ * region as its height, so the block floats in the middle of it with the card
+ * an arbitrary number of rows further down. Content-sized, the widget reports
+ * exactly the rows its block occupies (build_welcome_lines returns no padding
+ * rows) and the alignment below puts that block against the card. It also
+ * settles the /clear case the old `1fr` was chosen for: the "history is
+ * untouched" notice mounted under this view now simply follows the block
+ * instead of competing with it for the region.
+ *
+ * The region it is measured against already excludes the input panel's rows,
+ * because the panel is DOCKED and the layout engine reserves a docked child's
+ * rows before it offers the rest to the flow. That is what keeps the block's
+ * height budget honest without any arithmetic here or in the widget.
+ *
+ * No border, no rule, no fill: the block is the only thing on screen, so the
+ * mandate's "structure from symbols, tint and spacing" is all it gets. The
+ * accent green is NOT spent here — the logo lockup carries its own hierarchy
+ * through the neutral ramp (mark `dim`, wordmark `fg`).
+ *
+ * HORIZONTAL centring is still computed in the widget, not declared here: what
+ * it draws depends on the cells it actually has (the logo tier drops before the
+ * hints, which drop before the status rows), so it needs the measured width
+ * that `content-align` would hide from it. VERTICAL placement is the
+ * stylesheet's alone (`Screen.boot`), so the two can never disagree. */
+#welcome {
+    width: 1fr;
+    height: auto;
+    min-height: 0;
+    color: $lo-dim;
+}
+
+/* ── boot layout: the input is a centred card until the session has content ──
+ *
+ * Everything above assumes the input panel is a full-width band. Before the
+ * transcript holds a single block it is not: the panel is a clamped card, and
+ * the splash rests directly on it so the two read as ONE column rather than a
+ * logo adrift over a bar. The status band stays the card's last row in both
+ * layouts, so it travels with the input it belongs to instead of stranding
+ * itself at the bottom of the screen, and the pickers keep their place between
+ * the input row and the band — inside the clamp, because they are inside the
+ * card.
+ *
+ * `Screen.boot` is the whole switch, and the app flips it in the same call that
+ * shows or hides the splash (OperatorApp._set_welcome_visible). Two layouts,
+ * ONE condition: a second notion of "the session is empty" is exactly how a
+ * centred boot card ends up on screen beside a populated transcript. A second
+ * class, `.boot-card`, rides on top of it — not a third layout, a MEASUREMENT:
+ * whether this terminal is wide enough for the card to read as one (see the rule
+ * below).
+ *
+ * The clamp is `max(75, 70% of the content box)`, never wider than the content
+ * box. It takes three declarations because tcss has no `max()`: `width` is the
+ * proportion, `min-width` the floor, `max-width` the degradation — and the
+ * degradation BEATS the floor, so at 40 or 20 cells the card is simply as wide
+ * as there is room for rather than overflowing a terminal the minimalism suite
+ * measures. NOTHING is added to make it read as a card: the panel's existing
+ * surface step IS the card (D4), now bounded on both sides instead of running
+ * the width of the terminal.
+ *
+ * `align-vertical: bottom` on the TRANSCRIPT is what puts the splash on the
+ * card: the transcript keeps its `1fr` height, so the region it offers the
+ * splash is still the engine's own "everything the docked panel did not take",
+ * and the content-sized block inside it is pushed to the bottom of that region —
+ * which is the card's top edge. Making the transcript content-sized instead
+ * looks equivalent and is not: its measured height then depends on the block it
+ * contains while the block's budget depends on the region, and the pair settles
+ * one row past the bottom of the screen, where a scrollbar appears and reflows
+ * the width of everything.
+ *
+ * WHERE the pair sits is not this rule's, though — it only says the splash and the
+ * card touch. The pair is the composition, and a composition resting on the bottom
+ * of a 48-row terminal left the upper two thirds of the screen empty, so the app
+ * reserves rows BELOW the card as well (OperatorApp._sync_boot_composition) and the
+ * two slacks come out even. Reserving them is conditional on their being spare:
+ * every row the composition takes is a row the splash's budget loses, and the
+ * splash pays in whole sections — at 28 rows the block wants all 20 it is offered,
+ * and buying air there would spend the mark, the one thing that screen exists to
+ * show. So a short terminal keeps exactly the old behaviour: the pair on the
+ * bottom, all the slack above, where nothing needs it.
+ *
+ * The panel stays DOCKED here. In the flow it would be the last thing placed
+ * and the first thing clipped, and on a terminal too short for the splash above
+ * it, the input — the one widget that may never disappear — is what would walk
+ * off the bottom edge.
+ *
+ * No `transition:` on purpose. The swap is instant: a half-drawn interpolation
+ * of a docked panel reads as a glitch in a terminal, not as motion. */
+Screen.boot TranscriptView {
+    align-vertical: bottom;
+    /* The one row the boot layout does not need — and the LEFT cell restated,
+     * because Textual resolves `padding` as one value per rule: a lone
+     * `padding-top` here would win the whole declaration and take the spine's
+     * left cell with it, moving every row in the region one column out of line
+     * with the input chevron below.
+     *
+     * In the conversation layout the top row keeps a turn's first line off the
+     * terminal's top edge, where it would read as clipped. Here the column is
+     * bottom-aligned against the card, so that row can only ever be slack — and
+     * the screen's own one-cell inset is still above it, so nothing touches the
+     * edge either way. It is not free slack, though: under the shared-region
+     * budget (WelcomeView.get_content_height) every row this region spends is a
+     * row the splash's degradation ladder has to pay for, and the ladder pays in
+     * whole sections. Reclaiming a row that buys nothing is what lets the mark
+     * survive a `/clear` receipt AND two failed MCP servers at 96x28. Frames with
+     * slack are unchanged: the block is bottom-aligned, so a taller region only
+     * grows the empty space above. */
+    padding: 0 0 0 1;
+}
+
+/* The clamp lives on `.boot-card`, not on `Screen.boot`, because a clamp with no
+ * lower guard is worse than no clamp. `max(75, 70%)` insets the panel by 1 to 3
+ * cells between 78 and 84 columns — at 80, the commonest terminal, 2 cells on the
+ * left and 3 on the right — and an inset smaller than the app's own one-cell
+ * gutter does not read as a card. It reads as a full-width bar that is off
+ * centre, which is the one thing a borderless surface must never look like:
+ * there is no edge to attribute the offset to.
+ *
+ * So the app measures the card once per resize and adds this class only when the
+ * inset is at least 4 cells a side (OperatorApp.on_resize; computing a width in
+ * Python is the same move Toast._refit already makes, because a stylesheet cannot
+ * ask how wide the terminal is). Below that threshold the panel stays the
+ * full-width docked bar the base rule already gives it — the same honest
+ * degradation 40 and 20 cells get, arrived at 40 columns earlier.
+ *
+ * `max-width` is the CAP, in cells, not the old `100%`: unbounded, `70%` resolves
+ * to 131 cells on a 190-column terminal and the panel is a bar again — a
+ * borderless fill reads as a card only while the ground beside it is legible as
+ * margin, and past a hundred cells the fill IS the frame. The `100%` guard it
+ * replaces is not lost: the class is only applied where the resolved width leaves
+ * at least 8 cells of box, and the geometry suite measures every rendered row
+ * against the terminal at 16 and 20 cells, where the floor would overflow. */
+Screen.boot.boot-card #input-shell {
+    width: 70%;
+    min-width: 75;
+    max-width: 100;
+}
+
+/* ── slash-command picker ────────────────────────────────────────────────
+ *
+ * The suggestion list under the editor, inside the input dock and above the
+ * bottom-docked status band. Borderless like everything else (D4): the list
+ * is held together by the 2-cell selection gutter — which lines up with
+ * `#prompt-chevron`, so a highlighted `❯` sits directly beneath the prompt's
+ * own `❯` and command names start in the editor's text column. Hence NO left
+ * padding here; padding would break that alignment, and a vertical margin is
+ * not an option the sheet has (the adaptive `.gap-above` rule is the only
+ * vertical margin in the file, deliberately).
+ *
+ * `height` is written by the widget on every repaint (one row per visible
+ * suggestion, plus the overflow count when the list is longer). It is NOT
+ * `auto`: a list measured before layout knows its width resolves one row too
+ * tall per item and stays there — the same trap `ToolCard` pins itself
+ * against. Row backgrounds (selection and hover elevation) are painted into
+ * the rich text, since one Static draws every row.
+ *
+ * The accent lives on the selected command NAME only (D23); this rule paints
+ * the ground the unselected rows sit on, which is the dock's own surface so
+ * the list reads as part of the input rather than as a popup over it. */
+CommandPicker {
+    width: 1fr;
+    background: $lo-surface;
+    color: $lo-fg;
+}

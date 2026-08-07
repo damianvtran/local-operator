@@ -32,7 +32,7 @@ def generate_openapi_schema(app: FastAPI) -> Dict[str, Any]:
         description=app.description,
         routes=app.routes,
         tags=app.openapi_tags,
-        servers=getattr(app, "servers", None),
+        servers=app.servers,
     )
 
 

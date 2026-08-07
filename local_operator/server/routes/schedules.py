@@ -39,7 +39,7 @@ async def create_schedule_for_agent(
     schedule_data: ScheduleCreateRequest,
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     scheduler_service: SchedulerService = Depends(get_scheduler_service),
-):
+) -> JSONResponse:
     """
     Create a new schedule for a specific agent.
     """
@@ -76,7 +76,7 @@ async def list_all_schedules(
     page: int = Query(1, ge=1, description="Page number"),
     per_page: int = Query(10, ge=1, le=100, description="Number of schedules per page"),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
-):
+) -> JSONResponse:
     """
     Retrieve a paginated list of all schedules across all agents.
     """
@@ -121,7 +121,7 @@ async def list_schedules_for_agent(
     page: int = Query(1, ge=1, description="Page number"),
     per_page: int = Query(10, ge=1, le=100, description="Number of schedules per page"),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
-):
+) -> JSONResponse:
     """
     Retrieve a paginated list of schedules for a specific agent.
     """
@@ -164,7 +164,7 @@ async def list_schedules_for_agent(
 async def get_schedule_by_id(
     schedule_id: UUID,
     agent_registry: AgentRegistry = Depends(get_agent_registry),
-):
+) -> JSONResponse:
     """
     Retrieve a single schedule by its ID.
     """
@@ -198,7 +198,7 @@ async def edit_schedule(
     schedule_data: ScheduleUpdateRequest,
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     scheduler_service: SchedulerService = Depends(get_scheduler_service),
-):
+) -> JSONResponse:
     """
     Edit an existing schedule by its ID.
     """
@@ -252,7 +252,7 @@ async def remove_schedule(
     schedule_id: UUID,
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     scheduler_service: SchedulerService = Depends(get_scheduler_service),
-):
+) -> JSONResponse:
     """
     Remove a schedule by its ID.
     """

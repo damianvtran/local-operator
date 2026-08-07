@@ -10,7 +10,6 @@ from local_operator.clients.radient import RadientClient
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig, get_env_config
-from local_operator.executor import LocalCodeExecutor
 from local_operator.model.configure import configure_model
 from local_operator.server.dependencies import (
     get_agent_registry,
@@ -19,6 +18,7 @@ from local_operator.server.dependencies import (
     get_radient_client,
 )
 from local_operator.server.models.schemas import AgentSpeechRequest, SpeechRequest
+from local_operator.server.utils.operator import ServerExecutor
 from local_operator.server.utils.speech_utils import determine_voice_and_instructions
 
 router = APIRouter()
@@ -41,8 +41,8 @@ logger = logging.getLogger("local_operator.server.routes.speech")
 )
 async def create_speech(
     speech_request: SpeechRequest,
-    radient_client=Depends(get_radient_client),
-):
+    radient_client: RadientClient = Depends(get_radient_client),
+) -> Response:
     """
     Generates speech from text using a specified provider and returns the audio data.
     This endpoint is protected by API key authentication and is subject to billing.
@@ -86,12 +86,12 @@ async def create_speech(
 async def create_agent_speech(
     agent_id: str,
     speech_request: AgentSpeechRequest,
-    radient_client=Depends(get_radient_client),
+    radient_client: RadientClient = Depends(get_radient_client),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     credential_manager: CredentialManager = Depends(get_credential_manager),
     config_manager: ConfigManager = Depends(get_config_manager),
     env_config: EnvConfig = Depends(get_env_config),
-):
+) -> Response:
     """
     Generates speech from an agent's last message.
     """
@@ -137,7 +137,13 @@ async def create_agent_speech(
             model_info_client=model_info_client,
             env_config=env_config,
         )
-        executor = LocalCodeExecutor(model_configuration=model_config)
+        executor = ServerExecutor(
+            model_configuration=model_config,
+            credential_manager=credential_manager,
+            config_manager=config_manager,
+            agent_registry=agent_registry,
+            agent=agent,
+        )
 
         voice, instructions = await determine_voice_and_instructions(agent, executor)
 

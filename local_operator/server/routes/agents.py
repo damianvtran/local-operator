@@ -11,7 +11,7 @@ import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path as FilePath
-from typing import Any, Dict, cast
+from typing import Dict
 
 from fastapi import (
     APIRouter,
@@ -27,7 +27,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import ValidationError
 
-from local_operator.agents import AgentEditFields, AgentRegistry
+from local_operator.agents import AgentData, AgentEditFields, AgentRegistry
 from local_operator.clients.radient import RadientClient
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig, get_env_config
@@ -152,9 +152,9 @@ async def list_agents(
             )
         else:  # last_message_datetime (default)
             # Sort directly using the datetime object, fallback to created_date, then min datetime
-            def get_sort_key(agent):
+            def get_sort_key(agent: AgentData) -> datetime:
                 # Prefer last_message_datetime if it's a valid datetime
-                last_msg_dt = getattr(agent, "last_message_datetime", None)
+                last_msg_dt = agent.last_message_datetime
                 if isinstance(last_msg_dt, datetime):
                     # Ensure timezone awareness for comparison
                     return (
@@ -164,7 +164,7 @@ async def list_agents(
                     )
 
                 # Fallback to created_date if it's a valid datetime
-                created_dt = getattr(agent, "created_date", None)
+                created_dt = agent.created_date
                 if isinstance(created_dt, datetime):
                     # Ensure timezone awareness for comparison
                     return (
@@ -256,7 +256,7 @@ async def list_agents(
 async def create_agent(
     agent: AgentCreate,
     agent_registry: AgentRegistry = Depends(get_agent_registry),
-):
+) -> JSONResponse:
     """
     Create a new agent.
     """
@@ -276,7 +276,7 @@ async def create_agent(
     response = CRUDResponse(
         status=201,
         message="Agent created successfully",
-        result=cast(Dict[str, Any], new_agent_serialized),
+        result=new_agent_serialized,
     )
     return JSONResponse(status_code=201, content=jsonable_encoder(response))
 
@@ -338,7 +338,7 @@ async def get_agent(
     return CRUDResponse(
         status=200,
         message="Agent retrieved successfully",
-        result=cast(Dict[str, Any], agent_serialized),
+        result=agent_serialized,
     )
 
 
@@ -419,7 +419,7 @@ async def update_agent(
     return CRUDResponse(
         status=200,
         message="Agent updated successfully",
-        result=cast(Dict[str, Any], updated_agent_serialized),
+        result=updated_agent_serialized,
     )
 
 
@@ -576,7 +576,7 @@ async def download_agent_from_radient(
         return CRUDResponse(
             status=200,
             message="Agent downloaded from Radient successfully",
-            result=cast(Dict[str, Any], agent_serialized),
+            result=agent_serialized,
         )
     except HTTPException:
         raise
@@ -708,20 +708,17 @@ async def get_agent_conversation(
         last_message_datetime = datetime.now()
 
         if conversation_history:
-            # Find the first and last message timestamps
-            # This assumes ConversationRecord has a timestamp attribute
-            # If not, we'll use the current time as a fallback
+            # Find the first and last message timestamps. ``timestamp`` is
+            # optional on ConversationRecord, so records predating it are
+            # skipped and an all-untimestamped history keeps the defaults set
+            # above (min/max raise ValueError on an empty sequence).
             try:
                 first_message_datetime = min(
-                    msg.timestamp
-                    for msg in conversation_history
-                    if hasattr(msg, "timestamp") and msg.timestamp is not None
+                    msg.timestamp for msg in conversation_history if msg.timestamp is not None
                 )
 
                 last_message_datetime = max(
-                    msg.timestamp
-                    for msg in conversation_history
-                    if hasattr(msg, "timestamp") and msg.timestamp is not None
+                    msg.timestamp for msg in conversation_history if msg.timestamp is not None
                 )
             except (AttributeError, ValueError):
                 # If timestamps aren't available, use current time
@@ -908,7 +905,7 @@ async def clear_agent_conversation(
 async def import_agent(
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     file: UploadFile = File(..., description="ZIP file containing agent state files"),
-):
+) -> JSONResponse:
     """
     Import an agent from a ZIP file.
 
@@ -943,7 +940,7 @@ async def import_agent(
             response = CRUDResponse(
                 status=201,
                 message="Agent imported successfully",
-                result=cast(Dict[str, Any], agent_serialized),
+                result=agent_serialized,
             )
             return JSONResponse(status_code=201, content=jsonable_encoder(response))
         except ValueError as e:
@@ -993,7 +990,7 @@ async def export_agent(
     background_tasks: BackgroundTasks,
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     agent_id: str = Path(..., description="ID of the agent to export", examples=["agent123"]),
-):
+) -> FileResponse:
     """
     Export an agent's state files as a ZIP file.
 
@@ -1126,7 +1123,7 @@ async def get_agent_execution_history(
                 timestamps = [
                     execution.timestamp
                     for execution in execution_history
-                    if hasattr(execution, "timestamp") and execution.timestamp is not None
+                    if execution.timestamp is not None
                 ]
                 if timestamps:
                     try:
@@ -1134,7 +1131,7 @@ async def get_agent_execution_history(
                         last_execution_datetime = max(timestamps)
                     except TypeError:
                         # Handle offset-naive and offset-aware datetime comparison
-                        def to_aware(dt):
+                        def to_aware(dt: datetime) -> datetime:
                             if dt.tzinfo is None:
                                 return dt.replace(tzinfo=timezone.utc)
                             return dt
@@ -1365,7 +1362,7 @@ async def update_agent_system_prompt(
 async def list_agent_execution_variables(
     agent_id: str = Path(..., description="ID of the agent"),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
-):
+) -> CRUDResponse[ExecutionVariablesResponse]:
     try:
         variables = agent_registry.load_agent_context(agent_id)
 
@@ -1406,7 +1403,7 @@ async def create_agent_execution_variable(
     variable_data: ExecutionVariable,
     agent_id: str = Path(..., description="ID of the agent"),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
-):
+) -> JSONResponse:
     try:
         # Coerce the value to the correct type based on the type field
         coerced_value = variable_data.value
@@ -1467,7 +1464,7 @@ async def get_agent_execution_variable(
     agent_id: str = Path(..., description="ID of the agent"),
     variable_key: str = Path(..., description="Key of the execution variable"),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
-):
+) -> CRUDResponse[ExecutionVariable]:
     try:
         value = agent_registry.get_context_variable(agent_id, variable_key)
         return CRUDResponse(
@@ -1508,7 +1505,7 @@ async def update_agent_execution_variable(
     agent_id: str = Path(..., description="ID of the agent"),
     variable_key: str = Path(..., description="Key of the execution variable to update"),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
-):
+) -> CRUDResponse[ExecutionVariable]:
     try:
         # Coerce the value to the correct type if type is provided
         coerced_value = variable_data.value

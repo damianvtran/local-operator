@@ -5,6 +5,7 @@ Provides REST endpoints for interacting with the Local Operator agent
 through HTTP requests instead of CLI.
 """
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib.metadata import version
 from pathlib import Path
@@ -19,8 +20,7 @@ from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config
 from local_operator.helpers import setup_cross_platform_environment
 from local_operator.jobs import JobManager
-from local_operator.logger import get_logger
-from local_operator.operator import OperatorType
+from local_operator.logger import configure_console_logging, get_logger
 from local_operator.scheduler_service import SchedulerService
 from local_operator.server.routes import (
     agents,
@@ -32,17 +32,27 @@ from local_operator.server.routes import (
     models,
     schedules,
     speech,
+    sse,
     static,
     transcription,
     websockets,
 )
+from local_operator.server.utils.event_broker import EventBroker
 from local_operator.server.utils.websocket_manager import WebSocketManager
+from local_operator.types import OperatorType
+
+# The server is its own entry point: uvicorn imports this module by name, so
+# there is no `main()` above it to configure logging. Importing
+# `local_operator.logger` used to do it as a side effect; now it is stated
+# here, with the same level (LOG_LEVEL, default WARNING) and format the module
+# import installed.
+configure_console_logging()
 
 logger = get_logger("local_operator.server")
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Initialize and clean up application state.
 
     This function is called when the application starts up and shuts down.
@@ -69,6 +79,10 @@ async def lifespan(app: FastAPI):
     app.state.agent_registry = AgentRegistry(config_dir=config_dir, refresh_interval=3.0)
     app.state.job_manager = JobManager()
     app.state.websocket_manager = WebSocketManager()
+    # The SSE fan-out. One instance per process, mirroring the websocket
+    # manager: both are subscribers to the same pump, which is what keeps the
+    # legacy transport byte-identical while SSE carries the richer taxonomy.
+    app.state.event_broker = EventBroker()
     app.state.env_config = get_env_config()
 
     app.state.scheduler_service = SchedulerService(
@@ -80,6 +94,7 @@ async def lifespan(app: FastAPI):
         verbosity_level=VerbosityLevel.QUIET,
         job_manager=app.state.job_manager,
         websocket_manager=app.state.websocket_manager,
+        event_broker=app.state.event_broker,
     )
 
     await app.state.scheduler_service.start()
@@ -93,6 +108,8 @@ async def lifespan(app: FastAPI):
     app.state.agent_registry = None
     app.state.job_manager = None
     app.state.websocket_manager = None
+    app.state.event_broker.close()
+    app.state.event_broker = None
     app.state.env_config = None
     app.state.scheduler_service = None
 
@@ -171,6 +188,12 @@ app.include_router(
 # /v1/ws
 app.include_router(
     websockets.router,
+)
+
+# /v1/sse - the preferred streaming transport; /v1/ws above is the fallback
+# kept for older clients.
+app.include_router(
+    sse.router,
 )
 
 # /v1/schedules

@@ -11,3 +11,6 @@ dist/
 .coverage*
 htmlcov/
 build/
+# pytest-textual-snapshot report artifact — regenerable, and it embeds the
+# environment (including secrets) in its HTML dump. Never commit it.
+snapshot_report.html

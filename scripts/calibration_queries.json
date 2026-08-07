@@ -1,0 +1,20 @@
+[
+  ["deploy this MR to qa", "minerva-platform-deployments"],
+  ["promote core to prod-2", "minerva-platform-deployments"],
+  ["roll back prod-2", "minerva-platform-deployments"],
+  ["summarize the slack thread and reply", "minerva-support-workspace"],
+  ["reply to this support request", "minerva-support-workspace"],
+  ["customer search usage last month", "minerva-usage-metrics"],
+  ["how many searches did the tenant run", "minerva-usage-metrics"],
+  ["check production logs for errors", "minerva-observability"],
+  ["find the slow search-sync trace", "minerva-observability"],
+  ["toggle a launchdarkly flag for a tenant", "minerva-admin-apis"],
+  ["invite a user to the tenant", "minerva-admin-apis"],
+  ["screenshot the page in the cmux browser", "cmux-browser"],
+  ["open a url in the browser", "cmux-browser"],
+  ["where are the aws credentials", "minerva-credentials"],
+  ["aws sso login for minerva_prod", "minerva-cloud-ops"],
+  ["open an MR and get it reviewed", "minerva-software-development"],
+  ["update a hubspot deal", "minerva-hubspot-crm"],
+  ["run something every 15 minutes", "scheduled-wakeups-omp"]
+]

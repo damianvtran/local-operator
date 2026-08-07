@@ -1,13 +1,12 @@
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 # Set environment variables
 ENV PORT=1111
 ENV HOME=/home/appuser
 
-RUN apt-get update && apt-get install -y \
-    make \
-    gcc \
-    g++ \
+# `make` only: the CMD (and docker-compose) drive the server through the
+# Makefile. No gcc/g++ — see the pip install note below.
+RUN apt-get update && apt-get install -y --no-install-recommends make \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user
@@ -20,15 +19,18 @@ RUN mkdir -p ${HOME}/.local-operator ${HOME}/local-operator-home && \
 # Set working directory
 WORKDIR /app
 
-# Copy requirements and install dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy the rest of the application
+# Copy the application
 COPY . .
 
-# Install the local-operator package in development mode
-RUN pip install -e .
+# The image serves the HTTP API, so it needs the `server` extra on top of the
+# lean default install. Dependencies are declared in pyproject.toml only —
+# there is no requirements.txt to keep in sync.
+#
+# No build toolchain is installed on purpose: every dependency in this set
+# ships prebuilt wheels for CPython on Linux. If a `pip install` here ever
+# starts compiling from source, that is a dependency regression to fix rather
+# than a reason to add gcc back to the image.
+RUN pip install --no-cache-dir -e ".[server]"
 
 EXPOSE ${PORT}
 

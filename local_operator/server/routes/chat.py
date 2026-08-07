@@ -11,15 +11,15 @@ from typing import TYPE_CHECKING  # Added
 from fastapi import APIRouter, Depends, HTTPException, Path
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from tiktoken import encoding_for_model
 
 from local_operator.agents import AgentRegistry
+from local_operator.compaction.tokens import count_text_tokens
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.helpers import parse_agent_action_xml, parse_replacements
 from local_operator.jobs import JobManager
-from local_operator.prompts import EditFileInstructionsPrompt
+from local_operator.prompts_api import render_template
 
 # from local_operator.scheduler_service import SchedulerService # Moved to TYPE_CHECKING
 from local_operator.server.dependencies import (
@@ -27,6 +27,7 @@ from local_operator.server.dependencies import (
     get_config_manager,
     get_credential_manager,
     get_env_config,
+    get_event_broker,
     get_job_manager,
     get_scheduler_service,
     get_websocket_manager,
@@ -42,6 +43,7 @@ from local_operator.server.models.schemas import (
     JobResultSchema,
 )
 from local_operator.server.utils.attachment_utils import process_attachments
+from local_operator.server.utils.event_broker import EventBroker
 
 # Import job processor utilities when needed
 from local_operator.server.utils.job_processor_queue import (
@@ -49,7 +51,7 @@ from local_operator.server.utils.job_processor_queue import (
     run_agent_job_in_process_with_queue,
     run_job_in_process_with_queue,
 )
-from local_operator.server.utils.operator import create_operator
+from local_operator.server.utils.operator import ExecutorInitError, create_operator
 from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import ConversationRecord, ConversationRole
 
@@ -59,6 +61,11 @@ if TYPE_CHECKING:
 
 router = APIRouter(tags=["Chat"])
 logger = logging.getLogger("local_operator.server.routes.chat")
+
+#: Inline-edit prompt template (``local_operator/prompts_md/``). Lives on disk
+#: rather than as a Python constant so prompt edits stay diffable — the same
+#: reason the harness's system prompt moved out of the deleted ``prompts.py``.
+EDIT_FILE_INSTRUCTIONS_TEMPLATE = "edit_file_instructions.md"
 
 
 @router.post(
@@ -93,8 +100,8 @@ async def chat_endpoint(
     credential_manager: CredentialManager = Depends(get_credential_manager),
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
-    env_config=Depends(get_env_config),
-):
+    env_config: EnvConfig = Depends(get_env_config),
+) -> CRUDResponse[ChatResponse]:
     """
     Process a chat request and return the response with context.
 
@@ -108,7 +115,7 @@ async def chat_endpoint(
         description: Internal Server Error
     """
     try:
-        # Create a new executor for this request using the provided hosting and model
+        # Build the per-request session facade for the requested hosting/model
         operator = create_operator(
             request.hosting,
             request.model,
@@ -118,7 +125,7 @@ async def chat_endpoint(
             env_config=env_config,
         )
 
-        model_instance = operator.executor.model_configuration.instance
+        model_configuration = operator.executor.model_configuration
 
         if request.context and len(request.context) > 0:
             # Override the default system prompt with the provided context
@@ -129,16 +136,18 @@ async def chat_endpoint(
         else:
             try:
                 operator.executor.initialize_conversation_history()
-            except ValueError:
+            except ExecutorInitError:
                 # Conversation history already initialized
                 pass
 
-        # Configure model options if provided
+        # Sampling overrides now live on the ModelConfiguration: the rewritten
+        # engine has no mutable per-provider chat-model object, the wire
+        # clients read these off the request built from this configuration.
         if request.options:
-            temperature = request.options.temperature or model_instance.temperature
-            if temperature is not None:
-                model_instance.temperature = temperature
-            model_instance.top_p = request.options.top_p or model_instance.top_p
+            if request.options.temperature is not None:
+                model_configuration.temperature = request.options.temperature
+            if request.options.top_p is not None:
+                model_configuration.top_p = request.options.top_p
 
         processed_attachments = await process_attachments(request.attachments)
         response_json, final_response = await operator.handle_user_input(
@@ -150,17 +159,17 @@ async def chat_endpoint(
         else:
             response_content = ""
 
-        # Calculate token stats using tiktoken
-        tokenizer = None
-        try:
-            tokenizer = encoding_for_model(request.model)
-        except Exception:
-            tokenizer = encoding_for_model("gpt-4o")
-
+        # Token stats go through the shared counter, NOT tiktoken directly:
+        # tiktoken lives behind the `tokenizer` extra, and a module-scope import
+        # here meant `pip install local-operator[server] && local-operator
+        # serve` died with a raw ModuleNotFoundError from inside uvicorn's
+        # import machinery. count_text_tokens is exact when the extra is present
+        # and falls back to the chars/4 estimate when it is not.
         prompt_tokens = sum(
-            len(tokenizer.encode(msg.content)) for msg in operator.executor.agent_state.conversation
+            count_text_tokens(msg.content, request.model)
+            for msg in operator.executor.agent_state.conversation
         )
-        completion_tokens = len(tokenizer.encode(response_content))
+        completion_tokens = count_text_tokens(response_content, request.model)
         total_tokens = prompt_tokens + completion_tokens
 
         return CRUDResponse(
@@ -220,11 +229,11 @@ async def chat_with_agent(
     credential_manager: CredentialManager = Depends(get_credential_manager),
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
-    env_config=Depends(get_env_config),
+    env_config: EnvConfig = Depends(get_env_config),
     agent_id: str = Path(
         ..., description="ID of the agent to use for the chat", examples=["agent123"]
     ),
-):
+) -> CRUDResponse[ChatResponse]:
     """
     Process a chat request using a specific agent from the registry and return the response with
     context. The specified agent is applied to both the operator and executor.
@@ -237,7 +246,7 @@ async def chat_with_agent(
             logger.exception("Error retrieving agent")
             raise HTTPException(status_code=404, detail=f"Agent not found: {e}")
 
-        # Create a new executor for this request using the provided hosting and model
+        # Build the per-request session facade bound to this agent
         operator = create_operator(
             request.hosting,
             request.model,
@@ -248,14 +257,14 @@ async def chat_with_agent(
             persist_conversation=request.persist_conversation,
             env_config=env_config,
         )
-        model_instance = operator.executor.model_configuration.instance
+        model_configuration = operator.executor.model_configuration
 
-        # Configure model options if provided
+        # Request-level sampling overrides beat the agent's stored knobs.
         if request.options:
-            temperature = request.options.temperature or model_instance.temperature
-            if temperature is not None:
-                model_instance.temperature = temperature
-            model_instance.top_p = request.options.top_p or model_instance.top_p
+            if request.options.temperature is not None:
+                model_configuration.temperature = request.options.temperature
+            if request.options.top_p is not None:
+                model_configuration.top_p = request.options.top_p
 
         processed_attachments = await process_attachments(request.attachments)
         response_json, final_response = await operator.handle_user_input(
@@ -263,17 +272,17 @@ async def chat_with_agent(
         )
         response_content = response_json.response if response_json is not None else ""
 
-        # Calculate token stats using tiktoken
-        tokenizer = None
-        try:
-            tokenizer = encoding_for_model(request.model)
-        except Exception:
-            tokenizer = encoding_for_model("gpt-4o")
-
+        # Token stats go through the shared counter, NOT tiktoken directly:
+        # tiktoken lives behind the `tokenizer` extra, and a module-scope import
+        # here meant `pip install local-operator[server] && local-operator
+        # serve` died with a raw ModuleNotFoundError from inside uvicorn's
+        # import machinery. count_text_tokens is exact when the extra is present
+        # and falls back to the chars/4 estimate when it is not.
         prompt_tokens = sum(
-            len(tokenizer.encode(msg.content)) for msg in operator.executor.agent_state.conversation
+            count_text_tokens(msg.content, request.model)
+            for msg in operator.executor.agent_state.conversation
         )
-        completion_tokens = len(tokenizer.encode(response_content))
+        completion_tokens = count_text_tokens(response_content, request.model)
         total_tokens = prompt_tokens + completion_tokens
 
         return CRUDResponse(
@@ -335,11 +344,12 @@ async def chat_async_endpoint(
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     job_manager: JobManager = Depends(get_job_manager),
     websocket_manager: WebSocketManager = Depends(get_websocket_manager),
+    event_broker: EventBroker = Depends(get_event_broker),
     env_config: EnvConfig = Depends(get_env_config),
     scheduler_service: "SchedulerService" = Depends(
         get_scheduler_service
     ),  # Changed to string literal
-):
+) -> JSONResponse:
     """
     Process a chat request asynchronously and return a job ID.
 
@@ -387,11 +397,12 @@ async def chat_async_endpoint(
                 agent_registry,
                 env_config,
                 request.context if request.context else None,
-                request.options.model_dump() if request.options else None,
+                request.options,
             ),
             job_manager=job_manager,
             websocket_manager=websocket_manager,
             scheduler_service=scheduler_service,
+            event_broker=event_broker,
         )
 
         # Return job information
@@ -459,6 +470,7 @@ async def chat_with_agent_async(
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     job_manager: JobManager = Depends(get_job_manager),
     websocket_manager: WebSocketManager = Depends(get_websocket_manager),
+    event_broker: EventBroker = Depends(get_event_broker),
     env_config: EnvConfig = Depends(get_env_config),
     scheduler_service: "SchedulerService" = Depends(
         get_scheduler_service
@@ -466,7 +478,7 @@ async def chat_with_agent_async(
     agent_id: str = Path(
         ..., description="ID of the agent to use for the chat", examples=["agent123"]
     ),
-):
+) -> JSONResponse:
     """
     Process a chat request asynchronously using a specific agent and return a job ID.
 
@@ -528,6 +540,7 @@ async def chat_with_agent_async(
             job_manager=job_manager,
             websocket_manager=websocket_manager,
             scheduler_service=scheduler_service,
+            event_broker=event_broker,
         )
 
         # Return job information
@@ -599,7 +612,7 @@ async def edit_file_with_agent(
     agent_id: str = Path(
         ..., description="ID of the agent to use for editing", examples=["agent123"]
     ),
-):
+) -> JSONResponse:
     """
     Edit a file using a specific agent with an edit prompt.
 
@@ -655,16 +668,19 @@ async def edit_file_with_agent(
         # Load agent conversation history
         try:
             operator.executor.initialize_conversation_history()
-        except ValueError:
+        except ExecutorInitError:
             # Conversation history already initialized
             pass
 
         # Construct the edit prompt with file content
-        edit_instruction = EditFileInstructionsPrompt.format(
-            file_path=resolved_file_path,
-            edit_prompt=request.edit_prompt,
-            file_content=file_content,
-            selection=request.selection,
+        edit_instruction = render_template(
+            EDIT_FILE_INSTRUCTIONS_TEMPLATE,
+            {
+                "file_path": str(resolved_file_path),
+                "edit_prompt": request.edit_prompt,
+                "file_content": file_content,
+                "selection": request.selection,
+            },
         )
 
         processed_attachments = await process_attachments(request.attachments)

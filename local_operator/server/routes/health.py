@@ -31,7 +31,7 @@ router = APIRouter(tags=["Health"])
         },
     },
 )
-async def health_check():
+async def health_check() -> CRUDResponse[HealthCheckResponse]:
     """
     Health check endpoint.
 

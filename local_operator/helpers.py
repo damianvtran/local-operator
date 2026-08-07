@@ -9,6 +9,7 @@ setup for subprocess execution across different operating systems.
 
 # Import standard library modules that are always available
 import base64
+import functools
 import io
 import json
 import logging
@@ -16,32 +17,59 @@ import os
 import platform
 import re
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
-try:
-    from PIL import Image
-    from pillow_heif import register_heif_opener
+from local_operator.optional import missing_extra_error
 
-    # Register HEIF opener with Pillow
-    register_heif_opener()
-    HEIF_SUPPORT = True
-except ImportError:
-    # PIL and pillow_heif are optional dependencies
-    Image = None  # type: ignore
-    HEIF_SUPPORT = False
+if TYPE_CHECKING:
+    from local_operator.types import ResponseJsonSchema
 
-from local_operator.types import ResponseJsonSchema
 
-# Configure logging (optional, but helpful for debugging)
-# Use sys.stdout to ensure logs appear if running as a GUI app without a console
-# Note: BasicConfig should ideally be called only once at application entry point.
-# If called elsewhere, it might not reconfigure. Consider moving this to main app setup.
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", stream=sys.stdout
-)
+@functools.lru_cache(maxsize=1)
+def _heif_image_module() -> Optional[Any]:
+    """Return Pillow's ``Image`` module with the HEIF opener registered, or
+    ``None`` when the ``images`` extra is unusable.
+
+    Deliberately a cached FUNCTION rather than a module-level probe. ``helpers``
+    is on the core import path (``cli.py`` imports it for
+    ``setup_cross_platform_environment``), and importing Pillow + pillow-heif
+    eagerly costs ~23 ms and ~7.6 MB RSS on every single invocation — including
+    ``--version``, shell completion and every scheduler tick — to support HEIC
+    attachments, an input the vast majority of runs never see. Measured with
+    ``scripts/bench_base_overhead.py``; ``tests/unit/test_import_graph.py``
+    pins it so a future module-level ``from PIL import Image`` cannot creep
+    back in.
+
+    The except is NOT just ImportError. ``register_heif_opener()`` EXECUTES
+    here, and these wheels are the platform-fragile ones: a partially-built or
+    ABI-mismatched pillow-heif raises OSError/RuntimeError/AttributeError while
+    loading libheif. A narrower except would turn a broken optional wheel into
+    a dead CLI with an unrelated traceback — exactly what the extras split
+    exists to prevent. lru_cache means the failing import is attempted once per
+    process, not once per attachment.
+    """
+    try:
+        from PIL import Image
+        from pillow_heif import register_heif_opener
+
+        register_heif_opener()
+        return Image
+    except Exception:  # noqa: BLE001 — see the docstring; this must never break the CLI
+        return None
+
+
+# NO logging configuration here. This module used to call `logging.basicConfig`
+# at import, which installed a stderr StreamHandler as a side effect of merely
+# importing a helper — so the effective configuration depended on import order,
+# and no entry point could turn it off. The full-screen TUI needs it off (a
+# record written to stderr lands on top of the Textual frame), and a
+# StreamHandler built here holds the pre-redirect stderr object, so Textual's
+# own `redirect_stderr` cannot save it. `local_operator.logger` owns the
+# configuration now and the entry points call it explicitly:
+# `configure_cli_logging()` in `cli.main`, `configure_console_logging()` in
+# `server.app`, `file_logging()` around the TUI.
 logger = logging.getLogger(__name__)
 
 
@@ -318,7 +346,7 @@ def clean_json_response(response_content: str) -> str:
     return response_content.strip()
 
 
-def process_json_response(response_str: str) -> ResponseJsonSchema:
+def process_json_response(response_str: str) -> "ResponseJsonSchema":
     """Process and validate a JSON response string from the language model.
 
     Args:
@@ -333,6 +361,15 @@ def process_json_response(response_str: str) -> ResponseJsonSchema:
         ValidationError: If the JSON response does not match the expected schema.
         ValueError: If no valid JSON object can be extracted from the response.
     """
+    # Imported here, not at module scope, and the return annotation is a string
+    # for the same reason. ``local_operator.types`` builds its pydantic model
+    # classes at import time (~35 ms on top of pydantic itself, measured with
+    # scripts/bench_base_overhead.py), and this is the ONLY function in helpers
+    # that touches it — but cli.py imports helpers on every invocation for
+    # ``setup_cross_platform_environment``, so the whole CLI paid for a schema
+    # only the legacy JSON-response path ever validates against.
+    from local_operator.types import ResponseJsonSchema
+
     response_content = clean_json_response(response_str)
 
     # Validate the JSON response
@@ -679,12 +716,16 @@ def convert_heic_to_png_data_url(file_path: Union[str, Path]) -> Tuple[str, str]
     Raises:
         Exception: If HEIF support is not available or conversion fails
     """
-    if not HEIF_SUPPORT or Image is None:
-        raise Exception("HEIF support not available. Please install pillow-heif.")
+    # The support flag and the module handle are now ONE memoized lookup: a
+    # separate boolean would have to be recomputed here anyway, and two sources
+    # of truth is how "HEIF_SUPPORT is True but Image is None" bugs happen.
+    image = _heif_image_module()
+    if image is None:
+        raise Exception(missing_extra_error("images", "HEIC/HEIF conversion"))
 
     try:
         # Open and convert HEIC/HEIF to PNG in memory
-        with Image.open(file_path) as img:
+        with image.open(file_path) as img:
             # Convert to RGB if necessary (HEIF can have different color modes)
             if img.mode != "RGB":
                 img = img.convert("RGB")
@@ -716,14 +757,15 @@ def convert_heic_to_png_file(heic_path: Union[str, Path]) -> Path:
     Raises:
         Exception: If conversion fails or HEIF support is not available
     """
-    if not HEIF_SUPPORT or Image is None:
-        raise Exception("HEIF support not available. Please install pillow-heif.")
+    image = _heif_image_module()
+    if image is None:
+        raise Exception(missing_extra_error("images", "HEIC/HEIF conversion"))
 
     heic_path = Path(heic_path)
 
     try:
         # Open the HEIC/HEIF file
-        with Image.open(heic_path) as img:
+        with image.open(heic_path) as img:
             # Convert to RGB if necessary (HEIC can have different color modes)
             if img.mode != "RGB":
                 img = img.convert("RGB")

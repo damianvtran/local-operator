@@ -14,11 +14,11 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import dill
-import jsonlines
 import yaml
 from pydantic import BaseModel, Field
 
+from local_operator.jsonl import read_jsonl, write_jsonl
+from local_operator.optional import missing_extra_error
 from local_operator.types import Schedule  # Keep existing Schedule import
 from local_operator.types import (
     AgentState,
@@ -28,6 +28,27 @@ from local_operator.types import (
     ExecutionType,
     ProcessResponseStatus,
 )
+
+
+def _dill() -> Any:
+    """Import ``dill`` on demand for the pickled-context APIs.
+
+    Only ``save_agent_context`` / ``load_agent_context`` and the one-time
+    migration of legacy ``*_context.pkl`` files need it, and those are reached
+    exclusively from the HTTP API. Keeping the import here means the default
+    install — and every core exec-mode run — never pays for it.
+
+    ``dill`` rather than :mod:`pickle` because the saved context may hold
+    user-defined functions from the execution namespace, which stdlib pickle
+    cannot serialize.
+    """
+    try:
+        import dill
+    except ImportError as exc:
+        raise ImportError(
+            missing_extra_error("server", "Saving and loading pickled agent context")
+        ) from exc
+    return dill
 
 
 class AgentData(BaseModel):
@@ -546,9 +567,8 @@ class AgentRegistry:
         schedules: List[Schedule] = []
         if schedules_file.exists() and schedules_file.stat().st_size > 0:
             try:
-                with jsonlines.open(schedules_file, mode="r") as reader:
-                    for record in reader:
-                        schedules.append(Schedule.model_validate(record))
+                for record in read_jsonl(schedules_file):
+                    schedules.append(Schedule.model_validate(record))
             except Exception as e:
                 logging.error(f"Failed to load schedules from {schedules_file}: {str(e)}")
         return schedules
@@ -561,15 +581,12 @@ class AgentRegistry:
             # Ensure the directory exists
             schedules_file.parent.mkdir(parents=True, exist_ok=True)
 
-            with open(schedules_file, "wb") as f_binary:  # Open in binary for fd
-                # Use a jsonlines writer that writes to the binary file object
-                # We need to encode to bytes before writing
-                with jsonlines.Writer(f_binary) as writer:
-                    for schedule_item in schedules:
-                        # jsonlines.Writer expects dicts, not already encoded json strings
-                        # model_dump(mode="json") returns a dict suitable for json.dumps
-                        # but jsonlines handles the serialization to json string and then to bytes.
-                        writer.write(schedule_item.model_dump(mode="json"))
+            # ``mode="json"`` first: schedules carry datetimes, which the JSON
+            # encoder rejects as-is.
+            write_jsonl(
+                schedules_file,
+                (schedule_item.model_dump(mode="json") for schedule_item in schedules),
+            )
 
         except Exception as e:
             logging.error(f"Failed to save schedules to {schedules_file}: {str(e)}")
@@ -710,9 +727,8 @@ class AgentRegistry:
             conversation_file = agent_dir / "conversation.jsonl"
             if conversation_file.exists() and conversation_file.stat().st_size > 0:
                 try:
-                    with jsonlines.open(conversation_file, mode="r") as reader:
-                        for record in reader:
-                            conversation_records.append(ConversationRecord.model_validate(record))
+                    for record in read_jsonl(conversation_file):
+                        conversation_records.append(ConversationRecord.model_validate(record))
                 except Exception as e:
                     logging.error(f"Failed to load conversation records: {str(e)}")
 
@@ -720,11 +736,8 @@ class AgentRegistry:
             execution_history_file = agent_dir / "execution_history.jsonl"
             if execution_history_file.exists() and execution_history_file.stat().st_size > 0:
                 try:
-                    with jsonlines.open(execution_history_file, mode="r") as reader:
-                        for record in reader:
-                            execution_history_records.append(
-                                CodeExecutionResult.model_validate(record)
-                            )
+                    for record in read_jsonl(execution_history_file):
+                        execution_history_records.append(CodeExecutionResult.model_validate(record))
                 except Exception as e:
                     logging.error(f"Failed to load execution history records: {str(e)}")
 
@@ -732,12 +745,11 @@ class AgentRegistry:
             learnings_file = agent_dir / "learnings.jsonl"
             if learnings_file.exists() and learnings_file.stat().st_size > 0:
                 try:
-                    with jsonlines.open(learnings_file, mode="r") as reader:
-                        for record in reader:
-                            if isinstance(record, str):
-                                learnings_list.append(record)
-                            elif isinstance(record, dict) and "learning" in record:
-                                learnings_list.append(record["learning"])
+                    for record in read_jsonl(learnings_file):
+                        if isinstance(record, str):
+                            learnings_list.append(record)
+                        elif isinstance(record, dict) and "learning" in record:
+                            learnings_list.append(record["learning"])
                 except Exception as e:
                     logging.error(f"Failed to load learnings: {str(e)}")
 
@@ -807,21 +819,22 @@ class AgentRegistry:
         try:
             # Save conversation records
             conversation_file = agent_dir / "conversation.jsonl"
-            with jsonlines.open(conversation_file, mode="w") as writer:
-                for record in agent_state.conversation:
-                    writer.write(record.model_dump())
+            write_jsonl(
+                conversation_file, (record.model_dump() for record in agent_state.conversation)
+            )
 
             # Save execution history records
             execution_history_file = agent_dir / "execution_history.jsonl"
-            with jsonlines.open(execution_history_file, mode="w") as writer:
-                for record in agent_state.execution_history:
-                    writer.write(record.model_dump())
+            write_jsonl(
+                execution_history_file,
+                (record.model_dump() for record in agent_state.execution_history),
+            )
 
             # Save learnings
             learnings_file = agent_dir / "learnings.jsonl"
-            with jsonlines.open(learnings_file, mode="w") as writer:
-                for learning in agent_state.learnings:
-                    writer.write({"learning": learning})
+            write_jsonl(
+                learnings_file, ({"learning": learning} for learning in agent_state.learnings)
+            )
 
             # Save schedules
             self._save_schedules(agent_dir, agent_state.schedules)
@@ -964,7 +977,14 @@ class AgentRegistry:
 
         Raises:
             KeyError: If the agent with the specified ID does not exist.
+            ImportError: If the ``server`` extra (which provides ``dill``) is
+                not installed.
         """
+        # Bound once, up front: the per-value probes below swallow every
+        # exception, so a missing dill must fail here rather than silently
+        # reduce the whole context to nothing.
+        dill = _dill()
+
         if agent_id not in self._agents:
             raise KeyError(f"Agent with id {agent_id} not found")
 
@@ -1058,8 +1078,13 @@ class AgentRegistry:
 
         Raises:
             KeyError: If the agent with the specified ID does not exist.
-            Exception: If there is an error loading the context.
+            ImportError: If the ``server`` extra (which provides ``dill``) is
+                not installed.
         """
+        # Bound once, up front — see save_agent_context: the reconstruction
+        # probes below swallow exceptions, so a missing dill must surface here.
+        dill = _dill()
+
         if agent_id not in self._agents:
             raise KeyError(f"Agent with id {agent_id} not found")
 
@@ -1247,21 +1272,22 @@ class AgentRegistry:
 
                 # Save conversation records
                 conversation_file = agent_dir / "conversation.jsonl"
-                with jsonlines.open(conversation_file, mode="w") as writer:
-                    for record in old_data.conversation:
-                        writer.write(record.model_dump())
+                write_jsonl(
+                    conversation_file, (record.model_dump() for record in old_data.conversation)
+                )
 
                 # Save execution history records
                 execution_history_file = agent_dir / "execution_history.jsonl"
-                with jsonlines.open(execution_history_file, mode="w") as writer:
-                    for record in old_data.execution_history:
-                        writer.write(record.model_dump())
+                write_jsonl(
+                    execution_history_file,
+                    (record.model_dump() for record in old_data.execution_history),
+                )
 
                 # Save learnings
                 learnings_file = agent_dir / "learnings.jsonl"
-                with jsonlines.open(learnings_file, mode="w") as writer:
-                    for learning in old_data.learnings:
-                        writer.write({"learning": learning})
+                write_jsonl(
+                    learnings_file, ({"learning": learning} for learning in old_data.learnings)
+                )
 
                 # Save current plan if provided
                 if old_data.current_plan is not None:
@@ -1301,6 +1327,11 @@ class AgentRegistry:
             return False
 
         try:
+            # Only legacy installs ever reach this point (the file check above
+            # short-circuits otherwise), so the dill requirement is scoped to
+            # exactly the users who already have pickled context on disk.
+            dill = _dill()
+
             # Load old context
             with old_context_file.open("rb") as f:
                 context = dill.load(f)
