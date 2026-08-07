@@ -14,7 +14,20 @@ Regenerate after intentional visual changes with::
 
 from __future__ import annotations
 
+import sys
 from typing import Any
+
+import pytest
+
+#: Golden SVGs are rendered by the CI reference interpreter/platform (ubuntu,
+#: 3.13). Textual's SVG output is not byte-stable across interpreters or OSes,
+#: so the visual gate runs on the reference env and is skipped elsewhere rather
+#: than flapping between matrix legs and local machines.
+REFERENCE_SNAPSHOT_ENV = sys.platform == "linux" and sys.version_info >= (3, 13)
+pytestmark = pytest.mark.skipif(
+    not REFERENCE_SNAPSHOT_ENV,
+    reason="SVG goldens target the CI reference env (linux/py3.13)",
+)
 
 from local_operator.harness.types import (  # noqa: E402
     AgentEndEvent,
