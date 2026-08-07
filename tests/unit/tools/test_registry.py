@@ -1,6 +1,8 @@
 """Registry tests: factory table semantics and selection."""
 
-from local_operator.harness.types import AgentTool, ToolContext
+from typing import Any, Coroutine, cast
+
+from local_operator.harness.types import AgentTool, ToolContext, ToolResult
 from local_operator.tools.registry import (
     DEFAULT_TOOL_NAMES,
     TOOL_BUILDERS,
@@ -12,7 +14,7 @@ class _FakeScheduler:
     """Just enough surface for build_wake_tool's capability check."""
 
     @property
-    def schedules(self) -> list:
+    def schedules(self) -> list[Any]:
         return []
 
     async def update(self, schedules) -> None:
@@ -134,13 +136,21 @@ def test_write_reports_diff_counts_for_new_and_overwritten_files(tmp_path) -> No
 
     ctx = ToolContext(cwd=str(tmp_path))
     created = asyncio.run(
-        execute_write("t1", {"path": "f.txt", "content": "a\nb\nc\n"}, context=ctx)
+        cast(
+            Coroutine[Any, Any, ToolResult],
+            execute_write("t1", {"path": "f.txt", "content": "a\nb\nc\n"}, None, None, ctx),
+        )
     )
+    assert created.details is not None
     assert created.details["added"] == 3
     assert created.details["removed"] == 0
     changed = asyncio.run(
-        execute_write("t2", {"path": "f.txt", "content": "a\nZ\nc\nd\n"}, context=ctx)
+        cast(
+            Coroutine[Any, Any, ToolResult],
+            execute_write("t2", {"path": "f.txt", "content": "a\nZ\nc\nd\n"}, None, None, ctx),
+        )
     )
+    assert changed.details is not None
     assert changed.details["added"] == 2
     assert changed.details["removed"] == 1
 
@@ -152,8 +162,19 @@ def test_edit_reports_diff_counts(tmp_path) -> None:
     from local_operator.tools.builtin import execute_edit, execute_write
 
     ctx = ToolContext(cwd=str(tmp_path))
-    asyncio.run(execute_write("t0", {"path": "f.txt", "content": "a\nb\nc\n"}, context=ctx))
-    result = asyncio.run(
-        execute_edit("t1", {"path": "f.txt", "old_text": "b", "new_text": "B"}, context=ctx)
+    asyncio.run(
+        cast(
+            Coroutine[Any, Any, ToolResult],
+            execute_write("t0", {"path": "f.txt", "content": "a\nb\nc\n"}, None, None, ctx),
+        )
     )
+    result = asyncio.run(
+        cast(
+            Coroutine[Any, Any, ToolResult],
+            execute_edit(
+                "t1", {"path": "f.txt", "old_text": "b", "new_text": "B"}, None, None, ctx
+            ),
+        )
+    )
+    assert result.details is not None
     assert (result.details["added"], result.details["removed"]) == (1, 1)

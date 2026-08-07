@@ -258,6 +258,7 @@ def test_open_reuses_the_surface_it_already_has(monkeypatch) -> None:
     assert not result.is_error
     assert "new-surface" not in fake.verbs()
     assert "goto" in fake.verbs()
+    assert ctx.browser is not None
     assert ctx.browser.surface_id == "surface:9"
 
 
@@ -925,6 +926,7 @@ def test_close_closes_the_surface_and_clears_the_handle(monkeypatch) -> None:
     result = _run(tool, "t1", {"action": "close"}, ctx)
     assert not result.is_error
     assert fake.calls == [["close-surface", "--surface", "surface:73"]]
+    assert ctx.browser is not None
     assert ctx.browser.surface_id == ""
 
 
@@ -948,6 +950,7 @@ def test_close_drops_the_handle_even_when_cmux_fails(monkeypatch) -> None:
     tool = builtin.build_browser_tool(_ctx())
     ctx = _with_surface("surface:73")
     result = _run(tool, "t1", {"action": "close"}, ctx)
+    assert ctx.browser is not None
     assert ctx.browser.surface_id == ""
     assert "dropped the handle" in result.text
 
@@ -1118,6 +1121,7 @@ def test_a_dead_handle_is_refused_instead_of_driving_the_active_tab(monkeypatch,
     assert "surface:99999 is gone" in result.text
     assert "'open'" in result.text, "the model needs to be told how to recover"
     # Cleared, or 'open' would reuse the dead handle and there would be no way back.
+    assert ctx.browser is not None
     assert ctx.browser.surface_id == ""
     # Nothing but the liveness probe itself may reach cmux: the action's own
     # verb would have been answered by the user's tab with exit 0.
@@ -1132,6 +1136,7 @@ def test_open_recovers_from_a_dead_handle_instead_of_erroring(monkeypatch) -> No
     ctx = _with_surface("surface:99999")
     result = _run(tool, "t1", {"action": "open", "url": "https://example.com"}, ctx)
     assert not result.is_error, result.text
+    assert ctx.browser is not None
     assert ctx.browser.surface_id == "surface:73"
     assert any(call[:2] == ["--json", "new-surface"] for call in fake.calls), fake.calls
     assert "goto" not in fake.verbs(), "a goto here would have driven the user's tab"

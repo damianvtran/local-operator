@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import json
 import time
+from typing import Any
 from unittest import mock
 
+import httpx
 import pytest
 
 from local_operator.model import catalogue
@@ -26,7 +28,7 @@ from local_operator.model import configure as configure_mod
 from local_operator.model.catalogue import cached_listing
 
 
-def _payload(model_id: str = "vendor/model", window: int = 1_000_000) -> dict:
+def _payload(model_id: str = "vendor/model", window: int = 1_000_000) -> dict[str, Any]:
     return {
         "data": [
             {
@@ -59,6 +61,7 @@ def test_a_fresh_cache_is_used_without_fetching(tmp_path) -> None:
 def test_an_expired_cache_refetches(tmp_path) -> None:
     cached_listing("openrouter", lambda: _payload(window=1), cache_dir=tmp_path)
     fresh = cached_listing("openrouter", lambda: _payload(window=2), ttl_s=-1, cache_dir=tmp_path)
+    assert fresh is not None
     assert fresh["data"][0]["context_length"] == 2
 
 
@@ -338,6 +341,7 @@ def test_a_future_timestamp_is_stale_not_permanently_fresh(tmp_path) -> None:
         return _payload(window=7)
 
     got = cached_listing("openrouter", fetch, cache_dir=tmp_path)
+    assert got is not None
     assert len(calls) == 1, "a future-stamped entry must be refetched"
     assert got["data"][0]["context_length"] == 7
 
@@ -552,7 +556,7 @@ def test_no_key_anywhere_still_resolves(tmp_path, monkeypatch) -> None:
 # -- schema drift that validates but cannot be mapped (S2) -------------------
 
 
-def _drifted_payload() -> dict:
+def _drifted_payload() -> dict[str, Any]:
     """Validates under ``extra="allow"``, then breaks ``float()``/``int()``."""
     return {
         "data": [
@@ -815,7 +819,7 @@ def test_a_direct_provider_gets_its_real_window_from_its_own_listing(
 # -- the wire, not the seam --------------------------------------------------
 
 
-class _CannedHttp:
+class _CannedHttp(httpx.Client):
     """The slice of `httpx.Client` the transports use, answering canned bodies.
 
     Same shape as `test_discovery.py`'s stub client, kept here rather than shared
@@ -823,22 +827,30 @@ class _CannedHttp:
     helpers across modules is how a fixture ends up serving two contracts.
     """
 
-    def __init__(self, pages: list[dict]) -> None:
+    def __init__(self, pages: list[dict[str, Any]]) -> None:
         self._pages = list(pages)
-        self.calls: list[tuple[str, dict]] = []
+        self.calls: list[tuple[str, dict[str, object]]] = []
 
-    def get(self, url: str, *, headers: dict, params: dict, timeout: float):
-        self.calls.append((url, dict(params)))
+    def get(
+        self,
+        url: Any,
+        *,
+        params: Any = None,
+        headers: Any = None,
+        timeout: Any = None,
+        **kwargs: Any,
+    ) -> "_CannedResponse":
+        self.calls.append((str(url), dict(params or {})))
         assert self._pages, f"unexpected extra request to {url}"
         return _CannedResponse(self._pages.pop(0))
 
 
-class _CannedResponse:
-    def __init__(self, body: dict) -> None:
+class _CannedResponse(httpx.Response):
+    def __init__(self, body: dict[str, Any]) -> None:
         self.status_code = 200
         self._body = body
 
-    def json(self) -> dict:
+    def json(self, **kwargs: Any) -> dict[str, Any]:
         return self._body
 
 

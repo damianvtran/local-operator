@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 import time
 import types
+from collections.abc import Sequence
+from typing import Any
 
 import httpx
 import pytest
@@ -35,14 +37,14 @@ from local_operator.model.registry import ModelInfo, static_models
 from local_operator.providers.registry import PROVIDER_REGISTRY
 
 
-class _Response:
+class _Response(httpx.Response):
     """The slice of ``httpx.Response`` the transports actually touch."""
 
     def __init__(self, status_code: int, body: object) -> None:
         self.status_code = status_code
         self._body = body
 
-    def json(self) -> object:
+    def json(self, **kwargs: Any) -> object:
         # A body that is an exception models a 200 whose payload will not decode,
         # which is a real provider failure mode (an HTML error page served with a
         # 200 by a proxy) and must land on the same ``None`` as a 500.
@@ -51,7 +53,7 @@ class _Response:
         return self._body
 
 
-class _StubClient:
+class _StubClient(httpx.Client):
     """A stand-in for ``httpx.Client`` that never touches the network.
 
     Responses are consumed in order; an exception in the queue is raised from
@@ -60,13 +62,21 @@ class _StubClient:
     requests fails loudly if the code issues N+1.
     """
 
-    def __init__(self, responses: list[object], *, sticky: bool = False) -> None:
+    def __init__(self, responses: Sequence[object], *, sticky: bool = False) -> None:
         self._responses = list(responses)
         self._sticky = sticky
-        self.calls: list[tuple[str, dict, dict, float]] = []
+        self.calls: list[tuple[str, dict[str, object], dict[str, object], float]] = []
 
-    def get(self, url: str, *, headers: dict, params: dict, timeout: float) -> _Response:
-        self.calls.append((url, dict(headers), dict(params), timeout))
+    def get(
+        self,
+        url: Any,
+        *,
+        params: Any = None,
+        headers: Any = None,
+        timeout: Any = None,
+        **kwargs: Any,
+    ) -> _Response:
+        self.calls.append((str(url), dict(headers or {}), dict(params or {}), timeout))
         if self._sticky:
             item = self._responses[0]
         else:
@@ -254,14 +264,14 @@ def test_anthropic_base_url_override_does_not_double_the_version_segment() -> No
 # -- Gemini transport ---------------------------------------------------------
 
 
-def _gemini_page(*entries: dict, next_token: str | None = None) -> _Response:
+def _gemini_page(*entries: dict[str, Any], next_token: str | None = None) -> _Response:
     page: dict[str, object] = {"models": list(entries)}
     if next_token:
         page["nextPageToken"] = next_token
     return _Response(200, page)
 
 
-def _gemini_entry(model_id: str, **overrides: object) -> dict:
+def _gemini_entry(model_id: str, **overrides: object) -> dict[str, object]:
     entry: dict[str, object] = {
         "name": f"models/{model_id}",
         "displayName": model_id.upper(),
@@ -360,7 +370,7 @@ def test_gemini_makes_no_request_without_a_key() -> None:
     assert client.calls == []
 
 
-class _SlowPaginator:
+class _SlowPaginator(httpx.Client):
     """A Gemini endpoint that is slow but ALIVE: every page answers inside the
     budget it was granted and hands back a fresh ``nextPageToken`` forever.
 
@@ -372,10 +382,18 @@ class _SlowPaginator:
     def __init__(self, clock: list[float], *, share: float) -> None:
         self._clock = clock
         self._share = share
-        self.calls: list[tuple[str, dict, dict, float]] = []
+        self.calls: list[tuple[str, dict[str, object], dict[str, object], float]] = []
 
-    def get(self, url: str, *, headers: dict, params: dict, timeout: float) -> _Response:
-        self.calls.append((url, dict(headers), dict(params), timeout))
+    def get(
+        self,
+        url: Any,
+        *,
+        params: Any = None,
+        headers: Any = None,
+        timeout: Any = None,
+        **kwargs: Any,
+    ) -> _Response:
+        self.calls.append((str(url), dict(headers or {}), dict(params or {}), timeout))
         assert timeout > 0, "a request was issued with no budget left to spend"
         self._clock[0] += timeout * self._share
         page = len(self.calls)
@@ -846,7 +864,7 @@ def test_available_models_never_reads_a_document_written_by_the_old_layout(tmp_p
 
 
 def test_available_models_survives_a_broken_cache_layer(tmp_path, monkeypatch) -> None:
-    def explode(*args: object, **kwargs: object) -> dict:
+    def explode(*args: object, **kwargs: object) -> dict[str, Any]:
         raise OSError("cache is on fire")
 
     monkeypatch.setattr(discovery, "cached_listing", explode)

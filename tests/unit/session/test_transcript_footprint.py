@@ -9,6 +9,7 @@ still be the conversation, and ``first_kept_entry_id`` must still resolve.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
@@ -26,7 +27,7 @@ from local_operator.session.transcript import (
 )
 
 
-def _row(transcript: Transcript, index: int) -> dict:
+def _row(transcript: Transcript, index: int) -> dict[str, Any]:
     return json.loads(transcript.path.read_text().splitlines()[index])
 
 
@@ -92,11 +93,13 @@ async def test_redundant_raw_arguments_dropped_but_odd_ones_kept(tmp_path):
     # redundant one is given up, and wire clients regenerate that with
     # json.dumps.
     replayed = Transcript(tmp_path / "sess").build_llm_history()
-    assert [c.arguments for c in replayed[0].tool_calls] == [
+    first = replayed[0]
+    assert isinstance(first, Message)
+    assert [c.arguments for c in first.tool_calls] == [
         {"command": "ls"},
         {"command": "ls"},
     ]
-    assert replayed[0].tool_calls[1].raw_arguments == '{"command": "rm -rf /"}'
+    assert first.tool_calls[1].raw_arguments == '{"command": "rm -rf /"}'
 
 
 @pytest.mark.asyncio
@@ -115,8 +118,10 @@ async def test_legacy_fat_rows_still_load(tmp_path):
 
     replayed = Transcript(directory).build_llm_history()
     assert len(replayed) == 1
-    assert replayed[0].text == "hello"
-    assert replayed[0].id == message.id
+    first = replayed[0]
+    assert isinstance(first, Message)
+    assert first.text == "hello"
+    assert first.id == message.id
 
 
 @pytest.mark.asyncio
@@ -128,8 +133,10 @@ async def test_custom_entry_keeps_its_entry_id(tmp_path):
     await transcript.append_message(marker)
 
     replayed = Transcript(tmp_path / "sess").build_llm_history()
-    assert replayed[0].id == marker.id
-    assert replayed[0].details == {"name": "deploy"}
+    first = replayed[0]
+    assert isinstance(first, CustomMessage)
+    assert first.id == marker.id
+    assert first.details == {"name": "deploy"}
 
 
 @pytest.mark.asyncio
@@ -148,10 +155,12 @@ async def test_prune_journal_applies_on_replay(tmp_path):
 
     replayed = Transcript(tmp_path / "sess").build_llm_history()
     assert len(replayed) == 1
-    assert replayed[0].text == "[Superseded by a newer read of this file]"
+    first = replayed[0]
+    assert isinstance(first, Message)
+    assert first.text == "[Superseded by a newer read of this file]"
     # Flagged the way the live pruning pass flags it, so the next pass skips
     # it instead of re-blanking and re-journalling it every turn.
-    assert (replayed[0].provider_payload or {}).get("pruned") is True
+    assert (first.provider_payload or {}).get("pruned") is True
 
 
 @pytest.mark.asyncio
@@ -180,7 +189,7 @@ async def test_compact_file_folds_journal_and_shrinks_disk(tmp_path):
     assert len(types) == 2
 
     replayed = Transcript(tmp_path / "sess").build_llm_history()
-    assert [m.text for m in replayed] == ["keep me", "[pruned]"]
+    assert [m.text for m in replayed if isinstance(m, Message)] == ["keep me", "[pruned]"]
     assert [m.id for m in replayed] == [keep.id, big.id]
 
 
@@ -197,7 +206,9 @@ async def test_compact_file_below_threshold_is_a_no_op(tmp_path):
     assert await transcript.compact_file() == 0
     assert transcript.path.read_bytes() == before
     # Still correct on replay — folding is an optimisation, not the mechanism.
-    assert Transcript(tmp_path / "sess").build_llm_history()[0].text == "[pruned]"
+    first = Transcript(tmp_path / "sess").build_llm_history()[0]
+    assert isinstance(first, Message)
+    assert first.text == "[pruned]"
 
 
 @pytest.mark.asyncio
@@ -223,11 +234,13 @@ async def test_compaction_boundary_survives_folding(tmp_path):
     assert await transcript.compact_file() > 0
 
     replayed = Transcript(tmp_path / "sess").build_llm_history()
-    assert replayed[0].custom_type == "compaction_summary"
-    assert replayed[0].details["summary"] == "summary so far"
+    marker = replayed[0]
+    assert isinstance(marker, CustomMessage)
+    assert marker.custom_type == "compaction_summary"
+    assert marker.details["summary"] == "summary so far"
     # Exactly the kept window: the cut point resolved, so nothing before it
     # came back.
-    assert [m.text for m in replayed[1:]] == ["recent"]
+    assert [m.text for m in replayed[1:] if isinstance(m, Message)] == ["recent"]
 
 
 def test_encode_rejects_nothing_it_cannot_rebuild():

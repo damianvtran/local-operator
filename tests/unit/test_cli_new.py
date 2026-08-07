@@ -19,6 +19,7 @@ import subprocess
 import sys
 import types
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -433,7 +434,7 @@ def test_main_exec_dispatch(
     """exec routes to exec_mode.run_exec with the parsed ExecArgs, and its
     exit code passes through (README contract). ``--hosting test`` keeps the
     CL-06 startup preflight green (the test provider needs no key)."""
-    captured: dict = {}
+    captured: dict[str, Any] = {}
 
     def fake_run_exec(command: str, exec_args) -> int:
         captured["command"] = command
@@ -493,7 +494,7 @@ def test_main_interactive_tty_uses_tui(
     hands the TUI the wired session (TUI-003 contract), and ``values.tui.theme``
     reaches run_tui (CL-13)."""
     sentinel_session = object()
-    seen: dict = {}
+    seen: dict[str, Any] = {}
 
     async def fake_create_session(*args, **kwargs):
         seen["factory_called"] = True
@@ -514,7 +515,7 @@ def test_main_interactive_tty_uses_tui(
         seen["provider_controller"] = provider_controller
         return 0
 
-    fake_tui.run_tui = fake_run_tui
+    setattr(fake_tui, "run_tui", fake_run_tui)
     monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
 
@@ -615,7 +616,7 @@ def test_main_preflight_missing_hosting(
 ) -> None:
     """Interactive startup with no hosting configured prints the legacy
     message shape and exits -1 BEFORE any turn (no session factory call)."""
-    called: dict = {"factory": False}
+    called: dict[str, bool] = {"factory": False}
 
     async def fake_create_session(*args, **kwargs):
         called["factory"] = True
@@ -645,7 +646,7 @@ def test_main_preflight_missing_api_key(
     """A keyed provider with NO resolvable key fails preflight (-1) before the
     turn; keyless providers (test) pass through."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    called: dict = {"factory": False}
+    called: dict[str, bool] = {"factory": False}
 
     async def fake_create_session(*args, **kwargs):
         called["factory"] = True
@@ -672,7 +673,7 @@ def test_main_preflight_env_key_passes(
 ) -> None:
     """With the env key present the preflight lets the session through."""
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    seen: dict = {}
+    seen: dict[str, Any] = {}
 
     async def fake_create_session(*args, **kwargs):
         seen["built"] = True
@@ -685,7 +686,7 @@ def test_main_preflight_env_key_passes(
         await session_factory()
         return 0
 
-    fake_tui.run_tui = fake_run_tui
+    setattr(fake_tui, "run_tui", fake_run_tui)
     monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
     monkeypatch.setattr("local_operator.cli.create_session", fake_create_session)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
@@ -704,7 +705,7 @@ def test_main_preflight_env_key_passes(
 def test_tui_flag_forces_tui_on_non_tty(
     tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    seen: dict = {}
+    seen: dict[str, Any] = {}
 
     async def fake_create_session(*args, **kwargs):
         return MagicMock()
@@ -716,7 +717,7 @@ def test_tui_flag_forces_tui_on_non_tty(
         seen["ran"] = True
         return 0
 
-    fake_tui.run_tui = fake_run_tui
+    setattr(fake_tui, "run_tui", fake_run_tui)
     monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
     monkeypatch.setattr("local_operator.cli.create_session", fake_create_session)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: False)  # NOT a tty
@@ -750,7 +751,7 @@ def test_config_list_marks_deprecated_keys(tmp_home: Path, capsys) -> None:
 # --- CL-17: golden legacy parser inventory ----------------------------------------
 
 
-def _walk_actions(parser: argparse.ArgumentParser) -> dict[str, dict]:
+def _walk_actions(parser: argparse.ArgumentParser) -> dict[str, dict[str, Any]]:
     out = {}
     for action in parser._actions:
         if action.option_strings and action.option_strings[0] == "-h":
@@ -768,7 +769,7 @@ def _walk_actions(parser: argparse.ArgumentParser) -> dict[str, dict]:
     return out
 
 
-def _inventory(parser: argparse.ArgumentParser) -> dict[str, dict]:
+def _inventory(parser: argparse.ArgumentParser) -> dict[str, dict[str, Any]]:
     seen: set[int] = set()
     inventory = {"$": _walk_actions(parser)}
     seen.add(id(parser))

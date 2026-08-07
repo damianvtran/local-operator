@@ -75,10 +75,10 @@ class FakeSession:
         return "test/model"
 
     @property
-    def model(self):
+    def model(self) -> Any:
         return None
 
-    def set_model(self, model):
+    def set_model(self, model: Any) -> None:
         pass
 
     @property
@@ -88,6 +88,9 @@ class FakeSession:
     def set_goal(self, text: str) -> str:
         self._goal = (text or "").strip()
         return self._goal
+
+    async def seed_history(self, messages: list[Any]) -> None:
+        pass
 
     async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
         self.prompts.append(text)

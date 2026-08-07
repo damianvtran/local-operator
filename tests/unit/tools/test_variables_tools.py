@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from typing import Any
 
 import pytest
 
@@ -36,7 +37,7 @@ def _ctx(config: dict[str, str] | None = None) -> ToolContext:
     )
 
 
-def _result(executor, tool_call_id: str, args: dict, ctx: ToolContext):
+def _result(executor, tool_call_id: str, args: dict[str, Any], ctx: ToolContext):
     return asyncio.run(executor(tool_call_id, args, context=ctx))
 
 

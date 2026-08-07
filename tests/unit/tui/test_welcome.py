@@ -308,8 +308,26 @@ class FakeSession:
     def is_streaming(self) -> bool:
         return False
 
-    def set_conversation_name(self, name: str) -> None:
-        self.conversation_name = name
+    @property
+    def model(self) -> Any:
+        return None
+
+    def set_model(self, model: Any) -> None:
+        pass
+
+    @property
+    def goal(self) -> str:
+        return ""
+
+    def set_goal(self, text: str) -> str:
+        return text
+
+    async def seed_history(self, messages: list[Any]) -> None:
+        pass
+
+    def set_conversation_name(self, text: str, *, user_set: bool = True) -> str:
+        self.conversation_name = text
+        return text
 
     async def complete_once(self, system: str, prompt: str) -> str:
         # Parameter names AND order must match SessionProtocol.complete_once:

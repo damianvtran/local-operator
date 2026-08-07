@@ -29,6 +29,7 @@ from local_operator.harness.types import (
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
+    ModelSpec,
     TextContent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
@@ -67,10 +68,10 @@ class FakeSession:
         return "fake/model"
 
     @property
-    def model(self):
-        return None
+    def model(self) -> ModelSpec:
+        return ModelSpec(provider="fake", model_id="fake-model")
 
-    def set_model(self, model):
+    def set_model(self, model: ModelSpec) -> None:
         pass
 
     @property
@@ -80,6 +81,20 @@ class FakeSession:
     def set_goal(self, text: str) -> str:
         self._goal = (text or "").strip()
         return self._goal
+
+    @property
+    def conversation_name(self) -> str:
+        return getattr(self, "_conversation_name", "")
+
+    def set_conversation_name(self, text: str, *, user_set: bool = True) -> str:
+        self._conversation_name = (text or "").strip()
+        return self._conversation_name
+
+    async def complete_once(self, system: str, prompt: str) -> str:
+        return ""
+
+    async def seed_history(self, messages: list[Message]) -> None:
+        pass
 
     # driving turns
     async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
@@ -199,7 +214,7 @@ def test_build_worker_argv_train_threaded_to_worker(monkeypatch: pytest.MonkeyPa
     parsed = exec_worker.build_parser().parse_args(argv[3:])
     assert parsed.train is True
     # And the worker's factory passes it into the session args namespace.
-    seen: dict = {}
+    seen: dict[str, Any] = {}
 
     def fake_create_session(session_args, *managers, **kwargs):
         seen["train"] = session_args.train
@@ -251,7 +266,7 @@ def test_run_exec_foreground_error_exits_nonzero(fake_factory, capsys) -> None:
 
 def test_run_exec_foreground_json_mode(fake_factory, capsys) -> None:
     reply = Message.assistant("streamed")
-    script = [
+    script: list[AgentEvent] = [
         AgentStartEvent(),
         MessageStartEvent(message=reply),
         MessageUpdateEvent(message=reply, delta="streamed"),
@@ -471,7 +486,11 @@ def test_headless_approval_denial_notice(fake_factory, monkeypatch, capsys) -> N
     import local_operator.session_factory as sf
 
     gate = sf._make_request_approval(yolo=False)
-    approved = asyncio.run(gate("exec", "rm -rf /"))
+
+    async def _gate() -> bool:
+        return await gate("exec", "rm -rf /")
+
+    approved = asyncio.run(_gate())
     assert approved is False
     err = capsys.readouterr().err
     assert "approval required but no tty; run with --yolo to auto-approve" in err
@@ -482,7 +501,11 @@ def test_yolo_gate_approves_without_tty(monkeypatch) -> None:
     import local_operator.session_factory as sf
 
     gate = sf._make_request_approval(yolo=True)
-    assert asyncio.run(gate("exec", "anything")) is True
+
+    async def _gate() -> bool:
+        return await gate("exec", "anything")
+
+    assert asyncio.run(_gate()) is True
 
 
 # --- exec_worker -----------------------------------------------------------------

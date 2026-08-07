@@ -40,7 +40,7 @@ async def test_reloads_from_disk(tmp_path):
     reopened = Transcript(directory)
     assert len(reopened.entries()) == 2
     history = reopened.build_llm_history()
-    assert [m.text for m in history] == ["one", "two"]
+    assert [m.text for m in history if isinstance(m, Message)] == ["one", "two"]
 
 
 @pytest.mark.asyncio

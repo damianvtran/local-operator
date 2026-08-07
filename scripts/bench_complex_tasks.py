@@ -24,6 +24,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 # Allow running from the repo root without installation.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -64,7 +65,7 @@ TASKS: list[tuple[str, str]] = [
 ]
 
 
-def run_task(workdir: Path, slug: str, prompt: str) -> dict:
+def run_task(workdir: Path, slug: str, prompt: str) -> dict[str, Any]:
     capture = OUT_DIR / f"{slug}.jsonl"
     start = time.monotonic()
     proc = subprocess.run(
@@ -102,7 +103,7 @@ def run_task(workdir: Path, slug: str, prompt: str) -> dict:
     }
 
 
-def tally_cost(capture: Path) -> tuple[dict, float]:
+def tally_cost(capture: Path) -> tuple[dict[str, int], float]:
     """Sum usage across turn_end/agent_end events and price the tokens.
 
     Pricing comes from the model registry when it has the model, else from a
@@ -171,7 +172,7 @@ def _live_pricing() -> tuple[float, float]:
     return _PRICING_CACHE
 
 
-def measure_base_overhead(workdir: Path) -> dict:
+def measure_base_overhead(workdir: Path) -> dict[str, float]:
     """Peak RSS after building a session but before any turn: the harness's
     fixed cost. Compute here is nothing but imports + session construction."""
     import resource

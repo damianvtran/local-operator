@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from local_operator.mcp.config import (
     MCPHttpServerConfig,
+    MCPServerConfig,
     MCPStdioServerConfig,
     add_server,
     list_effective_servers,
@@ -29,13 +32,20 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home_dir
 
 
-def _write(path: Path, doc: dict) -> None:
+def _write(path: Path, doc: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(doc), encoding="utf-8")
 
 
-def _stdio(command: str = "npx", **extra) -> dict:
+def _stdio(command: str = "npx", **extra: Any) -> dict[str, Any]:
     return {"type": "stdio", "command": command, **extra}
+
+
+def _command(configs: Mapping[str, MCPServerConfig], name: str) -> str:
+    """Narrow a loaded config to its stdio shape and return the command."""
+    cfg = configs[name]
+    assert isinstance(cfg, MCPStdioServerConfig)
+    return cfg.command
 
 
 class TestPriorityAndDedupe:
@@ -51,9 +61,9 @@ class TestPriorityAndDedupe:
         )
 
         configs, sources = load_all_mcp_configs(cwd)
-        assert configs["srv"].command == "proj-cmd"
+        assert _command(configs, "srv") == "proj-cmd"
         assert sources["srv"].endswith(".local-operator/mcp.json")
-        assert configs["claudeonly"].command == "cc"
+        assert _command(configs, "claudeonly") == "cc"
 
     def test_dot_mcp_json_beats_user(self, tmp_path: Path, home: Path) -> None:
         cwd = tmp_path / "proj"
@@ -61,7 +71,7 @@ class TestPriorityAndDedupe:
         _write(home / ".local-operator" / "mcp.json", {"mcpServers": {"srv": _stdio("user-cmd")}})
 
         configs, _ = load_all_mcp_configs(cwd)
-        assert configs["srv"].command == "dot-cmd"
+        assert _command(configs, "srv") == "dot-cmd"
 
     def test_user_beats_foreign_imports(self, tmp_path: Path, home: Path) -> None:
         cwd = tmp_path / "proj"
@@ -73,8 +83,8 @@ class TestPriorityAndDedupe:
         )
 
         configs, sources = load_all_mcp_configs(cwd)
-        assert configs["srv"].command == "user-cmd"
-        assert configs["vsc"].command == "v"
+        assert _command(configs, "srv") == "user-cmd"
+        assert _command(configs, "vsc") == "v"
         assert sources["vsc"].endswith(".vscode/mcp.json")
 
     def test_claude_project_mcp_json_imported(self, tmp_path: Path, home: Path) -> None:
@@ -82,7 +92,7 @@ class TestPriorityAndDedupe:
         cwd = tmp_path / "proj"
         _write(cwd / ".claude" / ".mcp.json", {"mcpServers": {"claudy": _stdio("cl")}})
         configs, sources = load_all_mcp_configs(cwd)
-        assert configs["claudy"].command == "cl"
+        assert _command(configs, "claudy") == "cl"
         assert sources["claudy"].endswith(".mcp.json")
 
     def test_claude_json_project_scope_imported(self, tmp_path: Path, home: Path) -> None:
@@ -100,8 +110,8 @@ class TestPriorityAndDedupe:
             },
         )
         configs, sources = load_all_mcp_configs(cwd)
-        assert configs["global_srv"].command == "g-cmd"
-        assert configs["proj_srv"].command == "p-cmd"
+        assert _command(configs, "global_srv") == "g-cmd"
+        assert _command(configs, "proj_srv") == "p-cmd"
         assert "other" not in configs  # wrong project key ignored
         assert sources["proj_srv"].endswith(".claude.json")
 
@@ -117,14 +127,14 @@ class TestPriorityAndDedupe:
             },
         )
         configs, _ = load_all_mcp_configs(cwd)
-        assert configs["srv"].command == "scoped-cmd"
+        assert _command(configs, "srv") == "scoped-cmd"
 
     def test_claude_json_malformed_projects_degrades(self, tmp_path: Path, home: Path) -> None:
         """Best-effort: a misshaped projects key falls back to global only."""
         cwd = tmp_path / "proj"
         _write(home / ".claude.json", {"mcpServers": {"g": _stdio("g")}, "projects": 42})
         configs, _ = load_all_mcp_configs(cwd)
-        assert configs["g"].command == "g"
+        assert _command(configs, "g") == "g"
 
 
 class TestEnableDisable:

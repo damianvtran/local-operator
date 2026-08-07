@@ -36,9 +36,9 @@ class _Stub(TranscriptBlock):
 
     def __init__(self, kind: str, rows: int = 1, *, lead: bool = False, transient: bool = False):
         super().__init__()
-        self.SPACING_KIND = kind
-        self.SPACING_LEAD = lead
-        self.SPACING_TRANSIENT = transient
+        setattr(self, "SPACING_KIND", kind)
+        setattr(self, "SPACING_LEAD", lead)
+        setattr(self, "SPACING_TRANSIENT", transient)
         self._rows = rows
 
     def spans_multiple_rows(self) -> bool:
@@ -152,18 +152,17 @@ async def test_a_ledger_of_tool_rows_is_one_row_each_under_the_real_sheet(
     emits tool start and tool end in one synchronous burst — so the test
     reproduces exactly that ordering rather than a convenient one.
     """
+    cases: list[tuple[str, dict[str, object]]] = [
+        ("bash", {"command": "pytest tests/unit -q"}),
+        ("grep", {"pattern": "parse"}),
+        ("read", {"path": "src/parser.py"}),
+        ("write", {"path": "src/parser.py"}),
+    ]
     app = StyledTranscriptApp()
     async with app.run_test(size=(width, 24)) as pilot:
         view = app.query_one(TranscriptView)
         cards = []
-        for index, (name, args) in enumerate(
-            [
-                ("bash", {"command": "pytest tests/unit -q"}),
-                ("grep", {"pattern": "parse"}),
-                ("read", {"path": "src/parser.py"}),
-                ("write", {"path": "src/parser.py"}),
-            ]
-        ):
+        for index, (name, args) in enumerate(cases):
             card = ToolCard(str(index), name, args)
             view.append_block(card)
             cards.append(card)

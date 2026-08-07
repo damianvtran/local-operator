@@ -4,6 +4,7 @@ ApiEmbedder wire contract, and the env-based backend picker."""
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import httpx
 import pytest
@@ -77,7 +78,7 @@ class TestLocalEmbedder:
 class TestApiEmbedder:
     @pytest.mark.asyncio
     async def test_success_posts_openai_compatible_request(self) -> None:
-        captured: dict = {}
+        captured: dict[str, Any] = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
             captured["url"] = str(request.url)

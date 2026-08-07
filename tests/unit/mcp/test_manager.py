@@ -9,12 +9,12 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 
-from local_operator.harness.types import ToolContext, ToolResult
+from local_operator.harness.types import AbortSignal, ToolContext, ToolResult
 from local_operator.mcp.manager import (
     McpManager,
     ServerConnection,
@@ -25,12 +25,12 @@ from local_operator.mcp.manager import (
 from local_operator.mcp.tool_cache import McpToolCache
 
 
-def _tool(name: str, schema: dict | None = None) -> Tool:
+def _tool(name: str, schema: dict[str, Any] | None = None) -> Tool:
     """One SDK ``Tool`` as a server would advertise it."""
     return Tool(
         name=name,
         description=f"{name} desc",
-        inputSchema=schema or {"type": "object", "properties": {"q": {"type": "string"}}},
+        input_schema=schema or {"type": "object", "properties": {"q": {"type": "string"}}},
     )
 
 
@@ -40,16 +40,21 @@ class FakeSession:
     def __init__(
         self, call_result: CallToolResult | None = None, raise_on_call: Exception | None = None
     ) -> None:
-        self.calls: list[tuple[str, dict]] = []
+        self.calls: list[tuple[str, dict[str, Any]]] = []
         self.call_result = call_result or CallToolResult(
-            content=[TextContent(type="text", text="ok")], isError=False
+            content=[TextContent(type="text", text="ok")], is_error=False
         )
         self.raise_on_call = raise_on_call
 
-    async def list_tools(self, params: Any = None) -> ListToolsResult:
-        return ListToolsResult(tools=[_tool("search")], nextCursor=None)
+    async def list_tools(self, *, params: Any = None) -> ListToolsResult:
+        return ListToolsResult(tools=[_tool("search")], next_cursor=None)
 
-    async def call_tool(self, name: str, arguments: dict | None, **kwargs: Any) -> CallToolResult:
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        read_timeout_seconds: float | None = None,
+    ) -> CallToolResult:
         self.calls.append((name, dict(arguments or {})))
         if self.raise_on_call is not None:
             raise self.raise_on_call
@@ -60,6 +65,13 @@ def _make_conn(name: str, cfg: Any, session: FakeSession | None = None) -> Serve
     return ServerConnection(
         name=name, config=cfg, session=session or FakeSession(), tools=[_tool("search")]
     )
+
+
+def _tool_meta(manager: McpManager, tool_name: str) -> dict[str, Any]:
+    """``get_tool_meta`` narrowed to non-None for assertions."""
+    meta = manager.get_tool_meta(tool_name)
+    assert meta is not None
+    return cast(dict[str, Any], meta)
 
 
 @pytest.fixture()
@@ -111,14 +123,16 @@ class TestFastStartupGate:
         assert names == ["mcp__fast_search", "mcp__slow_search"]  # sorted by name
         assert manager.get_connection_status("fast") == "connected"
         assert manager.get_connection_status("slow") == "connecting"
-        assert manager.get_tool_meta("mcp__slow_search")["deferred"] is True
-        assert manager.get_tool_meta("mcp__fast_search")["deferred"] is False
+        assert _tool_meta(manager, "mcp__slow_search")["deferred"] is True
+        assert _tool_meta(manager, "mcp__fast_search")["deferred"] is False
 
         # Deferred execute parks until the connection lands.
         slow_tool = next(t for t in manager.get_tools() if t.name == "mcp__slow_search")
-        exec_task = asyncio.create_task(
-            slow_tool.execute("call-1", {"q": "hi"}, None, None, ToolContext())
-        )
+
+        async def _slow_call() -> ToolResult:
+            return await slow_tool.execute("call-1", {"q": "hi"}, None, None, ToolContext())
+
+        exec_task = asyncio.create_task(_slow_call())
         await asyncio.sleep(0.02)
         assert not exec_task.done()
 
@@ -132,7 +146,7 @@ class TestFastStartupGate:
 
         # Live connection registered; tools rebuilt from the real list.
         assert manager.get_connection_status("slow") == "connected"
-        assert manager.get_tool_meta("mcp__slow_search")["deferred"] is False
+        assert _tool_meta(manager, "mcp__slow_search")["deferred"] is False
         # on_tools_changed fired when the deferred server landed.
         assert any("mcp__slow_search" in snap for snap in changed)
 
@@ -388,7 +402,7 @@ class TestToolsListChangedNoInlineAwait:
         conn = _make_conn("fast", manager.get_server_config("fast") or SimpleNamespace())
         message = SimpleNamespace(method="notifications/tools/list_changed")
 
-        await manager._on_session_message("fast", conn, message)
+        await manager._on_session_message("fast", conn, cast(Any, message))
         # The handler must NOT have awaited the refresh inline.
         assert calls == []
         await asyncio.sleep(0.01)
@@ -515,12 +529,13 @@ class TestBreakerTrippedCallsFailPromptly:
 
         monkeypatch.setattr(manager, "_connect_server", flaky_connect)
         await manager.discover_and_connect()
-        assert manager.get_connection("fast") is not None
+        fast_conn = manager.get_connection("fast")
+        assert fast_conn is not None
 
         # Kill the transport, then make every reconnect fail until the
         # breaker trips and abandons the waiter future.
         state["fail"] = True
-        manager.get_connection("fast").closed_event.set()
+        fast_conn.closed_event.set()
         for _ in range(200):
             await real_sleep(0)
             if manager.reconnect_suspended("fast"):
@@ -557,7 +572,10 @@ class TestBreakerTrippedCallsFailPromptly:
 
         # Park the deferred execute on the connect waiter FIRST, then
         # disconnect: the parked call must fail, not hang (MCP-19).
-        exec_task = asyncio.create_task(slow_tool.execute("c", {}, None, None, ToolContext()))
+        async def _parked_call() -> ToolResult:
+            return await slow_tool.execute("c", {}, None, None, ToolContext())
+
+        exec_task = asyncio.create_task(_parked_call())
         await asyncio.sleep(0.02)
         assert not exec_task.done()
         await manager.disconnect_server("slow")
@@ -573,8 +591,8 @@ class TestToolNameCollision:
 
     @staticmethod
     def _echo_list(tool_name: str) -> Any:
-        async def list_tools(params: Any = None) -> SimpleNamespace:
-            return SimpleNamespace(tools=[_tool(tool_name)], next_cursor=None)
+        async def list_tools(*, params: Any = None) -> ListToolsResult:
+            return ListToolsResult(tools=[_tool(tool_name)], next_cursor=None)
 
         return list_tools
 
@@ -595,6 +613,7 @@ class TestToolNameCollision:
             conn = _make_conn(name, cfg)
             conn.tools = [_tool(tool_name)]
             # Echo the same tool on refresh so the origin set stays stable.
+            assert conn.session is not None
             conn.session.list_tools = self._echo_list(tool_name)
             return conn
 
@@ -608,13 +627,13 @@ class TestToolNameCollision:
         assert sorted(names) == ["mcp__my_server_a_b", "mcp__my_server_a_b_2"]
         # Deterministic by origin key, not registration order:
         # ("my", "server_a_b") < ("my-server", "a_b").
-        assert manager.get_tool_meta("mcp__my_server_a_b")["server_name"] == "my"
-        assert manager.get_tool_meta("mcp__my_server_a_b_2")["server_name"] == "my-server"
+        assert _tool_meta(manager, "mcp__my_server_a_b")["server_name"] == "my"
+        assert _tool_meta(manager, "mcp__my_server_a_b_2")["server_name"] == "my-server"
         assert any("collision" in rec.message for rec in caplog.records)
 
         # A refresh of the LATER server must not flip ownership.
         await manager.refresh_server_tools("my")
-        assert manager.get_tool_meta("mcp__my_server_a_b")["server_name"] == "my"
+        assert _tool_meta(manager, "mcp__my_server_a_b")["server_name"] == "my"
         await manager.disconnect_all()
 
 
@@ -628,11 +647,17 @@ class TestAbortStaysAbort:
         manager = McpManager(str(project))
 
         class HangingSession:
-            async def list_tools(self, params: Any = None) -> SimpleNamespace:
-                return SimpleNamespace(tools=[_tool("search")], next_cursor=None)
+            async def list_tools(self, *, params: Any = None) -> ListToolsResult:
+                return ListToolsResult(tools=[_tool("search")], next_cursor=None)
 
-            async def call_tool(self, name: str, arguments: dict | None, **kw) -> Any:
+            async def call_tool(
+                self,
+                name: str,
+                arguments: dict[str, Any] | None = None,
+                read_timeout_seconds: float | None = None,
+            ) -> CallToolResult:
                 await asyncio.sleep(3600)
+                raise AssertionError("unreachable: the call is aborted first")
 
         async def fake_connect(name: str, cfg: Any) -> ServerConnection:
             return ServerConnection(
@@ -643,8 +668,8 @@ class TestAbortStaysAbort:
         await manager.discover_and_connect()
         tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
 
-        signal = asyncio.Event()
-        signal.set()  # abort already set when the call starts
+        signal = AbortSignal()
+        signal.abort()  # abort already set when the call starts
         with pytest.raises(asyncio.CancelledError):
             await tool.execute("c1", {"q": "x"}, signal, None, ToolContext())
         await manager.disconnect_all()

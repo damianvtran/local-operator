@@ -7,7 +7,11 @@ import asyncio
 
 import pytest
 
-from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS, AsyncJobManager
+from local_operator.harness.jobs import (
+    DEFAULT_MAX_RUNNING_JOBS,
+    AsyncJob,
+    AsyncJobManager,
+)
 
 
 async def wait_for(predicate, timeout: float = 2.0) -> None:
@@ -18,6 +22,13 @@ async def wait_for(predicate, timeout: float = 2.0) -> None:
         if loop.time() > deadline:
             raise AssertionError("timed out waiting for condition")
         await asyncio.sleep(0.01)
+
+
+def require_job(manager: AsyncJobManager, job_id: str) -> AsyncJob:
+    """``manager.get`` narrowed to non-None for assertions."""
+    job = manager.get(job_id)
+    assert job is not None
+    return job
 
 
 async def quick_runner(job_id, signal, report_progress):
@@ -31,8 +42,8 @@ async def test_register_runs_and_completes():
     job_id = manager.register("task", "quick", quick_runner)
     job = manager.get(job_id)
     assert job is not None and job.status == "running"
-    await wait_for(lambda: manager.get(job_id).status == "completed")
-    assert manager.get(job_id).result_text == f"done:{job_id}"
+    await wait_for(lambda: require_job(manager, job_id).status == "completed")
+    assert require_job(manager, job_id).result_text == f"done:{job_id}"
     await manager.dispose()
 
 
@@ -43,8 +54,9 @@ async def test_failed_job_reports_error_text():
 
     manager = AsyncJobManager()
     job_id = manager.register("task", "boom", boom)
-    await wait_for(lambda: manager.get(job_id).status == "failed")
+    await wait_for(lambda: require_job(manager, job_id).status == "failed")
     job = manager.get(job_id)
+    assert job is not None
     assert "kaboom" in (job.error_text or "")
     await manager.dispose()
 
@@ -66,10 +78,10 @@ async def test_max_running_enforced_queued_dont_count():
         manager.register("task", "c", blocked)
     # Queued registration succeeds and does not count against the cap.
     q = manager.register("task", "q", blocked, queued=True)
-    assert manager.get(q).queued is True
+    assert require_job(manager, q).queued is True
     assert manager.at_capacity() is True  # still only counts a + b
     gate.set()
-    await wait_for(lambda: manager.get(a).status == "completed")
+    await wait_for(lambda: require_job(manager, a).status == "completed")
     await manager.dispose()
 
 
@@ -86,7 +98,7 @@ async def test_start_queued_promotes_and_runs():
     assert started == []
     assert manager.start_queued(job_id) is True
     assert manager.start_queued(job_id) is False  # already promoted
-    await wait_for(lambda: manager.get(job_id).status == "completed")
+    await wait_for(lambda: require_job(manager, job_id).status == "completed")
     assert started == [job_id]
     await manager.dispose()
 
@@ -102,7 +114,7 @@ async def test_cancel_aborts_signal_and_sets_status():
 
     job_id = manager.register("task", "long", blocked)
     assert await manager.cancel(job_id) is True
-    assert manager.get(job_id).status == "cancelled"
+    assert require_job(manager, job_id).status == "cancelled"
     await manager.dispose()
 
 
@@ -139,7 +151,7 @@ async def test_delivery_sink_scoping():
     )
 
     job_id = manager.register("task", "owned", quick_runner, owner_id="Main")
-    await wait_for(lambda: manager.get(job_id).status == "completed")
+    await wait_for(lambda: require_job(manager, job_id).status == "completed")
 
     assert main_inbox == [(job_id, f"done:{job_id}")]
     assert sub_inbox == []  # never leaked across owners
@@ -156,10 +168,10 @@ async def test_dead_letter_when_no_sink():
 
     manager = AsyncJobManager(on_job_complete=on_complete)
     job_id = manager.register("task", "orphan", quick_runner, owner_id="Ghost")
-    await wait_for(lambda: manager.get(job_id).status == "completed")
+    await wait_for(lambda: require_job(manager, job_id).status == "completed")
     # The row keeps its result for retention, but nothing was delivered.
     assert fallback == []
-    assert manager.get(job_id).result_text == f"done:{job_id}"
+    assert require_job(manager, job_id).result_text == f"done:{job_id}"
     await manager.dispose()
 
 
@@ -172,7 +184,7 @@ async def test_unowned_job_uses_fallback():
 
     manager = AsyncJobManager(on_job_complete=on_complete)
     job_id = manager.register("task", "unowned", quick_runner)
-    await wait_for(lambda: manager.get(job_id).status == "completed")
+    await wait_for(lambda: require_job(manager, job_id).status == "completed")
     assert fallback == [(job_id, f"done:{job_id}")]
     await manager.dispose()
 
@@ -199,7 +211,7 @@ async def test_unregister_sink():
     unregister = manager.register_delivery_sink("Main", lambda j, t, job: inbox.append(j))
     unregister()
     job_id = manager.register("task", "after-unregister", quick_runner, owner_id="Main")
-    await wait_for(lambda: manager.get(job_id).status == "completed")
+    await wait_for(lambda: require_job(manager, job_id).status == "completed")
     assert inbox == []  # dead-lettered again
     await manager.dispose()
 
@@ -208,7 +220,7 @@ async def test_unregister_sink():
 async def test_retention_sweep_drops_old_settled_jobs():
     manager = AsyncJobManager(retention_ms=10)
     job_id = manager.register("task", "ephemeral", quick_runner)
-    await wait_for(lambda: manager.get(job_id).status == "completed")
+    await wait_for(lambda: require_job(manager, job_id).status == "completed")
     await asyncio.sleep(0.05)
     # The next lifecycle event sweeps settled jobs past the retention window.
     gate = asyncio.Event()

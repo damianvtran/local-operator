@@ -10,9 +10,9 @@ from local_operator.compaction.pruning import (
 from local_operator.compaction.tokens import estimate_tokens
 from local_operator.harness.types import Message
 
-NOW = 10_000_000.0
+NOW = 10_000_000
 ACTIVE = NOW  # not idle
-IDLE_AGO = 6_000_000.0  # > 5_400_000 ms idle window
+IDLE_AGO = 6_000_000  # > 5_400_000 ms idle window
 
 
 def _read_result(path: str, words: int = 300) -> Message:
@@ -35,6 +35,7 @@ def test_superseded_read_blanked_with_pairing_intact():
     assert changed is True
     assert len(out) == 4  # never deleted
     assert old_read.text == SUPERSEDED_NOTICE
+    assert old_read.provider_payload is not None
     assert old_read.provider_payload["pruned"] is True
     assert old_read.provider_payload["details"]["path"] == "/repo/a.py"  # old details kept
     # The newer read is untouched.

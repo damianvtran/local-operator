@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -29,7 +30,9 @@ def tools(context: ToolContext) -> dict[str, AgentTool]:
     return {tool.name: tool for tool in create_tools(context)}
 
 
-async def _call(tools: dict, name: str, args: dict, context: ToolContext) -> ToolResult:
+async def _call(
+    tools: dict[str, AgentTool], name: str, args: dict[str, Any], context: ToolContext
+) -> ToolResult:
     tool = tools[name]
     return await tool.execute("call-1", args, None, None, context)  # type: ignore[operator]
 
@@ -46,12 +49,20 @@ class RecordingApproval:
         return self.approve
 
 
-def _context_with_approval(tmp_path: Path, approve: bool = True) -> ToolContext:
+class _RecordingContext(ToolContext):
+    """ToolContext with the approval recorder DECLARED so tests can read it back."""
+
+    recorder: RecordingApproval
+
+
+def _context_with_approval(tmp_path: Path, approve: bool = True) -> _RecordingContext:
     approval = RecordingApproval(approve)
-    context = ToolContext(cwd=str(tmp_path), session_id="unit-test", request_approval=approval)
-    # Stash the recorder on the context object for the tests.
-    context.recorder = approval  # type: ignore[attr-defined]
-    return context
+    return _RecordingContext(
+        cwd=str(tmp_path),
+        session_id="unit-test",
+        request_approval=approval,
+        recorder=approval,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +304,7 @@ async def test_read_range_beyond_eof_is_useless(tools, context) -> None:
     result = await _call(tools, "read", {"path": "short.txt", "range": "50-60"}, context)
     assert result.useless is True
     assert result.is_error is False
+    assert result.details is not None
     assert result.details.get("useless") is True
 
 
@@ -631,10 +643,10 @@ class _FakeScheduler:
     """Minimal stand-in exposing the surface the wake tool reads."""
 
     def __init__(self) -> None:
-        self._schedules: list = []
+        self._schedules: list[Any] = []
 
     @property
-    def schedules(self) -> list:
+    def schedules(self) -> list[Any]:
         return self._schedules
 
     async def update(self, schedules) -> None:
@@ -742,7 +754,7 @@ async def test_unexpected_exception_becomes_error_result(tools, context, monkeyp
 
 #: (tool name, args, needs_scheduler) — one representative call per tool,
 #: chosen to exercise success AND the useless/error shapes.
-_SWEEP_CASES: list[tuple[str, dict]] = [
+_SWEEP_CASES: list[tuple[str, dict[str, Any]]] = [
     ("bash", {"command": "echo sweep"}),
     ("read", {"path": "sweep.txt"}),
     ("read", {"path": "ghost-sweep.txt"}),

@@ -44,6 +44,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -218,7 +219,7 @@ def _child_env(config_dir: Path) -> dict[str, str]:
     return env
 
 
-def _run_probe(code: str, argv: list[str], env: dict[str, str]) -> dict:
+def _run_probe(code: str, argv: list[str], env: dict[str, str]) -> dict[str, Any]:
     proc = subprocess.run(
         [sys.executable, "-c", code, *argv],
         capture_output=True,
@@ -244,7 +245,7 @@ def _run_probe(code: str, argv: list[str], env: dict[str, str]) -> dict:
     return payload
 
 
-def _repeat(code: str, argv: list[str], env: dict[str, str], runs: int) -> dict:
+def _repeat(code: str, argv: list[str], env: dict[str, str], runs: int) -> dict[str, Any]:
     """Run a probe ``runs`` times and reduce to min/median.
 
     The first run is discarded. A freshly checked-out tree has no
@@ -312,7 +313,7 @@ def _importtime_self(
     return rows[:top]
 
 
-def measure(runs: int, top: int, config_dir: Path) -> dict:
+def measure(runs: int, top: int, config_dir: Path) -> dict[str, Any]:
     env = _child_env(config_dir)
 
     # Bare interpreter boot: subtracted from RSS so the reported megabytes are
@@ -320,7 +321,7 @@ def measure(runs: int, top: int, config_dir: Path) -> dict:
     # (perf_counter starts after boot), so only RSS needs the correction.
     baseline = _repeat(_IMPORT_PROBE, [""], env, runs)
 
-    result: dict = {
+    result: dict[str, Any] = {
         "python": sys.version.split()[0],
         "platform": sys.platform,
         "runs": runs,
@@ -358,8 +359,8 @@ def _delta(now: float, before: float | None) -> str:
     return f"{diff:+8.1f} ({pct:+6.1f}%)"
 
 
-def _dig(blob: dict | None, *keys):
-    cur: object = blob
+def _dig(blob: dict[str, Any] | None, *keys: str) -> Any:
+    cur: Any = blob
     for key in keys:
         if not isinstance(cur, dict) or key not in cur:
             return None
@@ -367,7 +368,9 @@ def _dig(blob: dict | None, *keys):
     return cur
 
 
-def _rows(result: dict, baseline: dict | None) -> list[tuple]:
+def _rows(
+    result: dict[str, Any], baseline: dict[str, Any] | None
+) -> list[tuple[str, str, float, float, float | None]]:
     """Flatten a run into ``(label, unit, min, median, baseline_min)`` rows.
 
     Both the current run and the baseline are projected through the SAME
@@ -377,17 +380,19 @@ def _rows(result: dict, baseline: dict | None) -> list[tuple]:
     base_rss = result["baseline_interpreter"]["min_rss_mb"]
     old_base_rss = _dig(baseline, "baseline_interpreter", "min_rss_mb")
 
-    def rss_pair(cell: dict, old: dict | None) -> tuple[float, float, float | None]:
+    def rss_pair(
+        cell: dict[str, Any], old: dict[str, Any] | None
+    ) -> tuple[float, float, float | None]:
         # RSS is reported NET of the bare interpreter, and the baseline uses
         # its own floor: comparing a raw ru_maxrss across machines or Python
         # patch releases measures CPython, not this harness.
         old_min = _dig(old, "min_rss_mb")
-        before = None
+        before: float | None = None
         if old_min is not None and old_base_rss is not None:
             before = old_min - old_base_rss
         return cell["min_rss_mb"] - base_rss, cell["median_rss_mb"] - base_rss, before
 
-    rows: list[tuple] = []
+    rows: list[tuple[str, str, float, float, float | None]] = []
     for module in TARGET_MODULES:
         cell = result["imports"][module]
         old = _dig(baseline, "imports", module)
@@ -440,7 +445,7 @@ def _rows(result: dict, baseline: dict | None) -> list[tuple]:
     return rows
 
 
-def report(result: dict, baseline: dict | None, top: int) -> None:
+def report(result: dict[str, Any], baseline: dict[str, Any] | None, top: int) -> None:
     base_rss = result["baseline_interpreter"]["min_rss_mb"]
     print(f"python {result['python']} on {result['platform']}, {result['runs']} runs per cell")
     print(f"bare interpreter RSS floor: {base_rss:.1f} MB (subtracted from harness RSS below)")

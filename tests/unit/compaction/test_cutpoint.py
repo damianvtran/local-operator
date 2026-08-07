@@ -105,15 +105,17 @@ def test_empty_and_zero_budget():
 def test_compaction_summary_marker_is_valid_cut():
     """A prior compaction marker may serve as the cut boundary."""
     marker = CustomMessage(custom_type="compaction_summary", details={"summary": "s" * 50})
+    big = _big_user()
+    tail = Message.user("tail")
     messages = [
         Message.user("old1"),
         Message.user("old2"),
         marker,
-        _big_user(),
-        Message.user("tail"),
+        big,
+        tail,
     ]
     # Budget that exhausts exactly at the marker: big + tail alone are short.
-    keep = estimate_tokens(messages[3]) + estimate_tokens(messages[4]) + 5
+    keep = estimate_tokens(big) + estimate_tokens(tail) + 5
     cut = find_cut_point(messages, keep)
     assert cut is not None
     assert messages[cut] is marker
@@ -168,7 +170,9 @@ def _canonical_sequence() -> list[Message]:
     ]
 
 
-def assert_partition_pair_integrity(to_summarize: list, kept: list) -> None:
+def assert_partition_pair_integrity(
+    to_summarize: list[Message | CustomMessage], kept: list[Message | CustomMessage]
+) -> None:
     """Every tool_call_id answered in ``kept`` has its issuing assistant in
     ``kept``; no call issued in ``to_summarize`` is answered in ``kept``."""
     kept_call_ids = {c.id for m in kept if isinstance(m, Message) for c in m.tool_calls}

@@ -189,7 +189,7 @@ class RunStats:
         """
         return _rate(self.turns[1:])
 
-    def window_rate(self, start: int, end: int) -> float:
+    def window_rate(self, start: int, end: int | None) -> float:
         return _rate(self.turns[start:end])
 
 

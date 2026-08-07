@@ -18,7 +18,7 @@ import uuid
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
@@ -32,7 +32,10 @@ from local_operator.env import EnvConfig
 from local_operator.harness.types import AgentEndEvent, EventHandler, Message
 from local_operator.jobs import JobManager, JobStatus
 from local_operator.scheduler_service import SchedulerService
-from local_operator.types import Schedule, ScheduleUnit
+from local_operator.types import OperatorType, Schedule, ScheduleUnit
+
+if TYPE_CHECKING:
+    from local_operator.server.utils.websocket_manager import WebSocketManager
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -51,6 +54,7 @@ class FakeSession:
     def __init__(self, fail: BaseException | None = None):
         self.prompts: list[str] = []
         self.disposed = False
+        self.cwd: str | None = None
         self._fail = fail
         self._handlers: list[EventHandler] = []
 
@@ -149,8 +153,21 @@ def _make_agent(registry: AgentRegistry, name: str = "sched-agent") -> Any:
     return registry.create_agent(
         AgentEditFields(
             name=name,
+            security_prompt=None,
             hosting="openai",
             model="gpt-4o",
+            description=None,
+            tags=[],
+            categories=[],
+            last_message=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
             current_working_directory=".",
         )
     )
@@ -180,10 +197,12 @@ def _make_service(
         config_manager=ConfigManager(registry.config_dir),
         credential_manager=CredentialManager(registry.config_dir),
         env_config=EnvConfig(),
-        operator_type="cli",
+        operator_type=OperatorType.CLI,
         verbosity_level=VerbosityLevel.QUIET,
         job_manager=job_manager or JobManager(),
-        websocket_manager=websocket_manager if websocket_manager is not None else object(),
+        websocket_manager=cast(
+            "WebSocketManager", websocket_manager if websocket_manager is not None else object()
+        ),
     )
 
 
@@ -224,7 +243,8 @@ async def test_one_time_fires_once_and_pops(registry, monkeypatch):
     factory = FakeSessionFactory()
     monkeypatch.setattr(session_factory, "create_session", factory)
     job_manager = JobManager()
-    service = _make_service(registry, job_manager, RecordingWebSocketManager())
+    ws_manager = RecordingWebSocketManager()
+    service = _make_service(registry, job_manager, ws_manager)
     agent = _make_agent(registry)
     schedule = _add_schedule(
         registry,
@@ -260,7 +280,7 @@ async def test_one_time_fires_once_and_pops(registry, monkeypatch):
         job = job_manager.jobs[job_id]
         assert job.result is not None
         assert job.result.response and "scheduled response" in job.result.response
-        broadcasts = service.websocket_manager.broadcasts
+        broadcasts = ws_manager.broadcasts
         assert any(b[0] == job_id and b[1].get("status") == "completed" for b in broadcasts)
 
         # Extra scheduler ticks: a one-time schedule never fires twice
