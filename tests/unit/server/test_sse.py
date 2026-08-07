@@ -529,8 +529,12 @@ def test_detaching_the_last_listener_of_a_terminal_channel_does_not_pin_it() -> 
     """Regression (review N-2): unsubscribe must not refresh a terminal
     channel's TTL, or a client reconnecting after ``stream.terminal`` pins the
     channel's memory forever."""
-    broker = EventBroker(channel_ttl_s=0)
+    broker = EventBroker(channel_ttl_s=300)
     broker.publish("job:t", EventName.TERMINAL, {"type": EventName.TERMINAL}, terminal=True)
+    # Back-date the TTL so eviction is NOT unconditional: with a discriminating
+    # window, only the unsubscribe TTL-guard (not ttl=0) lets the channel be
+    # reclaimed (review N-4).
+    broker._channels["job:t"].last_activity -= 400
     sub = broker.subscribe("job:t")
     sub.close()
     # Opening another channel runs the eviction pass; the idle terminal channel
