@@ -33,6 +33,7 @@ from local_operator.server.utils.sse import (
     frame,
     gap_payload,
     heartbeat,
+    keepalive,
     open_payload,
 )
 from local_operator.server.utils.sse_publisher import legacy_record_frame, publish_record
@@ -104,6 +105,16 @@ def test_frame_degrades_unserialisable_values_instead_of_dropping_the_event() ->
 def test_comment_and_heartbeat_are_valid_sse_comments() -> None:
     assert comment("connected") == ": connected\n\n"
     assert heartbeat() == ": heartbeat\n\n"
+
+
+def test_keepalive_is_a_dispatchable_event_not_a_comment() -> None:
+    """Regression (review C-01): EventSource discards ``:`` comments without
+    firing a handler, so a client cannot re-arm a stall detector on them. The
+    liveness tick must therefore be a real named event."""
+    text = keepalive()
+    assert text.startswith("event: keepalive\n")
+    assert "data: " in text
+    assert not text.startswith(":")
 
 
 def test_envelope_mirrors_the_event_name_as_the_inner_discriminator() -> None:
