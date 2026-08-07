@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -47,7 +48,7 @@ def tools(context: ToolContext) -> dict[str, AgentTool]:
 
 
 async def _call(
-    tools: dict[str, AgentTool], name: str, args: dict, context: ToolContext
+    tools: dict[str, AgentTool], name: str, args: dict[str, Any], context: ToolContext
 ) -> ToolResult:
     return await tools[name].execute("call-1", args, None, None, context)  # type: ignore[operator]
 
@@ -96,7 +97,9 @@ def test_write_then_read_range_round_trips() -> None:
     assert meta is not None
     assert meta.lines == 500 and meta.complete is True
 
-    selected, total = store.read_lines(meta.handle, 10, 12)
+    read = store.read_lines(meta.handle, 10, 12)
+    assert read is not None
+    selected, total = read
     assert total == 500
     assert selected == ["line 10", "line 11", "line 12"]
 
@@ -132,7 +135,9 @@ def test_search_reports_line_numbers_and_total() -> None:
     meta = store.write(text, tool_name="bash", session_id="s1")
     assert meta is not None
 
-    matches, total_matches, total_lines = store.search(meta.handle, "Traceback")
+    found = store.search(meta.handle, "Traceback")
+    assert found is not None
+    matches, total_matches, total_lines = found
     assert total_matches == 1
     assert matches[0][0] == 201  # the line number an agent then reads around
     assert "boom" in matches[0][1]
@@ -143,7 +148,9 @@ def test_search_caps_returned_matches_but_reports_the_true_total() -> None:
     store = spill.get_store()
     meta = store.write(_lines(1000, "match"), tool_name="bash", session_id="s1")
     assert meta is not None
-    matches, total_matches, _lines_count = store.search(meta.handle, "match", limit=10)
+    found = store.search(meta.handle, "match", limit=10)
+    assert found is not None
+    matches, total_matches, _lines_count = found
     # A pattern matching everything must not reintroduce the unbounded read
     # the store exists to prevent, but must still tell the truth about size.
     assert len(matches) == 10
@@ -229,7 +236,9 @@ def test_per_entry_cap_clips_one_pathological_output(
     assert meta.bytes <= 50_000
     assert meta.complete is False  # honestly flagged as a partial copy
 
-    text = "\n".join(store.read_lines(meta.handle, 1, None)[0])
+    read = store.read_lines(meta.handle, 1, None)
+    assert read is not None
+    text = "\n".join(read[0])
     assert text.startswith("HEAD")  # head kept
     assert text.endswith("TAIL")  # and the tail, where the answer usually is
 

@@ -6,6 +6,7 @@ import asyncio
 import time
 from collections.abc import Callable
 from datetime import datetime
+from typing import Any
 
 import pytest
 
@@ -186,6 +187,7 @@ class TestAdvance:
     def test_recurring_advances(self):
         schedule = self.one_shot(every_ms=60_000)
         result = advance_wake_schedule(schedule, NOW)
+        assert "next" in result
         next_schedule = result["next"]
         assert next_schedule.fired_count == 1
         assert next_schedule.next_due_at == NOW + 60_000
@@ -195,6 +197,7 @@ class TestAdvance:
         schedule = self.one_shot(every_ms=3_600_000)
         six_hours_late = NOW + 6 * 3_600_000 + 1
         result = advance_wake_schedule(schedule, six_hours_late)
+        assert "next" in result
         next_schedule = result["next"]
         assert next_schedule.fired_count == 1  # one fire, not six
         # Next occurrence strictly after now, within one interval.
@@ -274,7 +277,7 @@ class SchedulerHarness:
         self.retired.append((schedule, reason))
 
     def schedule(self, **kw) -> WakeSchedule:
-        defaults = dict(
+        defaults: dict[str, Any] = dict(
             id="w1", message="m", next_due_at=self.now_ms + 60_000, created_at=self.now_ms
         )
         defaults.update(kw)

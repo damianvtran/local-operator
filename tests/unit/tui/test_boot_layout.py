@@ -67,6 +67,23 @@ class FakeSession:
         return "test/model"
 
     @property
+    def model(self) -> Any:
+        return None
+
+    def set_model(self, model: Any) -> None:
+        pass
+
+    @property
+    def goal(self) -> str:
+        return ""
+
+    def set_goal(self, text: str) -> str:
+        return text
+
+    async def seed_history(self, messages: list[Any]) -> None:
+        pass
+
+    @property
     def conversation_name(self) -> str:
         return ""
 
@@ -251,7 +268,9 @@ async def test_the_card_is_a_bounded_fill_and_not_a_box() -> None:
 
         def bg(x: int, y: int) -> str:
             """The composed background at one cell, as a `$lo-*` token value."""
-            return app.screen.get_style_at(x, y).bgcolor.triplet.hex.lower()
+            bgcolor = app.screen.get_style_at(x, y).bgcolor
+            assert bgcolor is not None and bgcolor.triplet is not None
+            return bgcolor.triplet.hex.lower()
 
         for y in range(card.y, card.bottom):
             assert bg(card.x, y) == surface, (y, "the card's first cell")

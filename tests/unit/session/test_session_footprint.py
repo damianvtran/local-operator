@@ -18,6 +18,8 @@ from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
     ChatRequest,
+    CustomMessage,
+    Message,
     ModelSpec,
     StreamEndEvent,
     StreamTextDelta,
@@ -142,7 +144,7 @@ async def test_superseded_read_is_journalled_and_shrinks_the_resume(tmp_path):
     # superseded read. 0.55 leaves room for tokenizer drift without letting a
     # regression that resurrects the output slip through.
     assert resumed_tokens < naive_tokens * 0.55
-    stale = [m for m in resumed if BIG_OUTPUT in m.text]
+    stale = [m for m in resumed if isinstance(m, Message) and BIG_OUTPUT in m.text]
     assert len(stale) == 1, "both copies of the superseded read came back on resume"
     # And a resume now costs what the live session cost, not more. The few
     # tokens of slack are the whitespace difference between the provider's
@@ -152,7 +154,9 @@ async def test_superseded_read_is_journalled_and_shrinks_the_resume(tmp_path):
 
     # The conversation itself is intact: same messages, same order, same ids,
     # so compaction can still reference any of them as a cut point.
-    assert [m.role for m in resumed] == [m.role for m in session._context.messages]
+    assert [m.role for m in resumed if isinstance(m, Message)] == [
+        m.role for m in session._context.messages if isinstance(m, Message)
+    ]
     assert [m.id for m in resumed] == [m.id for m in session._context.messages]
 
 
@@ -290,8 +294,10 @@ async def test_real_compaction_then_resume_replays_the_kept_window(tmp_path):
     )
 
     resumed = Transcript(directory).build_llm_history()
-    assert resumed[0].custom_type == "compaction_summary"
-    assert "SUMMARY:" in resumed[0].details["summary"]
+    marker = resumed[0]
+    assert isinstance(marker, CustomMessage)
+    assert marker.custom_type == "compaction_summary"
+    assert "SUMMARY:" in marker.details["summary"]
     # Exactly the kept window followed the marker — nothing from before the
     # cut came back.
     ids_after_marker = [m.id for m in resumed[1:]]

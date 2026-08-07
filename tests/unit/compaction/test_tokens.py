@@ -13,6 +13,7 @@ from local_operator.compaction.tokens import (
     register_invalidator,
 )
 from local_operator.harness.types import (
+    Content,
     ImageContent,
     Message,
     TextContent,
@@ -188,7 +189,7 @@ def test_upper_bound_never_undercounts_across_scripts():
         return "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 200)))
 
     for trial in range(400):
-        blocks = [TextContent(text=text()) for _ in range(rng.randint(0, 4))]
+        blocks: list[Content] = [TextContent(text=text()) for _ in range(rng.randint(0, 4))]
         calls = []
         if rng.random() < 0.3:
             raw = text()[:60] if rng.random() < 0.5 else None
@@ -235,7 +236,8 @@ def test_upper_bound_dominates_after_a_mutate_then_invalidate_round_trip():
 def test_upper_bound_counts_images_and_is_additive():
     """Images are charged at the same flat rate as the exact estimator, and the
     bound sums over messages — an image-heavy history must not slip under."""
-    image = Message(role="user", content=[ImageContent(url="data:image/png;base64,AA==")])
+    blocks: list[Content] = [ImageContent(data="data:image/png;base64,AA==")]
+    image = Message(role="user", content=blocks)
     assert messages_tokens_upper_bound([image]) == IMAGE_TOKEN_ESTIMATE
     assert messages_tokens_upper_bound([image, image]) == 2 * IMAGE_TOKEN_ESTIMATE
     assert messages_tokens_upper_bound([image]) >= estimate_tokens(image)

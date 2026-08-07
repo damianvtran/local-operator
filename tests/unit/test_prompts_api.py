@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 
 from local_operator.harness.types import AgentTool, ToolContext
@@ -10,6 +12,9 @@ from local_operator.prompts_api import (
     render_string,
     render_template,
 )
+
+if TYPE_CHECKING:
+    from local_operator.harness.wake import WakeSchedule
 
 
 def _tool(name: str, description: str, hidden: bool = False) -> AgentTool:
@@ -23,10 +28,10 @@ class _FakeSchedulerForBlocks:
     """Minimal scheduler so create_tools includes wake for ordering checks."""
 
     @property
-    def schedules(self) -> list:
+    def schedules(self) -> list["WakeSchedule"]:
         return []
 
-    async def update(self, schedules) -> None:
+    async def update(self, schedules: list["WakeSchedule"]) -> None:
         pass
 
 

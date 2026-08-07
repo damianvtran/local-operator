@@ -92,11 +92,14 @@ class TestChildPaths:
         (base / "notes.txt").write_text("x", encoding="utf-8")
 
         # A dir with no visible files renders the empty marker.
-        assert "(empty directory)" in resolve_skill_url("skill://alpha/references", skills)
+        empty_listing = resolve_skill_url("skill://alpha/references", skills)
+        assert empty_listing is not None
+        assert "(empty directory)" in empty_listing
 
         # skill://alpha (no path) returns SKILL.md text, so probe '.' to list
         # the base dir: dirs get the ' (dir)' suffix, files list bare.
         root_listing = resolve_skill_url("skill://alpha/.", skills)
+        assert root_listing is not None
         assert "references/ (dir)" in root_listing
         assert "scripts/ (dir)" in root_listing
         assert "notes.txt" in root_listing
@@ -109,6 +112,7 @@ class TestChildPaths:
     def test_binary_safe_read(self, skills: dict[str, Skill]) -> None:
         (skills["alpha"].base_dir / "blob.bin").write_bytes(b"\xff\xfe\x00data")
         content = resolve_skill_url("skill://alpha/blob.bin", skills)
+        assert content is not None
         assert "data" in content  # decoded with errors='replace'
 
 
@@ -184,6 +188,7 @@ class TestDotfiles:
         (skills["alpha"].base_dir / ".env").write_text("SECRET=x", encoding="utf-8")
         (skills["alpha"].base_dir / "notes.txt").write_text("visible", encoding="utf-8")
         listing = resolve_skill_url("skill://alpha/.", skills)
+        assert listing is not None
         assert ".env" not in listing
         assert "notes.txt" in listing
 

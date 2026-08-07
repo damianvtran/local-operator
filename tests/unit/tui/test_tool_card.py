@@ -15,8 +15,11 @@ hexes so a ramp change moves one file, not this suite.
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 from rich.cells import cell_len
+from rich.color import Color, ColorTriplet
 from rich.style import Style
 from rich.text import Text
 
@@ -42,8 +45,22 @@ def _style_at(text: Text, needle: str) -> Style:
     index = text.plain.index(needle)
     for span in text.spans:
         if span.start <= index < span.end:
-            return span.style
+            return cast(Style, span.style)
     return Style()
+
+
+def _triplet(color: Color | None) -> ColorTriplet:
+    """A styled span always carries a concrete color; assert the contract."""
+    assert color is not None
+    assert color.triplet is not None
+    return color.triplet
+
+
+def _card_text(card: ToolCard) -> Text:
+    """The card's painted row; a ToolCard always renders a Text."""
+    renderable = card.renderable
+    assert isinstance(renderable, Text)
+    return renderable
 
 
 def _assert_fits(card: ToolCard) -> None:
@@ -63,13 +80,11 @@ def test_write_diff_counts_render_in_success_and_danger_tints() -> None:
     row = card._build_row(80)
 
     assert "+12" in row.plain and "-3" in row.plain
-    assert (
-        _style_at(row, "+12").color.triplet
-        == Style(color=theme_mod.semantic_color("success")).color.triplet
+    assert _triplet(_style_at(row, "+12").color) == _triplet(
+        Style(color=theme_mod.semantic_color("success")).color
     )
-    assert (
-        _style_at(row, "-3").color.triplet
-        == Style(color=theme_mod.semantic_color("danger")).color.triplet
+    assert _triplet(_style_at(row, "-3").color) == _triplet(
+        Style(color=theme_mod.semantic_color("danger")).color
     )
     _assert_fits(card)
 
@@ -263,7 +278,7 @@ def test_hovered_hint_uses_the_dim_ramp_step() -> None:
     card.mark_done("one\ntwo")
     card._set_hovered(True)
     lit = _style_at(card._build_row(80), EXPAND_HINT)
-    assert lit.color.triplet == Style(color=theme_mod.semantic_color("dim")).color.triplet
+    assert _triplet(lit.color) == _triplet(Style(color=theme_mod.semantic_color("dim")).color)
 
 
 def test_a_result_that_only_repeats_the_summary_is_not_expandable() -> None:
@@ -300,9 +315,8 @@ def test_failed_output_renders_in_the_danger_tint() -> None:
     card.mark_failed("exit status 1", "Traceback:\n  boom")
     card.toggle_expanded()
     content = card._build_content(80)
-    assert (
-        _style_at(content, "Traceback:").color.triplet
-        == Style(color=theme_mod.semantic_color("danger")).color.triplet
+    assert _triplet(_style_at(content, "Traceback:").color) == _triplet(
+        Style(color=theme_mod.semantic_color("danger")).color
     )
 
 
@@ -396,33 +410,33 @@ async def test_pointing_at_a_row_lifts_its_ground_and_its_hint() -> None:
         second.mark_done("line one\nline two")
         await pilot.pause()
 
-        surface = Style(bgcolor=theme_mod.semantic_color("surface")).bgcolor
-        overlay = Style(bgcolor=theme_mod.semantic_color("overlay")).bgcolor
-        dim = Style(color=theme_mod.semantic_color("dim")).color
+        surface = _triplet(Style(bgcolor=theme_mod.semantic_color("surface")).bgcolor)
+        overlay = _triplet(Style(bgcolor=theme_mod.semantic_color("overlay")).bgcolor)
+        dim = _triplet(Style(color=theme_mod.semantic_color("dim")).color)
 
         def ground(card: ToolCard):
             return card.styles.background.rgb
 
         def has_hint(card: ToolCard) -> bool:
-            return EXPAND_HINT in card.renderable.plain
+            return EXPAND_HINT in _card_text(card).plain
 
-        def hint_color(card: ToolCard):
-            return _style_at(card.renderable, EXPAND_HINT).color.triplet
+        def hint_color(card: ToolCard) -> ColorTriplet:
+            return _triplet(_style_at(_card_text(card), EXPAND_HINT).color)
 
-        assert ground(first) == surface.triplet
+        assert ground(first) == surface
         assert not has_hint(first)
 
         await pilot.hover(first)
         await pilot.pause()
-        assert ground(first) == overlay.triplet
-        assert has_hint(first) and hint_color(first) == dim.triplet
+        assert ground(first) == overlay
+        assert has_hint(first) and hint_color(first) == dim
 
         await pilot.hover(second)
         await pilot.pause()
-        assert ground(first) == surface.triplet
+        assert ground(first) == surface
         assert not has_hint(first)  # the row the pointer left goes quiet again
-        assert ground(second) == overlay.triplet
-        assert has_hint(second) and hint_color(second) == dim.triplet
+        assert ground(second) == overlay
+        assert has_hint(second) and hint_color(second) == dim
 
 
 @pytest.mark.asyncio
@@ -441,8 +455,8 @@ async def test_outcome_reaches_the_ground_not_just_the_glyph() -> None:
         bad.mark_failed("boom")
         await pilot.pause()
 
-        def expected(token: str):
-            return Style(bgcolor=theme_mod.semantic_color(token)).bgcolor.triplet
+        def expected(token: str) -> ColorTriplet:
+            return _triplet(Style(bgcolor=theme_mod.semantic_color(token)).bgcolor)
 
         assert running.styles.background.rgb == expected("raised")
         assert ok.styles.background.rgb == expected("surface")

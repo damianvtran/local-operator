@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import types
+from collections.abc import Awaitable, Callable, Sequence
 
 import pytest
 
@@ -13,6 +14,7 @@ from local_operator.harness.types import (
     AbortSignal,
     AgentEndEvent,
     AgentEvent,
+    AgentStartEvent,
     AgentTool,
     ChatRequest,
     CompactionEndEvent,
@@ -21,6 +23,7 @@ from local_operator.harness.types import (
     Message,
     ModelSpec,
     StreamEndEvent,
+    StreamEvent,
     StreamTextDelta,
     StreamToolCallDelta,
     TextContent,
@@ -44,7 +47,7 @@ async def wait_for(predicate, timeout: float = 2.0) -> None:
 class ScriptedStream:
     """Replays per-call event scripts; records requests."""
 
-    def __init__(self, turns: list[list]) -> None:
+    def __init__(self, turns: list[list[StreamEvent]]) -> None:
         self.turns = turns
         self.requests: list[ChatRequest] = []
 
@@ -341,23 +344,27 @@ async def test_compaction_runs_when_due(tmp_path, monkeypatch):
         threshold_tokens: int = Field(default=-1)
         auto_continue: bool = True
 
-    prune_calls: list[tuple] = []
+    prune_calls: list[tuple[int, int]] = []
 
     def prune_tool_outputs(messages, now_ts, last_activity_ts, **kwargs):
         prune_calls.append((now_ts, last_activity_ts))
         return list(messages), False
 
     fake_api = types.ModuleType("local_operator.compaction.api")
-    fake_api.CompactionSettings = CompactionSettings
-    fake_api.prune_tool_outputs = prune_tool_outputs
-    fake_api.estimate_messages_tokens = lambda messages: 90_000
+    setattr(fake_api, "CompactionSettings", CompactionSettings)
+    setattr(fake_api, "prune_tool_outputs", prune_tool_outputs)
+    setattr(fake_api, "estimate_messages_tokens", lambda messages: 90_000)
     # Rigorous upper bound (>= the exact estimate) used by the cheap pre-check
     # that keeps tiktoken off the no-compaction path.
-    fake_api.messages_tokens_upper_bound = lambda messages: 95_000
-    fake_api.compaction_context_tokens = lambda provider, local: max(provider or 0, local)
-    fake_api.find_cut_point = lambda messages, keep: 1  # cut after first message
-    fake_api.resolve_threshold_tokens = lambda window, settings: settings.threshold_tokens
-    fake_api.RECOVERY_BAND = 0.8
+    setattr(fake_api, "messages_tokens_upper_bound", lambda messages: 95_000)
+    setattr(
+        fake_api, "compaction_context_tokens", lambda provider, local: max(provider or 0, local)
+    )
+    setattr(fake_api, "find_cut_point", lambda messages, keep: 1)  # cut after first message
+    setattr(
+        fake_api, "resolve_threshold_tokens", lambda window, settings: settings.threshold_tokens
+    )
+    setattr(fake_api, "RECOVERY_BAND", 0.8)
 
     seen_threshold: list[int] = []
 
@@ -365,17 +372,20 @@ async def test_compaction_runs_when_due(tmp_path, monkeypatch):
         seen_threshold.append(settings.threshold_tokens)
         return ctx_tokens > settings.threshold_tokens
 
-    fake_api.should_compact = should_compact
+    setattr(fake_api, "should_compact", should_compact)
 
-    async def summarize(messages, complete_fn):
+    async def summarize(
+        messages: Sequence[Message | CustomMessage],
+        complete_fn: Callable[[str, str], Awaitable[str]],
+    ) -> str:
         assert callable(complete_fn)
         summary = await complete_fn("sys", "summarize this")
         return f"SUMMARY({summary})"
 
-    fake_api.summarize_messages = summarize
+    setattr(fake_api, "summarize_messages", summarize)
 
     fake_pkg = types.ModuleType("local_operator.compaction")
-    fake_pkg.api = fake_api
+    setattr(fake_pkg, "api", fake_api)
     monkeypatch.setitem(sys.modules, "local_operator.compaction", fake_pkg)
     monkeypatch.setitem(sys.modules, "local_operator.compaction.api", fake_api)
     # Stub out strategy resolution to context-full (no snapcompact module).
@@ -453,22 +463,28 @@ async def test_compaction_below_bound_never_pays_for_the_exact_estimate(tmp_path
     exact_calls: list[int] = []
 
     fake_api = types.ModuleType("local_operator.compaction.api")
-    fake_api.CompactionSettings = CompactionSettings
-    fake_api.prune_tool_outputs = lambda messages, *a, **k: (list(messages), False)
-    fake_api.messages_tokens_upper_bound = lambda messages: 1_000
+    setattr(fake_api, "CompactionSettings", CompactionSettings)
+    setattr(fake_api, "prune_tool_outputs", lambda messages, *a, **k: (list(messages), False))
+    setattr(fake_api, "messages_tokens_upper_bound", lambda messages: 1_000)
 
     def estimate_messages_tokens(messages):
         exact_calls.append(len(messages))
         return 1_000
 
-    fake_api.estimate_messages_tokens = estimate_messages_tokens
-    fake_api.compaction_context_tokens = lambda provider, local: max(provider or 0, local)
-    fake_api.resolve_threshold_tokens = lambda window, settings: settings.threshold_tokens
-    fake_api.should_compact = lambda ctx, window, settings: ctx > settings.threshold_tokens
-    fake_api.RECOVERY_BAND = 0.8
+    setattr(fake_api, "estimate_messages_tokens", estimate_messages_tokens)
+    setattr(
+        fake_api, "compaction_context_tokens", lambda provider, local: max(provider or 0, local)
+    )
+    setattr(
+        fake_api, "resolve_threshold_tokens", lambda window, settings: settings.threshold_tokens
+    )
+    setattr(
+        fake_api, "should_compact", lambda ctx, window, settings: ctx > settings.threshold_tokens
+    )
+    setattr(fake_api, "RECOVERY_BAND", 0.8)
 
     fake_pkg = types.ModuleType("local_operator.compaction")
-    fake_pkg.api = fake_api
+    setattr(fake_pkg, "api", fake_api)
     monkeypatch.setitem(sys.modules, "local_operator.compaction", fake_pkg)
     monkeypatch.setitem(sys.modules, "local_operator.compaction.api", fake_api)
     fake_thresholds = types.ModuleType("local_operator.compaction.thresholds")
@@ -513,7 +529,9 @@ async def test_events_carry_monotonic_generation(tmp_path):
     await session.prompt("first")
     await session.prompt("second")
 
-    gens = [(e.type, e.generation) for e in events if e.type in ("agent_start", "agent_end")]
+    gens = [
+        (e.type, e.generation) for e in events if isinstance(e, (AgentStartEvent, AgentEndEvent))
+    ]
     assert gens == [("agent_start", 1), ("agent_end", 1), ("agent_start", 2), ("agent_end", 2)]
     await session.dispose()
 
@@ -551,7 +569,9 @@ async def test_dispose_cancels_jobs_and_wakes(tmp_path):
 
     job_id = session.jobs.register("task", "bg", blocked)
     await session.dispose()
-    assert session.jobs.get(job_id).status == "cancelled"
+    job = session.jobs.get(job_id)
+    assert job is not None
+    assert job.status == "cancelled"
     assert session.wake_scheduler.disposed is True
 
     with pytest.raises(RuntimeError):
@@ -695,7 +715,7 @@ async def test_aborted_run_end_is_never_held(tmp_path, monkeypatch):
         return None
 
     monkeypatch.setattr(session, "_maybe_compact", no_compact)
-    ends: list[object] = []
+    ends: list[AgentEndEvent] = []
     session.subscribe(
         lambda event: ends.append(event) if isinstance(event, AgentEndEvent) else None
     )

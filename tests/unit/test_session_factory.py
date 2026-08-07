@@ -9,13 +9,16 @@ from __future__ import annotations
 import argparse
 import inspect
 import sqlite3
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock
 
 import pytest
 
 from local_operator import session_factory
+from local_operator.session.session import Session
 from local_operator.session_factory import (
     _transcript_dir_and_agent_id,
     attach_mcp_dispose,
@@ -26,13 +29,18 @@ from local_operator.session_factory import (
     wire_mcp_into_session,
 )
 
+if TYPE_CHECKING:
+    from local_operator.agents import AgentData, AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.mcp.manager import McpManager
+
 # --- Fakes ---------------------------------------------------------------------
 
 
 class FakeConfigManager:
     """ConfigManager stand-in backed by a plain dict."""
 
-    def __init__(self, values: dict | None = None) -> None:
+    def __init__(self, values: dict[str, Any] | None = None) -> None:
         self.values = dict(values or {})
 
     def get_config_value(self, key: str, default=None):
@@ -90,25 +98,27 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_resolve_precedence_agent_wins() -> None:
-    agent = SimpleNamespace(hosting="anthropic", model="claude")
+    agent = cast("AgentData", SimpleNamespace(hosting="anthropic", model="claude"))
     args = _args(hosting="openai", model="gpt-4o")
-    config = FakeConfigManager({"hosting": "ollama", "model_name": "llama3"})
+    config = cast("ConfigManager", FakeConfigManager({"hosting": "ollama", "model_name": "llama3"}))
     assert resolve_hosting_model(agent, args, config) == ("anthropic", "claude")
 
 
 def test_resolve_precedence_flag_beats_config() -> None:
     args = _args(hosting="openai", model="gpt-4o")
-    config = FakeConfigManager({"hosting": "ollama", "model_name": "llama3"})
+    config = cast("ConfigManager", FakeConfigManager({"hosting": "ollama", "model_name": "llama3"}))
     assert resolve_hosting_model(None, args, config) == ("openai", "gpt-4o")
 
 
 def test_resolve_precedence_config_fallback() -> None:
-    config = FakeConfigManager({"hosting": "kimi", "model_name": "moonshot-v1-8k"})
+    config = cast(
+        "ConfigManager", FakeConfigManager({"hosting": "kimi", "model_name": "moonshot-v1-8k"})
+    )
     assert resolve_hosting_model(None, _args(), config) == ("kimi", "moonshot-v1-8k")
 
 
 def test_resolve_missing_values_raise_legacy_messages() -> None:
-    config = FakeConfigManager({})
+    config = cast("ConfigManager", FakeConfigManager({}))
     with pytest.raises(ValueError, match="Hosting platform is not configured."):
         resolve_hosting_model(None, _args(), config)
     with pytest.raises(ValueError, match="Model name is not configured."):
@@ -173,6 +183,7 @@ async def test_dict_compaction_config_flows_through_prompt(tmp_config_dir: Path)
         CredentialManager(tmp_config_dir),
         AgentRegistry(tmp_config_dir),
     )
+    assert isinstance(session, Session)
     from local_operator.compaction.api import CompactionSettings
 
     assert isinstance(session._compaction_settings, CompactionSettings)
@@ -188,8 +199,10 @@ async def test_dict_compaction_config_flows_through_prompt(tmp_config_dir: Path)
 
 def test_train_false_named_agent_uses_ephemeral_dir(tmp_path: Path) -> None:
     registry = FakeRegistry(tmp_path)
-    agent = SimpleNamespace(id="a1")
-    directory, agent_id = _transcript_dir_and_agent_id(agent, _args(train=False), registry)
+    agent = cast("AgentData", SimpleNamespace(id="a1"))
+    directory, agent_id = _transcript_dir_and_agent_id(
+        agent, _args(train=False), cast("AgentRegistry", registry)
+    )
     # Ephemeral session dir — NOT the agent dir: no replay, no append.
     assert directory.parent == tmp_path / "sessions"
     assert directory.name != "a1"
@@ -198,15 +211,19 @@ def test_train_false_named_agent_uses_ephemeral_dir(tmp_path: Path) -> None:
 
 def test_train_true_named_agent_uses_agent_dir(tmp_path: Path) -> None:
     registry = FakeRegistry(tmp_path)
-    agent = SimpleNamespace(id="a1")
-    directory, agent_id = _transcript_dir_and_agent_id(agent, _args(train=True), registry)
+    agent = cast("AgentData", SimpleNamespace(id="a1"))
+    directory, agent_id = _transcript_dir_and_agent_id(
+        agent, _args(train=True), cast("AgentRegistry", registry)
+    )
     assert directory == tmp_path / "agents" / "a1"
     assert agent_id == "a1"
 
 
 def test_train_true_no_agent_uses_autosave(tmp_path: Path) -> None:
     registry = FakeRegistry(tmp_path)
-    directory, agent_id = _transcript_dir_and_agent_id(None, _args(train=True), registry)
+    directory, agent_id = _transcript_dir_and_agent_id(
+        None, _args(train=True), cast("AgentRegistry", registry)
+    )
     assert registry.autosave_calls == 1
     assert directory == tmp_path / "agents" / "autosave-1"
     assert agent_id == "autosave-1"
@@ -214,7 +231,9 @@ def test_train_true_no_agent_uses_autosave(tmp_path: Path) -> None:
 
 def test_no_train_no_agent_is_ephemeral(tmp_path: Path) -> None:
     registry = FakeRegistry(tmp_path)
-    directory, agent_id = _transcript_dir_and_agent_id(None, _args(train=False), registry)
+    directory, agent_id = _transcript_dir_and_agent_id(
+        None, _args(train=False), cast("AgentRegistry", registry)
+    )
     assert directory.parent == tmp_path / "sessions"
     assert agent_id == "main"
     assert registry.autosave_calls == 0
@@ -234,7 +253,27 @@ async def test_train_gating_end_to_end(tmp_config_dir: Path) -> None:
     registry = AgentRegistry(config_dir)
     from local_operator.agents import AgentEditFields
 
-    agent = registry.create_agent(AgentEditFields(name="roster"))
+    agent = registry.create_agent(
+        AgentEditFields(
+            name="roster",
+            security_prompt=None,
+            hosting=None,
+            model=None,
+            description=None,
+            tags=[],
+            categories=[],
+            last_message=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
     config_manager = ConfigManager(config_dir)
     config_manager.update_config({"hosting": "test", "model_name": "test-model"}, write=False)
     credential_manager = CredentialManager(config_dir)
@@ -252,11 +291,13 @@ async def test_train_gating_end_to_end(tmp_config_dir: Path) -> None:
 
     # Second run WITHOUT train: history is NOT replayed from the agent dir.
     session2 = await create_session(make_args(False), config_manager, credential_manager, registry)
+    assert isinstance(session2, Session)
     assert len(session2._transcript.entries()) == 0  # fresh start
     await session2.dispose()
 
     # Third run WITH train: the transcript lives in the agent dir.
     session3 = await create_session(make_args(True), config_manager, credential_manager, registry)
+    assert isinstance(session3, Session)
     assert session3._transcript.directory == agent_dir
     await session3.prompt("train me")
     await session3.dispose()
@@ -309,7 +350,7 @@ async def test_skills_backend_failure_degrades_to_no_skills(tmp_config_dir: Path
 class FakeMcpManager:
     def __init__(self, configured: list[str] | None = None, connected: list[str] | None = None):
         self.disconnected = 0
-        self.callback = None
+        self.callback: Callable[[list[Any]], Any] | None = None
         self._configured = list(configured or [])
         self._connected = list(connected or [])
 
@@ -326,7 +367,7 @@ class FakeMcpManager:
         self.disconnected += 1
 
 
-class FakeSessionShell:
+class FakeSessionShell(Session):
     """Minimal session surface for the MCP seams (refresh_tools + dispose).
 
     Mirrors the real ``Session`` dispose contract: host teardown is registered
@@ -335,11 +376,11 @@ class FakeSessionShell:
     """
 
     def __init__(self) -> None:
-        self.tools: list = []
+        self.tools: list[Any] = []
         self.disposed = 0
         self.mcp_manager = None
         self.mcp_startup = None
-        self._dispose_hooks: list = []
+        self._dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
 
     def refresh_tools(self, tools) -> None:
         self.tools = list(tools)
@@ -374,13 +415,14 @@ async def test_mcp_merge_on_tools_changed_and_dispose(monkeypatch) -> None:
 
     # Live updates re-merge with builtins first.
     late = MagicMock(name="late_tool")
+    assert manager.callback is not None
     manager.callback([late])
     assert session.tools == [builtin, late]
     manager.callback([])
     assert session.tools == [builtin]
 
     # Dispose folding: session.dispose() disconnects MCP servers.
-    attach_mcp_dispose(session, manager)
+    attach_mcp_dispose(session, cast("McpManager", manager))
     await session.dispose()
     assert session.disposed == 1
     assert manager.disconnected == 1
@@ -437,6 +479,8 @@ async def test_the_stderr_warning_is_kept_for_headless_and_dropped_under_a_ui(
     await wire_mcp_into_session(with_ui, [], ".", has_ui=True)
     assert capsys.readouterr().err == ""
     # Silence on stderr, but the record is intact either way.
+    assert with_ui.mcp_startup is not None
+    assert headless.mcp_startup is not None
     assert with_ui.mcp_startup.failures == headless.mcp_startup.failures
 
 
@@ -454,6 +498,7 @@ async def test_a_hard_discovery_failure_still_degrades_to_zero_mcp_tools(monkeyp
     session = FakeSessionShell()
     assert await wire_mcp_into_session(session, [], ".", has_ui=True) is None
     assert session.tools == []
+    assert session.mcp_startup is not None
     assert session.mcp_startup.failures == {"discovery": "config unreadable"}
     assert session.mcp_startup.reportable is True
 
@@ -471,6 +516,7 @@ async def test_no_configured_servers_records_a_silent_outcome(monkeypatch) -> No
 
     session = FakeSessionShell()
     await wire_mcp_into_session(session, [], ".", has_ui=True)
+    assert session.mcp_startup is not None
     assert session.mcp_startup.reportable is False
     assert session.mcp_startup.failed is False
 
@@ -503,6 +549,7 @@ async def test_a_missing_mcp_sdk_is_reported_once_not_once_per_server(monkeypatc
     session = FakeSessionShell()
     await wire_mcp_into_session(session, [], ".", has_ui=False)
 
+    assert session.mcp_startup is not None
     assert session.mcp_startup.failures == {MCP_DISCOVERY_KEY: MCP_SDK_MISSING_ERROR}
     # The server tally stays honest: three ARE configured and none came up.
     assert session.mcp_startup.configured == ("gh", "linear", "slack")
@@ -534,6 +581,7 @@ async def test_a_layer_failure_keys_on_the_layer_not_on_a_filename(monkeypatch) 
 
     session = FakeSessionShell()
     await wire_mcp_into_session(session, [], ".", has_ui=True)
+    assert session.mcp_startup is not None
     assert session.mcp_startup.failures == {MCP_DISCOVERY_KEY: "invalid json at line 3"}
 
 
@@ -549,8 +597,8 @@ async def test_dispose_closes_auth_store(
     exclusively succeeds afterward."""
     import local_operator.providers.auth_store as auth_mod
 
-    closed: list = []
-    created: list = []
+    closed: list[auth_mod.AuthStore] = []
+    created: list[auth_mod.AuthStore] = []
 
     class SpyAuthStore(auth_mod.AuthStore):
         def __init__(self, *a, **k):
@@ -570,9 +618,9 @@ async def test_dispose_closes_auth_store(
 
     session = await create_session(
         _args(hosting="test", model="test-model"),
-        config_manager,
+        cast("ConfigManager", config_manager),
         credential_manager,
-        registry,
+        cast("AgentRegistry", registry),
     )
     assert len(created) == 1  # exactly one store per session
     assert len(closed) == 0  # still open before dispose
@@ -602,9 +650,9 @@ async def test_build_initial_blocks_without_turn(tmp_config_dir: Path) -> None:
 
     blocks = await build_initial_blocks(
         _args(hosting="test", model="test-model"),
-        config_manager,
+        cast("ConfigManager", config_manager),
         credential_manager,
-        registry,
+        cast("AgentRegistry", registry),
     )
     assert len(blocks) >= 1
     assert all(isinstance(block, str) and block.strip() for block in blocks)

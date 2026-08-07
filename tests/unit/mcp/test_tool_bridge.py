@@ -170,7 +170,7 @@ class TestFormatMcpResult:
                 TextContent(type="text", text="one"),
                 TextContent(type="text", text="two"),
             ],
-            isError=False,
+            is_error=False,
         )
         formatted = format_mcp_result(result, "id1", "mcp__srv_tool")
         assert formatted.text == "one\n\ntwo"
@@ -184,10 +184,10 @@ class TestFormatMcpResult:
                 ImageContent(
                     type="image",
                     data=base64.b64encode(b"\x89PNG\r\n\x1a\n").decode(),
-                    mimeType="image/png",
+                    mime_type="image/png",
                 )
             ],
-            isError=False,
+            is_error=False,
         )
         assert format_mcp_result(result).text == "[Image: image/png]"
 
@@ -198,7 +198,7 @@ class TestFormatMcpResult:
                 EmbeddedResource(
                     type="resource",
                     resource=TextResourceContents(
-                        uri="file:///a", text="body", mimeType="text/plain"
+                        uri="file:///a", text="body", mime_type="text/plain"
                     ),
                 ),
                 EmbeddedResource(
@@ -206,18 +206,18 @@ class TestFormatMcpResult:
                     resource=BlobResourceContents(
                         uri="file:///b",
                         blob=base64.b64encode(b"\x00\x01\x02").decode(),
-                        mimeType="application/octet-stream",
+                        mime_type="application/octet-stream",
                     ),
                 ),
             ],
-            isError=False,
+            is_error=False,
         )
         assert (
             format_mcp_result(result).text == "[Resource: file:///a]\nbody\n\n[Resource: file:///b]"
         )
 
     def test_is_error_prefix_and_flag(self) -> None:
-        result = CallToolResult(content=[TextContent(type="text", text="boom")], isError=True)
+        result = CallToolResult(content=[TextContent(type="text", text="boom")], is_error=True)
         formatted = format_mcp_result(result)
         assert formatted.is_error is True
         assert formatted.text == "Error: boom"
@@ -233,11 +233,11 @@ class TestFormatMcpResult:
         assert formatted.text == "Error: hi"
 
     def test_empty_content(self) -> None:
-        assert format_mcp_result(CallToolResult(content=[], isError=False)).text == ""
+        assert format_mcp_result(CallToolResult(content=[], is_error=False)).text == ""
 
     def test_details_carry_the_server_payload(self) -> None:
         """``details['server_result']`` round-trips the server's own result."""
-        result = CallToolResult(content=[TextContent(type="text", text="ok")], isError=False)
+        result = CallToolResult(content=[TextContent(type="text", text="ok")], is_error=False)
         details = format_mcp_result(result).details
         assert details is not None
         assert details["server_result"] == result.model_dump()
@@ -274,7 +274,7 @@ class TestBuildAgentTool:
         mcp_tool = Tool(
             name="search",
             description="Search things",
-            inputSchema={"type": "object", "properties": {"q": {"type": "string"}}},
+            input_schema={"type": "object", "properties": {"q": {"type": "string"}}},
         )
 
         async def call_fn(*args, **kwargs):  # pragma: no cover - not invoked here

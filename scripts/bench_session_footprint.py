@@ -38,7 +38,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, cast
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -253,7 +253,7 @@ async def measure_replay(path: Path) -> ReplayReport:
     # only the region outside the warm cache suffix: a resumed session's cache
     # is cold by definition, so there is no warm suffix to protect.
     now_ms = int(time.time() * 1000)
-    prune_tool_outputs(history, now_ms, last_activity_ms=0)
+    prune_tool_outputs(cast("list[Message]", history), now_ms, last_activity_ms=0)
     pruned = [
         message
         for message in history

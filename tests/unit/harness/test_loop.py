@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any, Literal
 
 import pytest
 
@@ -14,12 +15,14 @@ from local_operator.harness.types import (
     AgentEndEvent,
     AgentTool,
     AgentToolUpdate,
+    Aside,
     ChatRequest,
     CustomMessage,
     LoopConfig,
     Message,
     ModelSpec,
     StreamEndEvent,
+    StreamEvent,
     StreamTextDelta,
     StreamToolCallDelta,
     TextContent,
@@ -35,7 +38,7 @@ class ScriptedStream:
     """Fake stream_fn: replays a per-call script of StreamEvents and records
     every ChatRequest it receives."""
 
-    def __init__(self, turns: list[list]) -> None:
+    def __init__(self, turns: list[list[StreamEvent]]) -> None:
         self.turns = turns
         self.requests: list[ChatRequest] = []
 
@@ -51,7 +54,10 @@ class ScriptedStream:
 
 
 def echo_tool(
-    executed: list[str], name: str = "echo", concurrency: str = "shared", delay: float = 0.0
+    executed: list[str],
+    name: str = "echo",
+    concurrency: Literal["shared", "exclusive"] = "shared",
+    delay: float = 0.0,
 ) -> AgentTool:
     async def execute(tool_call_id, args, signal, on_update, context):
         if delay:
@@ -70,7 +76,7 @@ def echo_tool(
 
 
 def make_config(stream_fn, **kwargs) -> LoopConfig:
-    defaults = dict(
+    defaults: dict[str, Any] = dict(
         model=MODEL,
         convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
         stream_fn=stream_fn,
@@ -147,7 +153,9 @@ async def test_full_turn_text_tool_text():
     assert tool_msg.role == "tool"
     assert tool_msg.tool_call_id == assistant1.tool_calls[0].id
 
-    assert context.messages[-1].text == "Done"
+    last = context.messages[-1]
+    assert isinstance(last, Message)
+    assert last.text == "Done"
     # System blocks and converted messages reached the provider.
     assert stream.requests[0].system_blocks == ["sys"]
     assert stream.requests[0].messages[0].text == "go"
@@ -387,7 +395,7 @@ async def test_aside_thunks_commit_and_none_dropped():
         on_commit=lambda: committed.append("kept"),
     )
 
-    aside_calls: list[list] = [[lambda: aside_msg, lambda: None], []]
+    aside_calls: list[list[Aside]] = [[lambda: aside_msg, lambda: None], []]
 
     async def get_asides():
         return aside_calls.pop(0) if aside_calls else []

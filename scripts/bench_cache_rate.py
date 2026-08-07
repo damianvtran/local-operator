@@ -113,12 +113,14 @@ async def run_structural(turns: int) -> float:
     # provider call carries the selected block, later calls reuse it
     # byte-identically, so the measured stability is the stability the wire
     # actually gets.
-    frozen = {"block": None}
+    frozen: dict[str, str | None] = {"block": None}
 
     def provider() -> list[str]:
-        if frozen["block"] is None:
-            frozen["block"] = "<skills>\nminerva-observability: Datadog playbooks\n</skills>"
-        return build_system_blocks(tools, frozen["block"], "bench env", "2026-08-04")
+        block = frozen["block"]
+        if block is None:
+            block = "<skills>\nminerva-observability: Datadog playbooks\n</skills>"
+            frozen["block"] = block
+        return build_system_blocks(tools, block, "bench env", "2026-08-04")
 
     transcript = Transcript(Path(tempfile.mkdtemp(prefix="lo-bench-")))
     session = Session(

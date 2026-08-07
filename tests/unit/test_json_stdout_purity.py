@@ -13,10 +13,12 @@ from __future__ import annotations
 import io
 import json
 from contextlib import redirect_stderr, redirect_stdout
+from typing import cast
 
 import pytest
 
 from local_operator import cli
+from local_operator.credentials import CredentialManager
 
 
 def _streams(fn) -> tuple[str, str]:
@@ -46,7 +48,11 @@ def _assert_stdout_is_json_only(stdout: str, context: str) -> None:
 def test_missing_api_key_error_goes_to_stderr() -> None:
     """The most common exec failure there is: fresh install, no key, or a
     typo'd --hosting. It used to print a coloured line to stdout."""
-    stdout, stderr = _streams(lambda: cli._preflight_api_key("mistral", None))
+    # None on purpose: the preflight must survive the env-only resolution path
+    # with no credential manager wired up, which the parameter type doesn't model.
+    stdout, stderr = _streams(
+        lambda: cli._preflight_api_key("mistral", cast("CredentialManager", None))
+    )
     _assert_stdout_is_json_only(stdout, "_preflight_api_key")
     assert "MISTRAL_API_KEY" in stderr or "API key" in stderr
 

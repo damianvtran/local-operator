@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import math
 import re
+from typing import cast
 
 from rich.cells import cell_len
+from textual.widgets import Static
 
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.status_line import (
@@ -66,6 +68,11 @@ class FakeDock:
         return type("Timer", (), {"stop": lambda self: None})()
 
 
+def _dock(width: int = 80) -> Static:
+    """FakeDock where StatusLine's declared ``Static`` is asked for."""
+    return cast(Static, FakeDock(width))
+
+
 class FakeClock:
     """A monotonic clock the test advances by hand."""
 
@@ -82,7 +89,7 @@ class FakeClock:
 def _full_band(width: int = 200) -> tuple[StatusLine, FakeClock]:
     """A band with EVERY segment populated — the worst case for one-row."""
     clock = FakeClock()
-    status = StatusLine(FakeDock(width), clock=clock)
+    status = StatusLine(_dock(width), clock=clock)
     status.update(
         model_label="openrouter/moonshotai/kimi-k2-thinking",
         effort="high",
@@ -349,7 +356,7 @@ def test_an_empty_name_clears_the_segment() -> None:
 
 def test_duration_accumulates_only_while_streaming() -> None:
     clock = FakeClock()
-    status = StatusLine(FakeDock(200), clock=clock)
+    status = StatusLine(_dock(200), clock=clock)
     status.update(model_label="p/m")
 
     status.update(streaming=True)
@@ -365,7 +372,7 @@ def test_duration_accumulates_only_while_streaming() -> None:
 
 def test_duration_ticks_live_during_a_turn() -> None:
     clock = FakeClock()
-    status = StatusLine(FakeDock(200), clock=clock)
+    status = StatusLine(_dock(200), clock=clock)
     status.update(streaming=True)
     clock.advance(9)
     assert "9s" in status.render_text(200).plain
@@ -375,7 +382,7 @@ def test_a_redundant_streaming_false_cannot_bank_the_same_interval_twice() -> No
     """The prompt worker's ``finally`` repeats ``streaming=False`` after
     agent_end already sent it; double-banking would inflate every duration."""
     clock = FakeClock()
-    status = StatusLine(FakeDock(200), clock=clock)
+    status = StatusLine(_dock(200), clock=clock)
     status.update(streaming=True)
     clock.advance(10)
     status.update(streaming=False)
@@ -386,7 +393,7 @@ def test_a_redundant_streaming_false_cannot_bank_the_same_interval_twice() -> No
 
 def test_no_duration_segment_before_anything_has_run() -> None:
     clock = FakeClock()
-    status = StatusLine(FakeDock(200), clock=clock)
+    status = StatusLine(_dock(200), clock=clock)
     status.update(model_label="p/m", cwd="/tmp")
     assert "0s" not in status.render_text(200).plain
 
@@ -557,7 +564,7 @@ def test_mcp_segment_disappears_when_no_servers_are_configured() -> None:
     the absence of a feature the user never asked for. The segment appearing at
     all is part of the signal."""
     assert format_mcp(McpStatus()) == ""
-    status = StatusLine(FakeDock(200))
+    status = StatusLine(_dock(200))
     status.update(model_label="test/model", mcp=McpStatus())
     assert ICON_MCP not in status.render_text(200).plain
 
@@ -619,7 +626,7 @@ def test_a_discovery_failure_keeps_the_alarm_without_inventing_a_count() -> None
     second renders the bare initialism — every count would be a fiction, and
     ``0 MCP`` in particular would claim the machine asked for nothing."""
     assert format_mcp(McpStatus(discovery_failed=True)) == "MCP"
-    status = StatusLine(FakeDock(200))
+    status = StatusLine(_dock(200))
     status.update(model_label="test/model", mcp=McpStatus(discovery_failed=True))
     row = status.render_text(200)
     assert f"{ICON_MCP} MCP" in row.plain
@@ -629,7 +636,7 @@ def test_a_discovery_failure_keeps_the_alarm_without_inventing_a_count() -> None
 def test_only_the_mcp_glyph_carries_the_state_colour() -> None:
     """Tinting ``2 MCP`` danger reads as "the number 2 is wrong". The glyph is
     the status lamp; the count beside it stays plain foreground."""
-    status = StatusLine(FakeDock(200))
+    status = StatusLine(_dock(200))
     status.update(model_label="test/model", mcp=McpStatus(configured=3, connected=2, failed=True))
     fills = _fills(status.render_text(200))
     danger = theme_mod.semantic_color("danger").lower()
@@ -669,7 +676,7 @@ def test_a_healthy_mcp_count_sheds_before_the_cwd_and_the_model_label() -> None:
     sheds like one — just ahead of the cwd, and the two SHORTEN steps still come
     before it because they keep a segment instead of dropping one.
     """
-    status = StatusLine(FakeDock(40))
+    status = StatusLine(_dock(40))
     status.update(model_label="test/model", cwd="/Users/tester/work/local-operator")
 
     # Swept rather than pinned to one width: the invariant is an ORDER, and a

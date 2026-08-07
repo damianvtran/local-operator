@@ -309,6 +309,7 @@ async def test_bare_slash_opens_the_picker() -> None:
         assert [name for name, _ in picker.suggestions()] == [c.name for c in SLASH_COMMANDS]
         assert picker.highlighted_name() == "help"
         # Drawn: the pinned height matches the visible rows.
+        assert picker.styles.height is not None
         assert picker.styles.height.value == 9  # 8 suggestions + the overflow count
         assert app.editor.has_focus  # opening the list never steals the caret
 
@@ -1243,6 +1244,7 @@ async def test_arrowing_onto_a_logout_row_still_runs_it_on_one_enter() -> None:
         assert picker.highlighted_name() == "alibaba"
 
         _name, choice = picker.suggestions()[picker.selected_index]
+        assert isinstance(choice, ArgumentChoice)
         assert choice.detail, "the arrowed row must state what Enter destroys"
         assert choice.alert, "and state it in the destructive tint"
 

@@ -14,6 +14,7 @@ import logging
 import logging.handlers
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -227,7 +228,7 @@ def test_file_logging_blocks_a_console_handler_installed_mid_session(
         # built over something else then repointed at the terminal.
         logging.getLogger().addHandler(logging.StreamHandler(sys.stderr))
         logging.basicConfig(level=logging.DEBUG)
-        repointed = logging.StreamHandler(io.StringIO())
+        repointed = cast("logging.StreamHandler[Any]", logging.StreamHandler(io.StringIO()))
         repointed.stream = sys.stderr
         logging.getLogger("noisy.sdk").addHandler(repointed)
 

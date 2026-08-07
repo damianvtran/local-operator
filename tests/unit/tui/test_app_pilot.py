@@ -7,7 +7,7 @@ paints first, then awaits the session in a worker.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -47,6 +47,24 @@ class FakeSession:
     @property
     def model_label(self) -> str:
         return "test/model"
+
+    @property
+    def model(self) -> Any:
+        return None
+
+    def set_model(self, model: Any) -> None:
+        pass
+
+    @property
+    def goal(self) -> str:
+        return getattr(self, "_goal", "")
+
+    def set_goal(self, text: str) -> str:
+        self._goal = (text or "").strip()
+        return self._goal
+
+    async def seed_history(self, messages: list[Any]) -> None:
+        pass
 
     async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
         self.prompts.append(text)
@@ -853,7 +871,7 @@ class FakeProviderController:
         self.logins: list[str] = []
         self.logouts: list[str] = []
 
-    def login_providers(self):
+    def login_providers(self) -> list[Any]:
         return [
             _FakeDef("openrouter", "OpenRouter", None, ("router",)),
             _FakeDef("deepseek", "DeepSeek", None, ("ds",)),
@@ -872,7 +890,7 @@ class FakeProviderController:
         # wide one for "would a turn work".
         return self.has_any_credential(provider)
 
-    def usable_providers(self):
+    def usable_providers(self) -> set[str] | None:
         # The set shape the picker's filter asks for: one answer for the whole
         # registry instead of one probe per provider. `None` would mean the store
         # could not be read at all, which this fake never simulates.
@@ -1259,13 +1277,18 @@ def test_all_three_usage_surfaces_agree_for_an_api_key_only_install(monkeypatch)
     question, and they used to give three answers: with only `ANTHROPIC_API_KEY`
     set, `/provider` advertised anthropic, bare `/usage` rendered "no usage data",
     and `/usage anthropic` correctly said it needs a login."""
-    from local_operator.providers.controller import ProviderController
+    from local_operator.providers.controller import (
+        ControllerAuthStore,
+        ProviderController,
+    )
     from tests.unit.providers.test_controller import _USAGE_ENV_VARS, FakeAuthStore
 
     for name in _USAGE_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    controller = ProviderController(FakeAuthStore(), login_callbacks=None)
+    controller = ProviderController(
+        cast(ControllerAuthStore, FakeAuthStore()), login_callbacks=None
+    )
     app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=controller)
 
     # Surface 1: `/provider` must not advertise what `/usage` cannot deliver.
@@ -1318,7 +1341,7 @@ async def test_run_tui_forwards_provider_controller(monkeypatch) -> None:
     import local_operator.tui.app as app_mod
     from local_operator.tui.app import OperatorApp
 
-    seen: dict = {}
+    seen: dict[str, Any] = {}
     fake_controller = object()
 
     class _SpyApp(OperatorApp):
@@ -1326,7 +1349,7 @@ async def test_run_tui_forwards_provider_controller(monkeypatch) -> None:
             seen["controller"] = kw.get("provider_controller")
             super().__init__(*a, **kw)
 
-        async def run_async(self):
+        async def run_async(self, **kwargs: Any) -> None:
             return None
 
     # run_tui lazy-imports OperatorApp from local_operator.tui.app at call
@@ -1339,7 +1362,7 @@ async def test_run_tui_forwards_provider_controller(monkeypatch) -> None:
         return _SpyApp()  # type: ignore[return-value]
 
     # Await run_tui with a fake session factory that must not await forever.
-    async def factory2():
+    async def factory2() -> Any:
         return object()
 
     from local_operator.tui import run_tui
@@ -1977,8 +2000,8 @@ class _SwitchableSession(FakeSession):
     def model_label(self) -> str:
         return self._label
 
-    def set_model(self, spec) -> None:
-        self._label = f"{spec.provider}/{spec.model_id}"
+    def set_model(self, model) -> None:
+        self._label = f"{model.provider}/{model.model_id}"
 
 
 @pytest.mark.asyncio

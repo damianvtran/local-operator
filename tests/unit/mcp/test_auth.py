@@ -9,7 +9,6 @@ through the real SQLite store.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -25,37 +24,24 @@ from local_operator.mcp.auth import (
     wire_oauth_auth,
 )
 from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig, MCPOAuthConfig
-
-
-@dataclass
-class FakeRow:
-    """StoredCredential stand-in: integer id + provider + identity_key + data."""
-
-    id: int
-    provider: str
-    credential_type: str
-    data: dict[str, Any]
-    disabled_cause: str | None = None
-    identity_key: str | None = None
-    created_at: int = 0
-    updated_at: int = 0
+from local_operator.providers.auth_store import StoredCredential
 
 
 class FakeAuthStore:
     """In-memory stand-in satisfying the real AuthStore's method surface."""
 
     def __init__(self) -> None:
-        self.rows: list[FakeRow] = []
+        self.rows: list[StoredCredential] = []
         self._next_id = 1
 
-    def upsert_credential(self, provider: str, credential: dict[str, Any]) -> FakeRow:
+    def upsert_credential(self, provider: str, credential: dict[str, Any]) -> StoredCredential:
         identity = credential.get("project_id")  # mirrors _identity_key_for ordering
         payload = dict(credential)
         for existing in self.rows:
             if existing.provider == provider and existing.identity_key == identity:
                 existing.data = payload
                 return existing
-        row = FakeRow(
+        row = StoredCredential(
             id=self._next_id,
             provider=provider,
             credential_type="api_key",
@@ -68,13 +54,13 @@ class FakeAuthStore:
 
     def list_credentials(
         self, provider: str | None = None, include_disabled: bool = False
-    ) -> list[FakeRow]:
+    ) -> list[StoredCredential]:
         rows = [r for r in self.rows if provider is None or r.provider == provider]
         if include_disabled:
             return rows
         return [r for r in rows if r.disabled_cause is None]
 
-    def get_credential(self, credential_id: int) -> FakeRow | None:
+    def get_credential(self, credential_id: int) -> StoredCredential | None:
         for row in self.rows:
             if row.id == credential_id:
                 return row
@@ -133,8 +119,10 @@ class TestMcpTokenStorage:
         await other.set_tokens(OAuthToken(access_token="x", token_type="Bearer"))
         assert len(store.list_credentials(MCP_OAUTH_PROVIDER)) == 2
         # Servers never see each other's tokens.
-        assert (await storage.get_tokens()).access_token == "two"
-        assert (await other.get_tokens()).access_token == "x"
+        main_tokens = await storage.get_tokens()
+        assert main_tokens is not None and main_tokens.access_token == "two"
+        other_tokens = await other.get_tokens()
+        assert other_tokens is not None and other_tokens.access_token == "x"
 
     @pytest.mark.asyncio
     async def test_client_info_roundtrip(self) -> None:
@@ -157,7 +145,8 @@ class TestMcpTokenStorage:
         storage = McpTokenStorage("https://srv.example/mcp", store)
         await storage.set_client_info(OAuthClientInformationFull(client_id="cid"))
         await storage.set_tokens(OAuthToken(access_token="a", token_type="Bearer"))
-        assert (await storage.get_client_info()).client_id == "cid"
+        kept = await storage.get_client_info()
+        assert kept is not None and kept.client_id == "cid"
 
     @pytest.mark.asyncio
     async def test_none_store_degrades_to_noop(self) -> None:
@@ -229,12 +218,14 @@ class TestRealAuthStoreConformance:
             # Re-auth upserts in place (still one row for the URL).
             await storage.set_tokens(OAuthToken(access_token="acc-2", token_type="Bearer"))
             assert len(store.list_credentials("mcp-oauth")) == 1
-            assert (await storage.get_tokens()).access_token == "acc-2"
+            refreshed = await storage.get_tokens()
+            assert refreshed is not None and refreshed.access_token == "acc-2"
 
             # A fresh storage instance for the same URL sees the same row
             # (the logical id 'mcp_oauth:<url>' survives process restarts).
             storage2 = McpTokenStorage(url, store)
-            assert (await storage2.get_tokens()).access_token == "acc-2"
+            second = await storage2.get_tokens()
+            assert second is not None and second.access_token == "acc-2"
         finally:
             store.close()
 

@@ -3,6 +3,7 @@
 import base64
 import io
 from datetime import datetime, timezone
+from typing import cast
 
 from PIL import Image
 
@@ -181,8 +182,9 @@ def test_render_frame_valid_png_with_shape_dimensions():
         assert img.format == "PNG"
         assert img.size == (shape.page_width_px, 2 * shape.line_pitch)
         pixels = img.load()
+        assert pixels is not None
         # White-on-black: ink on the first glyph row, black at the bottom edge.
-        ink = sum(1 for x in range(0, shape.page_width_px, 3) if pixels[x, 3] > 128)
+        ink = sum(1 for x in range(0, shape.page_width_px, 3) if cast(int, pixels[x, 3]) > 128)
         assert ink > 0
         assert pixels[0, img.size[1] - 1] == 0
 
