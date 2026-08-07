@@ -12,6 +12,16 @@ from local_operator.prompts_api import (
     render_string,
     render_template,
 )
+from local_operator.tools import builtin
+
+
+@pytest.fixture(autouse=True)
+def _force_browser_available(monkeypatch):
+    """The inventory assertion spans the full default surface including
+    ``browser``, whose builder is gated on a reachable CMUX browser that CI
+    lacks; force the predicate so the ordering test is deterministic."""
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+
 
 if TYPE_CHECKING:
     from local_operator.harness.wake import WakeSchedule

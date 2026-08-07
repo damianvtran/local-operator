@@ -2,7 +2,10 @@
 
 from typing import Any, Coroutine, cast
 
+import pytest
+
 from local_operator.harness.types import AgentTool, ToolContext, ToolResult
+from local_operator.tools import builtin
 from local_operator.tools.registry import (
     DEFAULT_TOOL_NAMES,
     TOOL_BUILDERS,
@@ -19,6 +22,14 @@ class _FakeScheduler:
 
     async def update(self, schedules) -> None:
         pass
+
+
+@pytest.fixture(autouse=True)
+def _force_browser_available(monkeypatch):
+    """The default-surface assertions include ``browser``, whose builder is
+    environment-gated on a reachable CMUX browser. CI has none, so force the
+    capability predicate to keep these tests deterministic everywhere."""
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
 
 
 def test_default_set_builds_all_builtin_tools() -> None:
