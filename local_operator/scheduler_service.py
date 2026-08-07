@@ -1,209 +1,120 @@
+"""Scheduled task service — rewritten engine port (CL-07).
+
+The scheduler loads each agent's ``schedules.jsonl`` (owned by
+:class:`~local_operator.agents.AgentRegistry`), arms APScheduler triggers for
+active :class:`~local_operator.types.Schedule` entries, and runs due prompts
+**in-process** through the rewritten engine:
+
+- one asyncio task per run, built via ``session_factory.create_session`` +
+  ``Session.prompt`` — NO multiprocessing fork (the fork existed only to
+  isolate the old ``exec()``-based engine; the new engine is async-native);
+- ``train=True`` semantics: the run's transcript persists into the agent's
+  own directory (``agents/<id>/transcript.jsonl``), mirroring the legacy
+  ``persist_conversation=True`` behavior;
+- ``yolo=True``: scheduled runs are unattended, tool approvals auto-grant;
+- per-run timeout (default 30 minutes, configurable via the
+  ``LOCAL_OPERATOR_SCHEDULED_TASK_TIMEOUT_SECONDS`` environment variable);
+- failures are logged and recorded in the job ledger
+  (:class:`~local_operator.jobs.JobStatus.FAILED`) — a failing run never
+  kills the scheduler loop.
+
+Deliberate removals from the legacy module (disposition notes):
+
+- **Radient/Google OAuth refresh cron** (``RADIENT_TOKEN_REFRESH_JOB_ID``,
+  ``_execute_radient_token_refresh_task``,
+  ``add_radient_token_refresh_job_if_needed``) is REMOVED. Token refresh is a
+  provider concern: the rewrite's providers auth store
+  (``local_operator/providers/auth_store.py``) auto-refreshes on use. The
+  legacy module mixed that unrelated cron into the task scheduler.
+- **``_execute_scheduled_task_logic``** (the picklable child-process
+  entrypoint) is gone with the multiprocessing fork. The legacy test file
+  targeting it (``tests/unit/test_scheduler_service.py``) was removed with
+  the old engine.
+- **``ScheduleInstructionsPrompt``** is INLINED as ``SCHEDULE_INSTRUCTIONS``
+  (verbatim): its home, ``local_operator.prompts``, was deleted with the
+  legacy engine.
+- ``operator_type`` / ``verbosity_level`` / ``env_config`` are accepted for
+  interface compatibility with the legacy constructor (``server/app.py`` and
+  ``cli.py`` pass them) but are informational only: the rewritten engine has
+  no CLI/SERVER operator distinction and does its own env-config wiring.
+
+Legacy semantics preserved:
+
+- interval+unit (MINUTES/HOURS/DAYS) cron mapping with
+  ``start_time_utc``/``end_time_utc`` bounds and identical
+  misfire-grace/coalesce settings;
+- one-time schedules pop from the agent state after a successful run;
+  past-due one-time schedules replay immediately on load;
+  ``last_run_at`` stamps only on success; end-time runs deactivate;
+- ``load_all_agent_schedules`` purges inactive/ended schedules from
+  ``schedules.jsonl`` when saving, and replays missed recurring runs inside
+  the legacy grace window;
+- in-flight runs are cancelled on shutdown (was: orphaned child processes).
+"""
+
+from __future__ import annotations
+
+import argparse
 import asyncio
+import inspect
 import logging
+import os
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
-from multiprocessing import Queue
-from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional
 from uuid import UUID
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
+from local_operator import session_factory
 from local_operator.agents import AgentData, AgentRegistry
-from local_operator.bootstrap import initialize_operator
-from local_operator.clients.radient import RadientClient, RadientTokenResponse
 from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
-from local_operator.jobs import JobContext, JobContextRecord, JobManager, JobStatus
-from local_operator.operator import OperatorType
-from local_operator.prompts import ScheduleInstructionsPrompt
-from local_operator.server.utils.job_processor_queue import (
-    create_and_start_job_process_with_queue,
-)
-from local_operator.server.utils.websocket_manager import WebSocketManager
-from local_operator.types import Schedule, ScheduleUnit
+from local_operator.harness.types import AgentEndEvent, AgentEvent, Message, MessageRole
+from local_operator.jobs import JobContextRecord, JobManager, JobStatus
+from local_operator.types import ConversationRole, OperatorType, Schedule, ScheduleUnit
+
+if TYPE_CHECKING:
+    from local_operator.server.utils.event_broker import EventBroker
+    from local_operator.server.utils.websocket_manager import WebSocketManager
+
+from local_operator.server.utils.sse_publisher import publish_job_status
 
 logger = logging.getLogger(__name__)
 
-# Constants for Google Credentials (some retained for storing token)
-GOOGLE_ACCESS_TOKEN_KEY = "GOOGLE_ACCESS_TOKEN"
-GOOGLE_REFRESH_TOKEN_KEY = "GOOGLE_REFRESH_TOKEN"  # This is the token we use to refresh
-GOOGLE_TOKEN_EXPIRY_TIMESTAMP_KEY = "GOOGLE_TOKEN_EXPIRY_TIMESTAMP"
-RADIENT_TOKEN_REFRESH_JOB_ID = "radient_google_token_refresh_job"
-# Refresh every 15 minutes, Google access tokens typically last 1 hour (3600s)
-TOKEN_REFRESH_CRON_MINUTES = "*/15"  # Generic name, can be used for other providers too
+#: Default per-run timeout (30 minutes). Override with the
+#: ``LOCAL_OPERATOR_SCHEDULED_TASK_TIMEOUT_SECONDS`` environment variable.
+DEFAULT_RUN_TIMEOUT_SECONDS = 30 * 60
+RUN_TIMEOUT_ENV_VAR = "LOCAL_OPERATOR_SCHEDULED_TASK_TIMEOUT_SECONDS"
 
+#: Verbatim copy of the legacy ``prompts.ScheduleInstructionsPrompt`` (see the
+#: module docstring for why it is inlined).
+SCHEDULE_INSTRUCTIONS: str = """
+This is the next scheduled task that you must run again
 
-def _execute_scheduled_task_logic(
-    job_id: str,  # This will be the schedule_id_str
-    agent_id_str: str,
-    schedule_id_str: str,  # schedule_id is the same as job_id for scheduled tasks
-    prompt: str,
-    agent_registry_config_dir: str,
-    env_config: EnvConfig,
-    operator_type_str: str,
-    verbosity_level_str: str,
-    target_agent_hosting: str,  # From target_agent_data
-    target_agent_model: str,  # From target_agent_data
-    status_queue: Optional[Queue] = None,  # type: ignore
-):
-    """
-    The core logic for executing a scheduled agent task in a separate process.
-    This function is designed to be picklable and run by multiprocessing.Process.
-    """
-    # Create a new event loop for this process
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+Make sure to complete the task completely and with all required steps and details.  Compare any results with the previous task and update as needed.  Don't assume any steps have already been completed.
 
-    # Reconstruct managers
-    agent_registry = AgentRegistry(config_dir=Path(agent_registry_config_dir))
-    config_manager = ConfigManager(config_dir=Path(agent_registry_config_dir))
-    credential_manager = CredentialManager(config_dir=Path(agent_registry_config_dir))
-    operator_type = OperatorType[operator_type_str]
-    verbosity_level = VerbosityLevel[verbosity_level_str]
+Don't make assumptions about variables or data that are already in your context and conversation history.  Even if you see completed text and statuses in your context variables, these are likely stale now and need to be re-done.  Fetch new information as needed, and if you are running a recurring task that depends on new information, make sure to consider the new information in your response if there is any.  Write summaries, emails, reports, and any other text based on the new information and make sure that you are appropriately communicating the new information to the user.
+"""  # noqa: E501
 
-    # The scheduler_service instance for tools within a scheduled task.
-    # Tools should use the status_queue to request scheduling changes from the main process.
-    # So, we pass None or a proxy that uses the queue. For now, None.
-    scheduler_service_for_tools = None
-
-    async def task_execution_coroutine():
-        job_context = JobContext()
-        with job_context:
-            if status_queue:
-                status_queue.put(("status_update", job_id, JobStatus.PROCESSING, None))
-
-            try:
-                logger.debug(
-                    f"Process {job_id}: Starting task for agent {agent_id_str}, "
-                    f"schedule {schedule_id_str}"
-                )
-
-                # AgentData needs to be reconstructed or key parts passed.
-                # We passed hosting and model, assuming that's sufficient for initialize_operator
-                # along with agent_id_str for loading state.
-                # If current_agent object is complex, more data might be needed.
-                # For now, initialize_operator will load the agent using agent_id_str.
-                # We need to ensure get_agent can be called with agent_id_str.
-                # The original code did:
-                # target_agent_data = self.agent_registry.get_agent(agent_id_str)
-                # So, agent_registry.get_agent(agent_id_str) should work.
-                current_agent_obj: AgentData = agent_registry.get_agent(agent_id_str)
-
-                task_operator = initialize_operator(
-                    operator_type=operator_type,
-                    config_manager=config_manager,
-                    credential_manager=credential_manager,
-                    agent_registry=agent_registry,
-                    env_config=env_config,
-                    request_hosting=target_agent_hosting,  # Use passed value
-                    request_model=target_agent_model,  # Use passed value
-                    current_agent=current_agent_obj,  # Loaded agent object
-                    scheduler_service=scheduler_service_for_tools,
-                    persist_conversation=True,
-                    auto_save_conversation=False,
-                    verbosity_level=verbosity_level,
-                    job_id=job_id,
-                    status_queue=status_queue,
-                )
-
-                if status_queue and hasattr(task_operator, "executor"):
-                    task_operator.executor.status_queue = status_queue
-
-                additional_instructions = ScheduleInstructionsPrompt
-
-                _, final_response = await task_operator.handle_user_input(
-                    prompt, additional_instructions=additional_instructions
-                )
-                log_msg_response = final_response[:100] if final_response else ""
-                logger.debug(
-                    f"Process {job_id}: Task completed for agent {agent_id_str}. "
-                    f"Response: {log_msg_response}"
-                )
-
-                now_utc_after_task = datetime.now(timezone.utc)
-                agent_state_after_task = agent_registry.load_agent_state(agent_id_str)
-                schedule_id_uuid = UUID(schedule_id_str)
-                schedule_modified_in_state = False
-
-                schedules_copy = list(agent_state_after_task.schedules)
-                for sched_idx, sched_item in enumerate(schedules_copy):
-                    if sched_item.id == schedule_id_uuid:
-                        sched_item.last_run_at = now_utc_after_task
-                        schedule_modified_in_state = True
-
-                        if sched_item.one_time:
-                            logger.debug(
-                                f"Process {job_id}: One-time schedule {schedule_id_str} executed. "
-                                "Removing from agent state."
-                            )
-                            agent_state_after_task.schedules.pop(sched_idx)
-                            # The job in JobManager will be marked COMPLETED.
-                            # APScheduler job removal is handled by the main SchedulerService
-                            # based on this completion or if it was a DateTrigger.
-                            break
-
-                        if (
-                            sched_item.end_time_utc
-                            and now_utc_after_task >= sched_item.end_time_utc
-                        ):
-                            if sched_item.is_active:
-                                logger.debug(
-                                    f"Process {job_id}: Schedule {schedule_id_str} passed end time "
-                                    f"({sched_item.end_time_utc}) after task. Marking inactive."
-                                )
-                                sched_item.is_active = False
-                            # schedule_modified_in_state is already true
-                            # APScheduler job removal for end_time_utc is handled by
-                            # main SchedulerService.
-                        break
-
-                if schedule_modified_in_state:
-                    agent_registry.save_agent_state(agent_id_str, agent_state_after_task)
-                    logger.debug(
-                        f"Process {job_id}: Updated agent state for schedule {schedule_id_str}"
-                    )
-
-                result_payload = {
-                    "response": final_response or "",
-                    "context": [
-                        JobContextRecord(role=msg.role, content=msg.content, files=msg.files)
-                        for msg in task_operator.executor.agent_state.conversation
-                    ],
-                    "schedule_id": schedule_id_str,
-                    "agent_id": agent_id_str,
-                }
-                if status_queue:
-                    status_queue.put(("status_update", job_id, JobStatus.COMPLETED, result_payload))
-
-            except Exception as op_error:
-                logger.error(
-                    f"Process {job_id}: Failed to execute task for agent {agent_id_str}, "
-                    f"schedule {schedule_id_str}: {op_error}",
-                    exc_info=True,
-                )
-                if status_queue:
-                    status_queue.put(
-                        (
-                            "status_update",
-                            job_id,
-                            JobStatus.FAILED,
-                            {"error": str(op_error), "schedule_id": schedule_id_str},
-                        )
-                    )
-            finally:
-                logger.debug(f"Process {job_id}: Exiting task execution coroutine.")
-
-    loop.run_until_complete(task_execution_coroutine())
-    loop.close()
+#: Harness message roles that map onto the legacy job-context ledger shape.
+_MESSAGE_ROLE_TO_CONVERSATION_ROLE: dict[MessageRole, ConversationRole] = {
+    "user": ConversationRole.USER,
+    "assistant": ConversationRole.ASSISTANT,
+    "tool": ConversationRole.TOOL,
+}
 
 
 class SchedulerService:
-    """
-    Service for managing and executing scheduled tasks for agents.
+    """Service for managing and executing scheduled tasks for agents.
+
+    Public surface (byte-compatible with the legacy service):
+    ``start()``, ``shutdown()``, ``load_all_agent_schedules()``,
+    ``add_or_update_job(schedule)``, ``remove_job(schedule_id)``.
     """
 
     def __init__(
@@ -212,267 +123,83 @@ class SchedulerService:
         config_manager: ConfigManager,
         credential_manager: CredentialManager,
         env_config: EnvConfig,
-        operator_type: OperatorType,
+        operator_type: "OperatorType",
         verbosity_level: VerbosityLevel,
-        job_manager: JobManager,  # Added
-        websocket_manager: WebSocketManager,  # Added
-    ):
+        job_manager: JobManager,
+        websocket_manager: "WebSocketManager",
+        event_broker: "EventBroker | None" = None,
+    ) -> None:
         self.agent_registry = agent_registry
         self.config_manager = config_manager
         self.credential_manager = credential_manager
         self.env_config = env_config
-        self.scheduler = AsyncIOScheduler(timezone="UTC")
         self.operator_type = operator_type
         self.verbosity_level = verbosity_level
-        self.job_manager = job_manager  # Added
-        self.websocket_manager = websocket_manager  # Added
+        self.job_manager = job_manager
+        self.websocket_manager = websocket_manager
+        # Optional SSE fan-out. Scheduled runs execute inline in the parent (no
+        # pump), so without this their job streams would open and keepalive
+        # forever; publishing here gives them the same terminal contract as
+        # async chat jobs (review B-2).
+        self.event_broker = event_broker
 
-    async def _execute_radient_token_refresh_task(self) -> None:
-        """
-        Task executed by the scheduler to refresh Google OAuth tokens via Radient.
-        """
-        logger.info("Attempting to refresh Google OAuth access token via Radient...")
-        try:
-            radient_client_id = self.env_config.radient_client_id
-            google_refresh_token_secret = self.credential_manager.get_credential(
-                GOOGLE_REFRESH_TOKEN_KEY
-            )
+        self.scheduler = AsyncIOScheduler(timezone="UTC")
+        self._run_tasks: set[asyncio.Task[Any]] = set()
 
-            if not radient_client_id:
-                logger.warning(
-                    "RADIENT_CLIENT_ID not found in environment configuration. "
-                    "Skipping token refresh."
-                )
-                return
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
-            if not (google_refresh_token_secret and google_refresh_token_secret.get_secret_value()):
-                logger.warning(
-                    "Google refresh token not found or empty in credentials. "
-                    "Skipping token refresh."
-                )
-                return
-
-            logger.debug("Retrieved Radient Client ID and Google refresh token for token refresh.")
-
-            radient_api_key = self.credential_manager.get_credential("RADIENT_API_KEY")
-            radient_client = RadientClient(
-                api_key=radient_api_key, base_url=self.env_config.radient_api_base_url
-            )
-
-            refresh_response: RadientTokenResponse = await asyncio.to_thread(
-                radient_client.refresh_token,
-                client_id=radient_client_id,
-                refresh_token=google_refresh_token_secret,
-                provider="google",  # Specify Google provider for Radient endpoint
-            )
-
-            # The refresh_response is now directly the RadientTokenResponse model
-            new_access_token_secret = refresh_response.access_token
-            expires_in = refresh_response.expires_in  # Seconds
-
-            if not new_access_token_secret or expires_in is None:
-                logger.error(
-                    "Failed to get new access token or expiry from Radient refresh response: %s",
-                    refresh_response.dict(),  # .dict() is available on RadientTokenResponse
-                )
-                return
-
-            new_access_token = new_access_token_secret.get_secret_value()
-            # Calculate new expiry timestamp
-            # Add a small buffer (e.g., 60 seconds) to be safe
-            expiry_timestamp = int(datetime.now(timezone.utc).timestamp()) + expires_in - 60
-
-            self.credential_manager.set_credential(
-                GOOGLE_ACCESS_TOKEN_KEY, new_access_token, write=False
-            )
-            self.credential_manager.set_credential(
-                GOOGLE_TOKEN_EXPIRY_TIMESTAMP_KEY, str(expiry_timestamp), write=False
-            )
-            # If Radient issues a new refresh token, store it (optional, depends on Radient's flow)
-            if refresh_response.refresh_token:
-                self.credential_manager.set_credential(
-                    GOOGLE_REFRESH_TOKEN_KEY,
-                    refresh_response.refresh_token.get_secret_value(),
-                    write=False,
-                )
-            self.credential_manager.write_to_file()  # Persist all changes
-
-            logger.info(
-                (
-                    "Successfully refreshed Google OAuth access token via Radient. "
-                    "New expiry (UTC): %s"
-                ),
-                datetime.fromtimestamp(expiry_timestamp, tz=timezone.utc).isoformat(),
-            )
-
-        except Exception as e:
-            logger.error(
-                f"Unexpected error during Radient Google token refresh: {e}", exc_info=True
-            )
-
-    def _schedule_radient_token_refresh(self) -> None:
-        """
-        Schedules the Radient Google token refresh job if the necessary credentials exist.
-        """
+    async def start(self) -> None:
+        """Start the APScheduler and load all existing agent schedules."""
+        logger.debug("Starting SchedulerService...")
         if not self.scheduler.running:
-            logger.error("Scheduler is not running. Cannot schedule Radient token refresh.")
+            try:
+                self.scheduler.start(paused=False)
+                logger.debug("APScheduler started. (is running: %s)", self.scheduler.running)
+            except Exception as e:
+                logger.error(f"Failed to start APScheduler: {e}", exc_info=True)
+                return  # Cannot proceed if scheduler doesn't start
+        else:
+            logger.debug("APScheduler already running.")
+
+        await self.load_all_agent_schedules()
+
+    async def shutdown(self) -> None:
+        """Stop the APScheduler and cancel in-flight scheduled runs."""
+        if self.scheduler.running:
+            try:
+                self.scheduler.shutdown(wait=False)
+                logger.debug("APScheduler shut down.")
+            except Exception as e:
+                logger.error(f"Failed to shut down APScheduler: {e}", exc_info=True)
+
+        tasks = [t for t in self._run_tasks if not t.done()]
+        if not tasks:
             return
-
-        # Check if GOOGLE_REFRESH_TOKEN is set, as it's essential
-        # The job will now always be scheduled.
-        # The execution task (_execute_radient_token_refresh_task)
-        # will check for credentials at runtime.
-        if self.scheduler.get_job(RADIENT_TOKEN_REFRESH_JOB_ID):
-            logger.debug("Radient Google token refresh job already scheduled. Skipping re-adding.")
-            return
-
+        logger.debug("Cancelling %d in-flight scheduled run(s) for shutdown.", len(tasks))
+        for task in tasks:
+            task.cancel()
         try:
-            self.scheduler.add_job(
-                self._execute_radient_token_refresh_task,
-                trigger=CronTrigger(minute=TOKEN_REFRESH_CRON_MINUTES, timezone="UTC"),
-                id=RADIENT_TOKEN_REFRESH_JOB_ID,
-                name="Radient Google OAuth Token Refresh",
-                replace_existing=True,
-                misfire_grace_time=300,  # 5 minutes
-                coalesce=True,
-            )
-            logger.info(
-                "Scheduled Radient Google token refresh job with CRON expression: "
-                f"minute='{TOKEN_REFRESH_CRON_MINUTES}'."
-            )
-        except Exception as e:
-            logger.error(f"Failed to schedule Radient Google token refresh job: {e}", exc_info=True)
+            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.warning("Timed out waiting for %d scheduled run(s) to stop.", len(tasks))
 
-    async def _trigger_agent_task(
-        self, agent_id_str: str, schedule_id_str: str, prompt: str
-    ) -> None:
-        """
-        The actual function called by APScheduler to trigger an agent's task.
-        It now creates a job and starts a new process for execution.
-        """
-        logger.debug(
-            f"Attempting to trigger task for agent {agent_id_str}, schedule {schedule_id_str}"
-        )
-        try:
-            schedule_id_uuid = UUID(schedule_id_str)
-
-            # Load schedule details to check end_time_utc and active status
-            agent_state = self.agent_registry.load_agent_state(agent_id_str)
-            current_schedule: Schedule | None = None
-            for sched in agent_state.schedules:
-                if sched.id == schedule_id_uuid:
-                    current_schedule = sched
-                    break
-
-            if not current_schedule:
-                logger.error(
-                    f"Schedule {schedule_id_str} not found for agent {agent_id_str}. "
-                    "Removing APScheduler job."
-                )
-                self.remove_job(schedule_id_uuid)  # Removes from APScheduler
-                return
-
-            if not current_schedule.is_active:
-                logger.debug(
-                    f"Schedule {schedule_id_str} is no longer active. Removing APScheduler job."
-                )
-                self.remove_job(schedule_id_uuid)
-                # Agent state for inactive schedules is handled during load_all_agent_schedules
-                # or when a schedule is explicitly deactivated.
-                return
-
-            now_utc = datetime.now(timezone.utc)
-            if current_schedule.end_time_utc and now_utc >= current_schedule.end_time_utc:
-                logger.debug(
-                    f"Schedule {schedule_id_str} passed end time "
-                    f"({current_schedule.end_time_utc}). Removing APScheduler job, "
-                    "marking inactive in agent state."
-                )
-                # Mark inactive in current state and save
-                current_schedule.is_active = False
-                # This modification to agent_state needs to be saved.
-                # The _execute_scheduled_task_logic also handles this, but good to do
-                # it here too for clarity.
-                # However, to avoid race conditions, let the job process handle final state.
-                # For now, just remove from APScheduler.
-                self.remove_job(schedule_id_uuid)
-
-                # Update agent state to reflect inactive
-                updated_schedules = []
-                schedule_found_for_deactivation = False
-                for sched_in_state in agent_state.schedules:
-                    if sched_in_state.id == schedule_id_uuid:
-                        sched_in_state.is_active = False
-                        schedule_found_for_deactivation = True
-                    updated_schedules.append(sched_in_state)
-                if schedule_found_for_deactivation:
-                    agent_state.schedules = updated_schedules
-                    self.agent_registry.save_agent_state(agent_id_str, agent_state)
-                return
-
-            logger.info(
-                f"Creating job for scheduled task: agent {agent_id_str}, schedule {schedule_id_str}"
-            )
-
-            target_agent_data: AgentData = self.agent_registry.get_agent(agent_id_str)
-
-            # Create a job in JobManager. The job_id will be the schedule_id_str.
-            # The JobManager's create_job is async.
-            job_entry = await self.job_manager.create_job(
-                prompt=prompt,
-                model=target_agent_data.model,  # Model from agent data
-                hosting=target_agent_data.hosting,  # Hosting from agent data
-                agent_id=agent_id_str,
-                job_id=schedule_id_str,  # Pass schedule_id_str as job_id
-            )
-            # job_id from job_entry should be schedule_id_str
-
-            # Prepare arguments for _execute_scheduled_task_logic
-            # Ensure all managers' configurations are serializable (e.g., file paths)
-            process_args = (
-                job_entry.id,  # This is schedule_id_str
-                agent_id_str,
-                schedule_id_str,
-                prompt,
-                self.agent_registry.config_dir,
-                self.env_config,
-                self.operator_type.name,
-                self.verbosity_level.name,
-                target_agent_data.hosting,
-                target_agent_data.model,
-                # status_queue is added by create_and_start_job_process_with_queue
-            )
-
-            create_and_start_job_process_with_queue(
-                job_id=job_entry.id,
-                process_func=_execute_scheduled_task_logic,
-                args=process_args,
-                job_manager=self.job_manager,
-                websocket_manager=self.websocket_manager,
-                scheduler_service=self,  # Pass self for queue monitor to call add/remove schedule
-            )
-            logger.info(
-                f"Scheduled task job {job_entry.id} for agent {agent_id_str} "
-                "started in a new process."
-            )
-
-            # The responsibility of updating agent_state (last_run_at, one_time removal, etc.)
-            # is now within _execute_scheduled_task_logic, which communicates status.
-            # The main scheduler service might react to JobStatus.COMPLETED for one-time jobs
-            # to remove them from APScheduler if they were cron-based one-time.
-            # DateTrigger one-time jobs are automatically removed by APScheduler.
-
-        except Exception as e:
-            logger.error(
-                f"Error creating or starting job for scheduled task agent {agent_id_str}, "
-                f"schedule {schedule_id_str}: {str(e)}",
-                exc_info=True,
-            )
+    # ------------------------------------------------------------------
+    # Job (trigger) management — public surface used by the server routes
+    # ------------------------------------------------------------------
 
     def add_or_update_job(self, schedule: Schedule) -> None:
-        """
-        Adds a new job or updates an existing one in APScheduler based on the Schedule object.
-        Considers start_time_utc and end_time_utc.
+        """Add a new job or update an existing one in APScheduler.
+
+        Trigger semantics ported from the legacy service: one-time schedules
+        with a ``start_time_utc`` use a ``DateTrigger``; one-time schedules
+        with only interval/unit and all recurring schedules use a
+        ``CronTrigger`` with the interval mapped onto the matching cron
+        field (``*/N``), anchored to the ``start_time_utc`` hour/minute for
+        the HOURS and DAYS units. Misfire grace and coalescing match the
+        legacy values exactly. The job function is the async coroutine
+        ``_trigger_agent_task`` (no multiprocessing).
         """
         job_id = str(schedule.id)
         agent_id_str = str(schedule.agent_id)
@@ -504,7 +231,6 @@ class SchedulerService:
         def get_cron_interval_field(interval_value: int) -> str:
             if interval_value <= 0:  # Treat 0 or negative as "every"
                 return "*"
-            # For interval_value == 1, "*/1" is equivalent to "*", but explicit is fine.
             return f"*/{interval_value}"
 
         # Base cron parameters, default to "every" for all fields
@@ -531,10 +257,9 @@ class SchedulerService:
                 trigger = DateTrigger(
                     run_date=schedule.start_time_utc,
                     timezone="UTC",
-                )  # misfire_grace_time is an add_job param
+                )
             elif schedule.interval and schedule.unit:
-                # This is a one-time job that behaves like a recurring job until it runs once.
-                # We use CronTrigger for this.
+                # One-time job that behaves like a recurring job until it runs once.
                 if schedule.unit == ScheduleUnit.MINUTES:
                     cron_expression_params["minute"] = get_cron_interval_field(schedule.interval)
                     misfire_grace_time_seconds = max(60, int(schedule.interval * 60 / 2))
@@ -556,21 +281,13 @@ class SchedulerService:
                 else:
                     logger.error(
                         f"Unsupported schedule unit: {schedule.unit} for one-time "
-                        f"schedule {job_id} with interval. "
-                        "Skipping job creation."
+                        f"schedule {job_id} with interval. Skipping job creation."
                     )
                     return
                 log_details = (
                     f"One-time schedule with interval: every {schedule.interval} "
-                    f"{schedule.unit.value}. "
-                    f"Cron: (M='{cron_expression_params['minute']}', "
-                    f"H='{cron_expression_params['hour']}', "
-                    f"DoM='{cron_expression_params['day']}', "
-                    f"Mon='{cron_expression_params['month']}', "
-                    f"DoW='{cron_expression_params['day_of_week']}'). "
-                    f"Grace: {misfire_grace_time_seconds}s."
+                    f"{schedule.unit.value}. Grace: {misfire_grace_time_seconds}s."
                 )
-                effective_end_date = schedule.end_time_utc
                 trigger = CronTrigger(
                     timezone="UTC",
                     start_date=schedule.start_time_utc,
@@ -604,20 +321,14 @@ class SchedulerService:
                 misfire_grace_time_seconds = max(60, int(schedule.interval * 24 * 60 * 60 / 2))
             else:
                 logger.error(
-                    f"Unsupported schedule unit: {schedule.unit} for recurring schedule {job_id}. "
-                    "Skipping job creation."
+                    f"Unsupported schedule unit: {schedule.unit} for recurring schedule "
+                    f"{job_id}. Skipping job creation."
                 )
                 return
             log_details = (
                 f"Recurring every {schedule.interval} {schedule.unit.value}. "
-                f"Cron: (M='{cron_expression_params['minute']}', "
-                f"H='{cron_expression_params['hour']}', "
-                f"DoM='{cron_expression_params['day']}', "
-                f"Mon='{cron_expression_params['month']}', "
-                f"DoW='{cron_expression_params['day_of_week']}'). "
                 f"Grace: {misfire_grace_time_seconds}s."
             )
-            effective_end_date = schedule.end_time_utc
             trigger = CronTrigger(
                 timezone="UTC",
                 start_date=schedule.start_time_utc,
@@ -627,12 +338,10 @@ class SchedulerService:
 
         start_log_val = schedule.start_time_utc or "Immediate (if cron matches)"
         end_log_val = effective_end_date or "Never"
-        log_msg = (
+        logger.debug(
             f"Adding/updating job {job_id} for agent {agent_id_str}. {log_details} "
             f"Effective Start: {start_log_val}, Effective End: {end_log_val}."
         )
-        logger.debug(log_msg)
-        logger.debug(f"[SchedulerService] Trigger details: {trigger}")
 
         try:
             self.scheduler.add_job(
@@ -653,60 +362,28 @@ class SchedulerService:
             logger.error(f"Failed to add/update job {job_id} to scheduler: {str(e)}")
 
     def remove_job(self, schedule_id: UUID) -> None:
-        """
-        Removes a job from APScheduler.
-        """
+        """Remove a job from APScheduler."""
         job_id = str(schedule_id)
-        if self.scheduler.get_job(job_id):
-            try:
+        try:
+            if self.scheduler.get_job(job_id):
                 self.scheduler.remove_job(job_id)
                 logger.debug(f"Successfully removed job {job_id} from scheduler.")
-            except Exception as e:
-                logger.error(f"Failed to remove job {job_id} from scheduler: {str(e)}")
-        else:
-            logger.debug(f"Job {job_id} not found in scheduler, no action taken.")
+            else:
+                logger.debug(f"Job {job_id} not found in scheduler, no action taken.")
+        except Exception as e:
+            logger.error(f"Failed to remove job {job_id} from scheduler: {str(e)}")
 
-    async def start(self) -> None:
-        """
-        Starts the APScheduler, loads all existing active schedules,
-        and schedules the Google token refresh job.
-        """
-        logger.debug("Starting SchedulerService...")
-        if not self.scheduler.running:
-            try:
-                self.scheduler.start(paused=False)  # Ensure it's not started in paused state
-                logger.debug("APScheduler started. (is running: %s)", self.scheduler.running)
-            except Exception as e:
-                logger.error(f"Failed to start APScheduler: {e}", exc_info=True)
-                return  # Cannot proceed if scheduler doesn't start
-        else:
-            logger.debug("APScheduler already running. (is running: %s)", self.scheduler.running)
-
-        # Schedule Radient Google token refresh
-        self._schedule_radient_token_refresh()
-
-        # DEBUG: Log all jobs currently scheduled
-        jobs = self.scheduler.get_jobs()
-        logger.debug(
-            "Current scheduled jobs at start (after Radient Google refresh schedule): %s", jobs
-        )
-
-        await self.load_all_agent_schedules()
-
-    def add_radient_token_refresh_job_if_needed(self) -> None:
-        """
-        Public method to explicitly try to add the Radient Google token refresh job.
-        Useful if credentials are added after initial startup.
-        """
-        logger.info(
-            "Explicitly checking and scheduling Radient Google token refresh job if needed."
-        )
-        self._schedule_radient_token_refresh()
+    # ------------------------------------------------------------------
+    # Loading schedules from disk
+    # ------------------------------------------------------------------
 
     async def load_all_agent_schedules(self) -> None:
-        """
-        Loads all active schedules for all agents and adds them to the scheduler.
-        Handles past-due one-time jobs by triggering them immediately.
+        """Load all active schedules for all agents into the scheduler.
+
+        Handles past-due one-time jobs by triggering them immediately, and
+        replays missed recurring runs inside the legacy grace window. Ended
+        and inactive schedules are removed from persistence on save
+        (legacy semantics).
         """
         logger.debug("Loading all agent schedules into APScheduler...")
         now_utc = datetime.now(timezone.utc)
@@ -717,103 +394,71 @@ class SchedulerService:
                 try:
                     agent_state = self.agent_registry.load_agent_state(agent_data.id)
                     if not agent_state.schedules:
-                        logger.debug(f"No schedules found for agent {agent_data.id}")
                         continue
 
-                    logger.debug(
-                        f"Processing {len(agent_state.schedules)} schedules "
-                        f"for agent {agent_data.id}"
-                    )
-
-                    schedules_to_process = list(agent_state.schedules)
-
-                    for schedule_item in schedules_to_process:
+                    for schedule_item in list(agent_state.schedules):
                         job_id_str = str(schedule_item.id)
                         agent_id_str = str(schedule_item.agent_id)
 
-                        # A. Handle schedules that have ended
+                        # A. Schedules that have ended
                         if schedule_item.end_time_utc and now_utc >= schedule_item.end_time_utc:
-                            log_msg_ended = (
-                                f"Schedule {job_id_str} for agent {agent_id_str} has passed its "
-                                f"end time ({schedule_item.end_time_utc}). Ensuring "
-                                "inactive and removed."
+                            logger.debug(
+                                f"Schedule {job_id_str} for agent {agent_id_str} has passed "
+                                f"its end time ({schedule_item.end_time_utc}). "
+                                "Ensuring inactive and removed."
                             )
-                            logger.debug(log_msg_ended)
                             if schedule_item.is_active:
                                 schedule_item.is_active = False
                                 agent_state_needs_saving = True
                             self.remove_job(schedule_item.id)
-                            continue  # Move to the next schedule
+                            continue
 
-                        # B. Handle explicitly inactive schedules
+                        # B. Explicitly inactive schedules
                         if not schedule_item.is_active:
-                            log_msg_inactive = (
-                                f"Schedule {job_id_str} for agent {agent_id_str} is "
-                                "marked inactive. Ensuring removal from scheduler."
+                            logger.debug(
+                                f"Schedule {job_id_str} for agent {agent_id_str} is marked "
+                                "inactive. Ensuring removal from scheduler."
                             )
-                            logger.debug(log_msg_inactive)
                             self.remove_job(schedule_item.id)
                             agent_state_needs_saving = True
+                            continue
 
-                            continue  # Move to the next schedule
-
-                        # At this point, the schedule is active and not past its end_time_utc
-
-                        # C. Handle active one-time schedules
+                        # C. Active one-time schedules
                         if schedule_item.one_time:
                             if not schedule_item.start_time_utc:
-                                log_msg_no_start = (
-                                    f"Active one-time schedule {job_id_str} "
-                                    f"for agent {agent_id_str} lacks start_time_utc. "
-                                    "Marking inactive."
+                                logger.error(
+                                    f"Active one-time schedule {job_id_str} for agent "
+                                    f"{agent_id_str} lacks start_time_utc. Marking inactive."
                                 )
-                                logger.error(log_msg_no_start)
                                 schedule_item.is_active = False
                                 agent_state_needs_saving = True
                                 self.remove_job(schedule_item.id)
                                 continue
 
                             if now_utc > schedule_item.start_time_utc:
-                                log_msg_past_due = (
+                                logger.debug(
                                     f"Past-due active one-time schedule {job_id_str} for "
                                     f"agent {agent_id_str} "
                                     f"(start: {schedule_item.start_time_utc}). "
                                     "Triggering now (non-blocking)."
                                 )
-                                logger.debug(log_msg_past_due)
-                                # _trigger_agent_task is now async due to job_manager.create_job
-                                # and handles process creation.
-                                # We need to run it and not block load_all_agent_schedules.
-                                asyncio.create_task(
-                                    self._trigger_agent_task(
-                                        agent_id_str=agent_id_str,
-                                        schedule_id_str=job_id_str,
-                                        prompt=schedule_item.prompt,
-                                    )
+                                self._spawn_trigger(
+                                    agent_id_str=agent_id_str,
+                                    schedule_id_str=job_id_str,
+                                    prompt=schedule_item.prompt,
                                 )
-                                # The new _trigger_agent_task will create a job.
-                                # The job process (_execute_scheduled_task_logic)
-                                # handles agent state.
-                                # No need to call add_or_update_job for this one.
                             else:
-                                # Future one-time job, add it to scheduler
-                                log_msg_future_one_time = (
+                                logger.debug(
                                     f"Future active one-time schedule {job_id_str} for "
                                     f"agent {agent_id_str}. Adding to scheduler."
                                 )
-                                logger.debug(log_msg_future_one_time)
                                 self.add_or_update_job(schedule_item)
                             continue
 
-                        # D. Handle active recurring schedules
-                        # Check if a recurring job was missed and needs to be run
-                        triggered_missed_recurring = False
-                        if (
-                            not schedule_item.one_time
-                            and schedule_item.interval > 0
-                            and schedule_item.unit
-                        ):
-                            delta = timedelta()
+                        # D. Active recurring schedules: replay a missed run that is still
+                        # inside the legacy grace window (half the interval, min 60s).
+                        if schedule_item.interval > 0 and schedule_item.unit:
+                            delta: Optional[timedelta] = None
                             if schedule_item.unit == ScheduleUnit.MINUTES:
                                 delta = timedelta(minutes=schedule_item.interval)
                             elif schedule_item.unit == ScheduleUnit.HOURS:
@@ -821,86 +466,41 @@ class SchedulerService:
                             elif schedule_item.unit == ScheduleUnit.DAYS:
                                 delta = timedelta(days=schedule_item.interval)
 
-                            if delta > timedelta(0):  # Ensure valid delta
-                                grace_period_seconds = 0
-                                if schedule_item.unit == ScheduleUnit.MINUTES:
-                                    grace_period_seconds = int(schedule_item.interval * 60 / 2)
-                                elif schedule_item.unit == ScheduleUnit.HOURS:
-                                    grace_period_seconds = int(schedule_item.interval * 60 * 60 / 2)
-                                elif schedule_item.unit == ScheduleUnit.DAYS:
-                                    grace_period_seconds = int(
-                                        schedule_item.interval * 24 * 60 * 60 / 2
-                                    )
-                                grace_period_seconds = max(60, grace_period_seconds)
-                                grace_delta = timedelta(seconds=grace_period_seconds)
-
-                                # If last_run_at exists, use it to determine missed run
+                            if delta is not None and delta > timedelta(0):
+                                grace_delta = timedelta(
+                                    seconds=max(60, int(delta.total_seconds() / 2))
+                                )
+                                expected_run_time: Optional[datetime] = None
                                 if schedule_item.last_run_at:
-                                    next_expected_run_time = schedule_item.last_run_at + delta
-                                    if now_utc > next_expected_run_time and now_utc <= (
-                                        next_expected_run_time + grace_delta
-                                    ):
-                                        logger.debug(
-                                            f"Missed recurring schedule {job_id_str} for "
-                                            f"agent {agent_id_str} "
-                                            f"(last run: {schedule_item.last_run_at}, "
-                                            f"next expected: {next_expected_run_time}, "
-                                            f"grace: {grace_delta}). Triggering now (non-blocking)."
-                                        )
-                                        asyncio.create_task(
-                                            self._trigger_agent_task(
-                                                agent_id_str=agent_id_str,
-                                                schedule_id_str=job_id_str,
-                                                prompt=schedule_item.prompt,
-                                            )
-                                        )
-                                        triggered_missed_recurring = True
-                                # If no last_run_at, check if the first run
-                                # was missed based on start_time_utc
+                                    expected_run_time = schedule_item.last_run_at + delta
                                 elif schedule_item.start_time_utc:
-                                    first_expected_run_time = schedule_item.start_time_utc
-                                    if now_utc > first_expected_run_time and now_utc <= (
-                                        first_expected_run_time + grace_delta
-                                    ):
-                                        logger.debug(
-                                            f"Missed first recurring schedule {job_id_str} for "
-                                            f"agent {agent_id_str} "
-                                            f"(start: {first_expected_run_time}, "
-                                            f"grace: {grace_delta}). Triggering now (non-blocking)."
-                                        )
-                                        asyncio.create_task(
-                                            self._trigger_agent_task(
-                                                agent_id_str=agent_id_str,
-                                                schedule_id_str=job_id_str,
-                                                prompt=schedule_item.prompt,
-                                            )
-                                        )
-                                        triggered_missed_recurring = True
-                                    # If now_utc is past the grace window, do
-                                    # not trigger, just add to scheduler
-                                    # If now_utc is before start_time_utc, do
-                                    # nothing (future run)
-                                    # If no start_time_utc, do nothing
-                                    # (If both last_run_at and start_time_utc are None, do nothing)
+                                    expected_run_time = schedule_item.start_time_utc
 
-                        if (
-                            not triggered_missed_recurring
-                        ):  # If not triggered as missed, or if it's first run
-                            log_msg_recurring = (
-                                f"Active recurring schedule {job_id_str} for agent {agent_id_str}. "
-                                "Adding/updating in scheduler."
-                            )
-                            logger.debug(log_msg_recurring)
+                                if (
+                                    expected_run_time is not None
+                                    and now_utc > expected_run_time
+                                    and now_utc <= (expected_run_time + grace_delta)  # noqa: E501
+                                ):
+                                    logger.debug(
+                                        f"Missed recurring schedule {job_id_str} for "
+                                        f"agent {agent_id_str} (expected: "
+                                        f"{expected_run_time}, grace: {grace_delta}). "
+                                        "Triggering now (non-blocking)."
+                                    )
+                                    self._spawn_trigger(
+                                        agent_id_str=agent_id_str,
+                                        schedule_id_str=job_id_str,
+                                        prompt=schedule_item.prompt,
+                                    )
 
-                        # Always ensure the job is (re)added to the scheduler for future runs
+                        # Always ensure the job is (re)added for future runs
                         self.add_or_update_job(schedule_item)
 
                     if agent_state_needs_saving:
-                        # Remove inactive schedules from agent state
+                        # Remove inactive schedules from agent state (legacy behavior)
                         agent_state.schedules = [
                             sched for sched in agent_state.schedules if sched.is_active
                         ]
-
                         self.agent_registry.save_agent_state(agent_data.id, agent_state)
 
                 except Exception as e:
@@ -915,10 +515,412 @@ class SchedulerService:
                 f"An unexpected error occurred while loading all agent schedules: {str(e)}"
             )
 
-    async def shutdown(self) -> None:
+    # ------------------------------------------------------------------
+    # Run execution (new engine, in-process)
+    # ------------------------------------------------------------------
+
+    def _spawn_trigger(self, agent_id_str: str, schedule_id_str: str, prompt: str) -> None:
+        """Trigger a run now, non-blocking (used by load-time replays)."""
+        task = asyncio.create_task(
+            self._trigger_agent_task(
+                agent_id_str=agent_id_str,
+                schedule_id_str=schedule_id_str,
+                prompt=prompt,
+            )
+        )
+        self._run_tasks.add(task)
+        task.add_done_callback(self._run_tasks.discard)
+
+    async def _trigger_agent_task(
+        self, agent_id_str: str, schedule_id_str: str, prompt: str
+    ) -> None:
+        """APScheduler job function (async coroutine — no multiprocessing).
+
+        Validates the schedule against current agent state, creates the job
+        ledger entry, runs the prompt in-process, stamps schedule bookkeeping
+        on success, and records outcomes in the job manager. NEVER raises:
+        a failing run must not kill the scheduler loop.
         """
-        Shuts down the APScheduler.
+        try:
+            await self._trigger_agent_task_inner(agent_id_str, schedule_id_str, prompt)
+        except asyncio.CancelledError:
+            logger.info(
+                f"Scheduled run for agent {agent_id_str}, schedule {schedule_id_str} "
+                "was cancelled."
+            )
+            # Cancel bypasses _push_job_status (CancelledError is a BaseException
+            # and escapes both except branches), so mirror the terminal state to
+            # the broker directly - a sync call, safe inside a cancelled task -
+            # or the scheduled job's SSE stream keepalives forever (review N-1).
+            # job_id is the schedule id (legacy contract), so the channel matches.
+            if self.event_broker is not None:
+                publish_job_status(
+                    self.event_broker,
+                    schedule_id_str,
+                    JobStatus.CANCELLED,
+                    {"error": "Scheduled job cancelled"},
+                )
+            raise
+        except Exception as e:
+            logger.error(
+                f"Error handling scheduled task trigger for agent {agent_id_str}, "
+                f"schedule {schedule_id_str}: {str(e)}",
+                exc_info=True,
+            )
+
+    async def _trigger_agent_task_inner(
+        self, agent_id_str: str, schedule_id_str: str, prompt: str
+    ) -> None:
+        schedule_id_uuid = UUID(schedule_id_str)
+
+        agent_state = self.agent_registry.load_agent_state(agent_id_str)
+        current_schedule: Optional[Schedule] = None
+        for sched in agent_state.schedules:
+            if sched.id == schedule_id_uuid:
+                current_schedule = sched
+                break
+
+        if not current_schedule:
+            logger.error(
+                f"Schedule {schedule_id_str} not found for agent {agent_id_str}. "
+                "Removing APScheduler job."
+            )
+            self.remove_job(schedule_id_uuid)
+            return
+
+        if not current_schedule.is_active:
+            logger.debug(
+                f"Schedule {schedule_id_str} is no longer active. Removing APScheduler job."
+            )
+            self.remove_job(schedule_id_uuid)
+            return
+
+        now_utc = datetime.now(timezone.utc)
+        if current_schedule.end_time_utc and now_utc >= current_schedule.end_time_utc:
+            logger.debug(
+                f"Schedule {schedule_id_str} passed end time "
+                f"({current_schedule.end_time_utc}). Marking inactive and removing."
+            )
+            current_schedule.is_active = False
+            try:
+                self.agent_registry.save_agent_state(agent_id_str, agent_state)
+            except Exception:
+                logger.exception(f"Failed to persist deactivated schedule {schedule_id_str}")
+            self.remove_job(schedule_id_uuid)
+            return
+
+        try:
+            target_agent_data: AgentData = self.agent_registry.get_agent(agent_id_str)
+        except KeyError:
+            logger.error(
+                f"Agent {agent_id_str} not found for schedule {schedule_id_str}. "
+                "Removing APScheduler job."
+            )
+            self.remove_job(schedule_id_uuid)
+            return
+
+        logger.info(f"Running scheduled task: agent {agent_id_str}, schedule {schedule_id_str}")
+
+        # Job ledger entry; job_id is the schedule id (legacy contract).
+        try:
+            job_entry = await self.job_manager.create_job(
+                prompt=prompt,
+                model=target_agent_data.model,
+                hosting=target_agent_data.hosting,
+                agent_id=agent_id_str,
+                job_id=schedule_id_str,
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to create job ledger entry for schedule {schedule_id_str}: " f"{str(e)}",
+                exc_info=True,
+            )
+            return
+        job_id = job_entry.id
+
+        self._register_run_task(job_id)
+        await self._push_job_status(job_id, JobStatus.PROCESSING)
+
+        timeout_seconds = self._run_timeout_seconds()
+        try:
+            response_text, context_records = await asyncio.wait_for(
+                self._run_agent_session(agent_id_str, target_agent_data, prompt),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                f"Scheduled task {schedule_id_str} timed out after "
+                f"{timeout_seconds:.0f} seconds."
+            )
+            await self._push_job_status(
+                job_id,
+                JobStatus.FAILED,
+                {
+                    "error": f"Scheduled task timed out after {timeout_seconds:.0f} seconds",
+                    "schedule_id": schedule_id_str,
+                    "agent_id": agent_id_str,
+                },
+            )
+            return
+        except Exception as e:
+            logger.error(
+                f"Scheduled task {schedule_id_str} for agent {agent_id_str} failed: " f"{str(e)}",
+                exc_info=True,
+            )
+            await self._push_job_status(
+                job_id,
+                JobStatus.FAILED,
+                {
+                    "error": str(e),
+                    "schedule_id": schedule_id_str,
+                    "agent_id": agent_id_str,
+                },
+            )
+            return
+
+        # Success: legacy bookkeeping (last_run_at stamp, one_time pop,
+        # end-time deactivation) happens on success only.
+        try:
+            self._record_successful_run(agent_id_str, schedule_id_uuid)
+        except Exception:
+            logger.exception(f"Failed to record successful run for schedule {schedule_id_str}")
+
+        await self._push_job_status(
+            job_id,
+            JobStatus.COMPLETED,
+            {
+                "response": response_text,
+                "context": context_records,
+                "schedule_id": schedule_id_str,
+                "agent_id": agent_id_str,
+            },
+        )
+
+    def _register_run_task(self, job_id: str) -> None:
+        """Register the running coroutine with the job manager so cancel_job works."""
+        task = asyncio.current_task()
+        if task is None:
+            return
+
+        async def _register() -> None:
+            try:
+                await self.job_manager.register_task(job_id, task)
+            except KeyError:
+                logger.debug(f"Job {job_id} missing when registering run task.")
+            except Exception:
+                logger.exception(f"Failed to register run task for job {job_id}.")
+
+        asyncio.ensure_future(_register())
+
+    def _run_timeout_seconds(self) -> float:
+        """Per-run timeout: env override, else the 30-minute default."""
+        raw = os.environ.get(RUN_TIMEOUT_ENV_VAR)
+        if raw:
+            try:
+                value = float(raw)
+                if value > 0:
+                    return value
+            except ValueError:
+                pass
+            logger.warning(
+                f"Invalid {RUN_TIMEOUT_ENV_VAR}={raw!r}; using the default "
+                f"{DEFAULT_RUN_TIMEOUT_SECONDS}s."
+            )
+        return float(DEFAULT_RUN_TIMEOUT_SECONDS)
+
+    def _resolve_agent_cwd(self, agent_data: AgentData) -> Optional[str]:
+        """The agent's working directory for session construction, if usable."""
+        raw = agent_data.current_working_directory
+        if not raw or raw == ".":
+            return None
+        expanded = os.path.expanduser(raw)
+        if not os.path.isdir(expanded):
+            logger.warning(
+                f"Agent working directory {raw!r} does not exist; "
+                "running in the scheduler's cwd instead."
+            )
+            return None
+        return expanded
+
+    async def _run_agent_session(
+        self, agent_id_str: str, agent_data: AgentData, prompt: str
+    ) -> tuple[str, list[JobContextRecord]]:
+        """Build a fresh session for the scheduled run and drive one turn.
+
+        Returns ``(response_text, context_records)``. Isolation: a fresh
+        session per run with ``train=True`` so the turn persists into the
+        agent's own transcript, and ``yolo=True`` (unattended approval
+        auto-grant). The engine reads ``os.getcwd()`` at construction time,
+        so the agent's working directory is applied around construction only.
         """
-        if self.scheduler.running:
-            self.scheduler.shutdown()
-            logger.debug("APScheduler shut down.")
+        session_args = argparse.Namespace(
+            hosting=agent_data.hosting or None,
+            model=agent_data.model or None,
+            agent_name=None,
+            agent_id=agent_id_str,
+            yolo=True,
+            train=True,
+        )
+
+        captured_events: list[AgentEndEvent] = []
+
+        def _capture(event: AgentEvent) -> None:
+            if isinstance(event, AgentEndEvent):
+                captured_events.append(event)
+
+        # The agent's working directory is passed, not chdir'd: os.chdir is
+        # process-global and create_session awaits inside the window (skills,
+        # MCP discovery, transport spawns), so every other session builder in
+        # the same process (server routes, TUI turns) would read the wrong
+        # directory while a scheduled run held the lock.
+        cwd_override = self._resolve_agent_cwd(agent_data)
+        session = await session_factory.create_session(
+            session_args,
+            self.config_manager,
+            self.credential_manager,
+            self.agent_registry,
+            has_ui=False,
+            cwd=cwd_override,
+        )
+
+        unsubscribe: Callable[[], None] | None = None
+        try:
+            unsubscribe = session.subscribe(_capture)
+        except Exception:
+            logger.debug("Session subscribe failed for scheduled run.", exc_info=True)
+            unsubscribe = None
+
+        full_prompt = f"{prompt}\n\n## Additional Instructions\n\n{SCHEDULE_INSTRUCTIONS}"
+
+        try:
+            await session.prompt(full_prompt)
+        finally:
+            if unsubscribe is not None:
+                try:
+                    unsubscribe()
+                except Exception:
+                    pass
+            try:
+                await session.dispose()
+            except Exception:
+                logger.exception(
+                    f"Failed to dispose scheduled-run session for agent {agent_id_str}."
+                )
+
+        end_event = captured_events[-1] if captured_events else None
+        messages = list(end_event.messages) if end_event is not None else []
+
+        if end_event is not None and end_event.error:
+            raise RuntimeError(f"Scheduled run ended with error: {end_event.error}")
+
+        response_text = ""
+        for message in reversed(messages):
+            # CustomMessage entries are host plumbing (compaction summaries,
+            # skill prompts); only real LLM messages carry a role and text.
+            if isinstance(message, Message) and message.role == "assistant" and message.text:
+                response_text = message.text
+                break
+
+        context_records: list[JobContextRecord] = []
+        for message in messages:
+            if not isinstance(message, Message):
+                continue  # CustomMessage and other plumbing entries
+            conversation_role = _MESSAGE_ROLE_TO_CONVERSATION_ROLE.get(message.role)
+            if conversation_role is None:
+                continue  # a harness role with no ledger equivalent
+            context_records.append(
+                JobContextRecord(
+                    role=conversation_role,
+                    content=message.text,
+                    files=None,
+                )
+            )
+
+        return response_text, context_records
+
+    def _record_successful_run(self, agent_id_str: str, schedule_id_uuid: UUID) -> None:
+        """Stamp schedule bookkeeping after a successful run (legacy semantics).
+
+        ``last_run_at`` is set; one-time schedules are popped from the agent
+        state and removed from APScheduler; recurring schedules past their
+        ``end_time_utc`` are deactivated and removed from APScheduler.
+        """
+        now_utc = datetime.now(timezone.utc)
+        agent_state = self.agent_registry.load_agent_state(agent_id_str)
+
+        state_modified = False
+        remove_from_scheduler = False
+        for idx, sched in enumerate(list(agent_state.schedules)):
+            if sched.id != schedule_id_uuid:
+                continue
+            sched.last_run_at = now_utc
+            state_modified = True
+            if sched.one_time:
+                logger.debug(
+                    f"One-time schedule {schedule_id_uuid} executed. " "Removing from agent state."
+                )
+                agent_state.schedules.pop(idx)
+                remove_from_scheduler = True
+            elif sched.end_time_utc and now_utc >= sched.end_time_utc and sched.is_active:
+                logger.debug(
+                    f"Schedule {schedule_id_uuid} passed end time "
+                    f"({sched.end_time_utc}) after run. Marking inactive."
+                )
+                sched.is_active = False
+                remove_from_scheduler = True
+            break
+
+        if state_modified:
+            self.agent_registry.save_agent_state(agent_id_str, agent_state)
+        if remove_from_scheduler:
+            self.remove_job(schedule_id_uuid)
+
+    # ------------------------------------------------------------------
+    # Status reporting
+    # ------------------------------------------------------------------
+
+    async def _push_job_status(
+        self,
+        job_id: str,
+        status: JobStatus,
+        result: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Record the status in the job ledger and best-effort websocket broadcast."""
+        try:
+            await self.job_manager.update_job_status(job_id, status, result)
+        except KeyError:
+            logger.debug(f"Job {job_id} not found when recording status {status}.")
+        except Exception:
+            logger.exception(f"Failed to record job status {status} for job {job_id}.")
+        await self._broadcast_status(job_id, status, result)
+        # Mirror the status onto the SSE broker so scheduled job streams get the
+        # same job.status / stream.terminal contract as async chat jobs (B-2).
+        if self.event_broker is not None:
+            publish_job_status(self.event_broker, job_id, status, result)
+
+    async def _broadcast_status(
+        self,
+        job_id: str,
+        status: JobStatus,
+        result: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Best-effort broadcast; degrades gracefully if the manager shape differs."""
+        manager = self.websocket_manager
+        broadcast = getattr(manager, "broadcast", None)
+        if not callable(broadcast):
+            return
+        payload: dict[str, Any] = {
+            "type": "scheduled_job_status",
+            "job_id": job_id,
+            "status": status.value,
+        }
+        if isinstance(result, dict):
+            for key in ("error", "schedule_id", "agent_id"):
+                if result.get(key):
+                    payload[key] = result[key]
+        try:
+            outcome = broadcast(job_id, payload)
+            if inspect.isawaitable(outcome):
+                await outcome
+        except Exception:
+            logger.debug(f"WebSocket broadcast for job {job_id} failed (degraded).", exc_info=True)

@@ -19,8 +19,12 @@ class ProviderDetail(BaseModel):
     description: str = Field(..., description="Description of the provider")
     url: str = Field(..., description="URL to the provider's platform")
     requiredCredentials: List[str] = Field(..., description="List of required credential keys")
+    # `default=` must be spelled as a keyword: a positional default in
+    # `Field()` is honoured at runtime but is not recognised as a default by
+    # static analysis, which then treats the field as required and flags every
+    # construction site that omits it.
     recommended: bool = Field(
-        False,
+        default=False,
         description="Whether the provider is recommended for use in Local Operator",
     )
 
@@ -146,8 +150,10 @@ RecommendedOpenRouterModelIds = [
     "mistralai/mistral-large",
     "x-ai/grok-3-beta",
     "google/gemini-2.5-pro-preview",
-    "deepseek/deepseek-chat-v3-0324",
-    "deepseek/deepseek-r1-0528",
+    "deepseek/deepseek-v4-flash-0731",
+    "deepseek/deepseek-v4-flash",
+    "deepseek/deepseek-v4-pro",
+    "deepseek/deepseek-chat-v3.1",
 ]
 """List of recommended model IDs from OpenRouter.
 
@@ -209,7 +215,7 @@ class ModelInfo(BaseModel):
     id: str = Field(..., description="Unique identifier for the model")
     name: str = Field(..., description="Display name for the model")
     recommended: bool = Field(
-        False,
+        default=False,
         description=(
             "Whether the model is recommended for use in Local Operator. "
             "This is determined based on community usage and feedback."
@@ -281,6 +287,37 @@ def get_model_info(hosting: str, model: str) -> ModelInfo:
         raise ValueError(f"Unsupported hosting provider: {hosting}")
 
     return model_info
+
+
+def static_models(hosting: str) -> Dict[str, "ModelInfo"]:
+    """Every model this module knows for ``hosting``, keyed by model id.
+
+    :func:`get_model_info` answers "describe THIS model" and cannot answer "what
+    models exist", because its dispatch is a chain of `if hosting ==` branches
+    with the maps closed inside it. Live discovery needs the second question: it
+    merges a provider's API listing over what we shipped, and the shipped side has
+    to be enumerable for that merge to have a left-hand side.
+
+    Returns a COPY, so a caller that annotates rows in place — which a merge does
+    by construction — cannot mutate the process-wide catalogue.
+
+    Aggregators (openrouter, radient) and local runtimes (ollama) return ``{}``
+    rather than their one placeholder entry. Their placeholder describes the
+    ROUTER, not a model: offering `openrouter/openrouter` as a choice would be
+    offering a model that does not exist, and for exactly those providers the live
+    listing is authoritative anyway.
+    """
+    maps: Dict[str, Dict[str, ModelInfo]] = {
+        "anthropic": anthropic_models,
+        "openai": openai_models,
+        "google": google_models,
+        "deepseek": deepseek_models,
+        "alibaba": qwen_models,
+        "mistral": mistral_models,
+        "kimi": kimi_models,
+        "xai": xai_models,
+    }
+    return dict(maps.get(hosting, {}))
 
 
 unknown_model_info: ModelInfo = ModelInfo(
@@ -473,6 +510,47 @@ radient_default_model_info: ModelInfo = ModelInfo(
     name="Radient",
     recommended=False,
 )
+
+anthropic_default_model_info: ModelInfo = ModelInfo(
+    max_tokens=64_000,
+    context_window=200_000,
+    supports_images=True,
+    supports_prompt_cache=True,
+    # NOT a guess at the model's real numbers: 0 is this registry's "unknown"
+    # for a price, and a wrong price is worse than an absent one because the
+    # session band renders it as fact. Anthropic's models listing carries no
+    # prices at all, so an unshipped id keeps zeros until someone adds a row.
+    input_price=0.0,
+    output_price=0.0,
+    cache_writes_price=0.0,
+    cache_reads_price=0.0,
+    description="Anthropic Claude model not described by the shipped registry",
+    id="anthropic",
+    name="Anthropic Claude",
+    recommended=False,
+)
+"""Family FLOOR for a Claude id the registry does not ship.
+
+Anthropic's ``/v1/models`` returns ids and display names and nothing else, so an
+id the listing CONFIRMS EXISTS still arrives with no window, no output cap and no
+capabilities. Falling through to :data:`unknown_model_info` then hands the session
+128k/8192/no-cache, which is wrong for every Claude generation ever shipped: the
+whole family is 200k context, and prompt caching plus images are universal from
+Claude 3 on. Those three are the floor, and a floor is the safe direction — the
+cost of under-reporting is silent, the cost of over-reporting is loud. An
+under-reported window disables nothing but throws away 36% of the room and
+compacts early; an under-reported ``max_tokens`` TRUNCATES a long answer with no
+error at all; ``supports_prompt_cache=False`` makes the wire client skip
+``cache_control`` on the most expensive models in the catalogue. Over-report and
+the provider rejects the request with a 400 naming the real limit, which is a
+diagnosable failure rather than a silent degradation.
+
+``max_tokens`` is the floor among the CURRENT generations (Sonnet 4 is 64k) rather
+than the all-time floor (Claude 3 Haiku is 4k), because this template is only ever
+reached for an id the registry does not have — and every older, smaller-output
+model is already in :data:`anthropic_models`, so an unknown id is by construction
+a newer one.
+"""
 
 openai_models: Dict[str, ModelInfo] = {
     "gpt-4o": ModelInfo(
@@ -754,6 +832,52 @@ google_models: Dict[str, ModelInfo] = {
 }
 
 deepseek_models: Dict[str, ModelInfo] = {
+    # V4 family (2026): 1M context, implicit prompt caching, an order of
+    # magnitude cheaper than the V3 line. `-latest` floats to the newest
+    # snapshot; the dated ids pin a snapshot so a rollout cannot silently
+    # change behaviour under a long-running agent.
+    "deepseek-v4-flash": ModelInfo(
+        id="deepseek-v4-flash",
+        name="DeepSeek V4 Flash",
+        max_tokens=32_768,
+        context_window=1_048_576,
+        supports_images=False,
+        supports_prompt_cache=True,
+        input_price=0.14,
+        output_price=0.28,
+        cache_writes_price=0.14,
+        cache_reads_price=0.014,
+        description="Fast, cheap agentic workhorse with a 1M context window",
+        recommended=True,
+    ),
+    "deepseek-v4-flash-0731": ModelInfo(
+        id="deepseek-v4-flash-0731",
+        name="DeepSeek V4 Flash (2026-07-31)",
+        max_tokens=32_768,
+        context_window=1_048_576,
+        supports_images=False,
+        supports_prompt_cache=True,
+        input_price=0.09,
+        output_price=0.18,
+        cache_writes_price=0.09,
+        cache_reads_price=0.009,
+        description="Pinned July 2026 V4 Flash snapshot",
+        recommended=True,
+    ),
+    "deepseek-v4-pro": ModelInfo(
+        id="deepseek-v4-pro",
+        name="DeepSeek V4 Pro",
+        max_tokens=65_536,
+        context_window=1_048_576,
+        supports_images=False,
+        supports_prompt_cache=True,
+        input_price=0.435,
+        output_price=0.87,
+        cache_writes_price=0.435,
+        cache_reads_price=0.0435,
+        description="Stronger V4 tier for harder reasoning and long refactors",
+        recommended=False,
+    ),
     "deepseek-chat": ModelInfo(
         id="deepseek-chat",
         name="Deepseek Chat",

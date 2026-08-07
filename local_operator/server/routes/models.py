@@ -85,7 +85,7 @@ logger = logging.getLogger("local_operator.server.routes.models")
         },
     },
 )
-async def list_providers():
+async def list_providers() -> CRUDResponse[ProviderListResponse]:
     """
     List all available model providers with their details.
 
@@ -182,7 +182,7 @@ async def list_models(
     credential_manager: CredentialManager = Depends(get_credential_manager),
     query_params: ModelListQueryParams = Depends(),
     env_config: EnvConfig = Depends(get_env_config),
-):
+) -> CRUDResponse[ModelListResponse]:
     """
     List all available models from all providers.
 
@@ -372,7 +372,7 @@ async def list_models(
                                 recommended=model.id in RecommendedOpenRouterModelIds,
                                 description=(
                                     model.description
-                                    if hasattr(model, "description") and model.description
+                                    if model.description
                                     else f"OpenRouter model: {model.name}"
                                 ),
                             )
@@ -426,7 +426,7 @@ async def list_models(
                                 recommended=model.id in RecommendedRadientModelIds,
                                 description=(
                                     model.description
-                                    if hasattr(model, "description") and model.description
+                                    if model.description
                                     else f"Radient model: {model.name}"
                                 ),
                             )

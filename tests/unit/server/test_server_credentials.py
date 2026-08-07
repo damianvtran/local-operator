@@ -101,6 +101,34 @@ async def test_update_credential_success(test_app_client, mock_credential_manage
 
 
 @pytest.mark.asyncio
+async def test_update_credential_drops_the_model_metadata_memo(
+    test_app_client, mock_credential_manager
+):
+    """A new key must take effect without a restart.
+
+    Model metadata is memoized per 24h TTL bucket, and a missing credential is one
+    of the reasons it resolves badly: the provider's listing 401s and every model
+    it would have described falls back to the 128k unknown default, which is what
+    compaction then sizes itself against. The server runs for days, so without this
+    the user who just fixed the cause keeps the degraded answer for the rest of the
+    bucket.
+    """
+    from local_operator.model.configure import (
+        _resolve_model_info_cached,
+        resolve_model_info,
+    )
+
+    resolve_model_info("anthropic", "claude-sonnet-4-20250514")
+    assert _resolve_model_info_cached.cache_info().currsize > 0
+
+    payload = CredentialUpdate(key="ANTHROPIC_API_KEY", value="sk-ant-new")
+    response = await test_app_client.patch("/v1/credentials", json=payload.model_dump())
+
+    assert response.status_code == 200
+    assert _resolve_model_info_cached.cache_info().currsize == 0
+
+
+@pytest.mark.asyncio
 async def test_update_credential_empty_key(test_app_client, mock_credential_manager):
     """Test updating a credential with an empty key."""
     update_payload = CredentialUpdate(

@@ -5,6 +5,12 @@ on:
     branches:
       - main
       - 'dev-*'
+  # PULL REQUESTS TOO. Without this a feature branch received NO CI until it
+  # was already merged, which let a broken `pip install .` and an import that
+  # fails on the declared minimum Python both reach review looking green.
+  # Every gate below is worthless on a branch it never runs on.
+  pull_request:
+  workflow_dispatch:
 
 jobs:
   lint:
@@ -46,29 +52,33 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyright
+          pip install -e ".[dev]"
 
       - name: Run pyright
         run: pyright
         
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # BOTH ends of `requires-python`. Testing only the minimum let a
+        # 3.13-only typing feature ship; testing only the newest would let a
+        # 3.12 incompatibility ship. The declared range has to be the tested
+        # range or the classifier is a guess.
+        python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest pytest-asyncio coverage
-          pip install -e .
-          playwright install
+          pip install -e ".[dev]"
 
       - name: Run tests with coverage
         run: |
@@ -88,7 +98,7 @@ jobs:
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-report
+          name: coverage-report-${{ matrix.python-version }}
           path: htmlcov
           retention-days: 7
 
@@ -103,6 +113,10 @@ jobs:
           inputs: .
   cli-sanity:
     runs-on: ubuntu-latest
+    # Live-LLM job: needs a real OpenRouter key. Fork pull requests do not get
+    # repository secrets, so without this gate every external contributor sees a
+    # permanently red check they cannot fix.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     needs:
       - lint
       - type-check
@@ -115,6 +129,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # Deliberately the bare default install, with no extras: this job is the
+      # regression guard that the core agent still runs on the lean dependency
+      # set. Do not add extras here to fix a failure — fix the lazy import.
       - name: Install Package
         run: |
           python -m pip install --upgrade pip
@@ -124,7 +141,9 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           # Run CLI to create test file
-          local-operator --hosting openrouter --model x-ai/grok-4-fast exec "create a file called test.txt with the text 'hello world' in it" || exit 1
+          # --yolo: the sanity run is sandboxed CI; the rewritten harness denies
+          # approval-gated tools (write) without a tty unless auto-approved.
+          local-operator --hosting openrouter --model deepseek/deepseek-v4-flash-0731 exec --yolo "create a file called test.txt with the text 'hello world' in it" || exit 1
 
           # Check if file exists and contains correct text
           if [ ! -f test.txt ]; then
@@ -140,8 +159,51 @@ jobs:
 
           echo "CLI sanity test passed successfully"
 
+      # The `exec --json` event stream is a CONTRACT with the TUI, the server
+      # websocket and any external consumer, and stdout is its data channel.
+      # This gate exists because the checker previously lived in the repo
+      # unwired: a working detector sitting beside the defect it detects proves
+      # nothing. `--json` is the point — the job above deliberately runs
+      # without it, so only this step can catch prose on stdout.
+      - name: Run Streaming Contract Check
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          local-operator --hosting openrouter --model deepseek/deepseek-v4-flash-0731 \
+            --yolo exec --json "create a file called contract.txt containing ok" \
+            > run.jsonl 2> run.err || exit 1
+          python scripts/check_streaming_contract.py run.jsonl || {
+            echo "--- stdout that failed the contract ---"; cat run.jsonl; exit 1; }
+
+      # The error paths are the ones that regressed historically: a missing key
+      # or a bad model printed a coloured banner to stdout, so a consumer broke
+      # at exactly the moment it needed to read the failure. Assert stdout is
+      # EMPTY (or JSON) while the diagnosis lands on stderr.
+      - name: Assert Error Paths Keep stdout Clean
+        run: |
+          set +e
+          env -u OPENROUTER_API_KEY local-operator --hosting openrouter \
+            --model deepseek/deepseek-v4-flash-0731 exec --json "hi" > err_out.jsonl 2> err_err.txt
+          set -e
+          if [ -s err_out.jsonl ]; then
+            # `|| [ -n "$line" ]`: bash read returns non-zero at EOF on an
+            # UNTERMINATED final line, so without this the loop body never runs
+            # for it and the gate passes on exactly the shape it exists to
+            # catch — a diagnostic written with end='' or a stream truncated
+            # mid-write by a signal.
+            while IFS= read -r line || [ -n "$line" ]; do
+              [ -z "$line" ] && continue
+              echo "$line" | python -c 'import json,sys; json.loads(sys.stdin.read())' || {
+                echo "non-JSON on stdout from a failing exec --json run:"; echo "$line"; exit 1; }
+            done < err_out.jsonl
+          fi
+          test -s err_err.txt || { echo "expected a diagnostic on stderr"; exit 1; }
+          echo "error-path stdout is clean"
+
   server-sanity:
     runs-on: ubuntu-latest
+    # Live-LLM job — same fork-secret gate as cli-sanity.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     needs:
       - lint
       - type-check
@@ -157,7 +219,7 @@ jobs:
       - name: Install Package in Editable Mode
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
+          pip install -e ".[server]"
       - name: Start Server and Check Functionality
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
@@ -188,7 +250,7 @@ jobs:
             -d '{
               "prompt": "create a file called test.txt with the text '\''hello world'\'' in it",
               "hosting": "openrouter",
-              "model": "x-ai/grok-4-fast",
+              "model": "deepseek/deepseek-v4-flash-0731",
               "context": [],
               "options": {
                 "temperature": 0.7,

@@ -1,45 +1,57 @@
 """
 Main entry point for the Local Operator CLI application.
 
-This script initializes the DeepSeekCLI interface for interactive chat or,
-when the "serve" subcommand is used, starts up the FastAPI server to handle HTTP requests.
+This script initializes the interactive agent experience or, when a
+subcommand is given, dispatches to it: ``serve`` (FastAPI server), ``exec``
+(one-shot headless task), ``credential``/``config``/``agents`` management,
+``login``/``logout``/``login-status`` provider auth, and ``mcp`` server
+management.
 
-The application uses asyncio for asynchronous operation and includes
-error handling for graceful failure.
+Rewrite constraints (docs/REWRITE.md section E + backward-compat contracts):
+
+- EVERY legacy flag/subcommand/dest/default/exit code survives byte-for-byte
+  (``build_cli_parser`` is imported by server tests; ``main`` is the
+  console-script entry). New flags are strictly additive.
+- No module-level import of textual / providers / session internals / TUI:
+  those are lazy-imported at the point of use so ``import local_operator.cli``
+  stays cheap and cannot break while parallel rewrite streams are mid-flight.
+- Exit codes preserved: 0 success, -1 legacy error banner; ``exec`` returns
+  0/1 per the README contract.
 
 Example Usage:
-    python main.py --hosting deepseek --model deepseek-chat
-    python main.py --hosting openai --model gpt-4
-    python main.py --hosting ollama --model llama2
-    python main.py exec "write a hello world program" --hosting ollama --model llama2
+    local-operator --hosting deepseek --model deepseek-chat
+    local-operator --hosting openai --model gpt-4o
+    local-operator --hosting ollama --model llama2
+    local-operator exec "write a hello world program" --hosting ollama --model llama2
+    local-operator exec "long task" --background
+    local-operator login anthropic
 """
 
+from __future__ import annotations
+
 import argparse
-import asyncio
+import functools
 import math
 import os
 import platform
 import subprocess
+import sys
 import traceback
 from importlib.metadata import version
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional
 
-import uvicorn
-
-from local_operator.agents import AgentData  # Import AgentData type
-from local_operator.agents import AgentEditFields, AgentRegistry
-from local_operator.bootstrap import initialize_operator  # Import the new function
-from local_operator.clients.radient import RadientClient
 from local_operator.config import ConfigManager
-from local_operator.console import VerbosityLevel  # Import VerbosityLevel
 from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config
+from local_operator.logger import configure_cli_logging, file_logging
+from local_operator.optional import missing_extra_error
+from local_operator.paths import config_dir
+
+if TYPE_CHECKING:
+    from local_operator.agents import AgentRegistry
+
 from local_operator.helpers import setup_cross_platform_environment
-from local_operator.jobs import JobManager  # Added
-from local_operator.operator import OperatorType
-from local_operator.scheduler_service import SchedulerService  # Added
-from local_operator.server.utils.websocket_manager import WebSocketManager  # Added
 
 CLI_DESCRIPTION = """
     Local Operator - An environment for agentic AI models to perform tasks on the local device.
@@ -56,6 +68,10 @@ CLI_DESCRIPTION = """
 def build_cli_parser() -> argparse.ArgumentParser:
     """
     Build and return the CLI argument parser.
+
+    Backward compatibility is a hard contract here: every legacy flag,
+    subcommand, dest, and default must parse exactly as before. New flags and
+    subcommands are additive only (docs/REWRITE.md section E).
 
     Returns:
         argparse.ArgumentParser: The CLI argument parser
@@ -126,6 +142,26 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="The working directory to run the operator in.  Must be a valid directory.",
         dest="run_in",
     )
+    # --- Additive root flags (rewrite) ------------------------------------
+    parser.add_argument(
+        "--yolo",
+        action="store_true",
+        help="Auto-approve all tool executions (read/write/exec tiers) without prompting",
+    )
+    parser.add_argument(
+        "--no-tui",
+        action="store_true",
+        dest="no_tui",
+        help="Disable the full-screen TUI; use the plain headless REPL instead",
+    )
+    parser.add_argument(
+        "--tui",
+        action="store_true",
+        dest="tui",
+        help="Force the full-screen TUI even when stdout is not a tty "
+        "(errors clearly if the TUI cannot run without a tty)",
+    )
+
     subparsers = parser.add_subparsers(dest="subcommand")
     # Credential command
     credential_parser = subparsers.add_parser(
@@ -291,33 +327,175 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=str,
         help="The command to execute",
     )
+    # --- Additive exec flags (rewrite) ------------------------------------
+    exec_parser.add_argument(
+        "--background",
+        action="store_true",
+        help="Detach the task: spawn a background worker with a log file and exit immediately",
+    )
+    exec_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_mode",
+        help="Emit one JSON line per agent event instead of the final text",
+    )
+    exec_parser.add_argument(
+        "--agent-id",
+        type=str,
+        dest="agent_id",
+        help="ID of the agent to use for this execution (alternative to --agent by name)",
+    )
+
+    # --- Additive auth subcommands (rewrite) -------------------------------
+    login_parser = subparsers.add_parser(
+        "login",
+        help="Log in to a provider (OAuth or API key)",
+        parents=[parent_parser],
+    )
+    login_parser.add_argument(
+        "provider",
+        type=str,
+        nargs="?",
+        default=None,
+        help="Provider to log in to (e.g., openai, anthropic, kimi, xai). "
+        "Omit to list login-capable providers.",
+    )
+    logout_parser = subparsers.add_parser(
+        "logout",
+        help="Log out of a provider (removes stored credentials)",
+        parents=[parent_parser],
+    )
+    logout_parser.add_argument(
+        "provider",
+        type=str,
+        help="Provider to log out of",
+    )
+    subparsers.add_parser(
+        "login-status",
+        help="List stored provider credentials and their status",
+        parents=[parent_parser],
+    )
+    # Alias matching the docs/REWRITE.md section B spelling (`status`).
+    subparsers.add_parser(
+        "status",
+        help="Alias for login-status: list stored provider credentials",
+        parents=[parent_parser],
+    )
+
+    # --- Additive MCP subcommands (rewrite) --------------------------------
+    mcp_parser = subparsers.add_parser("mcp", help="Manage MCP servers", parents=[parent_parser])
+    mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command")
+    mcp_subparsers.add_parser(
+        "list", help="List configured MCP servers (all sources merged)", parents=[parent_parser]
+    )
+    mcp_add_parser = mcp_subparsers.add_parser(
+        "add", help="Add an MCP server (stdio command or http/sse URL)", parents=[parent_parser]
+    )
+    mcp_add_parser.add_argument("name", type=str, help="Server name")
+    mcp_add_parser.add_argument(
+        "--command", type=str, default=None, help="Stdio command to launch the server"
+    )
+    mcp_add_parser.add_argument(
+        "--arg",
+        action="append",
+        default=None,
+        dest="server_args",
+        help="Stdio command argument (repeatable)",
+    )
+    mcp_add_parser.add_argument(
+        "--env",
+        action="append",
+        default=None,
+        dest="server_env",
+        help="Environment variable KEY=VALUE for the stdio server (repeatable)",
+    )
+    mcp_add_parser.add_argument(
+        "--url", type=str, default=None, help="HTTP/SSE server URL (alternative to --command)"
+    )
+    mcp_add_parser.add_argument(
+        "--scope",
+        type=str,
+        choices=["global", "project"],
+        default="global",
+        help="Config scope to write (default: global ~/.local-operator/mcp.json)",
+    )
+    mcp_remove_parser = mcp_subparsers.add_parser(
+        "remove", help="Remove an MCP server from a config scope", parents=[parent_parser]
+    )
+    mcp_remove_parser.add_argument("name", type=str, help="Server name to remove")
+    mcp_remove_parser.add_argument(
+        "--scope",
+        type=str,
+        choices=["global", "project"],
+        default="global",
+        help="Config scope to remove from (default: global)",
+    )
+
+    # CL-04: ``--yolo`` is accepted on every subcommand too (additive). The
+    # root flag keeps its default; subparsers get a SUPPRESS copy so parsing
+    # inside a subcommand NEVER clobbers a root-level ``--yolo`` (the
+    # argparse re-default quirk that already applies to the legacy parent
+    # flags must not swallow this one — ``--yolo exec "task"`` is documented).
+    _propagate_yolo(parser)
 
     return parser
 
 
+def _propagate_yolo(parser: argparse.ArgumentParser) -> None:
+    """Add a default-suppressed ``--yolo`` to every subparser (recursively).
+
+    Not routed through ``parent_parser``: a shared parent action with a
+    SUPPRESS default still re-applies under argparse's subparser namespace
+    reset, and resolve-style conflicts mutate the shared action. A fresh
+    action per subparser is deterministic: each accepts ``--yolo`` locally
+    and never resets the value set before the subcommand.
+    """
+    for action in parser._actions:
+        if not isinstance(action, argparse._SubParsersAction):
+            continue
+        seen: set[int] = set()
+        for subparser in action.choices.values():
+            if id(subparser) in seen:
+                continue
+            seen.add(id(subparser))
+            subparser.add_argument(
+                "--yolo",
+                action="store_true",
+                default=argparse.SUPPRESS,
+                help="Auto-approve all tool executions (read/write/exec tiers)"
+                " without prompting",
+            )
+            _propagate_yolo(subparser)
+
+
 def credential_update_command(args: argparse.Namespace) -> int:
-    credential_manager = CredentialManager(Path.home() / ".local-operator")
+    credential_manager = CredentialManager(config_dir())
     credential_manager.prompt_for_credential(args.key, reason="update requested")
     return 0
 
 
 def credential_delete_command(args: argparse.Namespace) -> int:
-    credential_manager = CredentialManager(Path.home() / ".local-operator")
+    credential_manager = CredentialManager(config_dir())
     credential_manager.set_credential(args.key, "")
     return 0
 
 
 def config_create_command() -> int:
     """Create a new configuration file."""
-    config_manager = ConfigManager(Path.home() / ".local-operator")
+    base_dir = config_dir()
+    config_manager = ConfigManager(base_dir)
     config_manager._write_config(vars(config_manager.config))
-    print("Created new configuration file at ~/.local-operator/config.yml")
+    # Print the path that was actually written, not a hardcoded
+    # ~/.local-operator: config_dir() honours LOCAL_OPERATOR_CONFIG_DIR, and
+    # config_open_command below already reports the resolved path — naming a
+    # different file here makes the two commands contradict each other.
+    print(f"Created new configuration file at {base_dir / 'config.yml'}")
     return 0
 
 
 def config_open_command() -> int:
     """Open the configuration file using the default system editor."""
-    config_path = Path.home() / ".local-operator" / "config.yml"
+    config_path = config_dir() / "config.yml"
     if not config_path.exists():
         print(
             "\n\033[1;31mError: Configuration file does not exist.  Create one with "
@@ -341,7 +519,7 @@ def config_open_command() -> int:
 
 def config_edit_command(args: argparse.Namespace) -> int:
     """Edit a configuration value."""
-    config_manager = ConfigManager(Path.home() / ".local-operator")
+    config_manager = ConfigManager(config_dir())
     try:
         # Parse the value to the appropriate type
         value = args.value
@@ -381,17 +559,32 @@ def config_edit_command(args: argparse.Namespace) -> int:
 
 def config_list_command() -> int:
     """List available configuration options and their descriptions."""
-    config_manager = ConfigManager(Path.home() / ".local-operator")
+    config_manager = ConfigManager(config_dir())
     config = config_manager.get_config()
 
-    # Configuration descriptions
+    # Configuration descriptions. conversation_length / detail_length /
+    # max_learnings_history are DEPRECATED (CL-16): the compaction engine
+    # supersedes them — retention is governed by `values.compaction.*` now;
+    # the keys stay readable but are inert.
     descriptions = {
         "hosting": "AI provider platform (e.g., radient, openai, deepseek, anthropic, openrouter)",
         "model_name": "The specific model to use for interactions",
-        "conversation_length": "Maximum number of messages to keep in conversation history",
-        "detail_length": "Number of recent messages to leave unsummarized in conversation history",
-        "max_learnings_history": "Maximum number of learning entries to retain",
+        "conversation_length": "[DEPRECATED — superseded by compaction] "
+        "Maximum number of messages to keep in conversation history",
+        "detail_length": "[DEPRECATED — superseded by compaction] "
+        "Number of recent messages to leave unsummarized in conversation history",
+        "max_learnings_history": "[DEPRECATED — superseded by compaction] "
+        "Maximum number of learning entries to retain",
         "auto_save_conversation": "Whether to automatically save conversations",
+        "compaction": "Compaction engine settings (enabled, strategy, thresholds); "
+        "replaces conversation_length/detail_length",
+        "tui": "TUI settings (theme)",
+        "session_retention_max_sessions": "Maximum ephemeral session directories to keep "
+        "under sessions/ (0 disables the ceiling)",
+        "session_retention_max_bytes": "Maximum total bytes across sessions/ before the "
+        "oldest directories are evicted (0 disables the ceiling)",
+        "session_retention_max_age_days": "Age after which an ephemeral session directory "
+        "is evicted (0 disables the ceiling)",
     }
 
     print("\n\033[1;32m╭─ Configuration Options ───────────────────────\033[0m")
@@ -404,9 +597,22 @@ def config_list_command() -> int:
 
 
 def serve_command(host: str, port: int, reload: bool) -> int:
+    """Start the FastAPI server using uvicorn.
+
+    ``uvicorn`` is imported HERE, not at module scope: the HTTP facade lives
+    behind the ``server`` extra, so a default install (and every non-server
+    entry point) must be able to ``import local_operator.cli`` without
+    fastapi/uvicorn/starlette and their dependency chain present.
     """
-    Start the FastAPI server using uvicorn.
-    """
+    try:
+        import uvicorn
+    except ImportError:
+        print(
+            f"\n\033[1;31m{missing_extra_error('server', 'The HTTP API server')}\033[0m",
+            file=sys.stderr,
+        )
+        return -1
+
     print(f"Starting server at http://{host}:{port}")
     if reload:
         uvicorn.run(
@@ -421,7 +627,7 @@ def serve_command(host: str, port: int, reload: bool) -> int:
     return 0
 
 
-def agents_list_command(args: argparse.Namespace, agent_registry: AgentRegistry) -> int:
+def agents_list_command(args: argparse.Namespace, agent_registry: "AgentRegistry") -> int:
     """List all agents."""
     agents = agent_registry.list_agents()
     if not agents:
@@ -464,7 +670,7 @@ def agents_list_command(args: argparse.Namespace, agent_registry: AgentRegistry)
     return 0
 
 
-def agents_create_command(name: str, agent_registry: AgentRegistry) -> int:
+def agents_create_command(name: str, agent_registry: "AgentRegistry") -> int:
     """Create a new agent with the given name."""
 
     # If name not provided, prompt user for input
@@ -477,6 +683,8 @@ def agents_create_command(name: str, agent_registry: AgentRegistry) -> int:
         except (KeyboardInterrupt, EOFError):
             print("\n\033[1;31mAgent creation cancelled\033[0m")
             return -1
+
+    from local_operator.agents import AgentEditFields  # lazy: heavy module
 
     agent = agent_registry.create_agent(
         AgentEditFields(
@@ -509,7 +717,7 @@ def agents_create_command(name: str, agent_registry: AgentRegistry) -> int:
 
 
 def agents_delete_command(
-    args: argparse.Namespace, agent_registry: AgentRegistry, config_dir: Path
+    args: argparse.Namespace, agent_registry: "AgentRegistry", config_dir: Path
 ) -> int:
     """
     Delete an agent by name (local) or by ID (Radient).
@@ -529,8 +737,6 @@ def agents_delete_command(
     elif getattr(args, "agent_id", None):
         # Delete from Radient by ID
         from local_operator.clients.radient import RadientClient
-        from local_operator.config import ConfigManager
-        from local_operator.credentials import CredentialManager
 
         credential_manager = CredentialManager(config_dir)
         api_key = credential_manager.get_credential("RADIENT_API_KEY")
@@ -555,7 +761,416 @@ def agents_delete_command(
         return -1
 
 
+# --- Additive subcommand handlers (rewrite) --------------------------------
+
+
+def _build_auth_stack(config_dir: Path) -> tuple[Any, Any]:
+    """(auth_store, credential_manager) for the login handlers.
+
+    Lazy import of the providers stream's AuthStore — the CLI module top
+    level must never depend on it.
+    """
+    from local_operator.providers.auth_store import AuthStore
+
+    credential_manager = CredentialManager(config_dir)
+    auth_store = AuthStore(credential_manager=credential_manager)
+    return auth_store, credential_manager
+
+
+def login_command(args: argparse.Namespace) -> int:
+    """Run the OAuth/API-key login flow for one provider."""
+    try:
+        from local_operator.providers.auth_cli import run_login
+    except ImportError:
+        print("\n\033[1;31mError: provider login support is not available in this build\033[0m")
+        return -1
+    auth_store, credential_manager = _build_auth_stack(config_dir())
+    try:
+        return run_login(getattr(args, "provider", None), credential_manager, auth_store)
+    finally:
+        auth_store.close()
+
+
+def logout_command(args: argparse.Namespace) -> int:
+    """Remove all stored credentials for one provider."""
+    try:
+        from local_operator.providers.auth_cli import run_logout
+    except ImportError:
+        print("\n\033[1;31mError: provider login support is not available in this build\033[0m")
+        return -1
+    auth_store, _credential_manager = _build_auth_stack(config_dir())
+    try:
+        return run_logout(args.provider, auth_store)
+    finally:
+        auth_store.close()
+
+
+def login_status_command() -> int:
+    """List stored provider credentials and their status."""
+    try:
+        from local_operator.providers.auth_cli import list_logins
+    except ImportError:
+        print("\n\033[1;31mError: provider login support is not available in this build\033[0m")
+        return -1
+    auth_store, credential_manager = _build_auth_stack(config_dir())
+    try:
+        return list_logins(auth_store, credential_manager)
+    finally:
+        auth_store.close()
+
+
+def mcp_command(args: argparse.Namespace) -> int:
+    """Dispatch ``mcp list|add|remove`` to the MCP config module (stream E).
+
+    Lazy import: the MCP package keeps its SDK imports lazy too, and this
+    CLI must survive builds where it has not landed yet.
+    """
+    try:
+        from local_operator.mcp import config as mcp_config
+    except ImportError:
+        print("\n\033[1;31mError: MCP support is not available in this build\033[0m")
+        return -1
+
+    if args.mcp_command == "list":
+        servers = mcp_config.list_effective_servers(Path.cwd())
+        if not servers:
+            print("No MCP servers configured.")
+            return 0
+        print("\n\033[1;32m╭─ MCP Servers ─────────────────────────────────\033[0m")
+        for name, server in sorted(servers.items()):
+            target = server.get("command") or server.get("url") or "(unconfigured)"
+            print(f"\033[1;32m│ {name}: {target}\033[0m")
+        print("\033[1;32m╰──────────────────────────────────────────────\033[0m")
+        return 0
+    elif args.mcp_command == "add":
+        env: dict[str, str] = {}
+        for item in getattr(args, "server_env", None) or []:
+            if "=" not in item:
+                print(f"\n\033[1;31mError: --env expects KEY=VALUE, got: {item}\033[0m")
+                return -1
+            key, value = item.split("=", 1)
+            env[key] = value
+        return mcp_config.add_server(
+            args.name,
+            command=getattr(args, "command", None),
+            args=getattr(args, "server_args", None),
+            env=env or None,
+            url=getattr(args, "url", None),
+            scope=getattr(args, "scope", "global"),
+        )
+    elif args.mcp_command == "remove":
+        return mcp_config.remove_server(args.name, scope=getattr(args, "scope", "global"))
+    else:
+        print(f"\n\033[1;31mError: Invalid mcp command: {args.mcp_command}\033[0m")
+        return -1
+
+
+# --- Session factory facade -------------------------------------------------
+
+
+async def create_session(
+    args: argparse.Namespace,
+    config_manager: ConfigManager,
+    credential_manager: CredentialManager,
+    agent_registry: "AgentRegistry",
+    *,
+    has_ui: bool = False,
+):
+    """Build a wired harness session for interactive/headless use.
+
+    Thin facade over :func:`local_operator.session_factory.create_session`
+    (the composition root shared with ``exec`` and the background worker).
+    The engine import is lazy so importing ``cli`` never pulls in
+    providers/session internals.
+    """
+    from local_operator.session_factory import create_session as _create_session
+
+    return await _create_session(
+        args, config_manager, credential_manager, agent_registry, has_ui=has_ui
+    )
+
+
+# --- Shared helpers ----------------------------------------------------------
+
+
+def _apply_run_in(run_in: Optional[str]) -> Optional[int]:
+    """Validate and chdir into ``--run-in`` (legacy prints preserved).
+
+    Returns -1 when the directory is invalid, None on success/no-op.
+    """
+    if not run_in:
+        return None
+    run_in_path = Path(run_in).resolve()
+    if not run_in_path.is_dir():
+        print(f"\n\033[1;31mError: Invalid working directory: {run_in}\033[0m", file=sys.stderr)
+        return -1
+    os.chdir(run_in_path)
+    # These are OPERATOR notices, not data: they must go to stderr so they
+    # never interleave into the `exec --json` event stream on stdout.
+    print(f"\n\033[1;32mSetting working directory to: {run_in_path}\033[0m", file=sys.stderr)
+    return None
+
+
+async def _run_headless_repl(
+    args: argparse.Namespace,
+    config_manager: ConfigManager,
+    credential_manager: CredentialManager,
+    agent_registry: "AgentRegistry",
+) -> int:
+    """Plain-stream REPL for non-tty stdout or ``--no-tui``.
+
+    Mirrors the TUI loop semantics in miniature: one session for the whole
+    REPL, assistant text streamed to stdout as it arrives, tool rows dim on
+    stderr, Ctrl+C aborts the running turn (not the REPL), Ctrl+D/EOF exits.
+    """
+    import asyncio
+
+    from rich.console import Console
+
+    from local_operator.headless_print import PrintRenderer
+
+    console = Console(stderr=True, highlight=False)
+    session = await create_session(
+        args, config_manager, credential_manager, agent_registry, has_ui=False
+    )
+    renderer = PrintRenderer(stream_text=True)
+    unsubscribe = renderer.attach(session)
+    console.print(
+        "[bold cyan]Local Operator[/bold cyan] "
+        "[dim](headless REPL — Ctrl-C interrupts a turn, Ctrl-D exits)[/dim]"
+    )
+    try:
+        while True:
+            try:
+                # asyncio.to_thread (CL-14): blocking input() must not freeze
+                # the event loop (wake deliveries, session bookkeeping).
+                line = await asyncio.to_thread(input, "> ")
+            except (EOFError, KeyboardInterrupt):
+                console.print()
+                break
+            if not line.strip():
+                continue
+            renderer.failed = False
+            try:
+                await session.prompt(line)
+            except KeyboardInterrupt:
+                # Abort the turn, keep the REPL alive (TUI parity).
+                session.abort("interrupted")
+            except Exception as exc:  # noqa: BLE001 — keep the REPL alive
+                console.print(f"[red]Error: {exc}[/red]")
+    finally:
+        if callable(unsubscribe):
+            unsubscribe()
+        await session.dispose()
+    return 0
+
+
+def _preflight_hosting_model(
+    config_manager: ConfigManager,
+    credential_manager: CredentialManager,
+    agent_registry: "AgentRegistry",
+    current_agent: Optional[Any],
+    args: argparse.Namespace,
+) -> int | None:
+    """Startup preflight (CL-06): resolve hosting/model and verify the
+    provider's API key resolves BEFORE any turn runs.
+
+    Resolution uses the composition root's precedence (agent > flag >
+    config); key resolution walks the AuthStore cascade (runtime override,
+    stored OAuth, stored api_key, env, legacy credentials.env). Providers
+    that need no key (ollama, test, custom) pass through, and anything the
+    provider registry cannot answer passes through too — a preflight must
+    never block a configuration the engine itself would accept.
+
+    Returns -1 (already printed) on failure, None to continue. All engine
+    imports stay lazy so this never weights down parser-only paths.
+    """
+    try:
+        from local_operator.session_factory import resolve_hosting_model
+
+        hosting, _model_name = resolve_hosting_model(current_agent, args, config_manager)
+    except ValueError as exc:
+        # stderr on principle, not because this path is currently reachable from
+        # `exec --json`: it is an ERROR message, and its sibling
+        # `_preflight_api_key` two functions down already writes there. Keeping
+        # the two consistent is what stops the next person wiring this into the
+        # exec route from reintroducing a stdout leak.
+        print(f"\n\033[1;31mError: {exc}\033[0m", file=sys.stderr)
+        return -1
+    except Exception:  # noqa: BLE001 — unknown providers pass through
+        return None
+
+    return _preflight_api_key(hosting, credential_manager)
+
+
+def _preflight_api_key(hosting: str, credential_manager: CredentialManager) -> int | None:
+    """Verify the provider's API key resolves via the AuthStore cascade
+    (runtime override, stored OAuth, stored api_key, env, legacy
+    credentials.env). Providers that need no key (ollama, test) and anything
+    the provider registry cannot answer pass through — a preflight must
+    never block a configuration the engine itself would accept.
+
+    Returns -1 (already printed) on failure, None to continue.
+    """
+    canonical = "test" if hosting == "noop" else hosting
+    try:
+        from local_operator.providers.registry import get_provider_definition
+
+        definition = get_provider_definition(canonical)
+    except Exception:  # noqa: BLE001
+        return None
+    if definition is None or definition.env_keys is None:
+        # Keyless provider (ollama/test) or unregistered hosting: the
+        # engine decides; preflight must not be a second gatekeeper.
+        return None
+
+    try:
+        import asyncio
+
+        from local_operator.providers.auth_store import AuthStore
+
+        auth_store = AuthStore(credential_manager=credential_manager)
+        try:
+            api_key = asyncio.run(auth_store.get_api_key(canonical))
+        finally:
+            auth_store.close()
+    except Exception:  # noqa: BLE001 — resolution failures pass through
+        return None
+
+    if api_key:
+        return None
+
+    key_name = definition.env_keys if isinstance(definition.env_keys, str) else "API key"
+    # stderr: this fires on every fresh install and every typo'd --hosting,
+    # i.e. it is the single most common `exec --json` failure, and a coloured
+    # non-JSON line on stdout breaks the consumer it is trying to inform.
+    print(
+        f"\n\033[1;31mError: {key_name} is required for hosting platform "
+        f"'{hosting}' but is not configured. Set it via `local-operator "
+        f"credential update {key_name}`, the environment, or `local-operator "
+        f"login {canonical}`.\033[0m",
+        file=sys.stderr,
+    )
+    return -1
+
+
+#: Third-party modules the `server` extra provides. Used to decide whether a
+#: ModuleNotFoundError from the scheduler wiring really means "install the
+#: extra" — reporting an internal import failure that way sends the user to
+#: install something that will not help, and buries the actual defect.
+_SERVER_EXTRA_MODULES = frozenset(
+    {
+        "apscheduler",
+        "fastapi",
+        "starlette",
+        "uvicorn",
+        "websockets",
+        "multipart",
+        "dill",
+        "tiktoken",
+    }
+)
+
+
+async def _run_with_scheduler(run_fn, *run_args) -> int:
+    """Run the interactive front end with the SchedulerService alive (CL-07).
+
+    The legacy main() constructed ``SchedulerService`` (JobManager +
+    WebSocketManager, the same minimal managers the server app uses), started
+    it before the chat loop and shut it down afterwards — scheduled tasks
+    created during a session only fire while the service runs. Dropping it in
+    the rewrite would silently lose scheduled-task support, so the TUI and
+    headless REPL both run inside this wrapper. Every construction failure
+    (apscheduler missing, server-only managers unavailable) degrades to
+    running WITHOUT a scheduler — the front end itself must never be blocked
+    by scheduling support.
+    """
+    scheduler_service = None
+    try:
+        from local_operator.jobs import JobManager  # lazy: server-shared module
+        from local_operator.scheduler_service import SchedulerService
+        from local_operator.server.utils.websocket_manager import WebSocketManager
+        from local_operator.types import OperatorType
+
+        base_dir = config_dir()
+        config_manager = ConfigManager(base_dir)
+        credential_manager = CredentialManager(base_dir)
+        from local_operator.agents import AgentRegistry  # lazy: heavy module
+
+        agent_registry = AgentRegistry(base_dir)
+
+        from local_operator.console import VerbosityLevel
+
+        scheduler_service = SchedulerService(
+            agent_registry=agent_registry,
+            config_manager=config_manager,
+            credential_manager=credential_manager,
+            env_config=get_env_config(),
+            operator_type=OperatorType.CLI,
+            verbosity_level=(
+                VerbosityLevel.DEBUG
+                if os.environ.get("LOCAL_OPERATOR_DEBUG", "false") == "true"
+                else VerbosityLevel.VERBOSE
+            ),
+            job_manager=JobManager(),
+            websocket_manager=WebSocketManager(),  # required by the constructor, unused in CLI
+        )
+    except ModuleNotFoundError as exc:
+        # ONLY claim the extra when the missing module actually belongs to it.
+        # Catching every ModuleNotFoundError from this block reported a broken
+        # internal import (there are six in here) as a missing `server` extra:
+        # the user installs the extra, nothing changes, and the real defect
+        # stays invisible — strictly less diagnostic than the raw
+        # "No module named 'x'" this replaced.
+        root = (exc.name or "").split(".")[0]
+        if root in _SERVER_EXTRA_MODULES:
+            # Fires on every startup of a bare install, because this wraps both
+            # front ends — `local-operator` with no arguments is the
+            # most-travelled path in the product.
+            print(
+                f"\033[1;33mWarning: {missing_extra_error('server', 'Scheduled tasks')} "
+                f"Continuing without scheduled tasks.\033[0m",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"\033[1;33mWarning: scheduler unavailable, continuing without "
+                f"scheduled tasks: {exc}\033[0m",
+                file=sys.stderr,
+            )
+        scheduler_service = None
+    except Exception as exc:  # noqa: BLE001 — degrade to no scheduler
+        print(
+            f"\033[1;33mWarning: scheduler unavailable, continuing without "
+            f"scheduled tasks: {exc}\033[0m",
+            file=sys.stderr,
+        )
+        scheduler_service = None
+
+    if scheduler_service is not None:
+        try:
+            await scheduler_service.start()
+        except Exception as exc:  # noqa: BLE001 — never block the front end
+            print(
+                f"\033[1;33mWarning: failed to start scheduler: {exc}\033[0m",
+                file=sys.stderr,
+            )
+            scheduler_service = None
+    try:
+        return await run_fn(*run_args)
+    finally:
+        if scheduler_service is not None:
+            try:
+                await scheduler_service.shutdown()
+            except Exception:  # noqa: BLE001 — shutdown must not mask the exit code
+                pass
+
+
 def main() -> int:
+    # FIRST, before anything else can log. `helpers.py` used to configure the
+    # root logger as an import side effect; now the entry point owns it, which
+    # is what lets the TUI branch below swap the console handler for a file.
+    configure_cli_logging()
     try:
         parser = build_cli_parser()
         args = parser.parse_args()
@@ -564,11 +1179,10 @@ def main() -> int:
         setup_cross_platform_environment()
 
         os.environ["LOCAL_OPERATOR_DEBUG"] = "true" if args.debug else "false"
-
-        # Load environment configuration
-        env_config = get_env_config()
-
-        config_dir = Path.home() / ".local-operator"
+        # (CL-12) No env_config binding here: the scheduler wrapper resolves its
+        # own env config and the session factory does the same lazily — a
+        # dead local would only invite drift.
+        base_dir = config_dir()
         agent_home_dir = Path.home() / "local-operator-home"
 
         # Create the agent home directory if it doesn't exist
@@ -594,23 +1208,27 @@ def main() -> int:
             else:
                 parser.error(f"Invalid config command: {args.config_command}")
         elif args.subcommand == "agents":
-            agent_registry = AgentRegistry(config_dir)
+            from local_operator.agents import AgentRegistry  # lazy: heavy module
+
+            agent_registry = AgentRegistry(base_dir)
             if args.agents_command == "list":
                 return agents_list_command(args, agent_registry)
             elif args.agents_command == "create":
                 return agents_create_command(args.name, agent_registry)
             elif args.agents_command == "delete":
-                return agents_delete_command(args, agent_registry, config_dir)
+                return agents_delete_command(args, agent_registry, base_dir)
             elif args.agents_command == "push":
                 # Push agent to Radient
-                credential_manager = CredentialManager(config_dir)
+                from local_operator.clients.radient import RadientClient  # lazy
+
+                credential_manager = CredentialManager(base_dir)
                 api_key = credential_manager.get_credential("RADIENT_API_KEY")
                 if not api_key:
                     print(
                         "\n\033[1;31mError: RADIENT_API_KEY is required to push to Radient\033[0m"
                     )
                     return -1
-                config_manager = ConfigManager(config_dir)
+                config_manager = ConfigManager(base_dir)
                 base_url = config_manager.get_config_value(
                     "radient_base_url", "https://api.radienthq.com"
                 )
@@ -654,9 +1272,11 @@ def main() -> int:
                     return -1
             elif args.agents_command == "pull":
                 # Pull agent from Radient
+                from local_operator.clients.radient import RadientClient  # lazy
+
                 agent_id = args.id
                 # Get Radient base URL from config or use default
-                config_manager = ConfigManager(config_dir)
+                config_manager = ConfigManager(base_dir)
                 base_url = config_manager.get_config_value(
                     "radient_base_url", "https://api.radientlabs.ai"
                 )
@@ -678,22 +1298,73 @@ def main() -> int:
         elif args.subcommand == "serve":
             # Use the provided host, port, and reload options for serving the API.
             return serve_command(args.host, args.port, args.reload)
+        elif args.subcommand == "exec":
+            # Single-execution mode: headless one-shot (README contract —
+            # exit 0 on success, non-zero on error). Working-directory
+            # handling matches the legacy pre-run behavior.
+            invalid = _apply_run_in(args.run_in)
+            if invalid is not None:
+                return invalid
+            from local_operator.exec_mode import ExecArgs, run_exec
 
-        config_manager = ConfigManager(config_dir)
-        credential_manager = CredentialManager(config_dir)
-        agent_registry = AgentRegistry(config_dir)
+            exec_args = ExecArgs(
+                background=args.background,
+                json_mode=args.json_mode,
+                agent_name=args.agent_name,
+                agent_id=getattr(args, "agent_id", None),
+                yolo=args.yolo,
+                hosting=args.hosting,
+                model=args.model,
+                train=args.train,
+            )
+            # Startup preflight (CL-06) for the FOREGROUND path: hosting/
+            # model (agent > flag > config) + API-key resolution fail fast
+            # with the legacy message shape instead of dying mid-turn.
+            # ``--background`` preflight lives in exec_mode._spawn_background
+            # (CL-09) and shares the same resolution path.
+            if not args.background:
+                from local_operator.exec_mode import resolve_hosting_model_dry
+
+                try:
+                    hosting, _model = resolve_hosting_model_dry(exec_args)
+                except ValueError as exc:
+                    # stderr: this is the FOREGROUND `exec --json` path, so
+                    # stdout is the event stream. The byte-identical twins in
+                    # exec_mode._spawn_background were fixed earlier and these
+                    # were missed — the flag combination that reaches them
+                    # (`exec --json` with a bad or absent hosting/model) is the
+                    # most likely one to be scripted.
+                    print(f"\n\033[1;31mError: {exc}\033[0m", file=sys.stderr)
+                    return -1
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        f"\n\033[1;31mError: preflight failed: {exc}\033[0m",
+                        file=sys.stderr,
+                    )
+                    return -1
+                key_result = _preflight_api_key(hosting, CredentialManager(base_dir))
+                if key_result is not None:
+                    return key_result
+            return run_exec(args.command, exec_args)
+
+        config_manager = ConfigManager(base_dir)
+        credential_manager = CredentialManager(base_dir)
 
         # Override config with CLI args where provided
         config_manager.update_config_from_args(args)
 
         # Set working directory if provided and valid
-        if args.run_in:
-            run_in_path = Path(args.run_in).resolve()
-            if not run_in_path.is_dir():
-                print(f"\n\033[1;31mError: Invalid working directory: {args.run_in}\033[0m")
-                return -1
-            os.chdir(run_in_path)
-            print(f"\n\033[1;32mSetting working directory to: {run_in_path}\033[0m")
+        invalid = _apply_run_in(args.run_in)
+        if invalid is not None:
+            return invalid
+
+        from local_operator.agents import (  # lazy
+            AgentData,
+            AgentEditFields,
+            AgentRegistry,
+        )
+
+        agent_registry = AgentRegistry(base_dir)
 
         # Get agent if name provided
         current_agent: Optional[AgentData] = None  # Use AgentData type hint
@@ -738,83 +1409,138 @@ def main() -> int:
                     print("\n\033[1;31mError: Failed to create or retrieve agent.\033[0m")
                     return -1
 
-        # Determine training mode and single execution mode
-        training_mode = bool(args.train)
-        single_execution_mode = args.subcommand == "exec"
-
-        # Determine auto-save behavior
+        # Legacy behavior: the auto-save config value persists interactive
+        # sessions via the registry's autosave agent (exec is excluded —
+        # single-execution mode never autosaved).
         auto_save_enabled = config_manager.get_config_value("auto_save_conversation", False)
-        auto_save_active = auto_save_enabled and not single_execution_mode
+        if auto_save_enabled:
+            args.train = True
 
-        # Create autosave agent if needed
-        if auto_save_active:
-            agent_registry.create_autosave_agent()
-
-        # Determine verbosity level
-        verbosity = VerbosityLevel.DEBUG if args.debug else VerbosityLevel.VERBOSE
-
-        # Initialize the operator using the bootstrap function
-        scheduler_service: Optional[SchedulerService] = (
-            None  # Initialize scheduler_service variable
+        # Startup preflight (CL-06): hosting/model + API-key resolution fails
+        # fast with the legacy message shape BEFORE any turn (the factory
+        # raises the same errors mid-construction; surfacing them here keeps
+        # the user from seeing a half-initialized session).
+        preflight_result = _preflight_hosting_model(
+            config_manager, credential_manager, agent_registry, current_agent, args
         )
-        try:
-            # First, create the SchedulerService instance
-            # Instantiate JobManager and WebSocketManager for CLI context
-            job_manager = JobManager()
-            websocket_manager = WebSocketManager()  # Will be unused but needed for constructor
+        if preflight_result is not None:
+            return preflight_result
 
-            scheduler_service = SchedulerService(
-                agent_registry=agent_registry,
-                config_manager=config_manager,
-                credential_manager=credential_manager,
-                env_config=env_config,
-                operator_type=OperatorType.CLI,
-                verbosity_level=verbosity,
-                job_manager=job_manager,  # Added
-                websocket_manager=websocket_manager,  # Added
+        # Interactive path: full-screen TUI when stdout is a tty and not
+        # disabled; plain headless REPL otherwise. ``--tui`` (CL-13) forces
+        # the TUI even when stdout is not a tty — with a clear error when
+        # that is impossible.
+        force_tui = bool(getattr(args, "tui", False))
+        use_tui = force_tui or (not getattr(args, "no_tui", False) and sys.stdout.isatty())
+        run_tui = None
+        if use_tui:
+            try:
+                from local_operator.tui import run_tui  # lazy: textual
+            except ImportError:
+                run_tui = None
+                if force_tui:
+                    # Forced but impossible: surface WHY, don't silently fall
+                    # back to the plain REPL (the user asked for the TUI).
+                    print(
+                        "\n\033[1;31mError: the TUI is not available in this "
+                        "build/install (missing 'local_operator.tui'); remove "
+                        "--tui to use the plain REPL.\033[0m"
+                    )
+                    return -1
+                use_tui = False
+
+        # asyncio is imported HERE, not at module scope. It is the heaviest
+        # single item on the CLI's import graph (34.4 ms, +6.5 MB RSS, +77
+        # modules measured by scripts/bench_base_overhead.py) and only the
+        # interactive TUI/REPL tail below needs it — `--version`, `--help`,
+        # shell completion and the config/credential/agents/login subcommands
+        # all return before this point, and `exec`/`serve` bring their own
+        # event loop from exec_mode/the server module.
+        import asyncio
+
+        if use_tui and run_tui is not None:
+            tui_config = config_manager.get_config_value("tui", None)
+            theme_name = tui_config.get("theme", "dark") if isinstance(tui_config, dict) else "dark"
+
+            async def session_factory():
+                return await create_session(
+                    args,
+                    config_manager,
+                    credential_manager,
+                    agent_registry,
+                    has_ui=True,
+                )
+
+            # The provider controller gives the TUI the full provider/model/
+            # credential/usage surface behind /model /provider /login /usage.
+            # Its owning AuthStore lives for the TUI session only; the CLI
+            # closes it after run_tui returns.
+            from local_operator.providers.auth_store import AuthStore
+            from local_operator.providers.controller import ProviderController
+
+            tui_auth_store = AuthStore(credential_manager=credential_manager)
+            tui_controller = ProviderController(tui_auth_store, credential_manager)
+            try:
+                # BIND BY KEYWORD. ``_run_with_scheduler`` forwards *args
+                # positionally, so a positional controller lands in whatever
+                # parameter happens to sit in that slot (it once landed in
+                # ``login_handler``) and leaves provider_controller None,
+                # disabling every provider slash command while the app still
+                # starts cleanly. functools.partial pins it by name so a future
+                # signature change cannot re-introduce that silent failure.
+                tui_entry = functools.partial(run_tui, provider_controller=tui_controller)
+                # The silence starts HERE, not inside ``run_tui``. The
+                # scheduler is started by the wrapper below and logs
+                # "Scheduler started" at INFO before the app has painted a
+                # single cell — observed on the alternate screen at launch.
+                # ``run_tui`` opens the same window itself (the guarantee
+                # belongs to the TUI, not to one of its callers); the context
+                # manager is re-entrant, so the inner block is a no-op.
+                # ``_run_with_scheduler`` is shared with the headless REPL,
+                # which must keep its console output, so the wrapping goes on
+                # this call site rather than inside it.
+                with file_logging():
+                    return asyncio.run(
+                        _run_with_scheduler(
+                            tui_entry,
+                            session_factory,
+                            theme_name,
+                        )
+                    )
+            finally:
+                try:
+                    tui_auth_store.close()
+                except Exception:  # noqa: BLE001 — closing on teardown, never fatal
+                    pass
+
+        return asyncio.run(
+            _run_with_scheduler(
+                _run_headless_repl,
+                args,
+                config_manager,
+                credential_manager,
+                agent_registry,
             )
-
-            operator = initialize_operator(
-                operator_type=OperatorType.CLI,
-                config_manager=config_manager,
-                credential_manager=credential_manager,
-                agent_registry=agent_registry,
-                env_config=env_config,
-                scheduler_service=scheduler_service,  # Pass the created scheduler_service
-                current_agent=current_agent,
-                persist_conversation=training_mode,
-                auto_save_conversation=auto_save_active,
-                verbosity_level=verbosity,
-            )
-        except ValueError as e:
-            print(f"\n\033[1;31mError initializing operator: {e}\033[0m")
-            return -1
-
-        # Create an async main function to handle operator and scheduler start
-        async def async_main_cli():
-            if scheduler_service:
-                await scheduler_service.start()  # Start the scheduler
-
-            # Start the async chat interface or execute single command
-            if single_execution_mode:
-                _, final_response = await operator.execute_single_command(args.command)
-                if final_response:
-                    print(final_response)
-            else:
-                await operator.chat()
-
-            if scheduler_service:  # Shutdown scheduler gracefully
-                await scheduler_service.shutdown()
-
-        asyncio.run(async_main_cli())  # Run the new async main
-
-        return 0
+        )
     except Exception as e:
-        print(f"\n\033[1;31mError: {str(e)}\033[0m")
-        print("\033[1;34m╭─ Stack Trace ────────────────────────────────────\033[0m")
+        # STDERR, always. main() wraps the `exec` dispatch too, so this is the
+        # error presenter for `exec --json` — printing decorated banners to
+        # stdout put four unparseable lines on the event stream at exactly the
+        # moment a consumer most needs to read it.
+        print(f"\n\033[1;31mError: {str(e)}\033[0m", file=sys.stderr)
+        print(
+            "\033[1;34m╭─ Stack Trace ────────────────────────────────────\033[0m",
+            file=sys.stderr,
+        )
         traceback.print_exc()
-        print("\033[1;34m╰──────────────────────────────────────────────────\033[0m")
-        print("\n\033[1;33mPlease review and correct the error to continue.\033[0m")
+        print(
+            "\033[1;34m╰──────────────────────────────────────────────────\033[0m",
+            file=sys.stderr,
+        )
+        print(
+            "\n\033[1;33mPlease review and correct the error to continue.\033[0m",
+            file=sys.stderr,
+        )
         return -1
 
 

@@ -5,12 +5,48 @@ It provides default configurations and methods to update them.
 """
 
 import argparse
+import sys
 from datetime import datetime
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Dict
 
 import yaml
+
+
+def _version_tuple(raw: str) -> tuple[int, ...]:
+    """Parse a dotted version into ints for ordering.
+
+    Only the LEADING digits of each segment count, and the rest of the segment
+    is discarded: collecting every digit turned "1.2.3rc1" into (1, 2, 31),
+    making a pre-release compare as NEWER than its own release and firing the
+    "your config is newer" warning on the wrong versions. A pre-release sorting
+    equal to its release is the right approximation here — this decides one
+    advisory message, not resolution.
+
+    Empty segments are DROPPED, not zeroed ("1..3" -> (1, 3)), and a segment
+    with no leading digit ENDS the parse rather than contributing a 0
+    ("v1.2.3" -> (0,)). Nothing raises: a version warning must never be the
+    thing that stops the CLI from starting.
+    """
+    parts: list[int] = []
+    for chunk in str(raw).split("."):
+        chunk = chunk.strip()
+        digits = ""
+        for char in chunk:
+            if not char.isdigit():
+                break
+            digits += char
+        if digits:
+            parts.append(int(digits))
+        if digits != chunk:
+            # This segment was not purely numeric, so the version proper ends
+            # here: "3rc1", "3-beta" and "dev4" all mark a pre-release suffix.
+            # Stopping makes every pre-release form collapse to exactly its
+            # release version instead of sorting above it, which is what the
+            # one advisory message this feeds actually wants.
+            break
+    return tuple(parts) or (0,)
 
 
 class Config:
@@ -32,7 +68,7 @@ class Config:
     metadata: Dict[str, Any]
     values: Dict[str, Any]
 
-    def __init__(self, config_dict: Dict[str, Any]):
+    def __init__(self, config_dict: Dict[str, Any]) -> None:
         """Initialize the config with default or existing settings.
 
         Creates a new Config instance that manages configuration settings.
@@ -97,6 +133,13 @@ DEFAULT_CONFIG = Config(
             "hosting": "",
             "model_name": "",
             "auto_save_conversation": False,
+            # Ceilings on the ephemeral session store (see
+            # local_operator.session.retention). Any of the three set to 0
+            # disables that dimension; all three at 0 restores the unbounded
+            # behaviour, which is why none of them defaults there.
+            "session_retention_max_sessions": 200,
+            "session_retention_max_bytes": 128 * 1024 * 1024,
+            "session_retention_max_age_days": 30,
         },
     }
 )
@@ -121,7 +164,7 @@ class ConfigManager:
     config_file: Path
     config: Config
 
-    def __init__(self, config_dir: Path):
+    def __init__(self, config_dir: Path) -> None:
         """Initialize the config manager with default or existing settings.
 
         Creates a new ConfigManager instance that manages configuration settings.
@@ -155,11 +198,16 @@ class ConfigManager:
             # Check if config version is older than current version
             config_version = config_dict.get("version", "0.0.0")
             current_version = version("local-operator")
-            if config_version > current_version:
+            # Compare as version TUPLES, not strings: "1.10.0" > "1.9.0" is
+            # False lexicographically, so the warning fired on the wrong set of
+            # versions entirely. stderr because ConfigManager is constructed on
+            # the `exec --json` path, whose stdout is the event stream.
+            if _version_tuple(config_version) > _version_tuple(current_version):
                 print(
                     f"\n\033[1;33mWarning: Your config file version ({config_version}) "
                     f"is newer than the current version ({current_version}). "
-                    "Please upgrade to ensure compatibility.\033[0m"
+                    "Please upgrade to ensure compatibility.\033[0m",
+                    file=sys.stderr,
                 )
 
             # Fill in any missing values with defaults

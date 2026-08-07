@@ -9,20 +9,28 @@ It uses a shared queue to communicate status updates from the child process to t
 import asyncio
 import logging
 import multiprocessing
-from multiprocessing import Process, Queue
-from typing import TYPE_CHECKING, Callable, List, Optional  # Added TYPE_CHECKING
-from uuid import UUID
+from multiprocessing import Process
+from typing import TYPE_CHECKING, Callable, List, Optional
 
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.jobs import JobContext, JobContextRecord, JobManager, JobStatus
-
-# from local_operator.scheduler_service import SchedulerService # Moved to TYPE_CHECKING
-from local_operator.server.utils.operator import create_operator
+from local_operator.server.models.schemas import ChatOptions
+from local_operator.server.utils.event_broker import EventBroker
+from local_operator.server.utils.operator import (
+    ExecutorInitError,
+    StatusQueue,
+    create_operator,
+)
+from local_operator.server.utils.sse_publisher import (
+    publish_agent_event,
+    publish_job_status,
+    publish_record,
+)
 from local_operator.server.utils.websocket_manager import WebSocketManager
-from local_operator.types import ConversationRecord, Schedule
+from local_operator.types import ConversationRecord
 
 if TYPE_CHECKING:
     from local_operator.scheduler_service import SchedulerService
@@ -41,9 +49,9 @@ def run_job_in_process_with_queue(
     agent_registry: AgentRegistry,
     env_config: EnvConfig,
     context: Optional[list[ConversationRecord]] = None,
-    options: Optional[dict[str, object]] = None,
-    status_queue: Optional[Queue] = None,  # type: ignore
-):
+    options: Optional[ChatOptions] = None,
+    status_queue: Optional[StatusQueue] = None,
+) -> None:
     """
     Run a chat job in a separate process, using a queue to communicate status updates.
 
@@ -68,7 +76,7 @@ def run_job_in_process_with_queue(
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    async def process_chat_job_in_context():
+    async def process_chat_job_in_context() -> None:
         try:
             # Create a new operator in this process context
             job_context = JobContext()
@@ -99,8 +107,10 @@ def run_job_in_process_with_queue(
                     status_queue=status_queue,
                 )
 
-                # Set the status queue on the executor for execution state updates
-                if status_queue and hasattr(process_operator, "executor"):
+                # The facade reads this when it subscribes to the session's
+                # AgentEvent stream, so streaming frames reach the parent
+                # process exactly as before.
+                if status_queue:
                     process_operator.executor.status_queue = status_queue
 
                 # Initialize conversation history
@@ -114,24 +124,18 @@ def run_job_in_process_with_queue(
                 else:
                     try:
                         process_operator.executor.initialize_conversation_history()
-                    except ValueError:
+                    except ExecutorInitError:
                         # Conversation history already initialized
                         pass
 
-                # Configure model options if provided
-                model_instance = process_operator.executor.model_configuration.instance
+                # Sampling overrides ride on the ModelConfiguration now: the
+                # rewritten engine has no mutable chat-model object.
+                model_configuration = process_operator.executor.model_configuration
                 if options:
-                    # Handle temperature
-                    if "temperature" in options and options["temperature"] is not None:
-                        if hasattr(model_instance, "temperature"):
-                            # Use setattr to avoid type checking issues
-                            setattr(model_instance, "temperature", options["temperature"])
-
-                    # Handle top_p
-                    if "top_p" in options and options["top_p"] is not None:
-                        if hasattr(model_instance, "top_p"):
-                            # Use setattr to avoid type checking issues
-                            setattr(model_instance, "top_p", options["top_p"])
+                    if options.temperature is not None:
+                        model_configuration.temperature = options.temperature
+                    if options.top_p is not None:
+                        model_configuration.top_p = options.top_p
 
                 # Process the request
                 _, final_response = await process_operator.handle_user_input(
@@ -177,8 +181,8 @@ def run_agent_job_in_process_with_queue(
     env_config: EnvConfig,
     persist_conversation: bool = False,
     user_message_id: Optional[str] = None,
-    status_queue: Optional[Queue] = None,  # type: ignore
-):
+    status_queue: Optional[StatusQueue] = None,
+) -> None:
     """
     Run an agent chat job in a separate process, using a queue to communicate status updates.
 
@@ -205,7 +209,7 @@ def run_agent_job_in_process_with_queue(
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    async def process_chat_job_in_context():
+    async def process_chat_job_in_context() -> None:
         try:
             # Create a new operator in this process context
             job_context = JobContext()
@@ -249,7 +253,7 @@ def run_agent_job_in_process_with_queue(
                 )
 
                 # Set the status queue on the executor for execution state updates
-                if status_queue and hasattr(process_operator, "executor"):
+                if status_queue:
                     process_operator.executor.status_queue = status_queue
 
                 # Process the request
@@ -290,6 +294,7 @@ def create_and_start_job_process_with_queue(
     job_manager: JobManager,
     websocket_manager: WebSocketManager,
     scheduler_service: "SchedulerService",  # Changed to string literal
+    event_broker: Optional[EventBroker] = None,
 ) -> Process:
     """
     Create and start a process for a job, and set up a queue monitor to update the job status.
@@ -302,6 +307,11 @@ def create_and_start_job_process_with_queue(
         process_func: The function to run in the process
         args: The arguments to pass to the function
         job_manager: The job manager for tracking the process
+        websocket_manager: Legacy websocket fan-out (unchanged wire format)
+        scheduler_service: Scheduler used by scheduling-aware jobs
+        event_broker: SSE fan-out. Optional so a test or an embedder can run
+            the pump without a broker; when absent, every publish is a no-op
+            and only the websocket path is fed.
 
     Returns:
         The created Process object
@@ -321,7 +331,7 @@ def create_and_start_job_process_with_queue(
     process.start()
 
     # Create a task to monitor the status queue
-    async def monitor_status_queue():
+    async def monitor_status_queue() -> None:
         current_job_id = job_id  # Capture job_id in closure to avoid unbound variable issue
         try:
             while process.is_alive() or not status_queue.empty():
@@ -338,6 +348,7 @@ def create_and_start_job_process_with_queue(
                                 # Status update message: (type, job_id, status, result)
                                 _, received_job_id, status, result = message
                                 await job_manager.update_job_status(received_job_id, status, result)
+                                publish_job_status(event_broker, received_job_id, status, result)
                             elif msg_type == "execution_update" and len(message) == 3:
                                 # Execution state update: (type, job_id, execution_state)
                                 _, received_job_id, execution_state = message
@@ -345,48 +356,27 @@ def create_and_start_job_process_with_queue(
                                     received_job_id, execution_state
                                 )
                             elif msg_type == "message_update" and len(message) == 3:
-                                # Message update: (type, job_id, message)
-                                _, received_job_id, message = message
+                                # Message update: (type, record_id, message)
+                                _, received_job_id, update = message
 
-                                await websocket_manager.broadcast_update(received_job_id, message)
-                            elif msg_type == "schedule_add" and len(message) == 2:
-                                # Schedule add message: (type, schedule)
-                                _, schedule = message
-
-                                if schedule is not None and isinstance(schedule, Schedule):
-                                    try:
-                                        scheduler_service.add_or_update_job(schedule)
-                                    except Exception as e:
-                                        logger.error(
-                                            f"Failed to add schedule via status_queue: {e}"
-                                        )
-                                else:
-                                    logger.error(
-                                        "schedule_add message did not contain a valid"
-                                        f"Schedule object: {schedule}"
-                                    )
-                            elif msg_type == "schedule_remove" and len(message) == 2:
-                                # Schedule remove message: (type, schedule_id)
-                                _, schedule_id = message
-
-                                if schedule_id is not None and (
-                                    isinstance(schedule_id, UUID) or isinstance(schedule_id, str)
-                                ):
-                                    try:
-                                        if isinstance(schedule_id, str):
-                                            schedule_id_uuid = UUID(schedule_id)
-                                        else:
-                                            schedule_id_uuid = schedule_id
-                                        scheduler_service.remove_job(schedule_id_uuid)
-                                    except Exception as e:
-                                        logger.error(
-                                            f"Failed to remove schedule via status_queue: {e}"
-                                        )
-                                else:
-                                    logger.error(
-                                        "schedule_remove message did not contain a valid"
-                                        f"schedule_id: {schedule_id}"
-                                    )
+                                # The websocket path is deliberately unchanged:
+                                # the fallback transport must stay byte-identical
+                                # while SSE carries the same records plus the
+                                # richer taxonomy below.
+                                await websocket_manager.broadcast_update(received_job_id, update)
+                                publish_record(event_broker, current_job_id, update)
+                            elif msg_type == "agent_event" and len(message) == 3:
+                                # Raw engine event: (type, job_id, payload dict).
+                                # SSE-only - these are the deltas and tool traces
+                                # the websocket bridge collapses away, so no
+                                # legacy consumer can regress on them.
+                                _, _received_job_id, payload = message
+                                publish_agent_event(event_broker, current_job_id, payload)
+                            # schedule_add / schedule_remove frames were
+                            # produced by the legacy executor's agent
+                            # scheduling tools; the rewritten tool table has
+                            # none and /v1/schedules is the only creation
+                            # path, so the branches are dead and deleted.
                         elif len(message) == 3:
                             # Legacy format: (job_id, status, result)
                             received_job_id, status, result = message
@@ -395,8 +385,15 @@ def create_and_start_job_process_with_queue(
                             logger.warning(f"Received message with unexpected format: {message}")
                 await asyncio.sleep(0.01)
         except asyncio.CancelledError:
-            # Task was cancelled, clean up
-            pass
+            # Cancel bypasses the child's status queue (JobManager.cancel_job
+            # terminates the process and cancels this task), so without this the
+            # SSE job channel would keepalive forever - the exact "stream hangs"
+            # defect the transport exists to kill (review B-1). publish_job_status
+            # maps CANCELLED onto stream.terminal.
+            publish_job_status(
+                event_broker, current_job_id, JobStatus.CANCELLED, {"error": "Job cancelled"}
+            )
+            raise
         except Exception as e:
             logger.exception(f"Error monitoring status queue for job {current_job_id}: {str(e)}")
 
@@ -405,7 +402,7 @@ def create_and_start_job_process_with_queue(
 
     # Register the task with the job manager
     # Use a separate function to avoid capturing the monitor_task in the closure
-    async def register_monitor_task():
+    async def register_monitor_task() -> None:
         await job_manager.register_task(job_id, monitor_task)
 
     # Create a separate task for registration to avoid pickling issues

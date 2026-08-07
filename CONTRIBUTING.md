@@ -32,7 +32,7 @@ Thank you for your interest in contributing to Local Operator! We welcome all co
 │   └── types.py                 # Type definitions and enums
 ├── scripts                      # Utility scripts for development
 │   └── install_pyenv.sh         # Script to install pyenv and Python 3.12
-├── setup.py                     # Package installation configuration
+├── pyproject.toml               # Package metadata, dependencies and extras
 ├── static                       # Static assets and resources
 └── tests                        # Test suite directory
     ├── conftest.py              # Pytest configuration and fixtures
@@ -48,7 +48,10 @@ Refer to the [dependency graph](docs/dependencies.md) for a visual representatio
 ### Prerequisites
 
 - Python 3.12+ (will be installed via pyenv if not available)
-- Dependencies in requirements.txt
+- Dependencies are declared in `pyproject.toml`. The default install is
+  deliberately lean; optional features live behind extras (`server`, `mcp`,
+  `images`, `tokenizer`, and `all`). `make install` installs `.[dev]`, which
+  pulls every extra plus the test and lint tooling.
 
 ### Development Setup
 

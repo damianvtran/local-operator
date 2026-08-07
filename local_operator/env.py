@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
-from pydantic import Field
 
 # Always load .env from the project root, regardless of working directory
 dotenv_path = Path(__file__).parent.parent / ".env"
@@ -29,17 +28,14 @@ class EnvConfig:
 
     Attributes:
         radient_api_base_url: Base URL for the Radient API.
+        radient_client_id: Client ID for Radient API OAuth flows.
     """
 
-    radient_api_base_url: str = Field(
-        default="https://api.radienthq.com/v1",
-        description="Base URL for the Radient API.",
-    )
-
-    radient_client_id: str = Field(
-        default="",
-        description="Client ID for Radient API OAuth flows.",
-    )
+    # Plain dataclass defaults: this is a stdlib dataclass, not a pydantic
+    # model, so a ``pydantic.Field(...)`` here would be stored verbatim as the
+    # default and hand callers a FieldInfo where the annotation promises a str.
+    radient_api_base_url: str = "https://api.radienthq.com/v1"
+    radient_client_id: str = ""
 
 
 def get_env_config() -> EnvConfig:

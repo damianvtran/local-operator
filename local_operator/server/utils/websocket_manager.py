@@ -32,7 +32,7 @@ class WebSocketManager:
             subscribed to.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize the WebSocketManager."""
         # Maps connection types to message IDs to a set of connected WebSockets
         self.connections: Dict[WebsocketConnectionType, Dict[str, Set[WebSocket]]] = {

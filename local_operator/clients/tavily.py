@@ -3,6 +3,8 @@ from typing import Any, Dict, List, Optional
 import requests
 from pydantic import BaseModel, SecretStr
 
+from local_operator.clients._http import response_body
+
 
 class TavilyResult(BaseModel):
     """Individual search result from Tavily API.
@@ -70,7 +72,7 @@ class TavilyClient:
         base_url (str): Base URL for the Tavily API
     """
 
-    def __init__(self, api_key: SecretStr, base_url: str = "https://api.tavily.com"):
+    def __init__(self, api_key: SecretStr, base_url: str = "https://api.tavily.com") -> None:
         """Initialize the Tavily API client.
 
         Args:
@@ -156,11 +158,7 @@ class TavilyClient:
         except requests.exceptions.RequestException as e:
             raise RuntimeError(
                 f"Failed to execute Tavily API search due to a requests error: {str(e)}, Response"
-                f" Body: {(
-                    e.response.content.decode()
-                    if hasattr(e, 'response') and e.response
-                    else "No response body"
-                )}"
+                f" Body: {response_body(e)}"
             ) from e
         except Exception as e:
             raise RuntimeError(f"Failed to execute Tavily API search: {str(e)}") from e

@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional
 import requests
 from pydantic import BaseModel, Field
 
+from local_operator.clients._http import response_body
+
 
 class OllamaModelData(BaseModel):
     """Data for an Ollama model.
@@ -92,11 +94,7 @@ class OllamaClient:
             tags_response = OllamaGetTagsResponse.model_validate(response.json())
             return [OllamaModelData.model_validate(model) for model in tags_response.models]
         except requests.exceptions.RequestException as e:
-            error_body = (
-                e.response.content.decode()
-                if hasattr(e, "response") and e.response
-                else "No response body"
-            )
+            error_body = response_body(e)
             error_msg = f"Failed to fetch Ollama models due to a requests error: {str(e)}"
             error_msg += f", Response Body: {error_body}"
             raise RuntimeError(error_msg) from e

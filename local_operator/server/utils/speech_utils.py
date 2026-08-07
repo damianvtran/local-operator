@@ -1,10 +1,15 @@
+"""Voice selection helpers for the agent speech endpoint.
+
+The gender classifier is a single non-agentic completion, so it runs through
+``ServerExecutor.invoke_model`` (provider wire clients) rather than an agent
+session — no tools, no transcript, no loop.
+"""
+
 import re
 from typing import Tuple
 
-from langchain_core.messages import BaseMessage
-
 from local_operator.agents import AgentData
-from local_operator.executor import LocalCodeExecutor
+from local_operator.server.utils.operator import ServerExecutor
 from local_operator.types import ConversationRecord, ConversationRole
 
 GENDER_CLASSIFICATION_PROMPT = """
@@ -51,14 +56,14 @@ def parse_gender_from_xml(xml_string: str) -> str:
 
 
 async def determine_voice_and_instructions(
-    agent: AgentData, executor: LocalCodeExecutor
+    agent: AgentData, executor: ServerExecutor
 ) -> Tuple[str, str]:
     """
     Determines the voice and instructions for speech generation based on the agent's gender.
 
     Args:
         agent: The agent data.
-        executor: The LocalCodeExecutor instance.
+        executor: The ServerExecutor providing the one-shot completion.
 
     Returns:
         A tuple containing the voice, instructions, and input text.
@@ -67,7 +72,7 @@ async def determine_voice_and_instructions(
         agent_name=agent.name, agent_description=agent.description
     )
     messages = [ConversationRecord(role=ConversationRole.USER, content=prompt)]
-    response: BaseMessage = await executor.invoke_model(messages)
+    response = await executor.invoke_model(messages)
     gender = parse_gender_from_xml(str(response.content))
 
     voice = "nova" if gender == "female" else "ash"

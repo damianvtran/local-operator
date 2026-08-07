@@ -9,6 +9,19 @@ from uuid import UUID, uuid4  # Added UUID, uuid4
 from pydantic import BaseModel, Field, validator  # Added validator
 
 
+class OperatorType(Enum):
+    """Which front end owns the session.
+
+    Relocated here from the deleted legacy ``local_operator.operator`` module.
+    Nothing in the rewritten engine branches on it any more; it survives
+    because ``SchedulerService`` accepts it as part of its frozen public
+    surface and both the CLI and the FastAPI app pass it at construction.
+    """
+
+    CLI = "cli"
+    SERVER = "server"
+
+
 class ConversationRole(str, Enum):
     """Enum representing the different roles in a conversation with an AI model.
 
