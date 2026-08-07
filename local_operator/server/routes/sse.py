@@ -50,7 +50,7 @@ from local_operator.server.utils.sse import (
     envelope,
     frame,
     gap_payload,
-    heartbeat,
+    keepalive,
     open_payload,
 )
 
@@ -206,7 +206,11 @@ async def _stream(
                         ),
                     )
                     return
-                yield heartbeat()
+                # A dispatchable keepalive, not a comment: proxies count it as
+                # traffic AND the client's stall detector can re-arm on it. A
+                # comment alone is invisible to EventSource, so a healthy quiet
+                # turn would have read as a dead connection (review C-01).
+                yield keepalive()
                 continue
 
             dropped = subscription.take_dropped()

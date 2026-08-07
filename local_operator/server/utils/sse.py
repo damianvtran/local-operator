@@ -102,6 +102,11 @@ class EventName:
     TERMINAL = "stream.terminal"
     #: Transport or server failure. Equivalent to Minerva's ``error`` event.
     ERROR = "error"
+    #: Dispatchable keepalive. Unlike a ``:`` comment (which proxies count as
+    #: traffic but ``EventSource`` silently discards), this is a real event so a
+    #: client can re-arm its stall detector on it. A healthy quiet turn must not
+    #: look like a dead connection.
+    KEEPALIVE = "keepalive"
 
     # -- legacy-compatible record frames ----------------------------------
     #: A ``CodeExecutionResult`` snapshot - byte-compatible with the WebSocket
@@ -208,8 +213,19 @@ def comment(text: str) -> str:
 
 
 def heartbeat() -> str:
-    """Keepalive tick."""
+    """Keepalive tick as a comment - real traffic to proxies, invisible to clients."""
     return comment("heartbeat")
+
+
+def keepalive() -> str:
+    """Keepalive tick as a *dispatchable* event.
+
+    A comment keeps a proxy from idling the connection out, but ``EventSource``
+    discards comments without firing any handler, so a client cannot use them to
+    re-arm a stall detector. This named event is the client-visible half of the
+    same tick: it carries no state, only liveness.
+    """
+    return frame(EventName.KEEPALIVE, {"type": EventName.KEEPALIVE})
 
 
 def _fallback(value: Any) -> Any:
