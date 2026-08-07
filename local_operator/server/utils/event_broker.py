@@ -310,7 +310,12 @@ class EventBroker:
         chan = self._channels.get(channel)
         if chan is not None:
             chan.subscribers.discard(sub)
-            chan.last_activity = time.monotonic()
+            # Mirror the subscribe() guard: detaching the last listener of a
+            # terminal channel must not refresh its TTL, or a client that
+            # reconnects after `stream.terminal` pins the channel forever
+            # (review N-2).
+            if not chan.terminal:
+                chan.last_activity = time.monotonic()
         # Sentinel so a reader parked on `get()` returns promptly.
         try:
             sub.queue.put_nowait(None)

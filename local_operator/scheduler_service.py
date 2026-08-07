@@ -548,6 +548,18 @@ class SchedulerService:
                 f"Scheduled run for agent {agent_id_str}, schedule {schedule_id_str} "
                 "was cancelled."
             )
+            # Cancel bypasses _push_job_status (CancelledError is a BaseException
+            # and escapes both except branches), so mirror the terminal state to
+            # the broker directly - a sync call, safe inside a cancelled task -
+            # or the scheduled job's SSE stream keepalives forever (review N-1).
+            # job_id is the schedule id (legacy contract), so the channel matches.
+            if self.event_broker is not None:
+                publish_job_status(
+                    self.event_broker,
+                    schedule_id_str,
+                    JobStatus.CANCELLED,
+                    {"error": "Scheduled job cancelled"},
+                )
             raise
         except Exception as e:
             logger.error(
