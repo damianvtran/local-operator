@@ -179,11 +179,18 @@ def test_an_unresolvable_path_is_still_named(tmp_path: Path) -> None:
 
     An embedded NUL raises ValueError rather than OSError from `Path.resolve()`,
     which is the most likely way a model-supplied path fails to resolve.
+
+    It is now named AND flagged. Resolution failing used to propagate out of
+    `_resolve_workspace_path` and the describer's own fallback quoted the raw
+    string; the resolver handles it, so the row shows the absolute target and
+    carries the hazard clause — a path that cannot be resolved cannot be shown to
+    be inside the workspace, and the verdict that still warns is the honest one.
     """
     described = _summary(build_write_tool(), {"path": "a\x00b"}, str(tmp_path))
     # Quoted, not cleaned: the sanitiser that makes the line inert would
     # otherwise turn `a\x00b` into `ab` — a different file, named silently.
-    assert described == "write: 'a\\x00b'"
+    assert "a\\x00b" in described
+    assert OUTSIDE_MARKER in described or "outside" in described
 
 
 async def _unused_execute(*args: object, **kwargs: object) -> ToolResult:  # pragma: no cover
@@ -367,3 +374,27 @@ def test_an_unresolvable_home_still_resolves_a_target(monkeypatch) -> None:
     monkeypatch.setattr(Path, "expanduser", boom)
     resolved, _inside = _resolve_workspace_path("notes.md", "/tmp")
     assert resolved.is_absolute()
+
+
+def test_a_path_that_cannot_be_resolved_is_reported_outside_not_crashed() -> None:
+    """`resolve()` stats the path, so it raises on more than a missing parent.
+
+    An embedded NUL is a `ValueError` from the lstat itself; a symlink loop or a
+    permission wall is an `OSError`. Unhandled, a model-supplied `a\\x00b` took
+    down the approval prompt it was being asked about.
+
+    The verdict is OUTSIDE, deliberately: this boolean decides whether the user is
+    warned, and a path that cannot be resolved cannot be shown to be within the
+    workspace. Fail-closed still asks; fail-open would silently skip the hazard
+    clause on exactly the input nobody can characterise.
+    """
+    from local_operator.tools.builtin import _resolve_workspace_path
+
+    resolved, inside = _resolve_workspace_path("a\x00b", "/tmp")
+    assert inside is False
+    # The sentence is still buildable, which is the point.
+    assert str(resolved)
+
+    # A resolvable sibling of the same shape is still correctly inside.
+    _resolved, inside_ok = _resolve_workspace_path("ab", "/tmp")
+    assert inside_ok is True
