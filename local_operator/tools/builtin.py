@@ -668,7 +668,14 @@ def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
         return f"browse: {url}"
     if action and url:
         if url_unparsed:
-            return f"{UNRESOLVABLE_MARKER} {action}: {UNPARSED_URL_PREFIX} {url}"
+            # ONE label, not two. `{action}: unparsed url: <raw>` spent two labels
+            # before naming anything, so the row protected the words `unparsed
+            # url` as though they were the target: 40 of 71 widths painted no
+            # character of the URL at all, and below 40 the ACTION was gone while
+            # the label survived. The marker already says the URL could not be
+            # read, so the action can keep its own slot and the string gets the
+            # rest.
+            return f"{UNRESOLVABLE_MARKER} {action}: {url}"
         return f"{action}: {url}"
     return f"browser: {action}" if action else ""
 
@@ -676,8 +683,12 @@ def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
 def _opaque_url(raw: str) -> str:
     """A URL this module could not parse, presented as DATA, not a destination.
 
-    Returned QUOTED and paired with :data:`UNPARSED_URL_PREFIX` by the caller, so
-    the row names the string without claiming to know where it points.
+    Paired with :data:`UNPARSED_URL_PREFIX` by the caller, so the row names the
+    string without claiming to know where it points. The prefix is what does the
+    work: `_display_target` quotes only a space-run or a non-printable, so the
+    payload this exists for — a hostile URL of ordinary printable characters —
+    comes back bare, and it is the label in front of it, not quotation, that
+    stops the row reading as a destination.
 
     `_display_url`'s whole contract is "host first, no userinfo", and the two
     exits that could not honour it used to return the caller's string verbatim —

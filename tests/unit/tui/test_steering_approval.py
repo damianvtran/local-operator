@@ -1225,3 +1225,40 @@ async def test_the_two_hazards_spell_out_different_sentences() -> None:
         # And the two must not paint the same clause.
         if label == "unresolvable":
             assert "outside the workspace" not in row, row
+
+
+@pytest.mark.asyncio
+async def test_the_verbose_threshold_measures_this_row_s_own_clause() -> None:
+    """`_verbose_min_width` counts the clause the row will actually paint.
+
+    Assuming the longer of the two costs the shorter one its verb: measuring
+    `outside the workspace — ` for a row that spells `unresolvable — ` puts the
+    threshold 9 columns too high, so `allow` is shed while the explicit form
+    still fits. Measured band 56-64; at 56 the correct row is
+    `? allow write_file  unresolvable — write: '/ws/a\\x00b'` and the assumed one
+    drops `allow`.
+
+    The outside-workspace clause is unaffected (threshold 63 either way), which is
+    why the whole suite stayed green with this reverted — the regression lives
+    only on the clause introduced alongside it.
+    """
+    detail = f"{UNRESOLVABLE_MARKER} write: '/ws/a\\x00b'"
+    kept: list[int] = []
+    for width in range(66, 61, -1):
+        app = OperatorApp(lambda: _factory(SteerableSession()))
+        async with app.run_test(size=(width, 20)) as pilot:
+            app.query_one(TranscriptView).append_block(ApprovalBlock("write_file", detail))
+            await pilot.pause(0.05)
+            row = next(
+                (s.text for s in app.screen._compositor.render_strips() if "write_file" in s.text),
+                "",
+            )
+        if "allow" in row:
+            kept.append(width)
+        # Whatever the verb does, the clause the row measured is the one it paints.
+        assert "unresolvable" in row, (width, row)
+
+    # Every width in the band keeps the verb — the point of measuring the real
+    # clause. Measuring the longer clause instead sheds `allow` from 64 down,
+    # so a single missing width here is that threshold returning.
+    assert kept == list(range(66, 61, -1)), kept

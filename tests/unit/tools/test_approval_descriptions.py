@@ -425,6 +425,16 @@ def test_a_url_that_cannot_be_parsed_is_named_but_not_asserted() -> None:
     assert described.startswith(UNRESOLVABLE_MARKER)
     assert "unparsed url:" in described
 
+    # A non-navigating action carries ONE label, not two. `click: unparsed url:
+    # <raw>` spent two labels before naming anything, so the row protected the
+    # words as though they were the target: 40 of 71 widths painted no character
+    # of the URL, and below 40 the action itself was gone while the label
+    # survived. Measured after: 5 of 71, identical to the navigating branch.
+    clicked = _describe_browser_approval({"action": "click", "url": hostile}, "/tmp")
+    assert clicked.startswith(UNRESOLVABLE_MARKER)
+    assert clicked.count("unparsed url:") == 0
+    assert "click:" in clicked and hostile in clicked
+
     # A URL with no host at all cannot name a destination either — same contract,
     # different cause, and the arm that handles it needs its own case or a
     # `return raw` there goes unnoticed.

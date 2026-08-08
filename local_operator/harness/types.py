@@ -414,8 +414,19 @@ ToolExecuteFn = Callable[
 
 #: Renders the human sentence an approval prompt shows for one call. Takes the
 #: call's parsed arguments and the session's working directory, and returns
-#: ``"<verb>: <target>"``, optionally led by the outside-workspace marker — the
-#: shape the read-tier tools already use. The cwd is a parameter and not read
+#: ``"<verb>: <target>"`` — the shape the read-tier tools already use —
+#: optionally led by one of two hazard markers:
+#:
+#: * ``[outside workspace]``: the target resolved, and it is not under the root.
+#: * ``[unresolvable]``: the target could not be characterised at all, so nothing
+#:   can be said about where it is. A describer may also return this in front of
+#:   a sentence that is NOT ``<verb>: <target>`` — ``[unresolvable] unparsed url:
+#:   <raw>`` — precisely because no verb-and-target pair could be determined.
+#:
+#: Both markers escalate identically; they differ only in the words the renderer
+#: spells out, because a target visibly inside the workspace described as being
+#: outside it teaches the reader to distrust the clause that matters. The cwd is
+#: a parameter and not read
 #: from the process because a session can be rooted anywhere (the server and the
 #: scheduler both pass one), and "outside the workspace" is measured against the
 #: session's root or it means nothing.
