@@ -387,7 +387,15 @@ class AgentLoop:
                 elif isinstance(event, StreamToolCallDelta):
                     state = tool_states.setdefault(
                         event.index,
-                        {"id": "", "name": "", "arg_parts": [], "bytes": 0, "announced": 0.0},
+                        {
+                            "id": "",
+                            "name": "",
+                            "arg_parts": [],
+                            "bytes": 0,
+                            "announced": 0.0,
+                            "key": "",
+                            "reported": -1,
+                        },
                     )
                     if event.id:
                         state["id"] = event.id
@@ -404,18 +412,41 @@ class AgentLoop:
                     # into a repaint storm; the first announcement is immediate
                     # so the row appears the moment the tool's name is known.
                     if state["name"]:
+                        # The key is latched on the FIRST announcement and never
+                        # recomputed. Evaluated each time, a provider that sends
+                        # the name before the id changed the key mid-stream, and
+                        # the UI — which keys its rows by it — mounted a second
+                        # row for the same call and then marked the abandoned one
+                        # interrupted.
+                        if not state["key"]:
+                            state["key"] = state["id"] or f"compose:{event.index}"
                         now = time.monotonic()
                         first = state["announced"] == 0.0
                         if first or now - state["announced"] >= COMPOSE_NOTICE_INTERVAL_S:
                             state["announced"] = now
+                            state["reported"] = state["bytes"]
                             yield ToolCallComposeEvent(
-                                tool_call_id=state["id"] or f"compose:{event.index}",
+                                tool_call_id=state["key"],
                                 tool_name=state["name"],
                                 argument_bytes=state["bytes"],
                             )
                 elif isinstance(event, StreamUsageEvent):
                     usage = event.usage
                 elif isinstance(event, StreamEndEvent):
+                    # Flush what the throttle swallowed. Arguments commonly land
+                    # in one burst inside a single window, so without this the
+                    # row's size could report a fraction of the call — or, when
+                    # the whole payload arrives faster than one window, never
+                    # display a size at all. It matters most on an aborted turn,
+                    # where the frozen row is what the user is left reading.
+                    for state in tool_states.values():
+                        if state["name"] and state["bytes"] != state["reported"]:
+                            state["reported"] = state["bytes"]
+                            yield ToolCallComposeEvent(
+                                tool_call_id=state["key"] or "compose:0",
+                                tool_name=state["name"],
+                                argument_bytes=state["bytes"],
+                            )
                     stop_reason = event.stop_reason
                     if event.usage is not None:
                         usage = event.usage

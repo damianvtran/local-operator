@@ -651,6 +651,11 @@ def _display_url(raw: str) -> str:
     if not parts.hostname:
         return raw
     host = _punycode_host(parts.hostname)
+    if ":" in host:
+        # An IPv6 literal needs its brackets back: `::1:8080` does not say where
+        # the address ends and the port begins, on a row whose only job is to
+        # state the destination unambiguously.
+        host = f"[{host}]"
     if parts.port:
         host = f"{host}:{parts.port}"
     tail = parts.path or ""

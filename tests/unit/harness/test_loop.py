@@ -26,6 +26,7 @@ from local_operator.harness.types import (
     StreamTextDelta,
     StreamToolCallDelta,
     TextContent,
+    ToolCallComposeEvent,
     ToolContext,
     ToolResult,
 )
@@ -128,6 +129,10 @@ async def test_full_turn_text_tool_text():
         # this event was added to remove.
         "tool_call_compose",
         "message_update",
+        # The second is the end-of-stream flush: whatever the throttle swallowed
+        # is announced before the call becomes an execution, so the row never
+        # under-reports what the model actually wrote.
+        "tool_call_compose",
         "message_end",
         "tool_execution_start",
         "tool_execution_end",
@@ -631,3 +636,71 @@ async def test_rendered_provider_errors_are_logged_without_a_stack(exc, wants_tr
     assert len(records) == 1
     assert bool(records[0].exc_info) is wants_traceback
     assert str(exc) in records[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_a_composing_call_reports_its_final_size():
+    """Whatever the throttle swallowed is flushed when the stream ends.
+
+    Arguments commonly land in one burst inside a single throttle window, so
+    without a flush the row's size reports a fraction of the call — or, when the
+    whole payload arrives faster than one window, never displays a size at all.
+    It matters most on an aborted turn, where the frozen row is what is left on
+    screen.
+    """
+    stream = ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(index=0, id="c1", name="echo"),
+                StreamToolCallDelta(index=0, argument_delta='{"text": "' + "x" * 4000 + '"}'),
+                StreamEndEvent(stop_reason="tool_calls"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    executed: list[str] = []
+    context = LoopContext(system_blocks=["sys"], tools=[echo_tool(executed)])
+    loop = AgentLoop()
+
+    composes = [
+        event
+        async for event in loop.run([Message.user("go")], context, make_config(stream), None)
+        if isinstance(event, ToolCallComposeEvent)
+    ]
+    assert composes, "the call must be announced while it is being composed"
+    assert composes[-1].argument_bytes == 4012
+    # One id for the whole call: a key that changes mid-stream mounts a second row.
+    assert len({event.tool_call_id for event in composes}) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_late_call_id_does_not_change_the_compose_key():
+    """The key is latched on the first announcement.
+
+    An OpenAI-compatible endpoint may send the tool NAME before the call id.
+    Recomputing the key each time changed it mid-stream, and the UI — which keys
+    its rows by it — mounted a second row and then marked the abandoned one
+    interrupted, for a call that had in fact succeeded.
+    """
+    stream = ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(index=0, name="echo"),
+                StreamToolCallDelta(index=0, argument_delta='{"text": '),
+                StreamToolCallDelta(index=0, id="call_late"),
+                StreamToolCallDelta(index=0, argument_delta='"hi"}'),
+                StreamEndEvent(stop_reason="tool_calls"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    executed: list[str] = []
+    context = LoopContext(system_blocks=["sys"], tools=[echo_tool(executed)])
+    loop = AgentLoop()
+
+    composes = [
+        event
+        async for event in loop.run([Message.user("go")], context, make_config(stream), None)
+        if isinstance(event, ToolCallComposeEvent)
+    ]
+    assert len({event.tool_call_id for event in composes}) == 1

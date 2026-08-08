@@ -1067,3 +1067,41 @@ onto every `local-operator --help`, which `test_import_graph` exists to prevent.
 | Resume replays HISTORY | session 2 built through the production `--resume` path, asked for the word back: `ZEBRA-47` |
 | Bare `--resume` takes the newest | `resolve_resume_id('@latest') -> fd5a66ef8ce2`, ordered by the transcript's mtime (a directory's own mtime moves for reasons that are not turns) |
 | A typo fails honestly | `no session 'nonexistent123' to resume`, exit status 1, the real ids listed — resolved before anything starts, so no full-screen app launches to report it |
+
+## The composing row: a call the model is still dictating
+
+A user asked for a Space Invaders game and watched a spinner for 1m41s with an
+empty transcript, reasonably concluding the agent had hung. It had not. A tool
+call does not exist until the last token of its arguments arrives, so for a
+19 KB `write` the harness emitted `message_end` and then nothing at all — no
+`tool_execution_start`, no card, no row — for as long as the model took to
+dictate the file.
+
+The provider's own timing, measured through the real client (`/tmp/lo-probe/
+probe_encoding.py` and `probe_compose_live_events.py`, `anthropic/claude-opus-5`):
+
+| Moment | Time |
+|---|---|
+| `content_block_start` for the `write` tool | 2.6s |
+| first `input_json_delta` | 82.5s |
+| arguments complete (14 KB) | 82.9s |
+| `tool_execution_start` | 83.1s |
+
+Two things follow. First, a row has to appear at 2.6s, not at 83.1s — that is
+`ToolCallComposeEvent`, emitted as soon as the tool's NAME is known. Second, a
+byte counter alone is not enough: it reads `0 B` for eighty seconds, and a
+number that never moves is exactly the impression the row exists to remove. The
+row carries a clock, and the size joins only once there is one.
+
+| Claim | Proof (live, `claude-opus-5`, `probe_live_compose.py`) |
+|---|---|
+| A row appears while the call is dictated | 108 distinct frames, `writing the call… 0s` → `writing the call… 1m57s` |
+| The clock moves through provider silence | every sample differs from the last; the byte count stayed 0 for the whole dictation on that run |
+| The call still completes | `/tmp/lo-probe/invaders.html`, 19,199 bytes |
+| The execution adopts the row | one `write` row on the frame, never two (`test_a_call_being_dictated_shows_a_row_that_moves`) |
+| The event is additive to the contract | `scripts/check_streaming_contract.py` PASS on a live `exec --json` capture; the SSE publisher ignores unmapped types by construction |
+
+A dead stream is now distinguishable from a slow one: `STREAM_READ_TIMEOUT_S`
+bounds the gap BETWEEN chunks at 180s, where a flat `timeout=600` meant a
+provider that accepted the connection and went silent looked like a working one
+for ten minutes.
