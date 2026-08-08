@@ -425,7 +425,20 @@ def _resolve_workspace_path(raw: str, cwd: str) -> tuple[Path, bool]:
     except RuntimeError:
         candidate = Path(raw)
     path = candidate if candidate.is_absolute() else root / candidate
-    path = path.resolve()
+    try:
+        path = path.resolve()
+    except (OSError, ValueError):
+        # `resolve()` stats the path, so it raises on more than a missing parent:
+        # an embedded NUL is a `ValueError` from the lstat itself, and a symlink
+        # loop or a permission wall is an `OSError`. Unhandled, a model-supplied
+        # `a\x00b` took down the approval prompt it was being asked about — the
+        # same shape as the `expanduser` crash above, one line further on.
+        #
+        # Reported OUTSIDE, not inside. A path that cannot be resolved cannot be
+        # shown to be within the workspace, and this verdict decides whether the
+        # user is warned; the honest answer when the check cannot be made is the
+        # one that still asks. The tool's own open() will fail afterwards anyway.
+        return path, False
     try:
         path.relative_to(root)
     except ValueError:
