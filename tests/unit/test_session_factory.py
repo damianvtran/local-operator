@@ -792,3 +792,30 @@ def test_resume_id_must_be_a_single_path_component(tmp_path: Path, requested: st
         session_factory._transcript_dir_and_agent_id(
             None, _args(resume=requested), cast("AgentRegistry", registry)
         )
+
+
+def test_a_named_id_survives_a_stat_that_fails(tmp_path, monkeypatch) -> None:
+    """The `@latest` scan guards its stat; the named-id path did not.
+
+    Same race, on the path a user reaches by typing an id: a retention sweep
+    unlinking the directory mid-call, or a permission/ENAMETOOLONG error. A bare
+    OSError here was a traceback on the way to the TUI instead of the recovery
+    message the caller already knows how to print.
+    """
+    sessions = tmp_path / "sessions"
+    (sessions / "sess-abc").mkdir(parents=True)
+    (sessions / "sess-abc" / resume_mod.TRANSCRIPT_NAME).write_text("{}", encoding="utf-8")
+
+    # Present and readable: resolves.
+    assert resume_mod.resume_dir(tmp_path, "sess-abc").name == "sess-abc"
+
+    real_is_file = Path.is_file
+
+    def flaky(self):  # noqa: ANN001, ANN202
+        if self.name == resume_mod.TRANSCRIPT_NAME:
+            raise PermissionError("stat denied")
+        return real_is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", flaky)
+    with pytest.raises(resume_mod.ResumeNotFound):
+        resume_mod.resume_dir(tmp_path, "sess-abc")

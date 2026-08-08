@@ -1151,8 +1151,14 @@ async def test_a_marker_rung_exists_between_the_words_and_the_glyph() -> None:
     whether or not the middle rung exists, so it defends nothing: collapsing the
     marker rung into the glyph rung is monotone too. What distinguishes them is
     that some width must exist where the row still leads with the prompt glyph
-    `?` — it is a question — AND carries a separate `!` for the hazard. Measured:
-    true on ~30 widths as written, 0 with the floor rung treated as a peer.
+    `?` — it is a question — AND carries a separate `!` for the hazard, and that
+    those widths form ONE contiguous band.
+
+    Both halves are load-bearing, and the first alone is not enough: with the
+    floor rung concatenated AFTER the peers the marker band still exists at 22
+    widths, in two runs either side of a glyph island, and a non-emptiness
+    assertion passes. Measured across the three structures — head one run
+    [[28, 57]], peers-first two runs, floor-first none.
     """
     both: list[int] = []
     # A fresh app per width: `screen.styles.width` does not re-run the frame
@@ -1176,3 +1182,10 @@ async def test_a_marker_rung_exists_between_the_words_and_the_glyph() -> None:
             both.append(width)
 
     assert both, "no width leads with `?` and carries a separate `!`"
+    # ONE band, not merely a non-empty set. Collapsing the floor rung into the
+    # peers leaves 22 widths in TWO runs with a glyph island between them — the
+    # hazard hopping slots that the two-list split exists to prevent — and a
+    # non-emptiness assertion passes straight through it. Measured: head one run
+    # [[28, 57]], peers-first two runs [[34, 38], [41, 57]], floor-first none.
+    runs = [w for w in both if w - 1 not in both]
+    assert len(runs) == 1, (runs, both)
