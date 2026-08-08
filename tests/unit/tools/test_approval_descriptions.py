@@ -31,7 +31,6 @@ from local_operator.tools.builtin import (
     WriteParams,
     _display_url,
     build_bash_tool,
-    build_browser_tool,
     build_edit_tool,
     build_wake_tool,
     build_write_tool,
@@ -287,10 +286,10 @@ def test_a_shouting_browser_action_still_names_its_target() -> None:
     neither the file being written nor that it left the workspace, while the tool
     went on to take the screenshot.
     """
-    tool = build_browser_tool(ToolContext(cwd="/ws", session_id="s"))
-    assert tool is not None
-    describe = tool.describe_approval
-    assert describe is not None
+    # The describer directly, not through `build_browser_tool`: that builder
+    # returns None wherever no cmux browser is reachable, which is every CI
+    # runner — a test routed through it silently stops testing anything.
+    describe = builtin._describe_browser_approval
 
     shouted = describe({"action": "SCREENSHOT", "path": "/etc/evil.png"}, "/ws")
     quiet = describe({"action": "screenshot", "path": "/etc/evil.png"}, "/ws")

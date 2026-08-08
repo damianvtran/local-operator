@@ -138,3 +138,36 @@ def test_status_band_renders_a_single_row() -> None:
     assert "12.4k/—" in row.plain
     assert "$0.0021" in row.plain
     assert cell_len(row.plain) <= 80
+
+
+def test_a_wrapped_row_never_overhangs_its_frame_even_on_a_cluster() -> None:
+    """Per-character widths do not add up for a grapheme CLUSTER.
+
+    `cell_len` counts `1️⃣` (digit + VS16 + keycap) as 2 when handed the whole
+    string and as 1+0+0 per character, so a row built from a running per-character
+    sum overhung its frame by one cell. Every row is measured whole here, which is
+    the only measurement that agrees with what the terminal paints.
+
+    The single-character exception is deliberate and separately documented: a
+    frame narrower than one ideograph cannot hold it, and taking nothing looped
+    forever.
+    """
+    from local_operator.tui.widgets.transcript import wrap_cells
+
+    keycap = "qqqqqq1\ufe0f\u20e3www"
+    samples = [
+        keycap,
+        "x" * 40,
+        "\u65e5\u672c\u8a9e" * 6,
+        "a\u200db" * 8,
+        "ctrl+c again to exit - resume with: local-operator --resume fd5a66ef8ce2",
+    ]
+    for text in samples:
+        for width in (1, 2, 5, 10, 20, 34):
+            for row in wrap_cells(text, width):
+                if len(row) <= 1:
+                    continue  # the documented one-character overhang
+                assert cell_len(row) <= width, (text, width, row, cell_len(row))
+
+    # And the cluster is not silently dropped: it moves to the next row whole.
+    assert "".join(wrap_cells(keycap, 10)) == keycap

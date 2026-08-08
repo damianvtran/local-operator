@@ -73,10 +73,16 @@ def wrap_cells(text: str, width: int) -> list[str]:
                 if used + size > width:
                     break
                 head += char
-                # Accumulated, not re-measured: `cell_len(head)` on a growing
-                # string is quadratic in the word's length, and this runs on
-                # every notice repaint.
                 used += size
+            # Per-character sizes do not add up for a grapheme CLUSTER: `cell_len`
+            # counts `1️⃣` (digit + VS16 + keycap) as 2 when handed the whole
+            # string and as 1+0+0 per character, so a row built from the running
+            # sum overhung its frame by a cell. Measure the finished head ONCE —
+            # one call over at most `width` characters, so linear in the word,
+            # not the quadratic re-measure of a growing string this loop used to
+            # avoid — and shed trailing characters until it fits.
+            while head and cell_len(head) > width:
+                head = head[:-1]
             if not head:
                 # A single character WIDER than the row (any CJK ideograph or
                 # emoji at width 1). Taking nothing appended "" forever and grew

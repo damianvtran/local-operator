@@ -522,10 +522,6 @@ def _describe_wake_approval(args: dict[str, Any], cwd: str) -> str:
 
     first = str(args.get("in") or args.get("at") or "").strip()
     every = str(args.get("every") or "").strip()
-    # `⟳` rather than the word "every", for one cell instead of six. The word was
-    # shared boilerplate at the FRONT of the one field that distinguishes two
-    # wakes, so at 18 columns `every 15m ×8` and `every 1h ×∞` both painted
-    # `every 1…` — two different unattended commitments, one row.
     # Plain ASCII words. The glyph this used to carry could not be gated: the
     # check was `cell_len("⟳") == 1`, which is a static Unicode width table and
     # not a terminal capability probe, so it measured 1 on every host and the
