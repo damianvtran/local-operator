@@ -49,6 +49,7 @@ from local_operator.tui.widgets.approval import (
     HAZARD_GLYPH,
     OUTSIDE_MARKER,
     PROMPT_GLYPH,
+    UNRESOLVABLE_MARKER,
     ApprovalBlock,
 )
 from local_operator.tui.widgets.assistant import AssistantBlock
@@ -1189,3 +1190,38 @@ async def test_a_marker_rung_exists_between_the_words_and_the_glyph() -> None:
     # [[28, 57]], peers-first two runs [[34, 38], [41, 57]], floor-first none.
     runs = [w for w in both if w - 1 not in both]
     assert len(runs) == 1, (runs, both)
+
+
+@pytest.mark.asyncio
+async def test_the_two_hazards_spell_out_different_sentences() -> None:
+    """One boolean was carrying two reasons and only one sentence.
+
+    A target that cannot be resolved escalates exactly like one outside the
+    workspace — and must, since nothing can be said about where it is. But it is
+    visibly under the workspace root, so `outside the workspace — write:
+    /ws/a\\x00b` argues with itself, and a clause the user can see is wrong is one
+    they learn to ignore on the genuine escape.
+
+    Only the WORDS rung differs. At the widths where the clause collapses to `!`
+    the row makes no location claim and is already honest for both, which is what
+    keeps the ladder a single shape.
+    """
+    cases = {
+        "outside": (f"{OUTSIDE_MARKER} write: /etc/hosts", "outside the workspace"),
+        "unresolvable": (f"{UNRESOLVABLE_MARKER} write: '/ws/a\\x00b'", "unresolvable"),
+    }
+    for label, (detail, expected) in cases.items():
+        app = OperatorApp(lambda: _factory(SteerableSession()))
+        async with app.run_test(size=(96, 20)) as pilot:
+            app.query_one(TranscriptView).append_block(ApprovalBlock("write_file", detail))
+            await pilot.pause(0.1)
+            row = next(
+                (s.text for s in app.screen._compositor.render_strips() if "write_file" in s.text),
+                "",
+            )
+        assert expected in row, (label, row)
+        # The parser's own bracket token must never reach the sentence.
+        assert "[" not in row, (label, row)
+        # And the two must not paint the same clause.
+        if label == "unresolvable":
+            assert "outside the workspace" not in row, row

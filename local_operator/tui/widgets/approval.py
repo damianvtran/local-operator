@@ -74,6 +74,13 @@ CHOICES: tuple[tuple[str, str], ...] = (
 
 #: The hazard clause, in words rather than the parser's own bracket token.
 HAZARD_WORDS = "outside the workspace — "
+#: The OTHER hazard's clause. A target that could not be resolved escalates
+#: identically, but it is a different sentence: a path visibly under the
+#: workspace root described as "outside the workspace" argues with itself, and a
+#: clause the user can see is wrong is one they learn to ignore on the genuine
+#: escape. Only this rung differs — at the widths where the clause collapses to
+#: `!` the marker makes no location claim and is already honest for both.
+HAZARD_WORDS_UNRESOLVABLE = "unresolvable — "
 #: Its narrow-width form. The hazard must never be what costs the row its target,
 #: so below the width where both fit it degrades to this and the path survives.
 HAZARD_MARKER = "! "
@@ -103,6 +110,11 @@ SPINE_FLOOR_WIDTH = 24
 #: outside the workspace. Surfaced as its own tinted clause because "outside
 #: the workspace" is the single most decision-relevant fact in the prompt.
 OUTSIDE_MARKER = "[outside workspace]"
+#: The other marker the tools emit: the target could not be resolved, so nothing
+#: can be said about where it is. Stripped here like the one above — a bracket
+#: sentinel that reached the sentence would be the parser's token leaking into
+#: the prose, which is the thing the clause constants exist to prevent.
+UNRESOLVABLE_MARKER = "[unresolvable]"
 
 #: Glyph opening the question row. Deliberately not the tool ledger's marker:
 #: this row is a QUESTION, and it must not read as one more completed action.
@@ -567,7 +579,10 @@ class ApprovalBlock(TranscriptBlock):
                 # it and pushed the threshold 12 columns too high, so a hazardous
                 # prompt shed `allow` while the explicit form still fitted with
                 # cells to spare — the same class of defect one direction over.
-                total += cell_len(HAZARD_WORDS) + max(0, HAZARD_MIN_TARGET - cell_len(detail))
+                # `outside` IS the clause this row spells out, so the threshold
+                # measures the sentence that will actually be painted rather than
+                # assuming the longer of the two.
+                total += cell_len(outside) + max(0, HAZARD_MIN_TARGET - cell_len(detail))
             target_verb, _target = self._split_target(detail)
             if target_verb:
                 # Same reasoning for the `verb:` label, which `_compose_question`
@@ -661,8 +676,11 @@ class ApprovalBlock(TranscriptBlock):
             # a clause paints `! write_file  ! ` and spends a separator on a
             # duplicate. The rung's whole premise is that no clause fits.
             if outside and not glyph_hazard:
-                if spare - cell_len(HAZARD_WORDS) >= HAZARD_MIN_TARGET:
-                    hazard = HAZARD_WORDS
+                # `outside` carries the WORDS; the marker and the glyph are shared
+                # by both hazards because at these widths the row makes no
+                # location claim and is already honest for either reason.
+                if spare - cell_len(outside) >= HAZARD_MIN_TARGET:
+                    hazard = outside
                 elif spare >= cell_len(HAZARD_MARKER):
                     hazard = HAZARD_MARKER
 
@@ -698,7 +716,16 @@ class ApprovalBlock(TranscriptBlock):
                 question.append("  ", style=dim)
             if hazard:
                 question.append(hazard, style=hazard_style)
-                hazard_rank = 2 if hazard == HAZARD_WORDS else 1
+                # Rank 2 is "spelled out in words", whichever clause it was.
+                # Currently INERT — measured, not assumed: `shapes` holds one peer
+                # rung and the floor is only consulted when no peer carries the
+                # hazard, so nothing compares two hazardous rows and both spellings
+                # paint identically at every width 90-20. Written this way anyway
+                # because the old form tested against ONE clause by name, so a
+                # second words-clause scored as a bare marker; that is a trap for
+                # the next rung, not a bug today, and it is not worth a test that
+                # would assert nothing.
+                hazard_rank = 1 if hazard == HAZARD_MARKER else 2
             if body_budget >= TARGET_MIN_USEFUL:
                 if body:
                     question.append(body, style=dim)
@@ -790,12 +817,20 @@ class ApprovalBlock(TranscriptBlock):
             return "", detail
         return f"{head}: ", tail
 
-    def _detail(self) -> tuple[str, bool]:
-        """``(description, outside_workspace)`` with the marker lifted out."""
+    def _detail(self) -> tuple[str, str]:
+        """``(description, hazard_clause)`` with the marker lifted out.
+
+        The second element is the WORDS this hazard spells out, or `""` for no
+        hazard — so it stays truthy exactly where the old boolean was, and the
+        rungs that spell the clause out get the right sentence without having to
+        know which markers exist.
+        """
         text = " ".join(self.description.split())
         if text.startswith(OUTSIDE_MARKER):
-            return text[len(OUTSIDE_MARKER) :].strip(), True
-        return text, False
+            return text[len(OUTSIDE_MARKER) :].strip(), HAZARD_WORDS
+        if text.startswith(UNRESOLVABLE_MARKER):
+            return text[len(UNRESOLVABLE_MARKER) :].strip(), HAZARD_WORDS_UNRESOLVABLE
+        return text, ""
 
     def spans_multiple_rows(self) -> bool:
         # Two rows while pending (question + hints), one once answered. Answered

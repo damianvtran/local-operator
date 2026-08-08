@@ -24,11 +24,13 @@ from local_operator.harness.types import AgentTool, ToolCall, ToolContext, ToolR
 from local_operator.harness.wake import WakeSchedule
 from local_operator.tools import builtin
 from local_operator.tools.builtin import (
+    UNRESOLVABLE_MARKER,
     BashParams,
     BrowserParams,
     EditParams,
     WakeParams,
     WriteParams,
+    _describe_browser_approval,
     _display_url,
     build_bash_tool,
     build_edit_tool,
@@ -183,14 +185,15 @@ def test_an_unresolvable_path_is_still_named(tmp_path: Path) -> None:
     It is now named AND flagged. Resolution failing used to propagate out of
     `_resolve_workspace_path` and the describer's own fallback quoted the raw
     string; the resolver handles it, so the row shows the absolute target and
-    carries the hazard clause — a path that cannot be resolved cannot be shown to
-    be inside the workspace, and the verdict that still warns is the honest one.
+    escalates. The clause is `unresolvable`, not `outside the workspace` — this
+    path is visibly under the root, and only the reason differs, never the
+    escalation.
     """
     described = _summary(build_write_tool(), {"path": "a\x00b"}, str(tmp_path))
     # Quoted, not cleaned: the sanitiser that makes the line inert would
     # otherwise turn `a\x00b` into `ab` — a different file, named silently.
     assert "a\\x00b" in described
-    assert OUTSIDE_MARKER in described or "outside" in described
+    assert described.startswith(UNRESOLVABLE_MARKER)
 
 
 async def _unused_execute(*args: object, **kwargs: object) -> ToolResult:  # pragma: no cover
@@ -339,9 +342,10 @@ def test_a_malformed_port_never_hands_back_the_unsanitised_url() -> None:
     trusted here; the host is already parsed and guarded.
     """
     leaky = "http://accounts.google.com@evil.test:99999/x"
-    assert _display_url(leaky) == "http! evil.test/x"
-    assert "accounts.google.com" not in _display_url(leaky)
-    assert "@" not in _display_url(leaky)
+    shown = _display_url(leaky)
+    assert shown == "http! evil.test/x"
+    assert "accounts.google.com" not in shown
+    assert "@" not in shown
 
     # The same URL without the bad port has always been sanitised; the two must
     # agree, or the port is deciding what the row says about the destination.
@@ -363,7 +367,7 @@ def test_an_unresolvable_home_still_resolves_a_target(monkeypatch) -> None:
     """
     from local_operator.tools.builtin import _resolve_workspace_path
 
-    resolved, inside = _resolve_workspace_path("~nosuchuser12345/x", "/tmp")
+    resolved, inside, _resolvable = _resolve_workspace_path("~nosuchuser12345/x", "/tmp")
     assert resolved.is_absolute()
     assert inside is True
 
@@ -372,7 +376,7 @@ def test_an_unresolvable_home_still_resolves_a_target(monkeypatch) -> None:
         raise RuntimeError("Could not determine home directory.")
 
     monkeypatch.setattr(Path, "expanduser", boom)
-    resolved, _inside = _resolve_workspace_path("notes.md", "/tmp")
+    resolved, _inside, _ok = _resolve_workspace_path("notes.md", "/tmp")
     assert resolved.is_absolute()
 
 
@@ -390,11 +394,64 @@ def test_a_path_that_cannot_be_resolved_is_reported_outside_not_crashed() -> Non
     """
     from local_operator.tools.builtin import _resolve_workspace_path
 
-    resolved, inside = _resolve_workspace_path("a\x00b", "/tmp")
+    resolved, inside, _resolvable = _resolve_workspace_path("a\x00b", "/tmp")
     assert inside is False
     # The sentence is still buildable, which is the point.
     assert str(resolved)
 
     # A resolvable sibling of the same shape is still correctly inside.
-    _resolved, inside_ok = _resolve_workspace_path("ab", "/tmp")
+    _resolved, inside_ok, _resolvable = _resolve_workspace_path("ab", "/tmp")
     assert inside_ok is True
+
+
+def test_a_url_that_cannot_be_parsed_is_named_but_not_asserted() -> None:
+    """The two remaining `return raw` exits echoed the caller's string.
+
+    `_validate_browser_url` gates only on the scheme prefix, so U+FF20 FULLWIDTH
+    COMMERCIAL AT reaches the describer, CPython's `_checknetloc` refuses the
+    netloc under NFKC normalisation, and the URL fell out verbatim — the row led
+    with `accounts.google.com` while the fetch, if a WebView normalises that
+    codepoint, goes to evil.test. Whether it does is unproven; a prompt that
+    cannot parse a URL has no business asserting a destination from it either way.
+    """
+    hostile = "http://accounts.google.com\uff20evil.test/x"
+    described = _describe_browser_approval({"action": "goto", "url": hostile}, "/tmp")
+
+    # It is still NAMED — a prompt that says nothing is worse.
+    assert hostile in described
+    # But the row does not open with attacker-chosen text, and does not claim to
+    # know where the browser is going.
+    assert not described.startswith("browse:")
+    assert described.startswith(UNRESOLVABLE_MARKER)
+    assert "unparsed url:" in described
+
+    # A URL with no host at all cannot name a destination either — same contract,
+    # different cause, and the arm that handles it needs its own case or a
+    # `return raw` there goes unnoticed.
+    for hostless in ("http://", "https://@", "http://:80"):
+        row = _describe_browser_approval({"action": "goto", "url": hostless}, "/tmp")
+        assert row.startswith(UNRESOLVABLE_MARKER), (hostless, row)
+        assert not row.startswith("browse:"), (hostless, row)
+
+    # A parseable URL is unaffected.
+    assert (
+        _describe_browser_approval({"action": "goto", "url": "https://ex.test/a"}, "/tmp")
+        == "browse: ex.test/a"
+    )
+
+
+def test_a_dotted_path_inside_the_workspace_is_not_called_outside_it() -> None:
+    """One boolean was carrying two different sentences.
+
+    `sub/../notes\\x00.md` resolves nowhere, so it fails closed — correctly. But
+    it is visibly under the workspace root, and a row reading `outside the
+    workspace — write: <ws>/sub/../notes\\x00.md` argues with itself. A clause the
+    user can see is wrong is one they learn to ignore on the genuine escape.
+    """
+    described = _summary(build_write_tool(), {"path": "sub/../notes\x00.md"}, "/tmp/ws")
+
+    assert described.startswith(UNRESOLVABLE_MARKER)
+    assert OUTSIDE_MARKER not in described
+    # A real escape still says what it is.
+    escaped = _summary(build_write_tool(), {"path": "/etc/hosts"}, "/tmp/ws")
+    assert escaped.startswith(OUTSIDE_MARKER)
