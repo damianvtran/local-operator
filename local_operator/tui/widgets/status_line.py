@@ -697,14 +697,6 @@ class StatusLine:
         at all — it belongs to the running indicator.
         """
         parts: list[tuple[str, str, Style]] = []
-        if self._approvals_auto and "approvals" not in dropped:
-            parts.append(
-                (
-                    ICON_APPROVALS,
-                    "auto-approve",
-                    Style(color=theme_mod.semantic_color("warning"), bold=True),
-                )
-            )
         if "subagents" not in dropped:
             agents = format_agents(self._subagents)
             if agents:
@@ -728,6 +720,24 @@ class StatusLine:
         if self._conversation_name and "name" not in dropped:
             parts.append(
                 ("", self._conversation_name, Style(color=theme_mod.semantic_color("muted")))
+            )
+        if self._approvals_auto and "approvals" not in dropped:
+            # LAST, so its right edge is the band's right edge: everything else
+            # here is right-ALIGNED as a group, which means a segment placed first
+            # slides left every time a sibling appears (measured: column 86 -> 74
+            # -> 64 -> 51 at a fixed 100 cells). An alarm that moves is an alarm
+            # the eye has to find.
+            #
+            # The glyph rides INSIDE the styled text rather than in the icon slot,
+            # because the loop below paints icons `dim` — which made the one alarm
+            # in the band its quietest mark (4.18:1, against the same `!` at
+            # 9.4:1 in the transcript).
+            parts.append(
+                (
+                    "",
+                    f"{ICON_APPROVALS} auto-approve",
+                    Style(color=theme_mod.semantic_color("warning"), bold=True),
+                )
             )
 
         right = Text()

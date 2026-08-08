@@ -254,9 +254,21 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
             )
             return False
         if _fullscreen_app_owns_terminal():
-            logger.warning(
+            # error, not warning: reaching this branch means a front end that owns
+            # the terminal did not install an approval handler, which is a wiring
+            # BUG, and the user pays for it with a tool that refuses for no
+            # visible reason. Named remedies so whoever reads the log can act.
+            #
+            # Deliberately not stderr, unlike the non-tty branch above: a stray
+            # stderr write under a full-screen app paints over the frame and stays
+            # there (see tests/unit/tui/test_logger_silence.py), so the CL-04
+            # spelling is unavailable here. The TUI routes this file's records to
+            # a rotating log, which is where this lands.
+            logger.error(
                 "approval for %r denied: a full-screen UI owns the terminal and "
-                "installed no approval handler",
+                "installed no approval handler — install one via "
+                "SessionProtocol.set_approval_handler, or run with --yolo to "
+                "auto-approve every tier",
                 tool_name,
             )
             return False

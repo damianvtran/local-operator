@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 
+from rich.cells import cell_len
 from rich.console import Group, RenderableType
 from rich.style import Style
 from rich.text import Text
@@ -50,12 +51,31 @@ from local_operator.tui.widgets.transcript import SPINE_INDENT, TranscriptBlock
 #: kept typing their next instruction would hit the most common letter in
 #: English and permanently disable the gate with no receipt. Every per-call
 #: answer stays a single keystroke, because those are per-call.
+#: Ordered refuse -> allow -> stop -> allow-all, and the order does two jobs.
+#:
+#: It opens on the refusal rather than the yes-word, so the row reads as a
+#: decision rather than a prompt to agree. And because the hint row sheds WHOLE
+#: choices from the right, the order is also the priority: the session-wide
+#: switch stops being advertised first, then the global stop key (which means the
+#: same thing everywhere in the app and is not this prompt's to teach), leaving
+#: the two per-call ANSWERS — the ones a user cannot proceed without — surviving
+#: to the narrowest terminals. A strict permissiveness gradient would have put
+#: `esc stop` last and cost `y allow` at 24 columns, which is worse: a prompt
+#: that only tells you how to refuse is a prompt you cannot get past.
 CHOICES: tuple[tuple[str, str], ...] = (
-    ("y", "allow"),
     ("n", "deny"),
-    ("A", "allow all"),
+    ("y", "allow"),
     ("esc", "stop"),
+    ("A", "allow all"),
 )
+
+#: The hazard clause, in words rather than the parser's own bracket token.
+HAZARD_WORDS = "outside the workspace — "
+#: Its narrow-width form. The hazard must never be what costs the row its target,
+#: so below the width where both fit it degrades to this and the path survives.
+HAZARD_MARKER = "! "
+#: Cells of target that must still fit for the full words to be worth their room.
+HAZARD_MIN_TARGET = 12
 
 #: Marker prefix the builtin tools put on a description whose target sits
 #: outside the workspace. Surfaced as its own tinted clause because "outside
@@ -65,6 +85,11 @@ OUTSIDE_MARKER = "[outside workspace]"
 #: Glyph opening the question row. Deliberately not the tool ledger's marker:
 #: this row is a QUESTION, and it must not read as one more completed action.
 PROMPT_GLYPH = "?"
+
+
+def fg_style() -> Style:
+    """The key ink. A function, not a constant: the theme can change at runtime."""
+    return Style(color=theme_mod.semantic_color("fg"))
 
 
 class ApprovalBlock(TranscriptBlock):
@@ -268,40 +293,85 @@ class ApprovalBlock(TranscriptBlock):
             allowed = self._answer in ("y", "a")
             question.append("✓ " if allowed else "✗ ", style=fg if allowed else danger)
             question.append("allowed " if allowed else "denied ", style=muted)
+        # The RAW tool name, deliberately, where the ledger row two lines below
+        # shows the shortened `display_name`. The divergence is intended and is
+        # not a consistency bug to fix: a security prompt must name exactly what
+        # is being authorised (`mcp__linear_create_issue`, server and all), while
+        # the ledger optimises for scanning a column of settled actions.
         question.append(self.tool_name, style=fg)
 
         detail, outside = self._detail()
         if detail:
             question.append("  ", style=dim)
             if outside:
-                # The one clause that can change the answer, so it is the only
-                # thing on the row allowed to be BOLD warning — and it is said in
-                # words rather than re-emitting the parser's own bracket token.
+                # The hazard is spent out of ITS OWN budget, never out of the
+                # target's. Appending the words first and computing the detail
+                # budget from what was left made the row say LESS the more
+                # dangerous the ask was: at 52 columns an outside-workspace prompt
+                # dropped the path entirely and ended on a dangling em dash, while
+                # the same prompt without a hazard truncated gracefully. The
+                # target is what the answer is about, so below the width where
+                # both fit the clause degrades to a marker rather than the path
+                # disappearing.
+                #
                 # On a settled receipt it drops to plain dim: the decision is
                 # made, and a permanent alarm in the transcript trains the eye to
                 # ignore the live one.
-                if self._answer is None:
-                    question.append("outside the workspace — ", style=warning + Style(bold=True))
-                else:
-                    question.append("outside the workspace — ", style=dim)
-            # No floor: once the prefix has filled the row there is no room to
-            # spend, and flooring at 8 appended eight cells past the edge.
+                style = warning + Style(bold=True) if self._answer is None else dim
+                spare = width - question.cell_len
+                if spare - cell_len(HAZARD_WORDS) >= HAZARD_MIN_TARGET:
+                    question.append(HAZARD_WORDS, style=style)
+                elif spare > cell_len(HAZARD_MARKER):
+                    question.append(HAZARD_MARKER, style=style)
             budget = width - question.cell_len
             if budget > 0:
                 question.append(truncate_cells(detail, budget), style=dim)
 
         if self._answer is not None:
-            return question
-        hint = Text(" " * (SPINE_INDENT + 2), no_wrap=True, overflow="ellipsis")
-        for index, (key, label) in enumerate(CHOICES):
+            # A Group even with one child: rich honours ``Text.no_wrap`` for a
+            # Group's children but NOT for a bare Text handed to a Static, so the
+            # answered receipt wrapped onto column zero — the composer's own
+            # gutter — at narrow widths while the pending two-row form did not.
+            return Group(question)
+        return Group(question, self._hint_row(width))
+
+    def _hint_row(self, width: int) -> Text:
+        """The key hints, shedding WHOLE choices rather than truncating one.
+
+        Sheds from the right, which is what makes :data:`CHOICES`' order a
+        priority list as well as a reading order: the session-wide switch stops
+        being advertised first, then the global stop key, leaving the two per-call
+        answers longest. Truncating instead left rows ending `A allow all …` and
+        then `A …`, offering a key whose consequence had been cut off.
+        """
+        indent = " " * (SPINE_INDENT + 2)
+        for count in range(len(CHOICES), 0, -1):
+            row = self._render_hints(indent, CHOICES[:count])
+            if cell_len(row.plain) <= width:
+                return row
+        # Narrower than one whole choice (roughly a 12-cell terminal): the keys
+        # alone, still whole tokens, so the row degrades to a legend rather than
+        # to an ellipsis.
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        row = Text(indent, no_wrap=True, overflow="ellipsis")
+        for index, (key, _) in enumerate(CHOICES[:2]):
             if index:
-                hint.append(" · ", style=dim)
+                row.append("/", style=dim)
+            row.append(key, style=fg_style())
+        return row
+
+    def _render_hints(self, indent: str, choices: tuple[tuple[str, str], ...]) -> Text:
+        row = Text(indent, no_wrap=True, overflow="ellipsis")
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        for index, (key, label) in enumerate(choices):
+            if index:
+                row.append(" · ", style=dim)
             # Keys in `fg`, not warning: a tint worn by the hazard AND by the key
             # that REFUSES distinguishes nothing. The keys are affordances, so
             # they read as the brightest plain ink and leave warning to the alarm.
-            hint.append(key, style=fg)
-            hint.append(f" {label}", style=dim)
-        return Group(question, hint)
+            row.append(key, style=fg_style())
+            row.append(f" {label}", style=dim)
+        return row
 
     def _detail(self) -> tuple[str, bool]:
         """``(description, outside_workspace)`` with the marker lifted out."""

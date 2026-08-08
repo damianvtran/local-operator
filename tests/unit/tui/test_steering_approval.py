@@ -19,12 +19,16 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from rich.cells import cell_len
 from textual.binding import Binding
 
 from local_operator.harness.types import ToolExecutionStartEvent
+from local_operator.paths import CONFIG_DIR_ENV
+from local_operator.resume import TRANSCRIPT_NAME
 from local_operator.tui.app import DOUBLE_INTERRUPT_WINDOW_S, OperatorApp
 from local_operator.tui.events import (
     AssistantDelta,
@@ -443,12 +447,20 @@ async def test_approvals_command_restores_prompting() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ctrl_c_twice_exits_and_offers_the_resume_command() -> None:
+async def test_ctrl_c_twice_exits_and_offers_the_resume_command(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """One Ctrl+C stops the work and keeps the session; two leave.
 
     The resume line is what makes the second press safe to offer: the session is
     on disk (the transcript is appended per turn), so quitting is recoverable.
+    The transcript is planted here because the hint is gated on it existing.
     """
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    transcript = tmp_path / "sessions" / "sess" / TRANSCRIPT_NAME
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text("{}\n", encoding="utf-8")
+
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
@@ -460,7 +472,12 @@ async def test_ctrl_c_twice_exits_and_offers_the_resume_command() -> None:
         assert session.aborts == ["interrupted"]
         assert app.is_running  # one press NEVER exits
         assert any("ctrl+c again to exit" in row for row in rows(app))
-        assert any("--resume sess" in row for row in rows(app))
+        # The transcript line promises recoverability; it deliberately does NOT
+        # carry the command, which belongs in the exit block printed to the
+        # terminal (the alt screen is discarded, so a copyable command in a frame
+        # is the unreachable copy).
+        assert any("the session can be resumed" in row for row in rows(app))
+        assert not any("--resume" in row for row in rows(app))
 
         await pilot.press("ctrl+c")
         await pilot.pause(0.3)
@@ -490,6 +507,8 @@ async def test_a_slow_second_ctrl_c_is_a_fresh_interrupt_not_an_exit() -> None:
         await pilot.pause(0.2)
         assert app.is_running
         assert session.aborts == ["interrupted", "interrupted"]
+        # One hint, not one per press: it is replaced rather than repeated.
+        assert len([row for row in rows(app) if "ctrl+c again to exit" in row]) == 1
 
 
 @pytest.mark.asyncio
@@ -534,3 +553,165 @@ def test_the_answer_keys_match_the_bindings_and_the_hint_row() -> None:
     # Esc is advertised but is NOT this widget's key — the app owns it as "stop".
     assert advertised - {"esc"} == bound
     assert "a" not in bound, "allow-all must need Shift; see CHOICES"
+
+
+@pytest.mark.asyncio
+async def test_clearing_the_transcript_does_not_disarm_later_prompts() -> None:
+    """``/clear`` settles the visible question; it does not stop the turn.
+
+    Latching the turn-wide deny flag here denied every later write/exec tool of
+    the SAME run with no prompt at all — silently, and while ``/approvals``
+    reported that tools would prompt. ``/clear`` clears a screen; it is not a stop.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.25)
+        session.streaming = True
+        ask = _approval_gate(session)
+
+        first = asyncio.ensure_future(ask("bash", "run: one"))
+        await pilot.pause(0.3)
+        app.query_one(TranscriptView).clear_blocks()
+        await pilot.pause(0.2)
+        assert await asyncio.wait_for(first, 2) is False  # its widget is gone
+        assert session.aborts == []  # the turn was NOT stopped
+
+        # The next tool of the same run still gets to ask.
+        second = asyncio.ensure_future(ask("write", "write: two"))
+        await pilot.pause(0.3)
+        assert app.query(ApprovalBlock), "a later tool of a live turn must still ask"
+        await pilot.press("y")
+        assert await asyncio.wait_for(second, 2) is True
+
+
+@pytest.mark.asyncio
+async def test_approvals_ask_clears_a_latched_deny() -> None:
+    """``/approvals ask`` promises prompting; it must deliver it.
+
+    The command previously only touched the allow-all flag, so after a stop had
+    latched the deny flag it printed "tools will prompt again" while the next ask
+    was refused without a prompt.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.25)
+        session.streaming = True
+        app._deny_queued_approvals()  # what a stop leaves behind
+        assert app._approvals_denied is True
+
+        app._run_slash_command("/approvals ask")
+        await pilot.pause(0.1)
+        assert app._approvals_denied is False
+        pending = asyncio.ensure_future(_approval_gate(session)("bash", "run: x"))
+        await pilot.pause(0.3)
+        assert app.query(ApprovalBlock)
+        await pilot.press("y")
+        assert await asyncio.wait_for(pending, 2) is True
+
+
+@pytest.mark.asyncio
+async def test_the_resume_hint_is_withheld_until_the_session_is_on_disk() -> None:
+    """A hint must not advertise a command ``--resume`` will refuse.
+
+    ``--resume`` requires the transcript to exist (a typo must fail rather than
+    open an empty session that looks resumed), so quitting before the first turn
+    persisted would otherwise print a command guaranteed to be rejected.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.25)
+        # FakeSession's id has no directory on disk, so there is nothing to offer.
+        assert app.resume_hint() == ""
+        await pilot.press("ctrl+c")
+        await pilot.pause(0.1)
+        painted = rows(app)
+        assert any("ctrl+c again to exit" in row for row in painted)
+        assert not any("--resume" in row for row in painted)
+
+
+@pytest.mark.parametrize("width", [110, 80, 60, 52, 46, 40, 30, 24, 20, 16])
+@pytest.mark.asyncio
+async def test_the_prompt_never_hides_its_target_or_overflows(width: int) -> None:
+    """A safety prompt must not say LESS the more dangerous the ask is.
+
+    The hazard clause used to be appended before the detail budget was computed,
+    so at 52 columns an outside-workspace prompt dropped the target path entirely
+    and ended on a dangling em dash — while the same prompt without a hazard
+    truncated gracefully. 52 columns is a split pane, not an edge case.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(width, 24)) as pilot:
+        await pilot.pause(0.2)
+        view = app.query_one(TranscriptView)
+        view.append_block(
+            ApprovalBlock("write_file", "[outside workspace] write: /Users/x/deep/config.yml")
+        )
+        await pilot.pause(0.2)
+        painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
+
+        # Nothing bleeds past the terminal at any width.
+        assert not [row for row in painted if cell_len(row) > width]
+        question = next((row for row in painted if "write_file" in row), "")
+        if question:
+            # The hazard degrades to a marker rather than eating the target, so a
+            # row that still has room for a path shows one.
+            assert not question.rstrip().endswith("—"), "hazard left a dangling clause"
+
+
+@pytest.mark.parametrize("width", [80, 46, 40, 34, 30, 24])
+@pytest.mark.asyncio
+async def test_the_answered_receipt_stays_on_one_row(width: int) -> None:
+    """The receipt must never wrap onto the composer's gutter.
+
+    Rich honours ``Text.no_wrap`` for a Group's children but not for a bare Text
+    handed to a Static, so returning the answered row unwrapped painted 2-4 rows
+    with the continuation at column 2 — the ❯ column — while the pending two-row
+    form was fine.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(width, 24)) as pilot:
+        await pilot.pause(0.2)
+        block = ApprovalBlock("write_file", "[outside workspace] write: /Users/x/deep/config.yml")
+        app.query_one(TranscriptView).append_block(block)
+        await pilot.pause(0.1)
+        block.resolve(True, answer="y")
+        await pilot.pause(0.2)
+        painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
+
+        assert len([row for row in painted if "allowed" in row]) == 1
+        assert not [row for row in painted if cell_len(row) > width]
+        assert block.spans_multiple_rows() is False
+
+
+@pytest.mark.parametrize("width", [110, 60, 46, 30, 24, 16])
+@pytest.mark.asyncio
+async def test_the_hint_row_sheds_whole_choices(width: int) -> None:
+    """Never half a choice: a key whose consequence was cut off is not an offer.
+
+    Truncating left rows ending `A allow all …` and then `A …`. Shedding also
+    encodes priority — the session-wide switch goes first, then the global stop
+    key, so the two per-call ANSWERS survive furthest.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(width, 24)) as pilot:
+        await pilot.pause(0.2)
+        app.query_one(TranscriptView).append_block(ApprovalBlock("bash", "run: make"))
+        await pilot.pause(0.2)
+        painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
+        hint = next((row.strip() for row in painted if "deny" in row), "")
+        assert hint, "the prompt must always advertise at least one answer"
+
+        # Every advertised item is whole: no trailing ellipsis, and any key shown
+        # is followed by its full label.
+        assert "…" not in hint
+        for key, label in CHOICES:
+            if f"{key} " in hint:
+                assert f"{key} {label}" in hint, f"{key} advertised without its label"
+        # The refusal is always the first thing offered, never the yes-word.
+        assert hint.startswith("n deny")

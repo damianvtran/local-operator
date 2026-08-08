@@ -54,6 +54,7 @@ from local_operator.tui.widgets.tool_card import (
     ICON_SUCCESS,
     NO_OUTPUT_NOTICE,
     RUNNING_NOTICE,
+    TERSE_NO_OUTPUT_NOTICE,
     ToolCard,
     compact_path,
 )
@@ -419,6 +420,99 @@ def test_the_notice_wears_the_apps_bracket_idiom() -> None:
     # Same idiom as the affordance they stand in for, so the slot reads as
     # one slot rather than as two unrelated things sharing a cell range.
     assert EXPAND_HINT.startswith("⟨") and COLLAPSE_HINT.startswith("⟨")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("width", [110, 80, 60, 48, 46, 40, 30])
+async def test_activating_an_inert_row_changes_the_painted_frame(width: int) -> None:
+    """The reported bug, asserted the way the user experienced it.
+
+    Not "the notice string is present" — "the frame is different afterwards".
+    The first fix for this shed the notice at the D8 summary floor along with
+    the expand offer, so at 46 columns pressing Enter on an inert row
+    repainted the identical bytes: "when I click to expand these lines,
+    nothing happens", reproduced by the very code meant to answer it.
+
+    The offer is chrome and may go. The ANSWER to a keystroke may not, so it
+    outranks the summary and shortens to its glyph rather than vanishing.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(width, 10)) as pilot:
+        view = app.query_one(TranscriptView)
+        card = ToolCard("a", "todo", {"x": "plan the sprites"})
+        view.append_block(card)
+        card.mark_done("")
+        await pilot.pause()
+        await pilot.pause()
+        before = [strip.text for strip in app.screen._compositor.render_strips()]
+
+        card.focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        after = [strip.text for strip in app.screen._compositor.render_strips()]
+
+        assert after != before, (width, after)
+        row = next(line for line in after if line.strip())
+        assert NO_OUTPUT_NOTICE in row or TERSE_NO_OUTPUT_NOTICE in row, (width, row)
+
+
+def test_the_answer_outranks_the_summary_and_the_offer_does_not() -> None:
+    """The two occupants of the slot have different priorities, and that
+    difference is the fix: chrome yields to content, an answer does not."""
+    narrow = 46  # under the D8 floor's pressure, above the glyph rung
+
+    offered = ToolCard("a", "todo", {"x": "plan the sprites and the aliens"})
+    offered.mark_done("one\ntwo")
+    offered._set_focused(True)
+    assert EXPAND_HINT not in offered._build_row(narrow).plain
+
+    answered = ToolCard("b", "todo", {"x": "plan the sprites and the aliens"})
+    answered.mark_done("")
+    answered.activate()
+    row = answered._build_row(narrow).plain
+    assert NO_OUTPUT_NOTICE in row
+    # Paid for out of the summary, which is unchanged, still on screen, and
+    # the least interesting thing on a row that produced no output.
+    assert "plan" in row
+
+
+def test_every_rung_of_the_notice_ladder_still_fits_the_card() -> None:
+    """The answer may take the summary's cells; it may not take the row's."""
+    for settle in (True, False):
+        for width in WIDTHS:
+            card = ToolCard("t", "list_variables", {"scope": "environment"})
+            if settle:
+                card.mark_done("")
+            card.activate()
+            row = card._build_row(width)
+            assert "\n" not in row.plain
+            assert cell_len(row.plain) <= width, (width, settle, row.plain)
+
+
+def test_a_stop_and_a_failure_never_show_the_same_text_column() -> None:
+    """``interrupted`` is a constant restating ⊘, so truncating it buys
+    nothing and costs discrimination: at 46 a real failure and a user stop
+    both painted ``inte…`` — identical in the leftmost and longest column,
+    the one the eye lands on first. Below the width that holds the word
+    whole it is dropped and the glyph column carries the state alone, which
+    it can, being distinguishable from ✓ and ✗ with no colour at all."""
+    for width in (110, 80, 60, 48, 46, 40):
+        bad = ToolCard("a", "bash", {"command": "pytest"})
+        stopped = ToolCard("b", "bash", {"command": "pytest"})
+        bad.mark_failed("internal error: worker died")
+        stopped.mark_interrupted()
+        bad_row = bad._build_row(width).plain
+        stop_row = stopped._build_row(width).plain
+        assert bad_row != stop_row, (width, bad_row)
+        # Whatever rides in front of the glyph must not be the same string.
+        assert bad_row.split("✗")[0].strip() != stop_row.split("⊘")[0].strip(), (
+            width,
+            bad_row,
+            stop_row,
+        )
+        # And the word only ever appears whole.
+        assert "interrupted" in stop_row or "inte" not in stop_row, (width, stop_row)
 
 
 # --- icons -----------------------------------------------------------------
