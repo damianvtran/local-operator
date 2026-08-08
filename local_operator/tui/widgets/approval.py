@@ -465,17 +465,32 @@ class ApprovalBlock(TranscriptBlock):
         # `allow` cannot come back after it has been shed. A pure argmax could
         # not promise that — two rungs carrying identical information tie, and
         # whichever way the tie is broken it flips back at some width.
-        verbose = self._compose_question(width, verb=True, glyph_hazard=False, spine=spine)
-        if verbose.score(width)[1] and verbose.target >= self._detail_cells():
-            question = verbose.text
+        # The threshold is COMPUTED, not discovered by trial. Asking the verbose
+        # rung whether it happens to show everything was not monotone: the hazard
+        # clause has its own ladder inside that rung, so at one width the clause
+        # still fitted and squeezed the target, and one column narrower the
+        # clause collapsed to `!` and the target jumped past the yardstick — the
+        # predicate ran false, true, false, and `allow` came back. A width the
+        # row needs for its fullest form is a constant, so comparing against it
+        # can only flip once.
+        if width >= self._verbose_min_width():
+            question = self._compose_question(
+                width, verb=True, glyph_hazard=False, spine=spine
+            ).text
         else:
-            best = verbose
+            # The verbose rung is not a candidate here. Seeding the comparison
+            # with it let it win ties below the threshold, which is how `allow`
+            # came back at a narrower width after the threshold had already
+            # ruled it out — the same defect one level down from the predicate
+            # that used to be non-monotone.
+            best: _Row | None = None
             for verb, glyph_hazard in shapes[1:]:
                 row = self._compose_question(
                     width, verb=verb, glyph_hazard=glyph_hazard, spine=spine
                 )
-                if row.score(width) > best.score(width):
+                if best is None or row.score(width) > best.score(width):
                     best = row
+            assert best is not None
             question = best.text
 
         if self._answer is not None:
@@ -500,6 +515,24 @@ class ApprovalBlock(TranscriptBlock):
         if self._answer is None:
             return Style(color=theme_mod.semantic_color("warning"), bold=True)
         return Style(color=theme_mod.semantic_color("dim"))
+
+    def _verbose_min_width(self) -> int:
+        """Row width at which the fullest wording hides nothing.
+
+        Counted rather than measured by rendering: indent, glyph, the verb, the
+        tool name, the separator, the hazard clause in its longest form, and the
+        whole description. Above this the explicit form is free; below it, no
+        arrangement of the explicit form can show everything, so the rungs
+        compete on measurement instead.
+        """
+        detail, outside = self._detail()
+        verb_cells = cell_len("allowed ") if self._answer is not None else cell_len("allow ")
+        total = SPINE_INDENT + 2 + verb_cells + cell_len(self.tool_name)
+        if detail:
+            total += _SEPARATOR_CELLS + cell_len(detail)
+            if outside:
+                total += cell_len(HAZARD_WORDS)
+        return total
 
     def _detail_cells(self) -> int:
         """Cells the whole description would occupy if nothing were truncated.

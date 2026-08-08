@@ -126,11 +126,11 @@ def test_wake_says_when_it_fires_and_what_it_will_say() -> None:
     assert once == "schedule: 30m — check the deploy"
 
     bounded = _summary(tool, {"op": "create", "message": "poll", "every": "15m", "limit": 8})
-    assert bounded == "schedule: x8 ⟳15m — poll"
+    assert bounded == "schedule: 8x every 15m — poll"
 
     # An unbounded recurrence is the one wake shape that never stops on its own.
     forever = _summary(tool, {"op": "create", "message": "watch", "every": "1h"})
-    assert forever == "schedule: forever ⟳1h — watch"
+    assert forever == "schedule: forever every 1h — watch"
 
     assert _summary(tool, {"op": "list"}) == "wake: list"
     assert _summary(tool, {"op": "cancel", "id": "w1"}) == "cancel wake: w1"
@@ -252,7 +252,7 @@ def test_a_screenshot_names_the_file_it_writes(tmp_path: Path) -> None:
     spaced = _summary(tool, {"action": "screenshot", "path": "  shot.png"}, str(tmp_path))
     assert spaced.endswith(r"\x20\x20shot.png'"), spaced
 
-    assert _summary(tool, {"action": "screenshot"}) == "screenshot: a temporary file"
+    assert _summary(tool, {"action": "screenshot"}) == "screenshot to a temporary file"
 
 
 def test_a_homograph_host_is_shown_as_punycode() -> None:
