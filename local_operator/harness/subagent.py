@@ -172,9 +172,7 @@ def _make_runner(
             raise
         except Exception as exc:
             await emit(
-                SubagentEndEvent(
-                    job_id=job_id, label=label, status="failed", error_text=str(exc)
-                )
+                SubagentEndEvent(job_id=job_id, label=label, status="failed", error_text=str(exc))
             )
             raise
         finally:

@@ -46,9 +46,7 @@ def _engine_context(tmp_path, manager: AsyncJobManager) -> ToolContext:
     launcher = lambda label, prompt: manager.register(  # noqa: E731
         "task", label, _quick_runner, owner_id=None
     )
-    return ToolContext(
-        cwd=str(tmp_path), session_id="s", subagent_launcher=launcher, jobs=manager
-    )
+    return ToolContext(cwd=str(tmp_path), session_id="s", subagent_launcher=launcher, jobs=manager)
 
 
 def _tools(context: ToolContext) -> dict[str, AgentTool]:
@@ -100,9 +98,7 @@ async def test_wait_returns_final_output_when_job_completes(tmp_path):
     context = _engine_context(tmp_path, manager)
     tools = _tools(context)
 
-    result = await _call(
-        tools, "task", {"label": "work", "prompt": "run"}, context
-    )
+    result = await _call(tools, "task", {"label": "work", "prompt": "run"}, context)
     assert result.is_error is False
     assert result.details is not None
     job_id = result.details["job_id"]
@@ -118,9 +114,7 @@ async def test_wait_returns_final_output_when_job_completes(tmp_path):
 @pytest.mark.asyncio
 async def test_wait_bounded_by_wait_ms_times_out(tmp_path):
     manager = AsyncJobManager()
-    context = ToolContext(
-        cwd=str(tmp_path), session_id="s", jobs=manager, subagent_launcher=None
-    )
+    context = ToolContext(cwd=str(tmp_path), session_id="s", jobs=manager, subagent_launcher=None)
     # Register a job that never settles so wait must time out.
     slow_id = manager.register("task", "slow", _slow_runner)
     tools = _tools(context)

@@ -615,7 +615,7 @@ class OperatorApp(App[None]):
         # resolves the newest session on an EXACT ``RESUME_LATEST`` match.
         # A bare arg is the same request, spelled the way a user would type it
         # without remembering the symbol.
-        resume_id = (arg.strip() or RESUME_LATEST)
+        resume_id = arg.strip() or RESUME_LATEST
         if self._resume_factory is None:
             notice("resume unavailable: no resume-capable launcher", "warning")
             return

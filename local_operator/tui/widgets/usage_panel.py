@@ -309,9 +309,7 @@ def _measure_columns(reports, width: int, now_ms: float) -> _Columns:  # noqa: A
         cell_len(limit.label) + (len(TIER_INDENT) if limit.tier else 0) for limit in limits
     ]
     numbers_cells = [cell_len(format_amount(limit.amount) or "not reported") for limit in limits]
-    reset_cells = [
-        cell_len(format_countdown(limit.resets_in_ms(now_ms))) for limit in limits
-    ]
+    reset_cells = [cell_len(format_countdown(limit.resets_in_ms(now_ms))) for limit in limits]
     # The label truncates rather than pushing the numbers off the row: it is the
     # one column whose content the user can still identify from a prefix.
     label = min(max(label_cells, default=0), max(12, width // 3))
