@@ -1176,3 +1176,52 @@ origin and in remedy, and an earlier draft of this section got both wrong:
 
 The distinction matters because "fails closed" is a claim about a gate, and only
 one of these two touches a gate.
+
+
+## Feature finalization round (dock band, /resume, diff view, gates)
+
+A post-review integration round wired the remaining TUI feature surfaces the
+reviewed command/tool work scaffolded but left as unwired modules, then put
+the whole tree through the CI gates that the rewrite had deferred.
+
+### New surfaces and how they're evidenced
+
+| Surface | What it does | Evidence |
+|---|---|---|
+| Dock band (`#band`) | Todo list + subagent task list collapse in above the composer; zero rows when empty | `tests/unit/tui/test_band_panels.py` (4 mounted-app tests: empty→shown→hidden, todo row rendering, trajectory modal) |
+| Subagent trajectory modal | Click/enter a subagent row → modal replaying the child's retained events | band-panels test drives `_open_subagent_trajectory` and asserts the child's prose renders |
+| Expanded write/edit diff | The card reveals a colorized unified diff (+ success, − danger, `@@`/headers muted, context dim) | `tests/unit/tui/test_tool_card.py` (4 new diff tests assert hunk-role tinting); engine `_diff_details` test asserts the diff payload + bounded cap |
+| `--resume` render fix | A resumed session shows its prior user/assistant messages on screen instead of a blank welcome | `Session.history()` seam + `_render_resumed_history`; `test_history_accessor*` prove the replay, `test_resume_*` drive the TUI command through a mounted app |
+| `/resume` command | Bare lists recent sessions with age; `/resume <id>` rebinds and reloads | `test_resume_lists_recent_sessions_without_a_boot`, `test_resume_id_rebinds_and_reloads` |
+| `/model default` | Persists provider/model to config so later launches boot on it | `test_app_pilot` covers model switching (persistence write covered by the command path) |
+| task/wait/jobs engine tools | `run_subagent` launcher wired via `Session._launch_subagent`; bounded tools registered | `tests/unit/tools/test_task_wait_jobs.py` (8), `tests/unit/session/test_launch_subagent.py` (3), 407 tools/session/harness tests |
+
+### Whole-tree gate status (final)
+
+The rewrite disabled lint/type gates during development by instruction; this
+round re-enabled and satisfied them across every file touched by the wave:
+
+| Gate | Result |
+|---|---|
+| `flake8 .` | clean (0) |
+| `black --check .` | clean |
+| `isort --check-only` | clean |
+| `pyright .` | **0 errors, 0 warnings, 0 informations** (was 22 errors before this round) |
+| `pytest tests/unit` | **2665 passed**, 8 skipped |
+
+The pyright cleanup also fixed latent defects the wave's partial commits left
+in: `RetryStartEvent` was referenced in the retry handler but never imported
+(a runtime `NameError` had a retry fired), `UsagePanel.offset` shadowed
+Textual `Widget.offset` (renamed `view_offset`), and the trajectory dict was
+untyped.
+
+### Scope note: pointer cursors (item 4, blocked)
+
+"Text pointer/default cursors" is **not implementable in Textual 8.2.8**:
+the framework exposes no mouse-cursor API (verified — no `set_mouse_cursor`,
+no `cursor:` CSS property in `textual.css._style_properties`). The caret
+request is satisfied (solid caret, visible the instant the buffer has content;
+hidden only over the empty placeholder because Textual's caret physically
+inverts the placeholder's first glyph — a documented D-05 design decision).
+Rich-text cursor over the input and pointer-over-rows requires a Textual
+upgrade and is the one deferred surface, recorded rather than hacked.
