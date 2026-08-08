@@ -150,6 +150,16 @@ GREP_FILE_LIMIT_BYTES = 1 * 1024 * 1024
 _GREP_PRUNE_DIRS = frozenset({"__pycache__", "node_modules", "dist", "build", ".git", ".venv"})
 #: Marker prefix on approval descriptions for targets outside the workspace.
 OUTSIDE_WORKSPACE_MARKER = "[outside workspace]"
+#: The OTHER reason a target escalates: it could not be resolved at all, so
+#: nothing can be said about where it is. Distinct from the marker above because
+#: they are different sentences — a path visibly under the workspace root
+#: described as "outside the workspace" argues with itself, and a clause the user
+#: can see is wrong is a clause they learn to ignore on the genuine escape.
+UNRESOLVABLE_MARKER = "[unresolvable]"
+#: Opens the row for a URL that could not be parsed. The sentence has to differ
+#: from `browse:`, which asserts a destination — the whole point is that no
+#: destination could be determined.
+UNPARSED_URL_PREFIX = "unparsed url:"
 
 #: Environment overrides that make common CLIs non-interactive.
 NON_INTERACTIVE_ENV: dict[str, str] = {
@@ -401,14 +411,18 @@ def _safe_cwd(context: ToolContext | None) -> str:
     return context.cwd if context and context.cwd else "."
 
 
-def _resolve_workspace_path(raw: str, cwd: str) -> tuple[Path, bool]:
+def _resolve_workspace_path(raw: str, cwd: str) -> tuple[Path, bool, bool]:
     """Resolve a tool-supplied path to an absolute ``Path``.
 
     ``~`` is expanded, relative paths join onto ``cwd``, and the result is
-    fully resolved. Returns ``(path, inside)`` where ``inside`` is True when
-    the resolved path stays within the resolved workspace root — approval
-    prompts always show the resolved path, and ``outside`` targets escalate
-    approval even for read-tier tools.
+    fully resolved. Returns ``(path, inside, resolvable)``. ``inside`` is True
+    only when the resolved path is known to stay within the resolved workspace
+    root — approval prompts always show the resolved path, and a target that is
+    not ``inside`` escalates approval even for read-tier tools.
+
+    ``resolvable`` separates the two ways ``inside`` can be False, because they
+    are different sentences to the user: a path that resolved and lies elsewhere,
+    versus one that could not be resolved at all. Both escalate identically.
     """
     # `expanduser()` raises RuntimeError when `~user` names nobody the platform
     # can resolve — the second of the two sites the describer fix named, and the
@@ -438,12 +452,12 @@ def _resolve_workspace_path(raw: str, cwd: str) -> tuple[Path, bool]:
         # shown to be within the workspace, and this verdict decides whether the
         # user is warned; the honest answer when the check cannot be made is the
         # one that still asks. The tool's own open() will fail afterwards anyway.
-        return path, False
+        return path, False, False
     try:
         path.relative_to(root)
     except ValueError:
-        return path, False
-    return path, True
+        return path, False, True
+    return path, True, True
 
 
 #: Two or more consecutive spaces — the part of a name a flattened prompt line
@@ -473,10 +487,20 @@ def _display_target(text: str) -> str:
     return _SPACE_RUN.sub(lambda match: "\\x20" * len(match.group()), repr(text))
 
 
-def _approval_description(path: Path, inside: bool, action: str) -> str:
+def _approval_description(path: Path, inside: bool, action: str, resolvable: bool = True) -> str:
     """Approval prompt text for ``action`` on a RESOLVED path (the user must
-    approve the exact target, not the raw string the model typed)."""
-    marker = "" if inside else f"{OUTSIDE_WORKSPACE_MARKER} "
+    approve the exact target, not the raw string the model typed).
+
+    Two markers, one escalation. Both mean "this needs a closer look", and the
+    renderer treats them identically at every width where the clause collapses to
+    `!`; they differ only in the sentence spelled out when there is room for one.
+    """
+    if inside:
+        marker = ""
+    elif resolvable:
+        marker = f"{OUTSIDE_WORKSPACE_MARKER} "
+    else:
+        marker = f"{UNRESOLVABLE_MARKER} "
     return f"{marker}{action}: {_display_target(str(path))}"
 
 
@@ -512,13 +536,13 @@ def _describe_path_approval(action: str, key: str = "path") -> ApprovalDescribeF
         if not raw.strip():
             return ""
         try:
-            path, inside = _resolve_workspace_path(raw, cwd or ".")
+            path, inside, resolvable = _resolve_workspace_path(raw, cwd or ".")
         except (OSError, ValueError, RuntimeError):
             # An unresolvable path is still worth naming; the tool will fail with
             # its own error, and a prompt that says nothing is worse than one
             # that quotes what the model asked for.
             return f"{action}: {_display_target(raw)}"
-        return _approval_description(path, inside, action)
+        return _approval_description(path, inside, action, resolvable)
 
     return describe
 
@@ -600,7 +624,15 @@ def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
     named no site at all. A NON-https scheme is kept, because "this fetch is not
     encrypted" is exactly the kind of thing this prompt exists to surface.
     """
-    url = _display_url(str(args.get("url") or "").strip())
+    raw_url = str(args.get("url") or "").strip()
+    shown = _display_url(raw_url)
+    # `None` means `_display_url` could not build a destination from this string,
+    # so the row must not open with `browse:` as though it had. Reported rather
+    # than inferred: deciding it by comparing against a re-derived opaque form
+    # made the branch depend on whether the quoting happened to differ, and a
+    # test could not tell the two paths apart.
+    url_unparsed = shown is None
+    url = _opaque_url(raw_url) if url_unparsed else shown
     # LOWERCASED, because `execute_browser` lowercases before it dispatches and
     # `BrowserParams.action` is a bare `str` with no enum. Comparing the raw value
     # meant `SCREENSHOT` fell past the screenshot branch: the prompt said
@@ -626,15 +658,36 @@ def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
         if not raw_path.strip():
             return "screenshot to a temporary file"
         try:
-            path, inside = _resolve_workspace_path(raw_path, cwd or ".")
+            path, inside, resolvable = _resolve_workspace_path(raw_path, cwd or ".")
         except (OSError, ValueError):
             return f"screenshot: {_display_target(raw_path)}"
-        return _approval_description(path, inside, "screenshot")
+        return _approval_description(path, inside, "screenshot", resolvable)
     if url and action in NAVIGATING_BROWSER_ACTIONS:
+        if url_unparsed:
+            return f"{UNRESOLVABLE_MARKER} {UNPARSED_URL_PREFIX} {url}"
         return f"browse: {url}"
     if action and url:
+        if url_unparsed:
+            return f"{UNRESOLVABLE_MARKER} {action}: {UNPARSED_URL_PREFIX} {url}"
         return f"{action}: {url}"
     return f"browser: {action}" if action else ""
+
+
+def _opaque_url(raw: str) -> str:
+    """A URL this module could not parse, presented as DATA, not a destination.
+
+    Returned QUOTED and paired with :data:`UNPARSED_URL_PREFIX` by the caller, so
+    the row names the string without claiming to know where it points.
+
+    `_display_url`'s whole contract is "host first, no userinfo", and the two
+    exits that could not honour it used to return the caller's string verbatim —
+    so a row that normally reads `browse: evil.test/x` instead led with whatever
+    the attacker put in front of the `@`. Quoting it makes the row read as the
+    raw text the model supplied rather than as a claim about where the fetch
+    goes, which is the same distinction the write describer draws for a path it
+    cannot resolve.
+    """
+    return _display_target(raw)
 
 
 def _punycode_host(host: str) -> str:
@@ -655,7 +708,7 @@ def _punycode_host(host: str) -> str:
         return host.encode("unicode_escape").decode("ascii")
 
 
-def _display_url(raw: str) -> str:
+def _display_url(raw: str) -> str | None:
     """The URL as a DESTINATION: host first, no userinfo, no redundant scheme.
 
     `https://` is dropped because it is on every URL and discriminates nothing —
@@ -673,9 +726,19 @@ def _display_url(raw: str) -> str:
     try:
         parts = urlsplit(raw)
     except ValueError:
-        return raw
+        # Unparseable, so this function cannot say where the fetch goes — and
+        # echoing the caller's string is the one thing it must not do. U+FF20
+        # FULLWIDTH COMMERCIAL AT reaches here: `_validate_browser_url` gates only
+        # on the scheme prefix, and CPython's `_checknetloc` refuses the netloc
+        # under NFKC normalisation, so `http://accounts.google.com＠evil.test/x`
+        # fell out verbatim and the row led with `accounts.google.com`. Whether a
+        # WebView normalises that to `@` is unproven, but a prompt that cannot
+        # parse a URL has no business asserting a destination from it.
+        return None
     if not parts.hostname:
-        return raw
+        # Same contract, different cause: with no host there is no destination to
+        # put first, so the sentence this function exists to build cannot be made.
+        return None
     try:
         port = parts.port
     except ValueError:
@@ -1402,14 +1465,14 @@ async def execute_read(
         return _text(tool_call_id, "read", content, details={"url": target})
 
     cwd = _safe_cwd(context)
-    path, inside = _resolve_workspace_path(target, cwd)
+    path, inside, resolvable = _resolve_workspace_path(target, cwd)
     if not path.exists():
         return _error(tool_call_id, "read", f"Path does not exist: {path}")
 
     # Outside-workspace reads escalate to an approval prompt regardless of
     # the read tier auto-approval the host normally applies.
     if not inside:
-        description = _approval_description(path, inside, "read")
+        description = _approval_description(path, inside, "read", resolvable)
         if not await _check_approval(context, "read", description):
             return _error(tool_call_id, "read", "User declined to read this file.")
 
@@ -1560,7 +1623,7 @@ async def execute_write(
     if not params.path.strip():
         return _error(tool_call_id, "write", "path must be a non-empty string")
     # Write-tier approval is the loop's gate; see execute_bash.
-    path, inside = _resolve_workspace_path(params.path, _safe_cwd(context))
+    path, inside, _resolvable = _resolve_workspace_path(params.path, _safe_cwd(context))
 
     existed = path.exists()
     previous = ""
@@ -1639,7 +1702,7 @@ async def execute_edit(
     if params.old_text == "":
         return _error(tool_call_id, "edit", "old_text must be a non-empty string")
 
-    path, inside = _resolve_workspace_path(params.path, _safe_cwd(context))
+    path, inside, _resolvable = _resolve_workspace_path(params.path, _safe_cwd(context))
     if not path.is_file():
         return _error(tool_call_id, "edit", f"File does not exist: {path}")
 
@@ -1919,14 +1982,14 @@ async def execute_grep(
         return _error(tool_call_id, "grep", f"invalid regex '{params.pattern}': {exc}")
 
     cwd = _safe_cwd(context)
-    target, inside = _resolve_workspace_path(params.path, cwd)
+    target, inside, resolvable = _resolve_workspace_path(params.path, cwd)
     if not target.exists():
         return _error(tool_call_id, "grep", f"Path does not exist: {target}")
 
     # Outside-workspace searches escalate to an approval prompt regardless
     # of the read tier auto-approval the host normally applies.
     if not inside:
-        description = _approval_description(target, inside, "grep")
+        description = _approval_description(target, inside, "grep", resolvable)
         if not await _check_approval(context, "read", description):
             return _error(tool_call_id, "grep", "User declined to search this path.")
 
@@ -3019,7 +3082,7 @@ async def _browser_screenshot(
         # `call.raw_arguments` and resolution was invisible to the person
         # answering.) `inside` is deliberately unused: unlike read/grep this tool
         # has no read-tier to escalate FROM, and `write` already always prompts.
-        resolved, _inside = _resolve_workspace_path(raw_path, _safe_cwd(context))
+        resolved, _inside, _resolvable = _resolve_workspace_path(raw_path, _safe_cwd(context))
         target = str(resolved)
     else:
         import tempfile
