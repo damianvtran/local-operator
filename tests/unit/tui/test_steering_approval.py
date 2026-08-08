@@ -26,7 +26,12 @@ import pytest
 from rich.cells import cell_len
 from textual.binding import Binding
 
-from local_operator.harness.types import ToolCallComposeEvent, ToolExecutionStartEvent
+from local_operator.harness.types import (
+    ToolCallComposeEvent,
+    ToolExecutionEndEvent,
+    ToolExecutionStartEvent,
+    ToolResult,
+)
 from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.resume import TRANSCRIPT_NAME
 from local_operator.tui.app import DOUBLE_INTERRUPT_WINDOW_S, OperatorApp
@@ -35,6 +40,7 @@ from local_operator.tui.events import (
     AssistantMessageEnd,
     AssistantMessageStart,
     ToolComposing,
+    ToolEnded,
     ToolStarted,
     TurnStarted,
 )
@@ -977,7 +983,7 @@ async def test_a_call_being_dictated_shows_a_row_that_moves() -> None:
         app.post_message(ToolComposing(ToolCallComposeEvent(tool_call_id="c1", tool_name="write")))
         await pilot.pause(0.1)
         painted = [strip.text for strip in app.screen._compositor.render_strips()]
-        assert [row for row in painted if "writing the call" in row]
+        assert [row for row in painted if "composing" in row]
         # No size until there is one: a `0 B` that never moves reads as stuck.
         assert not [row for row in painted if "0 B" in row]
 
@@ -1001,4 +1007,65 @@ async def test_a_call_being_dictated_shows_a_row_that_moves() -> None:
         await pilot.pause(0.1)
         painted = [strip.text for strip in app.screen._compositor.render_strips()]
         assert len([row for row in painted if "write" in row]) == 1
-        assert not [row for row in painted if "writing the call" in row]
+        assert not [row for row in painted if "composing" in row]
+
+
+@pytest.mark.asyncio
+async def test_an_adopted_row_times_the_tool_not_the_dictation() -> None:
+    """The duration on a receipt is how long the TOOL took.
+
+    The row is mounted when the model starts dictating, which for a large call
+    is minutes before anything runs. Left alone, the clock that started then was
+    still running when the tool finished, so a `write` that executed in
+    milliseconds settled as `✓ 101s` — and the ledger beneath it, whose rows were
+    never composed, measured something else entirely under the same glyph.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.2)
+        app.post_message(ToolComposing(ToolCallComposeEvent(tool_call_id="c1", tool_name="write")))
+        await pilot.pause(0.55)  # "dictation" time that must not be billed
+        app.post_message(
+            ToolStarted(
+                ToolExecutionStartEvent(tool_call_id="c1", tool_name="write", args={"path": "/x"})
+            )
+        )
+        await pilot.pause(0.05)
+        app.post_message(
+            ToolEnded(
+                ToolExecutionEndEvent(
+                    tool_call_id="c1",
+                    tool_name="write",
+                    result=ToolResult(tool_call_id="c1", tool_name="write", content=[]),
+                )
+            )
+        )
+        await pilot.pause(0.1)
+        card = next(iter(app.query(ToolCard)))
+        assert card._duration is not None
+        assert card._duration < 0.4, f"the dictation was billed to the tool: {card._duration}"
+
+
+@pytest.mark.asyncio
+async def test_the_composing_row_sheds_its_label_before_its_facts() -> None:
+    """Below the width where both fit, the two things that MOVE survive.
+
+    Truncating instead protected `composing…` — boilerplate next to a row that
+    is already visibly live — and cut the byte count and the clock, so below 39
+    columns the row stopped changing at all and two calls dictating 12 KB and
+    61 B painted identically.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(34, 24)) as pilot:
+        await pilot.pause(0.2)
+        app.post_message(
+            ToolComposing(
+                ToolCallComposeEvent(tool_call_id="c1", tool_name="write", argument_bytes=12700)
+            )
+        )
+        await pilot.pause(0.1)
+        painted = [strip.text for strip in app.screen._compositor.render_strips()]
+        row = next(row for row in painted if "12.4 KB" in row)
+        assert "composing" not in row

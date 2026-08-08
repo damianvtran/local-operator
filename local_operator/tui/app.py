@@ -2391,7 +2391,7 @@ class OperatorApp(App[None]):
             card = ToolCard(event.tool_call_id, event.tool_name)
             self._composing_cards[event.tool_call_id] = card
             self._append_block(card)
-        card.set_composing(event.argument_bytes)
+        card.set_composing(event.argument_bytes, event.tool_name)
 
     def on_tool_started(self, message: ToolStarted) -> None:
         event = message.event

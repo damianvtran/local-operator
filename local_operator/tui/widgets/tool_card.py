@@ -474,6 +474,7 @@ class ToolCard(TranscriptBlock):
         # and the clock that keeps the row visibly alive through a provider's
         # silence. All three are None/0 for a row that never composed.
         self._compose_bytes: int = 0
+        self._compose_facts: str = ""
         self._compose_started: float | None = None
         self._compose_timer: Timer | None = None
         self._duration: float | None = None
@@ -528,7 +529,13 @@ class ToolCard(TranscriptBlock):
 
     def mark_interrupted(self) -> None:
         """Turn ended before this tool completed: dim 'interrupted' state."""
+        was_composing = self._state == "composing"
         self._stop_composing()
+        if was_composing:
+            # The call was never sent, so the row must stop saying it is being
+            # written. It keeps the size as a record of how far the model got.
+            size = _format_bytes(self._compose_bytes) if self._compose_bytes else "nothing"
+            self._summary = f"never sent · {size} composed"
         self._duration = time.monotonic() - self._started
         self._state = "interrupted"
         self.remove_class("tool-running")
@@ -536,7 +543,7 @@ class ToolCard(TranscriptBlock):
         self._refresh_row()
         self.finalize()
 
-    def set_composing(self, argument_bytes: int) -> None:
+    def set_composing(self, argument_bytes: int, tool_name: str = "") -> None:
         """Show that the model is still WRITING this call's arguments.
 
         A separate state from `running`, because nothing has run: the row must
@@ -553,6 +560,13 @@ class ToolCard(TranscriptBlock):
         if self._state not in ("composing", "running"):
             return
         self._state = "composing"
+        # The name can arrive in FRAGMENTS: the first announcement fires on the
+        # first piece so the row appears at once, so a provider that splits
+        # `write` sends `wr` and then `write`. Following it keeps the visible row
+        # and its icon honest for the whole dictation, not just once the call
+        # starts running.
+        if tool_name and tool_name != self.tool_name:
+            self.tool_name = _strip_control_sequences(tool_name)
         self._compose_bytes = argument_bytes
         if self._compose_started is None:
             self._compose_started = time.monotonic()
@@ -570,15 +584,23 @@ class ToolCard(TranscriptBlock):
         started = self._compose_started or time.monotonic()
         elapsed = max(0, int(time.monotonic() - started))
         clock = format_duration(elapsed)
+        # The FACTS lead and the label sheds whole, the same shape this file
+        # already uses for a tool summary. Boilerplate-first, `composing…` was
+        # protected by the truncation while the two things that move were cut:
+        # below 39 columns the row stopped changing at all, and two calls
+        # dictating 12.4 KB and 61 B painted identically.
+        #
         # The size joins only once there IS one. Providers commonly open the
-        # call and then deliver its arguments in one late burst, so a leading
-        # `0 B` sat on screen for two minutes on a measured run — a number that
-        # never moves reads as a stuck counter, which is the impression this row
-        # exists to remove.
-        if self._compose_bytes:
-            self._summary = f"writing the call… {_format_bytes(self._compose_bytes)} · {clock}"
-        else:
-            self._summary = f"writing the call… {clock}"
+        # call and deliver its arguments in one late burst, so a leading `0 B`
+        # sat on screen for two minutes on a measured run — a number that never
+        # moves reads as a stuck counter, which is what this row exists to fix.
+        #
+        # `composing`, not `writing`: `write` is a TOOL in this app, so
+        # `write  writing the call…` read as a stutter and `read  writing the
+        # call…` read as wrong.
+        facts = f"{_format_bytes(self._compose_bytes)} · {clock}" if self._compose_bytes else clock
+        self._compose_facts = facts
+        self._summary = f"composing… {facts}"
         self._refresh_row()
 
     def _stop_composing(self) -> None:
@@ -604,6 +626,13 @@ class ToolCard(TranscriptBlock):
         # and `ite` would otherwise leave `wr` on the settled row forever, in the
         # ledger, on the icon, and in the summary built from it.
         self.tool_name = _strip_control_sequences(tool_name)
+        # The duration clock RESTARTS here. `_started` was set when the row was
+        # mounted, which for an adopted row is when the model began dictating —
+        # so a `write` that executed in 0.1s settled as `✓ 2.4s`, and on the
+        # reported 1m41s case would have read `✓ 101s`. Two receipts on one
+        # ledger would then be measuring different things with no way to tell
+        # which from the row.
+        self._started = time.monotonic()
         self._state = "running"
         # The same construction the constructor uses, so an adopted row is
         # byte-identical to one that had never been a composing row.
@@ -1041,7 +1070,19 @@ class ToolCard(TranscriptBlock):
                     slot = rung
                     break
         slot_cells = cell_len(slot) + 1 if slot else 0
-        summary = truncate_cells(self._summary, max(0, remaining - slot_cells))
+        budget = max(0, remaining - slot_cells)
+        if self._state == "composing" and self._compose_facts:
+            # The label is shed WHOLE before the facts are touched, the same
+            # ladder this file uses for the key hints and the approval clause.
+            # Truncating instead protected `composing…` — seventeen cells that
+            # say nothing new next to a row that is already visibly live — while
+            # cutting the byte count and the clock, which are the only two
+            # things on the row that move.
+            summary = self._summary
+            if cell_len(summary) > budget:
+                summary = truncate_cells(self._compose_facts, budget)
+        else:
+            summary = truncate_cells(self._summary, budget)
 
         row = _row_text()
         # The icon carries the running state: accent while live (D26 — a still
@@ -1125,7 +1166,16 @@ class ToolCard(TranscriptBlock):
         """
         dim = Style(color=theme_mod.semantic_color("dim"))
         elapsed = self._duration or 0.0
-        duration = f"{elapsed:.1f}s" if elapsed < 10 else f"{elapsed:.0f}s"
+        # Sub-second precision where it distinguishes tools, and the SAME
+        # grammar as everything else past a minute: the composing row above this
+        # one says `1m57s`, and `117s` two seconds later on the same row is the
+        # app disagreeing with itself about how it writes a duration.
+        if elapsed < 10:
+            duration = f"{elapsed:.1f}s"
+        elif elapsed < 60:
+            duration = f"{elapsed:.0f}s"
+        else:
+            duration = format_duration(elapsed)
         duration = duration.rjust(DURATION_COL)
         if self._state == "success":
             # D12: success is quiet — check + duration both dim, no reason.

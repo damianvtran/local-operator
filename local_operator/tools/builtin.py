@@ -56,7 +56,6 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from rich.cells import cell_len
 
 from local_operator.harness.types import (
     AbortSignal,
@@ -499,13 +498,6 @@ def _describe_path_approval(action: str, key: str = "path") -> ApprovalDescribeF
     return describe
 
 
-#: Recurrence mark for a repeating wake. `⟳` when the terminal can draw it in
-#: one cell, `*` otherwise: this sentence reaches the headless stdin gate too,
-#: where none of the TUI's glyph machinery runs, and a tofu box in a security
-#: prompt is worse than a plain character.
-REPEAT_MARK = "⟳" if cell_len("⟳") == 1 else "*"
-
-
 def _describe_wake_approval(args: dict[str, Any], cwd: str) -> str:
     """``schedule: <when> — <message>`` (or the operation for list/cancel).
 
@@ -534,10 +526,17 @@ def _describe_wake_approval(args: dict[str, Any], cwd: str) -> str:
     # shared boilerplate at the FRONT of the one field that distinguishes two
     # wakes, so at 18 columns `every 15m ×8` and `every 1h ×∞` both painted
     # `every 1…` — two different unattended commitments, one row.
+    # Plain ASCII words. The glyph this used to carry could not be gated: the
+    # check was `cell_len("⟳") == 1`, which is a static Unicode width table and
+    # not a terminal capability probe, so it measured 1 on every host and the
+    # fallback was unreachable. This sentence also reaches the headless stdin
+    # gate, where none of the TUI's glyph machinery runs at all, so it earns
+    # nothing by being clever — and the BOUND already leads, which is what makes
+    # two commitments differ at their first token.
     if first and every:
-        when = f"{first} then {REPEAT_MARK}{every}"
+        when = f"{first} then every {every}"
     elif every:
-        when = f"{REPEAT_MARK}{every}"
+        when = f"every {every}"
     else:
         when = first
 
@@ -548,7 +547,7 @@ def _describe_wake_approval(args: dict[str, Any], cwd: str) -> str:
         if until:
             bound = f" until {until}"
         elif isinstance(limit, int):
-            bound = f" x{limit}"
+            bound = f" {limit}x"
         else:
             # The SAME slot and the same shape as a count, because an unbounded
             # recurrence is the one wake that never stops on its own and it must
@@ -598,7 +597,7 @@ def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
         # will actually be written. Only the emptiness test is stripped.
         raw_path = str(args.get("path") or "")
         if not raw_path.strip():
-            return "screenshot: a temporary file"
+            return "screenshot to a temporary file"
         try:
             path, inside = _resolve_workspace_path(raw_path, cwd or ".")
         except (OSError, ValueError):
