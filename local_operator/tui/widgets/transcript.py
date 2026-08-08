@@ -665,6 +665,10 @@ class TranscriptView(ScrollableContainer):
         index = self._blocks.index(block)
         self._blocks.remove(block)
         block.remove()
+        # Same reason `clear_blocks` does it: the name column is derived FROM the
+        # blocks, so a removal can only ever make it too wide.
+        if getattr(block, "LEDGER_ROW", False):
+            self._name_col_cache = None
         # Whatever fell into the removed block's place now has a different
         # neighbour above it — most visibly the very first block, which must
         # never carry a gap once the boot hint is lifted off the top.

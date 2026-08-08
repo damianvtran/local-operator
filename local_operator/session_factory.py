@@ -38,6 +38,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from local_operator.ansi import sanitize_prompt_line
 from local_operator.harness.types import AgentMessage, Message
 
 # Pure path policy, no engine — see local_operator/resume.py for why it is
@@ -273,8 +274,17 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
             )
             return False
         try:
+            # Sanitised HERE as well as at the source. This is a second
+            # human-facing approval surface, it renders onto a real terminal
+            # with no widget between it and the escape codes, and the cost of
+            # the belt-and-braces is one function call on a path that is about
+            # to block on human input anyway.
             answer = await asyncio.to_thread(
-                input, f"Allow tool '{tool_name}' ({description})? [y/N] "
+                input,
+                "Allow tool '{}' ({})? [y/N] ".format(
+                    sanitize_prompt_line(tool_name, limit=120),
+                    sanitize_prompt_line(description),
+                ),
             )
         except (EOFError, KeyboardInterrupt):
             return False

