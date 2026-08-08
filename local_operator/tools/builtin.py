@@ -488,7 +488,7 @@ def _describe_path_approval(action: str, key: str = "path") -> ApprovalDescribeF
             return ""
         try:
             path, inside = _resolve_workspace_path(raw, cwd or ".")
-        except (OSError, ValueError):
+        except (OSError, ValueError, RuntimeError):
             # An unresolvable path is still worth naming; the tool will fail with
             # its own error, and a prompt that says nothing is worse than one
             # that quotes what the model asked for.
@@ -580,7 +580,13 @@ def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
     encrypted" is exactly the kind of thing this prompt exists to surface.
     """
     url = _display_url(str(args.get("url") or "").strip())
-    action = str(args.get("action") or "").strip()
+    # LOWERCASED, because `execute_browser` lowercases before it dispatches and
+    # `BrowserParams.action` is a bare `str` with no enum. Comparing the raw value
+    # meant `SCREENSHOT` fell past the screenshot branch: the prompt said
+    # `browser: SCREENSHOT` — no path, no outside-workspace marker — while the
+    # call wrote a PNG to whatever absolute path it was given. The action string
+    # is model-controlled, so the case is model-controlled too.
+    action = str(args.get("action") or "").strip().lower()
     # A `url` argument is only what the call DOES when the action navigates.
     # `click` and `type` carry the page they act on for context, and announcing
     # "browse: <url>" for them describes a navigation that will not happen while
@@ -649,14 +655,21 @@ def _display_url(raw: str) -> str:
         return raw
     if not parts.hostname:
         return raw
+    try:
+        port = parts.port
+    except ValueError:
+        # `urlsplit` defers port validation to attribute access, so a URL like
+        # `http://h:99999/` parses and then raises on `.port` — outside the try
+        # that exists to keep a malformed URL from crashing the prompt.
+        return raw
     host = _punycode_host(parts.hostname)
     if ":" in host:
         # An IPv6 literal needs its brackets back: `::1:8080` does not say where
         # the address ends and the port begins, on a row whose only job is to
         # state the destination unambiguously.
         host = f"[{host}]"
-    if parts.port:
-        host = f"{host}:{parts.port}"
+    if port:
+        host = f"{host}:{port}"
     tail = parts.path or ""
     if parts.query:
         tail += f"?{parts.query}"
@@ -2972,13 +2985,14 @@ async def _browser_screenshot(
         # literal "~" directory), relative paths resolved against the operator
         # process CWD instead of the session's, and the approval prompt showed
         # the unresolved string the model typed rather than the real target.
-        # NOTE: the write-tier approval prompt shows the RAW arguments the model
-        # wrote (loop.py builds its summary from call.raw_arguments), not this
-        # resolved path — so a user approving `../../evil.png` sees that string.
-        # That matches the pre-existing `write` tool, so it is consistent rather
-        # than a new hazard, but do not mistake resolution here for disclosure
-        # there. `inside` is deliberately unused: unlike read/grep this tool has
-        # no read-tier to escalate FROM, and `write` already always prompts.
+        # The approval prompt now shows the RESOLVED destination: the describers
+        # in this module run `_display_target`, so a user approving
+        # `../../evil.png` reads the absolute path the write will actually touch,
+        # with the hazard clause when it leaves the workspace. (The earlier note
+        # here described the pre-describer behaviour, where the prompt echoed
+        # `call.raw_arguments` and resolution was invisible to the person
+        # answering.) `inside` is deliberately unused: unlike read/grep this tool
+        # has no read-tier to escalate FROM, and `write` already always prompts.
         resolved, _inside = _resolve_workspace_path(raw_path, _safe_cwd(context))
         target = str(resolved)
     else:

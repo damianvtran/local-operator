@@ -1046,6 +1046,11 @@ def test_a_cached_document_that_cannot_be_mapped_is_dropped_so_the_next_call_rec
     arriving as an object -- would otherwise be served as a FRESH hit on every
     start for the full 24h TTL. Measured before the fix: three consecutive calls
     all returned ``static`` with zero fetches and the document stayed on disk.
+
+    Dropping it was not enough either. The call that drops it has already been
+    served from a fresh hit, so the fetch never ran, and the answer fell through
+    to the registry's static rows -- of which an aggregator has NONE. So the same
+    call re-enters the cache once and recovers immediately.
     """
     poisoned = tmp_path / "openrouter.listing.json"
     poisoned.write_text(
@@ -1055,19 +1060,14 @@ def test_a_cached_document_that_cannot_be_mapped_is_dropped_so_the_next_call_rec
     body = {"data": [{"id": "vendor/model", "context_length": 1_000}]}
     client = _StubClient([_Response(200, body)])
 
-    _, first_status = available_models("openrouter", api_key="k", client=client, cache_dir=tmp_path)
-    fetches_after_first = len(client.calls)
-    poisoned_survived = poisoned.exists()
-    models, second_status = available_models(
+    models, first_status = available_models(
         "openrouter", api_key="k", client=client, cache_dir=tmp_path
     )
 
-    # The first call cannot do better than the registry -- the document looks
-    # fresh, so nothing is fetched -- but it must not leave the document behind:
-    # recovery has to happen without the user deleting a file by hand.
-    assert (first_status, fetches_after_first) == ("static", 0)
-    assert not poisoned_survived
-    assert second_status == "ok"
+    # The FIRST call recovers: the unusable document is dropped and refetched in
+    # one pass, because "the next call will fix it" is an empty model list for
+    # every provider whose registry has no static rows.
+    assert first_status == "ok"
     assert len(client.calls) == 1
     assert "vendor/model" in {row.id for row in models}
 
@@ -1093,18 +1093,50 @@ def test_a_cached_document_from_an_older_capture_is_refetched_not_served(tmp_pat
     )
     client = _StubClient([_Response(200, _ANTHROPIC_BODY)])
 
-    _, first_status = available_models(
-        "anthropic", api_key="sk-ant", client=client, cache_dir=tmp_path
-    )
-    fetches_after_first = len(client.calls)
-    models, second_status = available_models(
+    models, first_status = available_models(
         "anthropic", api_key="sk-ant", client=client, cache_dir=tmp_path
     )
 
-    # The stale document looks fresh, so the first call still cannot fetch; what it
-    # must do is drop it, so the second call reads the wire and gets the real 1M.
-    assert (first_status, fetches_after_first) == ("static", 0)
-    assert second_status == "ok"
+    # One pass: the stale document is dropped AND replaced, because a provider
+    # with no static rows would otherwise be left with an empty catalogue until
+    # something else happened to ask again.
+    assert first_status == "ok"
+    assert len(client.calls) == 1
     by_id = {row.id: row for row in models}
     assert by_id["claude-opus-5"].context_window == 1_000_000
-    assert json.loads(stale.read_text())["payload"]["capture"] == discovery.LISTING_CAPTURE_VERSION
+    assert json.loads(stale.read_text())["payload"]["capture"] == discovery.listing_capture_version(
+        "anthropic"
+    )
+
+
+def test_only_the_transport_that_changed_invalidates_its_cache(tmp_path) -> None:
+    """A capture bump is per TRANSPORT, not global.
+
+    A single global number invalidated every provider's cache on upgrade, and for
+    an aggregator — whose registry has no static rows to fall back on — the
+    replacement answer was an empty model list. Only the Anthropic reader started
+    needing a field its writer had not recorded, so only Anthropic's stamp moved.
+    """
+    assert discovery.listing_capture_version("anthropic") == 2
+    assert discovery.listing_capture_version("openrouter") == discovery.LISTING_CAPTURE_DEFAULT
+
+    cached = tmp_path / "openrouter.listing.json"
+    cached.write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time(),
+                "payload": {
+                    "capture": discovery.LISTING_CAPTURE_DEFAULT,
+                    "models": [{"id": "vendor/model", "context_window": 1_000}],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = _StubClient([])
+
+    models, status = available_models("openrouter", api_key="k", client=client, cache_dir=tmp_path)
+    # Served from the cache, no fetch, rows intact — the upgrade did not touch it.
+    assert status == "cached"
+    assert not client.calls
+    assert "vendor/model" in {row.id for row in models}

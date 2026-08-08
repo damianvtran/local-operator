@@ -1363,6 +1363,7 @@ def main() -> int:
                 hosting=args.hosting,
                 model=args.model,
                 train=args.train,
+                resume=getattr(args, "resume", None),
             )
             # Startup preflight (CL-06) for the FOREGROUND path: hosting/
             # model (agent > flag > config) + API-key resolution fail fast

@@ -50,7 +50,19 @@ def resume_dir(config_dir: Path, requested: str) -> Path:
         candidates = [path for path in sessions.glob("*") if (path / TRANSCRIPT_NAME).is_file()]
         if not candidates:
             raise ResumeNotFound("no previous session to resume")
-        return max(candidates, key=lambda path: (path / TRANSCRIPT_NAME).stat().st_mtime)
+
+        def newest(path: Path) -> float:
+            try:
+                return (path / TRANSCRIPT_NAME).stat().st_mtime
+            except OSError:
+                # A directory that vanished mid-scan (retention sweeps run
+                # concurrently) or one whose transcript is unreadable sorts
+                # oldest rather than taking down the resolver on the way to the
+                # TUI.
+                return 0.0
+
+        return max(candidates, key=newest)
+
     # A session id must be ONE path component and nothing else. Enumerating the
     # ways to escape (`/`, `\`, `..`, and on Windows the drive-relative `C:x`
     # form) is a list that is never finished; asking the path library whether the
