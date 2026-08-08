@@ -197,6 +197,89 @@ def test_diff_counters_never_break_the_single_row() -> None:
     _assert_fits(card)
 
 
+# --- the write/edit diff expansion ----------------------------------------
+
+
+def _diff_card() -> ToolCard:
+    """A settled write card carrying a rendered unified diff in details."""
+    card = ToolCard("t", "edit", {"path": "notes.md"})
+    card.mark_done(
+        "Edited notes.md: replaced 1 occurrence(s) of old_text.",
+        {
+            "path": "notes.md",
+            "added": 1,
+            "removed": 1,
+            # diff: `--- `, `+++ `, an @@ hunk, one removed, one added.
+            "diff": [
+                "--- ",
+                "+++ ",
+                "@@ -1,4 +1,4 @@",
+                " a",
+                "-old line",
+                "+new line",
+                " d",
+            ],
+        },
+    )
+    return card
+
+
+def test_diff_powers_expansion_when_the_summary_is_the_only_output() -> None:
+    """A write/edit card expands to its DIFF, not to nothing.
+
+    The tool's result text is a single sentence (the summary), so without the
+    diff payload the card would advertise an expansion that reveals the same
+    line. The diff is what makes ``can_expand`` true and the expanded body
+    non-empty.
+    """
+    card = _diff_card()
+    assert card.can_expand() is True
+    assert card._diff is not None
+    assert card.toggle_expanded() is True
+    content = card._build_content(80).plain
+    assert "+new line" in content
+    assert "-old line" in content
+
+
+def test_diff_lines_are_tinted_by_hunk_role() -> None:
+    """Added lines are success, removed danger, headers/hunks muted, context dim.
+
+    The expanded body must tell the same story as the summary pill: only the
+    leading marker cell is tinted (a coloured line never reads as a wall).
+    """
+    card = _diff_card()
+    card.toggle_expanded()
+    content = card._build_content(80)
+    plus_style = _style_at(content, "+new line")
+    minus_style = _style_at(content, "-old line")
+    ctx_style = _style_at(content, " a")
+    hunk_style = _style_at(content, "@@ -1,4 +1,4 @@")
+    header_style = _style_at(content, "+++")
+    # Build the expected triplet from the semantic hex (``#rrggbb``).
+    def _expect(semantic: str) -> ColorTriplet:
+        hexv = theme_mod.semantic_color(semantic)
+        return ColorTriplet(*[int(hexv[i : i + 2], 16) for i in (1, 3, 5)])
+    # The added line carries the success green; the removed the danger red —
+    # the same two tints the summary pill uses for +N/-N.
+    assert _triplet(plus_style.color) == _expect("success")
+    assert _triplet(minus_style.color) == _expect("danger")
+    # Context rides dim; headers/hunks ride muted — neither success nor danger.
+    assert ctx_style != plus_style and ctx_style != minus_style
+    assert hunk_style != plus_style and hunk_style != minus_style
+    assert header_style != plus_style and header_style != minus_style
+
+
+def test_a_tool_without_a_diff_expands_to_its_raw_output() -> None:
+    """Non-write tools keep the plain-output expansion (no diff in details)."""
+    card = ToolCard("t", "bash", {"command": "ls"})
+    card.mark_done("one\ntwo\nthree")
+    assert card.can_expand() is True
+    assert card._diff is None
+    card.toggle_expanded()
+    content = card._build_content(80).plain
+    assert "one" in content and "three" in content
+
+
 # --- the one-line guarantee ------------------------------------------------
 
 

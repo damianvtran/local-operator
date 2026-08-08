@@ -76,8 +76,11 @@ from local_operator.tui.widgets.editor import (
 )
 from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.status_line import McpStatus, StatusLine, format_cost
+from local_operator.tui.widgets.subagent_panel import SubagentPanel
 from local_operator.tui.widgets.toast import Toast, format_mcp_startup
+from local_operator.tui.widgets.todo_panel import TodoPanel
 from local_operator.tui.widgets.tool_card import ToolCard
+from local_operator.tui.widgets.trajectory import TrajectoryScreen
 from local_operator.tui.widgets.usage_panel import (
     UsageDismissed,
     UsagePanel,
@@ -109,6 +112,11 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("exit", "Quit the app", aliases=("quit",)),
     SlashCommand("clear", "Clear the transcript (history is untouched)"),
     SlashCommand("reload", "Retry starting the session"),
+    SlashCommand(
+        "resume",
+        "List recent sessions, or resume one (id)",
+        aliases=("recall",),
+    ),
     SlashCommand("model", "Show or switch model (provider/id)", aliases=("models",)),
     SlashCommand("provider", "List providers and their login/usage state"),
     SlashCommand("accounts", "List stored credentials"),
@@ -256,10 +264,16 @@ class OperatorApp(App[None]):
         session_factory: Callable[[], Awaitable[SessionProtocol]],
         theme_name: str = "dark",
         provider_controller: Any | None = None,
+        resume_factory: Callable[[str], Awaitable[SessionProtocol]] | None = None,
     ) -> None:
         super().__init__()
         theme_mod.set_theme(theme_name)  # dark is the product's island night
         self._session_factory = session_factory
+        # ``/resume <id>`` rebinds the session factory to a resume-specific one
+        # (the CLI wires it to ``create_session`` with ``args.resume`` mutated)
+        # and reloads — the "proper /resume command" the app is asked for. A
+        # bare ``/resume`` lists recent sessions instead.
+        self._resume_factory = resume_factory
         # Full provider/model/credential/usage facade behind the slash
         # commands; ``None`` degrades /provider /usage /model-switch to
         # pointer notices when it is absent.
@@ -290,6 +304,14 @@ class OperatorApp(App[None]):
         # real change instead of every tick.
         # (task jobs, bash jobs) last painted, so a repaint only happens on change.
         self._subagents_shown: tuple[int, int] = (0, 0)
+        # The dock band (subagent task list + todo list) above the input. Both
+        # are refs rather than query_one lookups because they are mounted once
+        # and repainted on a scheduler tick — a live handle avoids a relookup
+        # per poll and makes the handlers below read as plain calls. Trajectory
+        # opens through the same handle's on_open callback, which pushes the
+        # child's retained event list as a modal.
+        self._subagent_panel: SubagentPanel | None = None
+        self._todo_panel: TodoPanel | None = None
         # Serializes interactive login flows so two /login commands can never
         # race the one suspended terminal.
         self._login_lock: Any | None = None
@@ -334,6 +356,17 @@ class OperatorApp(App[None]):
         # hidden the splash on mount.
         with TranscriptView():
             yield WelcomeView(lambda: session_welcome_info(self._session, self._providers))
+        # The dock band: subagent task list + todo list, sitting between the
+        # transcript and the composer. It is a transparent POSITIONER (zero own
+        # height when empty) holding one filled body per panel; the two panels
+        # each manage their own `display` so the band collapses to nothing when
+        # neither has content. Holding a ref lets the 1 Hz poll and the
+        # Subagent*/tool-end handlers repaint it without a relookup per tick.
+        self._subagent_panel = SubagentPanel(on_open=self._open_subagent_trajectory)
+        self._todo_panel = TodoPanel()
+        with Container(id="band"):
+            yield self._subagent_panel
+            yield self._todo_panel
         # Two containers for one panel: the dock is the docked POSITIONER, and
         # the shell is the panel the user sees — the fill, the padding, and the
         # boot layout's clamp. A docked widget cannot be centred by its parent,
@@ -441,6 +474,47 @@ class OperatorApp(App[None]):
         )
         self._wire_mcp_status(session)
         self._report_mcp_startup(session)
+        self._render_resumed_history(session)
+
+    def _render_resumed_history(self, session: Any) -> None:
+        """Replay a resumed session's prior messages onto the transcript.
+
+        ``--resume`` restores the conversation into LLM context but the TUI
+        transcript is a separate surface, so without this the app opens on a
+        blank screen that reads as a failed resume even though the model sees
+        everything. This mounts the prior user prompts and assistant replies as
+        blocks, so the resumed session looks resumed. Tool results and the
+        compaction summary are deliberately skipped (too noisy to replay as
+        blocks; the conversation reads cleanest as prompts + replies).
+
+        Guarded: a fresh session has an empty history, and a /clear already
+        retired the splash — this must not fight either.
+        """
+        try:
+            history = list(session.history())
+        except Exception:
+            return  # defensive: reduced hosts may lack the accessor
+        appended = False
+        for message in history:
+            role = getattr(message, "role", None)
+            text = getattr(message, "text", None) if hasattr(message, "text") else None
+            if isinstance(text, str):
+                text = text.strip()
+            if not text:
+                continue  # tool-use or empty assistant message — no prose
+            if role == "user":
+                self._append_block(UserBlock(text))
+                appended = True
+            elif role == "assistant" and getattr(message, "tool_calls", None) is None:
+                block = AssistantBlock()
+                block.update_text(text)
+                block.finalize_text()
+                self._append_block(block)
+                appended = True
+        if appended:
+            # The splash and the centred boot layout were retired by the first
+            # mounted block via _append_block; nothing further is needed here.
+            pass
 
     def _on_boot_failed(self, error: Exception) -> None:
         """Report a session that never constructed, WITHOUT retiring the splash.
@@ -498,6 +572,44 @@ class OperatorApp(App[None]):
             mcp=McpStatus(),
         )
         await self._boot_session()
+
+    def _cmd_resume(self, arg: str, notice: NoticeFn) -> None:
+        """``/resume`` — list recent sessions; ``/resume <id>`` — resume one.
+
+        A bare ``/resume`` lists the resumable sessions (newest first, with
+        age) as a notice — the pickable list the recovery question actually
+        needs, in the same grammar ``--resume`` reports on exit. An id (or the
+        ``@latest`` sentinel) rebinds the session factory to one that boots
+        THAT session and reloads, so the TUI can jump between conversations
+        without a shell round-trip. Without a CLI-provided resume factory the
+        resume path is unavailable and only the listing is offered.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.resume import format_age, recent_sessions
+
+        if self._resume_factory is None:
+            notice("resume requires a resume-capable launcher — see CLI", "warning")
+        recent = recent_sessions(config_dir(), limit=10)
+        if not recent:
+            notice("no previous sessions to resume", "warning")
+            return
+        if not arg:
+            now = float(__import__("time").time())
+            lines = [f"recent sessions — /resume <id> to open one:"]
+            for session_id, mtime in recent:
+                lines.append(f"  {session_id}   {format_age(now - mtime)}")
+            notice("\n".join(lines), "note")
+            return
+        resume_id = (arg.strip() or "latest").lstrip("@")
+        if self._resume_factory is None:
+            notice("resume unavailable: no resume-capable launcher", "warning")
+            return
+        # Rebind the factory so the reload boots the named session, then reuse
+        # the same teardown/reboot path as /reload. Failures inside the new
+        # factory surface through _on_boot_failed exactly as a bad --resume does.
+        self._session_factory = lambda: self._resume_factory(resume_id)  # type: ignore[misc]
+        notice(f"resuming session {resume_id}…")
+        self.run_worker(self._reload_session(), thread=False, group="session")
 
     # -- MCP status ---------------------------------------------------------
     def _wire_mcp_status(self, session: SessionProtocol) -> None:
@@ -1194,11 +1306,50 @@ class OperatorApp(App[None]):
         """Repaint the counter segments only when a running count changes."""
         agents = self._job_count("task")
         jobs = self._job_count("bash")
-        if (agents, jobs) == self._subagents_shown:
-            return
-        self._subagents_shown = (agents, jobs)
-        if self._status is not None:
-            self._status.update(subagents=agents, jobs=jobs)
+        if (agents, jobs) != self._subagents_shown:
+            self._subagents_shown = (agents, jobs)
+            if self._status is not None:
+                self._status.update(subagents=agents, jobs=jobs)
+        # The band's belt to the event stream's suspenders: elapsed time and
+        # job status move with no Subagent*/tool-end event at all, so the 1 Hz
+        # poll is what keeps them live. Both panels gate their own repaint on
+        # an equality/membership fingerprint, so a no-change tick is nearly
+        # free — and never raises, since a status surface may not take the app
+        # down (see the panels' own docstrings).
+        self._refresh_band()
+
+    def _refresh_band(self) -> None:
+        """Repaint the dock band (subagent + todo) from live session state.
+
+        Called on the 1 Hz poll and from the Subagent* event handlers. Safe to
+        call before the session is booted: both panels tolerate a ``None``
+        session (they read ``getattr``/``getattr(session, 'jobs', None)`` and
+        treat a missing manager as empty).
+        """
+        session = self._session
+        if self._subagent_panel is not None:
+            self._subagent_panel.sync(session)
+        if self._todo_panel is not None:
+            self._todo_panel.sync(session)
+
+    def _open_subagent_trajectory(self, job_id: str) -> None:
+        """Open the trajectory modal for one task job.
+
+        Reads the child's retained events once, at open (a snapshot, so
+        reading never races the child still writing them — same contract as
+        :class:`TrajectoryScreen`). Falls back to an honest empty state when
+        the job is gone (already swept) or carried no trajectory.
+        """
+        session = self._session
+        manager = getattr(session, "jobs", None) if session is not None else None
+        job = manager.get(job_id) if manager is not None else None
+        is_error = bool(
+            job is not None and (job.status == "failed" or (job.error_text and not job.result_text))
+        )
+        status = "failed" if is_error else (getattr(job, "status", "") or "running")
+        label = getattr(job, "label", "") if job is not None else job_id
+        events = getattr(job, "trajectory", None) if job is not None else None
+        self.push_screen(TrajectoryScreen(label, status, events or []))
 
     def _job_count(self, kind: str) -> int:
         """Running jobs of one ``kind`` — ``task`` (subagents) or ``bash``.
@@ -1293,6 +1444,8 @@ class OperatorApp(App[None]):
         elif command == "/reload":
             notice("reloading session…")
             self.run_worker(self._reload_session(), thread=False, group="session")
+        elif command == "/resume":
+            self._cmd_resume(arg, notice)
         elif command == "/model":
             self._cmd_model(arg, notice)
         elif command == "/provider":
@@ -1342,10 +1495,25 @@ class OperatorApp(App[None]):
         if not arg:
             self._open_model_picker()
             return
+        # ``/model default <provider>/<id>`` PERSISTS the choice as the boot
+        # default (config ``hosting`` + ``model_name``), so later launches
+        # open on it. Distinct from ``/model <p>/<id>``, which only switches
+        # the running session: the user phrase "make this the default" has no
+        # other home, and the picker's current-row marker already covers "which
+        # am I on". Writing config here keeps the one-word habit — ``/model
+        # default openrouter/deepseek/deepseek-chat`` — and the live switch
+        # stays available on the same command.
+        persist_default = arg.lower().startswith("default ")
+        target = arg[len("default ") :].strip() if persist_default else arg
+        if persist_default and not target:
+            notice(
+                "usage: /model default <provider>/<model-id>", "warning"
+            )
+            return
         if session is None or not hasattr(session, "set_model"):
             notice("session is still starting…", "warning")
             return
-        provider, sep, model_id = arg.partition("/")
+        provider, sep, model_id = target.partition("/")
         if not sep or not model_id:
             notice(
                 "usage: /model <provider>/<model-id> (e.g. openrouter/deepseek/deepseek-chat)",
@@ -1370,6 +1538,27 @@ class OperatorApp(App[None]):
             return
         old_label = session.model_label
         session.set_model(spec)
+        if persist_default:
+            # Persist as the boot default. Written independently of the live
+            # switch above so the two stay composable (``/model default p/m``
+            # both switches AND persists; a future flag could persist-only).
+            # Failure to write is reported but not fatal — the session already
+            # switched, and a read-only config dir should not take down a
+            # working prompt.
+            try:
+                from local_operator.config import ConfigManager
+                from local_operator.paths import config_dir
+
+                manager = ConfigManager(config_dir())
+                manager.set_config_value("hosting", provider)
+                manager.set_config_value("model_name", model_id)
+            except Exception as error:  # config write failure
+                notice(f"model switched, but could not save default: {error}", "warning")
+                suffix, warning = self._model_access_note(provider)
+                notice(f"model: {old_label} → {session.model_label} (next turn){suffix}")
+                if warning:
+                    notice(warning, "warning")
+                return
         if self._status is not None:
             # The window and the effort belong to the SPEC, not the session:
             # a switch that repainted only the label would leave the context
@@ -1380,7 +1569,10 @@ class OperatorApp(App[None]):
                 context_window=_context_window(session),
             )
         suffix, warning = self._model_access_note(provider)
-        notice(f"model: {old_label} → {session.model_label} (next turn){suffix}")
+        if persist_default:
+            notice(f"default model saved: {provider}/{model_id} (next launch){suffix}")
+        else:
+            notice(f"model: {old_label} → {session.model_label} (next turn){suffix}")
         if warning:
             notice(warning, "warning")
 
@@ -2476,6 +2668,12 @@ class OperatorApp(App[None]):
     def on_tool_ended(self, message: ToolEnded) -> None:
         event = message.event
         card = self._tool_cards.pop(event.tool_call_id, None)
+        # A todo change is visible the moment its tool settles, rather than on
+        # the next 1 Hz poll: the receipt and the band update together. The
+        # subagent panel needs no such hook — its data changes only through
+        # Subagent* events, which already repaint.
+        if str(getattr(event, "tool_name", "") or "") == "todo":
+            self._refresh_band()
         if card is None:
             return
         # Hand the card the FULL result text and details, not just a summary
@@ -2512,6 +2710,20 @@ class OperatorApp(App[None]):
             self._append_block(NoticeBlock("retry succeeded", "info"))
         else:
             self._append_block(NoticeBlock("retry failed", "error"))
+
+    # Subagent events arrive through the Controller's `_post` on the shared
+    # stream; each is an immediate repaint trigger for the band, paired with
+    # the 1 Hz poll as the belt (see `_refresh_band`). The panel re-reads the
+    # manager itself, so the handlers only need to fire the refresh, never to
+    # carry job data.
+    def on_subagent_started(self, message: SubagentStarted) -> None:
+        self._refresh_band()
+
+    def on_subagent_progress(self, message: SubagentProgress) -> None:
+        self._refresh_band()
+
+    def on_subagent_ended(self, message: SubagentEnded) -> None:
+        self._refresh_band()
 
 
 def _model_spec(session) -> Any | None:

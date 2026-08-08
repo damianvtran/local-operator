@@ -563,3 +563,88 @@ ApprovalBlock.approval-pending {
 ApprovalBlock:focus {
     background: $lo-tint-select;
 }
+
+/* ── dock band (subagent task list + todo list) ────────────────────────── *
+ *
+ * Sits between the transcript and the composer: a transparent POSITIONER that
+ * reserves rows only when a panel inside it is visible, so an idle session
+ * costs the layout nothing. The two panels each manage their own `display`
+ * (hidden when their ledger/store is empty), and each holds ONE filled body
+ * (`$lo-surface`, the tool card's elevation) on the ground — the same
+ * "elevation is a background step, never a line" rule as everything else. The
+ * slot's top padding row is the ONE margin the sheet permits: it separates the
+ * band from the transcript, and it is padding on the slot, never a margin, so
+ * the element that owns the vertical rhythm is the container. */
+#band {
+    dock: bottom;
+    height: auto;
+    align-horizontal: center;
+}
+
+.band-slot {
+    width: 1fr;
+    height: auto;
+    padding: 1 0 0 0;
+}
+
+.band-body {
+    width: 1fr;
+    height: auto;
+    background: $lo-surface;
+    padding: 0 1;
+}
+
+#subagent-header {
+    color: $lo-dim;
+}
+
+/* A row is a live surface: hover lights it, and a running row's trailing cell
+ * carries the spinner glyph. Rows are Static; the whole row is the click/Enter
+ * target for the trajectory modal, so hover and focus must read as reachable. */
+SubagentRow {
+    width: 1fr;
+    height: 1;
+}
+
+SubagentRow:hover {
+    background: $lo-overlay;
+}
+
+/* ── trajectory modal ──────────────────────────────────────────────────── *
+ *
+ * Opened from a band row (click or Enter). The modal is the app's own
+ * "floating read surface": same overlay ramp as the toast/usage, borderless,
+ * content-sized, holding a pinned header and a scrolling body. Esc dismisses.
+ */
+TrajectoryScreen {
+    align: center middle;
+    background: $lo-sunken;
+}
+
+TrajectoryScreen .trajectory {
+    width: auto;
+    height: auto;
+    max-width: 80;
+    max-height: 60%;
+    background: $lo-overlay;
+    padding: 1;
+}
+
+#trajectory-header {
+    width: auto;
+    height: auto;
+    color: $lo-fg;
+}
+
+#trajectory-scroll {
+    width: auto;
+    height: auto;
+    max-height: 50vh;
+}
+
+.trajectory-row {
+    width: auto;
+    height: auto;
+    color: $lo-fg;
+}
+

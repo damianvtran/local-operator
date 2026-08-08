@@ -493,6 +493,10 @@ class ToolCard(TranscriptBlock):
         self._removed = 0
         #: Cleaned result lines, populated once the tool finishes.
         self._output: list[str] = []
+        #: The write/edit tool's rendered unified diff (``details["diff"]``),
+        #: colourised at render time. ``None`` (not []) when the tool reported
+        #: no diff — a read or bash card expands to its raw output instead.
+        self._diff: list[str] | None = None
         #: Rows the card currently occupies (1 collapsed, N expanded).
         self._row_count = 1
         self._refresh_row()
@@ -669,9 +673,21 @@ class ToolCard(TranscriptBlock):
             self._refresh_row()
 
     def _absorb_result(self, result_text: str, details: dict[str, Any] | None) -> None:
-        """Capture the payload the expansion and the diff counters read."""
+        """Capture the payload the expansion and the diff counters read.
+
+        The write/edit tools report a rendered unified diff under
+        ``details["diff"]``; when present, that diff is what the expanded card
+        reveals (coloured per line), and the raw output is not also shown —
+        one story per card. Plain-output tools (bash, read) have no diff and
+        expand to their cleaned output as before.
+        """
         self._added, self._removed = _diff_counts(details)
         self._output = self._clean_output(result_text)
+        diff = details.get("diff") if isinstance(details, dict) else None
+        if isinstance(diff, list) and diff:
+            self._diff = [str(line) for line in diff]
+        else:
+            self._diff = None
 
     def _clean_output(self, result_text: str) -> list[str]:
         """Normalise the result into displayable rows (empty = nothing to show).
@@ -698,8 +714,13 @@ class ToolCard(TranscriptBlock):
 
     # -- expansion ----------------------------------------------------------
     def can_expand(self) -> bool:
-        """True when the card holds output the one-line summary cannot show."""
-        return bool(self._output)
+        """True when the card holds output the one-line summary cannot show.
+
+        Either the plain result output, or a write/edit diff (which can be
+        present on its own — a new-file write's summary line is one sentence
+        while its diff is the whole file).
+        """
+        return bool(self._output) or bool(self._diff)
 
     @property
     def expanded(self) -> bool:
@@ -956,13 +977,23 @@ class ToolCard(TranscriptBlock):
     def _build_content(self, width: int) -> Text:
         """The card: the one-row summary, plus the output when expanded."""
         row = self._build_row(width)
-        if not self._expanded or not self._output:
+        if not self._expanded:
             return row
+        if self._diff:
+            self._append_diff_body(row, width)
+        elif self._output:
+            self._append_output_body(row, width)
+        return row
+
+    def _append_output_body(self, row: Text, width: int) -> None:
+        """The plain-result expansion (bash/read/etc.): one line per row.
+
+        The output block reuses the card's own inner padding budget and
+        truncates per line: one output line is one row, so the expanded
+        height is exactly what the marker promises and never reflows.
+        """
         dim = Style(color=theme_mod.semantic_color("dim"))
         body = Style(color=theme_mod.semantic_color("danger")) if self._state == "error" else dim
-        # The output block reuses the card's own inner padding budget and
-        # truncates per line: one output line is one row, so the expanded
-        # height is exactly what the marker promises and never reflows.
         line_width = max(1, width - 2 - OUTPUT_INDENT)
         indent = " " * OUTPUT_INDENT
         shown = self._output[:EXPAND_MAX_LINES]
@@ -974,7 +1005,42 @@ class ToolCard(TranscriptBlock):
             marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(marker, line_width), style=dim)
-        return row
+
+    def _append_diff_body(self, row: Text, width: int) -> None:
+        """The write/edit expansion: the unified diff, coloured by hunk line.
+
+        ``+`` added in the success green, ``-`` removed in danger, ``@@``
+        hunk markers and ``---/+++`` headers muted, context lines dim — the
+        same ink law as the counters in the summary row, so the pill on the
+        one-line summary and the expanded body tell the same story. Only the
+        leading marker character is coloured here; the text rides the card's
+        default so a coloured line never reads as a wall of tint.
+        """
+        success = Style(color=theme_mod.semantic_color("success"))
+        danger = Style(color=theme_mod.semantic_color("danger"))
+        muted = Style(color=theme_mod.semantic_color("muted"))
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        line_width = max(1, width - 2 - OUTPUT_INDENT)
+        indent = " " * OUTPUT_INDENT
+        shown = self._diff[:EXPAND_MAX_LINES]
+        for raw in shown:
+            line = raw.rstrip()
+            prefix = line[:1] if line else ""
+            if line.startswith("---") or line.startswith("+++") or prefix == "@":
+                ink = muted
+            elif prefix == "+":
+                ink = success
+            elif prefix == "-":
+                ink = danger
+            else:
+                ink = dim
+            row.append("\n" + indent, style=dim)
+            row.append(truncate_cells(line, line_width), style=ink)
+        hidden = len(self._diff) - len(shown)
+        if hidden > 0:
+            marker = f"… {hidden} more diff line{'s' if hidden != 1 else ''}"
+            row.append("\n" + indent, style=dim)
+            row.append(truncate_cells(marker, line_width), style=dim)
 
     def _name_col(self, width: int) -> int:
         """The ledger's shared name column, in cells.

@@ -90,8 +90,8 @@ class TodoPanel(Container):
     def compose(self):  # type: ignore[override]
         yield self._body
 
-    # -- refresh -------------------------------------------------------------
-    def refresh(self, session: Any) -> None:
+    # -- sync -----------------------------------------------------------------
+    def sync(self, session: Any) -> None:
         """Re-read the store and repaint only on change.
 
         Called on the todo tool's ``tool_execution_end`` (immediate) AND on the
