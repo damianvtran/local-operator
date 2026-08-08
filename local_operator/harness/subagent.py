@@ -30,8 +30,8 @@ the subagent launcher itself (children are one level deep: a grandchild
 would register on the CHILD's job manager where no panel looks).
 
 Capacity: registration honours ``AsyncJobManager.at_capacity`` by parking
-the job with ``queued=True``; the manager's ``promote_queued`` starts parked
-jobs whenever any job settles and frees a slot. ``jobs.cancel`` aborts the
+the job with ``queued=True``; the manager's ``_promote_oldest_queued`` starts
+parked jobs whenever any job settles and frees a slot. ``jobs.cancel`` aborts the
 child: the manager aborts the job signal (bridged onto ``child.abort``) and
 cancels the runner task, and the runner's teardown disposes the child.
 """

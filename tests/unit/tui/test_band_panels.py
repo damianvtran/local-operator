@@ -306,6 +306,7 @@ async def test_subagent_band_does_not_crush_the_transcript() -> None:
 
         sub = app.query_one(SubagentPanel)
         transcript = app.query_one(TranscriptView)
+        input_shell = app.query_one("#input-shell")
         assert sub.display is True
         # The band (header + one row + slot padding) must be a few rows, NOT
         # the full height. The transcript must keep the great majority.
@@ -313,3 +314,13 @@ async def test_subagent_band_does_not_crush_the_transcript() -> None:
         trans_height = transcript.region.height
         assert band_height <= 4, f"band ballooned to {band_height} rows"
         assert trans_height >= 10, f"transcript crushed to {trans_height} rows"
+        # D-15-01: the band's content must sit ABOVE the composer (the input
+        # shell), never overlapping it — a sibling bottom-dock previously
+        # painted the band's rows blank behind the input. The subagent panel's
+        # bottom must end at or above the input shell's top.
+        assert sub.region.bottom <= input_shell.region.y, (
+            f"subagent band ({sub.region}) overlaps input shell ({input_shell.region})"
+        )
+        # And the row's text is actually rendered (not blanked).
+        row = sub.query("SubagentRow")[0]
+        assert "summarize workspace" in str(getattr(row, "content", ""))
