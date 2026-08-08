@@ -920,8 +920,18 @@ class Session:
         if strategy == "off":
             return
         if settings.threshold_tokens <= 0 and settings.threshold_percent <= 0:
-            default_threshold = min(int(self._model.context_window * 0.8), 600_000)
-            settings = settings.model_copy(update={"threshold_tokens": default_threshold})
+            # Resolve through the API so the §C default, the 600k absolute cap
+            # AND the max_threshold_tokens defensive ceiling stay in ONE
+            # place (this path used to clone the formula and silently dropped
+            # the cap, so a session on a provider advertising a huge window
+            # never compacted until it stalled).
+            settings = settings.model_copy(
+                update={
+                    "threshold_tokens": compaction_api.resolve_threshold_tokens(
+                        self._model.context_window, settings
+                    )
+                }
+            )
 
         llm_history = self._convert_to_llm(list(self._context.messages))
 

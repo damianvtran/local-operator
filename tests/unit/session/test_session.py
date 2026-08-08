@@ -342,6 +342,7 @@ async def test_compaction_runs_when_due(tmp_path, monkeypatch):
         keep_recent_tokens: int = 20000
         threshold_percent: float = -1.0
         threshold_tokens: int = Field(default=-1)
+        max_threshold_tokens: int = 600_000
         auto_continue: bool = True
 
     prune_calls: list[tuple[int, int]] = []
@@ -362,7 +363,13 @@ async def test_compaction_runs_when_due(tmp_path, monkeypatch):
     )
     setattr(fake_api, "find_cut_point", lambda messages, keep: 1)  # cut after first message
     setattr(
-        fake_api, "resolve_threshold_tokens", lambda window, settings: settings.threshold_tokens
+        fake_api,
+        "resolve_threshold_tokens",
+        lambda window, settings: (
+            settings.threshold_tokens
+            if settings.threshold_tokens > 0
+            else min(int(window * 0.8), getattr(settings, "max_threshold_tokens", 600_000))
+        ),
     )
     setattr(fake_api, "RECOVERY_BAND", 0.8)
 
@@ -458,6 +465,7 @@ async def test_compaction_below_bound_never_pays_for_the_exact_estimate(tmp_path
         keep_recent_tokens: int = 20000
         threshold_percent: float = -1.0
         threshold_tokens: int = Field(default=-1)
+        max_threshold_tokens: int = 600_000
         auto_continue: bool = True
 
     exact_calls: list[int] = []
@@ -476,7 +484,13 @@ async def test_compaction_below_bound_never_pays_for_the_exact_estimate(tmp_path
         fake_api, "compaction_context_tokens", lambda provider, local: max(provider or 0, local)
     )
     setattr(
-        fake_api, "resolve_threshold_tokens", lambda window, settings: settings.threshold_tokens
+        fake_api,
+        "resolve_threshold_tokens",
+        lambda window, settings: (
+            settings.threshold_tokens
+            if settings.threshold_tokens > 0
+            else min(int(window * 0.8), getattr(settings, "max_threshold_tokens", 600_000))
+        ),
     )
     setattr(
         fake_api, "should_compact", lambda ctx, window, settings: ctx > settings.threshold_tokens
