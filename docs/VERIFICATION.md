@@ -1108,8 +1108,11 @@ for ten minutes.
 
 ## Final gate: measured at `24fecb162`
 
-Every number below was produced at this head, not carried forward. Where a claim
-is about a change, both branches were painted — the rule the review rounds
+Every number in the tables below was produced at this head. One figure in the
+prose is explicitly historical and labelled as such — the 30-turn direct-key
+cache run, which cannot be reproduced here because the key is gone; it is marked
+where it appears and is not part of any contract. Where a claim is about a
+change, both branches were painted — the rule the review rounds
 converged on after four findings died to the same error (a consequence reasoned
 from a mechanism's description, with only the branch where the change was absent
 actually measured).
@@ -1136,9 +1139,15 @@ ran it, and reported `55`. The file is a correct iterative implementation with
 
 The live cache rate on OpenRouter reads 37.3% and is **informational only**: the
 shared pool does not reliably report `cached_tokens`. The structural measurement
-is the contract, because it is the thing this codebase controls — a 30-turn run
-against a direct key earlier in the rewrite measured 94.2% and $0.0164 against
-$0.0517 unclamped.
+is the contract, because it is the thing this codebase controls.
+
+**Historical, not measured at this head** (the direct key it needed has since
+expired, so it cannot be re-run): a 30-turn trajectory against a direct provider
+key earlier in the rewrite measured a **94.2%** live cache rate and $0.0164
+against $0.0517 unclamped. Quoted only as the one end-to-end confirmation that
+the structural number tracks a real provider's accounting; it is one digit from
+the 94.7% above by coincidence, and the two are different measurements of
+different things.
 
 ### Approval-prompt safety
 
@@ -1150,9 +1159,20 @@ rather than a cosmetic one, so it is fuzzed rather than sampled:
 | `_display_url` | 11,381 (scheme × userinfo decoy × real host × port × tail, plus degenerate inputs) | 0 userinfo leaks, 0 non-ASCII hosts, 0 raises, 0 credential leaks |
 | `_resolve_workspace_path` | full path matrix, **both** branches of the `expanduser` guard | 0 cases where `inside` is True while the resolved path lies outside the root |
 
-Two defects were found this way rather than by review, and both were regressions
-introduced by earlier fixes in the same series: `_display_url` degrading to the
-unsanitised input on an unreadable port, and `resolve()` raising `ValueError` on
-an embedded NUL. Both now fail closed — a target that cannot be characterised
-escalates and says so, in its own words (`unresolvable — `) rather than borrowing
-the workspace clause it would contradict.
+Two defects were found this way rather than by review. They are different in
+origin and in remedy, and an earlier draft of this section got both wrong:
+
+* **`_display_url` degrading to the unsanitised input on an unreadable port** was
+  a regression introduced by an earlier fix in this series. It is remedied by
+  **sanitising**, not by escalating: the port is dropped and the row paints
+  `http! evil.test/x`. There is no hazard clause on that row and there should not
+  be — the destination is known, and it is now stated correctly.
+* **`resolve()` raising `ValueError` on an embedded NUL** was NOT introduced here.
+  It is present unguarded at base `2a4c560`, where `_resolve_workspace_path`
+  raises straight through five call sites (verified by running the base copy).
+  This is the one remedied by **failing closed**: a target that cannot be
+  characterised escalates and says so in its own words (`unresolvable — `) rather
+  than borrowing the workspace clause it would contradict.
+
+The distinction matters because "fails closed" is a claim about a gate, and only
+one of these two touches a gate.
