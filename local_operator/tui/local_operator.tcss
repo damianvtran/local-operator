@@ -326,6 +326,40 @@ Toast {
     color: $lo-fg;
 }
 
+/* ---- usage panel (the `/usage` popup) --------------------------------- *
+ *
+ * Same treatment as the toast, and for the same reasons: it floats above every
+ * other surface, so it takes `overlay` (the ramp's top step) as a FILL, with no
+ * border — elevation is a background step, never a line (D4).
+ *
+ * It differs from the toast in what it is FOR, not in how it is placed. It is
+ * read rather than glanced at, so it holds focus and is dismissed by a key
+ * instead of a timer: nothing about the session changes underneath a table the
+ * user is reasoning about.
+ *
+ * The host HUGS the panel (`width: auto`) and both are positioned by a
+ * Python-set offset — the identical rule the toast host carries, for the
+ * identical reason. Textual hands a widget its whole region and BLANKS all of
+ * it, so a `width: 100%` host on this layer erases every column of every row
+ * the panel covers, including the transcript text either side of it. The layer
+ * keeps the panel out of the LAYOUT; it does not keep it off the screen. That
+ * also rules out `align: center middle` here, which needs a stretched host —
+ * the centring is arithmetic in the widget instead, against the measured
+ * screen it already has to read to size its own bars. */
+#usage-host {
+    layer: toast;
+    width: auto;
+    height: auto;
+}
+
+UsagePanel {
+    width: auto;
+    height: auto;
+    padding: 0 1;
+    background: $lo-overlay;
+    color: $lo-fg;
+}
+
 /* ---- welcome view (new-session empty state) --------------------------- *
  *
  * Lives INSIDE the transcript, so it is handed exactly the region above the

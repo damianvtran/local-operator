@@ -48,7 +48,9 @@ from local_operator.harness.types import (
     MessageUpdateEvent,
     NoticeEvent,
     RetryEndEvent,
-    RetryStartEvent,
+    SubagentEndEvent,
+    SubagentProgressEvent,
+    SubagentStartEvent,
     ToolCallComposeEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
@@ -198,6 +200,47 @@ class RetryEnded(Message):
     def __init__(self, success: bool) -> None:
         super().__init__()
         self.success = success
+
+
+class SubagentStarted(Message):
+    """A child session was registered as a background ``task`` job."""
+
+    def __init__(self, job_id: str, label: str, agent_id: str | None = None) -> None:
+        super().__init__()
+        self.job_id = job_id
+        self.label = label
+        self.agent_id = agent_id
+
+
+class SubagentProgress(Message):
+    """A throttled relay of a child session's activity (tool starts/ends,
+    message ends — never per-token deltas; the relay bounds that)."""
+
+    def __init__(self, job_id: str, label: str, progress: str) -> None:
+        super().__init__()
+        self.job_id = job_id
+        self.label = label
+        self.progress = progress
+
+
+class SubagentEnded(Message):
+    """A child session settled; the band repaints and the transcript gets one
+    line of news."""
+
+    def __init__(
+        self,
+        job_id: str,
+        label: str,
+        status: str,
+        result_text: str | None = None,
+        error_text: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.job_id = job_id
+        self.label = label
+        self.status = status
+        self.result_text = result_text
+        self.error_text = error_text
 
 
 class EventController:
@@ -406,6 +449,24 @@ class EventController:
     def _handle_retry_end(self, event: RetryEndEvent) -> None:
         self._post(RetryEnded(event.success))
 
+    # Subagent events ride the PARENT session stream: the child session's own
+    # stream is the job manager's problem, and the TUI subscribes to exactly
+    # one session. No generation guard here — a child's lifecycle events are
+    # not the parent loop's boundary events, so a stale turn cannot supersede
+    # them; the job id groups them.
+    def _handle_subagent_start(self, event: SubagentStartEvent) -> None:
+        self._post(SubagentStarted(event.job_id, event.label, event.agent_id))
+
+    def _handle_subagent_progress(self, event: SubagentProgressEvent) -> None:
+        self._post(SubagentProgress(event.job_id, event.label, event.progress))
+
+    def _handle_subagent_end(self, event: SubagentEndEvent) -> None:
+        self._post(
+            SubagentEnded(
+                event.job_id, event.label, event.status, event.result_text, event.error_text
+            )
+        )
+
     _HANDLERS = {
         "agent_start": _handle_agent_start,
         "agent_end": _handle_agent_end,
@@ -423,6 +484,9 @@ class EventController:
         "compaction_end": _handle_compaction_end,
         "retry_start": _handle_retry_start,
         "retry_end": _handle_retry_end,
+        "subagent_start": _handle_subagent_start,
+        "subagent_progress": _handle_subagent_progress,
+        "subagent_end": _handle_subagent_end,
     }
 
     # -- flush timer --------------------------------------------------------

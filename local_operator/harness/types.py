@@ -358,6 +358,28 @@ class BrowserSurface:
         self.surface_id = ""
 
 
+@runtime_checkable
+class JobManagerProtocol(Protocol):
+    """The slice of ``harness.jobs.AsyncJobManager`` the tools drive.
+
+    Declared HERE rather than importing the manager because ``harness.jobs``
+    imports THIS module: annotating ``ToolContext.jobs`` with the concrete
+    class would be an import cycle. Exposes exactly what ``wait``/``job``
+    and cancellation need (get, list, cancel) and nothing more — spawning
+    reaches the manager through session-installed launcher closures, never
+    through this surface, so the tools cannot touch the manager's
+    registration or delivery internals. Return types stay ``Any`` for the
+    same edge reason: the ``AsyncJob`` row type cannot be named on this side
+    of the cycle.
+    """
+
+    def get(self, job_id: str, *, owner_id: str | None = None) -> Any: ...
+
+    def list(self, *, owner_id: str | None = None) -> list[Any]: ...
+
+    async def cancel(self, job_id: str, *, owner_id: str | None = None) -> bool: ...
+
+
 class ToolContext(BaseModel):
     """Minimal host-provided context handed to tool execution.
 
@@ -398,6 +420,28 @@ class ToolContext(BaseModel):
     # to the next one. ``None`` degrades the browser tool to a single-call
     # surface the session can never close.
     browser: BrowserSurfaceProtocol | None = None
+    # Launcher for one-shot child sessions run as background jobs (the
+    # ``task`` tool). ``(label, prompt) -> job_id``, registering the run as
+    # an AsyncJob on the host's job manager. The session installs a closure
+    # over its own emit and job manager; ``None`` means the host has no
+    # subagent engine and the task tool is then not advertised at all
+    # (createIf) rather than advertised and always failing — the same
+    # convention ``wake_scheduler`` uses.
+    subagent_launcher: Callable[[str, str], str] | None = None
+    # Launcher for background shell commands (``bash`` with
+    # ``background: true``). ``(label, command) -> job_id``; output streams
+    # into the job's ``latest_details['output']`` as a bounded tail and the
+    # exit code is recorded at settle. Session-installed like the subagent
+    # launcher; ``None`` (a host without a job manager) degrades bash to its
+    # foreground-only behaviour instead of erroring.
+    background_bash_launcher: Callable[[str, str], str] | None = None
+    # The session's background job manager. Declared as a Protocol because
+    # the concrete class lives in ``harness.jobs``, which imports this
+    # module (import cycle). The ``wait``/``job`` tools read it; ``None``
+    # means no background work is tracked and both tools are then not
+    # advertised at all (createIf) rather than advertised and always
+    # failing.
+    jobs: JobManagerProtocol | None = None
 
 
 ToolExecuteFn = Callable[
@@ -674,6 +718,49 @@ class NoticeEvent(AgentEvent[Literal["notice"]]):
     type: Literal["notice"] = "notice"
     text: str
     kind: Literal["info", "warning", "error"] = "info"
+
+
+class SubagentStartEvent(AgentEvent[Literal["subagent_start"]]):
+    """A child session was registered as a background job.
+
+    Subagent events are NOT the parent loop's own boundary events: they relay
+    one CHILD session's lifecycle onto the parent's stream so a front end can
+    render the child's progress. ``job_id`` is the AsyncJob id every event of
+    this subagent carries, which is what lets a UI group them.
+    """
+
+    type: Literal["subagent_start"] = "subagent_start"
+    job_id: str
+    label: str
+    agent_id: str | None = None
+
+
+class SubagentProgressEvent(AgentEvent[Literal["subagent_progress"]]):
+    """A throttled relay of a child session's activity.
+
+    The relay emits one of these on tool starts/ends and message ends —
+    NEVER on every stream delta — because a child streaming a file token by
+    token would otherwise flood the parent stream with per-delta events.
+    ``progress`` is a short human-readable description of the step.
+    """
+
+    type: Literal["subagent_progress"] = "subagent_progress"
+    job_id: str
+    label: str
+    progress: str
+
+
+class SubagentEndEvent(AgentEvent[Literal["subagent_end"]]):
+    """A child session settled. The front end renders completion from THIS
+    event; the runner deliberately adds no NoticeEvent or transcript write
+    for it, so there is exactly one delivery path."""
+
+    type: Literal["subagent_end"] = "subagent_end"
+    job_id: str
+    label: str
+    status: str  # completed | failed | cancelled
+    result_text: str | None = None
+    error_text: str | None = None
 
 
 class CompactionStartEvent(AgentEvent[Literal["compaction_start"]]):

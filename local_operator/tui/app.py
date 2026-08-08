@@ -78,6 +78,11 @@ from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.status_line import McpStatus, StatusLine, format_cost
 from local_operator.tui.widgets.toast import Toast, format_mcp_startup
 from local_operator.tui.widgets.tool_card import ToolCard
+from local_operator.tui.widgets.usage_panel import (
+    UsageDismissed,
+    UsagePanel,
+    UsageRefreshRequested,
+)
 from local_operator.tui.widgets.transcript import (
     GAP_CLASS,
     NoticeBlock,
@@ -270,6 +275,10 @@ class OperatorApp(App[None]):
         # an update for a running tool land on a row that had not started.
         self._composing_cards: dict[str, ToolCard] = {}
         self._welcome: WelcomeView | None = None
+        # Whatever held focus when the usage panel opened, so closing it returns
+        # the user to the composer they were typing in rather than to nothing.
+        # The approval card follows the same discipline for the same reason.
+        self._usage_focus_restore: Any | None = None
         self._working_block: WorkingBlock | None = None
         self._total_cost: float = 0.0
         # Auto-naming fires ONCE per session. Latched here rather than on the
@@ -359,6 +368,13 @@ class OperatorApp(App[None]):
         # mount, and there is no window where two cards exist at once.
         with Container(id="toast-host"):
             yield Toast()
+        # The usage panel shares the toast's layer for the same reason: it is an
+        # overlay the user opens to READ, and taking rows from the transcript to
+        # show it would scroll away the work they opened it to reason about.
+        # Mounted once and kept hidden, so `/usage` never awaits a mount before
+        # it can show its loading state.
+        with Container(id="usage-host"):
+            yield UsagePanel()
 
     def get_css_variables(self) -> dict[str, str]:
         """Brand tokens as the stylesheet's single source of truth."""
@@ -1770,78 +1786,75 @@ class OperatorApp(App[None]):
             if wants_oauth and not wants_key and not self._providers.has_any_credential(target):
                 notice(f"{target} reports usage only after /login {target}", "warning")
                 return
-        notice("fetching usage…")
+        self._open_usage_panel(target)
+
+    def _open_usage_panel(self, target: str) -> None:
+        """Show the panel in its loading state and start the fetch.
+
+        The panel opens BEFORE the request. The fetch crosses the network once
+        per logged-in provider, and a command whose only immediate effect was a
+        transcript notice read as a command that had not run.
+        """
+        panel = self._usage_panel()
+        if panel is None:
+            self._append_block(NoticeBlock("usage panel unavailable", "warning"))
+            return
+        self._usage_focus_restore = self.focused
+        panel.start_fetch(target)
+        panel.focus()
         self.run_worker(self._fetch_usage_worker(target or None), thread=False, group="usage")
 
+    def _usage_panel(self) -> UsagePanel | None:
+        """The mounted panel, or None before compose (or in a stripped harness)."""
+        try:
+            return self.query_one(UsagePanel)
+        except Exception:  # noqa: BLE001 — the panel is optional chrome
+            return None
+
     async def _fetch_usage_worker(self, provider: str | None) -> None:
-        """Worker that fetches usage and posts the result as a block."""
+        """Worker that fetches usage and hands the reports to the panel.
 
-        def notice(body: str, kind: NoticeKind = "info") -> None:
-            self._append_block(NoticeBlock(body, kind))
-
+        A failure is reported INSIDE the panel rather than as a transcript
+        notice: the panel is what has focus and what carries the key that
+        retries, so sending the error anywhere else asks the user to look away
+        from the surface holding the fix.
+        """
+        panel = self._usage_panel()
         try:
             assert self._providers is not None
             reports = await self._providers.fetch_usage([provider] if provider else None)
         except Exception as error:
-            notice(f"usage fetch failed: {error}", "error")
+            if panel is None:
+                self._append_block(NoticeBlock(f"usage fetch failed: {error}", "error"))
+            else:
+                panel.show_error(f"usage fetch failed: {error}")
             return
-        self._append_block(self._usage_block(reports, provider))
+        if panel is None:
+            self._append_block(NoticeBlock("usage panel unavailable", "warning"))
+            return
+        panel.show_reports(reports)
 
-    def _usage_block(self, reports, requested: str | None) -> RichBlock:
-        """Render one or more usage reports as a compact table."""
-        dim = Style(color=theme_mod.semantic_color("dim"))
-        muted = Style(color=theme_mod.semantic_color("muted"))
-        # `label`, NOT accent. Green in this app means "a turn is live" — the
-        # band's always-on brand glyph was moved off it for exactly that reason,
-        # and a static section heading painted the same green teaches the user
-        # that green also means "heading", which weakens the liveness signal
-        # everywhere else.
-        heading = Style(color=theme_mod.semantic_color("label"))
-        lines: list[Text] = []
-        if not reports:
-            lines.append(
-                Text(
-                    "no usage data — this provider has no quota endpoint or no credential",
-                    style=dim,
-                )
-            )
-        for report in reports:
-            head = Text()
-            head.append(report.provider, style=heading)
-            if report.identity:
-                head.append(f"  ({report.identity})", style=muted)
-            head.append(" —", style=dim)
-            lines.append(head)
-            if report.notes:
-                lines.append(Text(f"  {report.notes}", style=dim))
-            for limit in report.limits:
-                a = limit.amount
-                bar = self._usage_bar(a.fraction())
-                status_tint = {
-                    "ok": theme_mod.semantic_color("success"),
-                    "warning": theme_mod.semantic_color("warning"),
-                    "exhausted": theme_mod.semantic_color("danger"),
-                    "unknown": dim,
-                }.get(limit.effective_status(), dim)
-                left = Text()
-                left.append(bar, style=status_tint)
-                label = f" {limit.label}"
-                if limit.window:
-                    label += f" ({limit.window})"
-                amount_text = _format_usage_amount(a)
-                if amount_text:
-                    label += f" — {amount_text}"
-                left.append(label, style=dim)
-                lines.append(left)
-        return RichBlock(Group(*lines))
+    def on_usage_refresh_requested(self, message: UsageRefreshRequested) -> None:
+        """``r`` in the panel — re-run the same fetch behind the same view."""
+        message.stop()
+        if self._providers is None:
+            return
+        panel = self._usage_panel()
+        if panel is None:
+            return
+        target = panel.target
+        panel.start_fetch(target)
+        self.run_worker(self._fetch_usage_worker(target or None), thread=False, group="usage")
 
-    def _usage_bar(self, fraction: float | None, width: int = 12) -> str:
-        """A minimal filled/empty bar; unknown fraction renders all-dots."""
-        if fraction is None:
-            return "·" * width
-        fraction = max(0.0, min(1.0, fraction))
-        filled = round(fraction * width)
-        return "█" * filled + "░" * (width - filled)
+    def on_usage_dismissed(self, message: UsageDismissed) -> None:
+        """Esc/q in the panel — give focus back to whatever had it."""
+        message.stop()
+        restore = self._usage_focus_restore
+        self._usage_focus_restore = None
+        if restore is not None and getattr(restore, "is_mounted", False):
+            restore.focus()  # type: ignore[union-attr]
+        else:
+            self._editor().focus()
 
     # -- provider argument list ---------------------------------------------
     def on_provider_query_opened(self, message: ProviderQueryOpened) -> None:
@@ -2555,47 +2568,6 @@ def _partial_text(partial_result) -> str:
         text = getattr(content, "text", None)
         if text:
             return text
-    return ""
-
-
-def _format_usage_amount(amount) -> str:
-    """The number for one usage row, or ``""`` when the amount carries none.
-
-    ``used`` first, then ``remaining``, then ``limit``, then an explicit fraction.
-    A remaining-only balance — exactly what both account-balance fetchers report,
-    since neither vendor gives a limit to derive spend from — used to print no
-    number at all, leaving a row labelled "Balance" that never said how much and,
-    for DeepSeek, no digit anywhere on screen.
-
-    Units come from ``UNIT_LABELS`` rather than the raw key, so a row reads
-    ``519.86 USD`` and ``30%`` instead of ``519.86 usd`` and ``30 percent``. A unit
-    with no label (``unknown`` — a CNY balance already naming its currency in the
-    label) prints the bare number rather than dropping it.
-    """
-    # Imported here, not at module scope: this file deliberately keeps the
-    # provider layer off the TUI's import graph, and by the time a report exists
-    # the module is already loaded.
-    from local_operator.providers.usage import UNIT_LABELS
-
-    unit = getattr(amount, "unit", "unknown")
-    label = UNIT_LABELS.get(unit, unit)
-
-    def with_unit(value: float) -> str:
-        text = f"{value:.2f}" if unit == "usd" else f"{value:g}"
-        if not label:
-            return text
-        # "%" is a suffix, every other label is a separate word.
-        return f"{text}{label}" if label == "%" else f"{text} {label}"
-
-    if amount.used is not None:
-        return with_unit(amount.used)
-    if amount.remaining is not None:
-        return f"{with_unit(amount.remaining)} left"
-    if amount.limit is not None:
-        return f"{with_unit(amount.limit)} limit"
-    if amount.used_fraction is not None:
-        # The bar already shows this, but a bar cannot be read off precisely.
-        return f"{amount.used_fraction * 100:g}% used"
     return ""
 
 
