@@ -118,8 +118,16 @@ class FakeSession:
     async def seed_history(self, messages: list[Any]) -> None:
         pass
 
+    def history(self) -> list[Any]:
+        return getattr(self, "_history", [])
+
     def steer(self, text: str) -> None:
         pass
+
+    def set_approval_handler(self, handler: object | None) -> None:
+        # The TUI installs its own approval gate on boot (the stdin gate
+        # deadlocks under a full-screen app); fakes only need to accept it.
+        self.approval_handler = handler
 
     def abort(self, reason: str = "interrupted") -> None:
         pass

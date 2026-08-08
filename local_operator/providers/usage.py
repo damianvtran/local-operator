@@ -25,6 +25,24 @@ What local-operator DOES fetch, grouped by the credential it needs:
 ``kimi`` is the only provider with both, and its two routes are different
 endpoints on different hosts rather than two ways of authenticating one.
 
+Providers deliberately absent, because the credential they need is one
+local-operator does not hold: ``google`` (the Gemini quota endpoint is part of
+the Gemini CLI's Cloud Code OAuth; local-operator's Google provider is an AI
+Studio API key, which that endpoint rejects) and ``alibaba`` (a browser console
+session cookie, not the DashScope key). Both would need a new login flow before
+a fetcher could reach anything, and advertising a provider whose table can only
+ever be empty is worse than being incomplete.
+
+**Vendors report utilization, not spend.** Every subscription endpoint here
+quotes a PERCENTAGE — ``utilization`` (Anthropic), ``used_percent``
+(OpenAI/Codex), ``creditUsagePercent`` (xAI) — nested inside a per-window
+object, and the numeric ones (Kimi) quote strings. Four of the five fetchers
+were originally written against invented ``{"used": N, "limit": N}`` shapes that
+no vendor sends, which parsed to nothing and returned ``None``: a live 200 with
+full data rendered "no usage data", indistinguishable from having no endpoint at
+all. The parsers below are pinned to captured live payloads for that reason, and
+their tests carry the real bodies rather than hand-written ones.
+
 Every fetcher returns the SAME ``UsageReport`` (or ``None`` when the
 provider/credential cannot report) so the TUI renders one shape and is
 never coupled to a provider's response schema. A missing endpoint is not an
@@ -37,8 +55,10 @@ code path here owns a client.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -200,9 +220,33 @@ class UsageLimit:
     window: str = ""
     status: str | None = None  # default derived from amount
     resets_at: str | None = None
+    #: Epoch ms the window rolls over, parsed from ``resets_at`` when the vendor
+    #: sends a timestamp we understand. Kept ALONGSIDE the raw string rather than
+    #: replacing it: the renderer wants "resets in 3h 40m", which needs a number,
+    #: while a vendor string we could not parse is still worth passing through
+    #: rather than dropping.
+    resets_at_ms: int | None = None
+    #: The model family a per-model cap belongs to (Anthropic's scoped weekly
+    #: rows: ``opus``, ``sonnet``, ``fable``). Empty for account-wide windows.
+    #: The renderer groups on this so a tier cap is never mistaken for the
+    #: umbrella limit that actually gates every request.
+    tier: str = ""
+    #: True for the account-wide umbrella windows. A tier row hitting 100% stops
+    #: one model family; a shared row hitting 100% stops the account, and the two
+    #: must not look alike in a list where the user is deciding whether to switch
+    #: models or stop working.
+    shared: bool = False
 
     def effective_status(self) -> str:
         return self.status or self.amount.status()
+
+    def resets_in_ms(self, now_ms: float | None = None) -> int | None:
+        """Milliseconds until the window rolls over, or None if unknown/past."""
+        if self.resets_at_ms is None:
+            return None
+        now = time.time() * 1000 if now_ms is None else now_ms
+        remaining = self.resets_at_ms - now
+        return int(remaining) if remaining > 0 else None
 
 
 @dataclass
@@ -405,61 +449,408 @@ async def fetch_deepseek_balance(client: httpx.AsyncClient, api_key: str) -> Usa
     return UsageReport(provider="deepseek", limits=limits, notes=notes)
 
 
+def _parse_iso_ms(value: Any) -> int | None:
+    """An ISO-8601 timestamp as epoch ms, or None when it is not one.
+
+    Anthropic sends ``2026-08-12T03:59:59.196163+00:00``. ``fromisoformat``
+    handles that on 3.11+; the ``Z`` suffix other vendors use is rewritten
+    because 3.11's parser rejects it outright rather than treating it as UTC.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp() * 1000)
+
+
+def _anthropic_bucket(value: Any) -> tuple[float, int | None] | None:
+    """``(utilization_percent, resets_at_ms)`` from one Anthropic usage bucket.
+
+    The bucket is ``{"utilization": 2.0, "resets_at": "..."}``. It is ``None``
+    for every window the account does not have, which is most of them — the
+    payload lists a dozen internal codenames (``tangelo``, ``nimbus_quill``,
+    ``omelette_promotional``) alongside the two real ones, so "absent" has to be
+    ordinary rather than exceptional.
+
+    A bucket with no ``utilization`` is dropped rather than reported as zero:
+    Anthropic sends ``resets_at``-only buckets, and rendering those as an empty
+    bar says "you have used nothing" when the truth is "nothing was said".
+    """
+    if not isinstance(value, dict):
+        return None
+    utilization = _num(value.get("utilization"))
+    if utilization is None:
+        return None
+    return utilization, _parse_iso_ms(value.get("resets_at"))
+
+
+def _anthropic_limit(
+    limit_id: str,
+    label: str,
+    bucket: tuple[float, int | None] | None,
+    *,
+    window: str,
+    tier: str = "",
+    shared: bool = False,
+) -> UsageLimit | None:
+    """One Anthropic window as a ``UsageLimit``, or None when not reported.
+
+    Utilization arrives as a PERCENT (``100.0`` means the cap is reached), so it
+    is carried as ``used`` against a limit of 100 with the fraction stated
+    explicitly. Deriving the fraction from used/limit alone would work here, but
+    stating it removes any doubt about whether ``2.0`` meant 2% or 200%.
+    """
+    if bucket is None:
+        return None
+    utilization, resets_ms = bucket
+    clamped = max(0.0, min(100.0, utilization))
+    return UsageLimit(
+        id=limit_id,
+        label=label,
+        amount=UsageAmount(
+            used=clamped,
+            limit=100.0,
+            remaining=100.0 - clamped,
+            used_fraction=clamped / 100.0,
+            unit="percent",
+        ),
+        window=window,
+        resets_at_ms=resets_ms,
+        tier=tier,
+        shared=shared,
+    )
+
+
+def _anthropic_scoped_weekly(raw_limits: Any) -> list[UsageLimit]:
+    """Per-model weekly caps from the generic ``limits[]`` array.
+
+    As of mid-2026 Anthropic returns ``null`` for the legacy ``seven_day_opus`` /
+    ``seven_day_sonnet`` buckets and publishes model-scoped caps only here, as
+    ``kind: "weekly_scoped"`` entries naming the family in
+    ``scope.model.display_name``. Reading only the legacy keys is why every
+    per-model row vanished.
+
+    ``is_active`` is deliberately ignored. Live payloads mark only the currently
+    BINDING limit active — this account's 100% weekly row is active while its 2%
+    session row is not — so filtering on it would hide every window except the
+    one already blocking, which is the opposite of what a usage view is for.
+    """
+    limits: list[UsageLimit] = []
+    seen: set[str] = set()
+    if not isinstance(raw_limits, list):
+        return limits
+    for item in raw_limits:
+        if not isinstance(item, dict) or item.get("kind") != "weekly_scoped":
+            continue
+        scope = item.get("scope")
+        model = scope.get("model") if isinstance(scope, dict) else None
+        display = model.get("display_name") if isinstance(model, dict) else None
+        if not isinstance(display, str) or not display.strip():
+            continue
+        name = display.strip()
+        slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+        if not slug or slug in seen:
+            continue
+        seen.add(slug)
+        percent = _num(item.get("percent"))
+        if percent is None:
+            continue
+        limit = _anthropic_limit(
+            f"anthropic:7d:{slug}",
+            f"7 day ({name})",
+            (percent, _parse_iso_ms(item.get("resets_at"))),
+            window="7 day",
+            tier=slug,
+        )
+        if limit is not None:
+            limits.append(limit)
+    return limits
+
+
+def _anthropic_money(value: Any) -> float | None:
+    """A ``{amount_minor, exponent, currency}`` object as whole units of USD.
+
+    Minor units with an explicit exponent, so ``20000`` at exponent 2 is
+    ``$200.00``. A non-USD currency returns None rather than a number wearing the
+    wrong symbol.
+    """
+    if not isinstance(value, dict):
+        return None
+    minor = value.get("amount_minor")
+    exponent = value.get("exponent")
+    if not isinstance(minor, int) or not isinstance(exponent, int):
+        return None
+    if minor < 0 or exponent < 0:
+        return None
+    currency = value.get("currency")
+    if currency is not None and str(currency).upper() != "USD":
+        return None
+    return minor / (10**exponent)
+
+
+def _anthropic_extra_usage(payload: dict[str, Any]) -> UsageLimit | None:
+    """The pay-as-you-go credit meter that tops up an exhausted plan.
+
+    Two shapes exist. The newer ``spend`` object uses minor units; the older
+    ``extra_usage`` uses ``used_credits`` with ``decimal_places``. ``spend`` wins
+    when present because it is what current accounts get.
+
+    Reported ONLY when the account has extra usage enabled. A disabled meter is
+    a $0.00/$200.00 row that reads as spare headroom the account cannot actually
+    draw on — this account has exactly that, ``enabled: false`` with a
+    ``disabled_reason`` — so it becomes a note instead of a bar.
+    """
+    spend = payload.get("spend")
+    if isinstance(spend, dict):
+        if spend.get("enabled") is not True:
+            return None
+        used = _anthropic_money(spend.get("used"))
+        if used is None:
+            return None
+        cap = _anthropic_money(spend.get("limit"))
+        return UsageLimit(
+            id="anthropic:extra",
+            label="Extra usage",
+            amount=UsageAmount(
+                used=used,
+                limit=cap if cap and cap > 0 else None,
+                remaining=(cap - used) if cap and cap > 0 else None,
+                unit="usd",
+            ),
+            window="1 month",
+        )
+    extra = payload.get("extra_usage")
+    if not isinstance(extra, dict) or extra.get("is_enabled") is not True:
+        return None
+    places = extra.get("decimal_places")
+    used = _num(extra.get("used_credits"))
+    if used is None:
+        return None
+    monthly = _num(extra.get("monthly_limit"))
+    divisor = 10 ** (places if isinstance(places, int) and places >= 0 else 2)
+    cap = monthly / divisor if monthly and monthly > 0 else None
+    return UsageLimit(
+        id="anthropic:extra",
+        label="Extra usage",
+        amount=UsageAmount(
+            used=used,
+            limit=cap,
+            remaining=(cap - used) if cap else None,
+            unit="usd",
+        ),
+        window="1 month",
+    )
+
+
+def _anthropic_notes(payload: dict[str, Any]) -> str | None:
+    """Why the extra-usage meter is off, when it is off and would have shown.
+
+    An account sitting at 100% weekly with no visible credit meter looks like a
+    dead end; naming the reason ("extra usage disabled — out of credits") is the
+    difference between a user waiting for a reset they cannot avoid and one
+    buying credits they did not know existed.
+    """
+    for key in ("spend", "extra_usage"):
+        section = payload.get(key)
+        if not isinstance(section, dict):
+            continue
+        enabled = section.get("enabled") if key == "spend" else section.get("is_enabled")
+        if enabled is True or enabled is None:
+            continue
+        reason = section.get("disabled_reason")
+        if isinstance(reason, str) and reason.strip():
+            return f"extra usage disabled — {reason.strip().replace('_', ' ')}"
+        return "extra usage disabled"
+    return None
+
+
 async def fetch_anthropic_oauth(client: httpx.AsyncClient, access_token: str) -> UsageReport | None:
-    """Anthropic subscription usage (5h / 7d windows, model-scoped tiers)."""
+    """Anthropic subscription usage (5h / 7d windows, model-scoped tiers).
+
+    The response reports each window as a ``utilization`` PERCENT inside a
+    ``{"utilization": ..., "resets_at": ...}`` bucket. This fetcher previously
+    looked for ``used``/``limit`` keys that the endpoint has never sent, so every
+    bucket was skipped, ``limits`` came back empty, and the report was dropped —
+    ``/usage`` said "no usage data" for an account whose weekly window was at
+    100%. Verified against the live endpoint: a 200 with full data rendered
+    nothing.
+
+    The generic ``limits[]`` array is read for the model-scoped weekly caps only.
+    Its ``session`` and ``weekly_all`` entries duplicate ``five_hour`` and
+    ``seven_day``, so they are a FALLBACK for when the named buckets are absent
+    rather than extra rows — reading both unconditionally listed every window
+    twice.
+    """
     payload = await _get_json(client, ANTHROPIC_USAGE_URL, _bearer(access_token))
     if payload is None:
         return None
-    limits: list[UsageLimit] = []
-    # Generic limits[] carries named windows (session, weekly_all, ...).
+
     raw_limits = payload.get("limits")
+    by_kind: dict[str, tuple[float, int | None]] = {}
     if isinstance(raw_limits, list):
         for item in raw_limits:
             if not isinstance(item, dict):
                 continue
-            kind = str(item.get("kind") or "limit")
-            used = item.get("used")
-            limit = item.get("limit")
-            if used is None:
+            kind = item.get("kind")
+            percent = _num(item.get("percent"))
+            if not isinstance(kind, str) or kind in by_kind or percent is None:
                 continue
-            resets = item.get("resets_at")
-            limits.append(
-                UsageLimit(
-                    id=f"anthropic:{kind}",
-                    label=f"Claude {kind}",
-                    amount=UsageAmount(used=_num(used), limit=_num(limit) or None, unit="percent"),
-                    window=str(item.get("window") or kind),
-                    resets_at=str(resets) if resets else None,
-                )
-            )
-    # Named top-level windows (five_hour / seven_day / seven_day_opus).
-    for key, label in (
-        ("five_hour", "5 hour"),
-        ("seven_day", "7 day"),
-        ("seven_day_opus", "7 day Opus"),
-        ("seven_day_sonnet", "7 day Sonnet"),
-    ):
-        value = payload.get(key)
-        if isinstance(value, dict) and value.get("used") is not None:
-            limits.append(
-                UsageLimit(
-                    id=f"anthropic:{key}",
-                    label=label,
-                    amount=UsageAmount(
-                        used=_num(value.get("used")),
-                        limit=_num(value.get("limit")) or None,
-                        unit="percent",
-                    ),
-                    window=label,
-                )
-            )
-    return UsageReport(provider="anthropic", limits=limits) if limits else None
+            by_kind[kind] = (percent, _parse_iso_ms(item.get("resets_at")))
+
+    five_hour = _anthropic_bucket(payload.get("five_hour")) or by_kind.get("session")
+    seven_day = _anthropic_bucket(payload.get("seven_day")) or by_kind.get("weekly_all")
+
+    candidates = [
+        _anthropic_limit("anthropic:5h", "5 hour", five_hour, window="5 hour", shared=True),
+        _anthropic_limit("anthropic:7d", "7 day", seven_day, window="7 day", shared=True),
+        _anthropic_limit(
+            "anthropic:7d:opus",
+            "7 day (Opus)",
+            _anthropic_bucket(payload.get("seven_day_opus")),
+            window="7 day",
+            tier="opus",
+        ),
+        _anthropic_limit(
+            "anthropic:7d:sonnet",
+            "7 day (Sonnet)",
+            _anthropic_bucket(payload.get("seven_day_sonnet")),
+            window="7 day",
+            tier="sonnet",
+        ),
+    ]
+    limits = [limit for limit in candidates if limit is not None]
+    seen_tiers = {limit.tier for limit in limits if limit.tier}
+    limits.extend(
+        limit for limit in _anthropic_scoped_weekly(raw_limits) if limit.tier not in seen_tiers
+    )
+    extra = _anthropic_extra_usage(payload)
+    if extra is not None:
+        limits.append(extra)
+
+    if not limits:
+        return None
+    return UsageReport(
+        provider="anthropic",
+        limits=limits,
+        notes=_anthropic_notes(payload),
+    )
+
+
+def _window_label(seconds: float | None, fallback: str) -> str:
+    """``5 hour`` / ``7 day`` from a window length in seconds.
+
+    The endpoint quotes the window as a DURATION (``17940`` seconds is the five
+    hour window, a minute short) rather than as a name, so the label is rounded
+    from it. Anything under a day reads in hours, at or above in days — the two
+    units ChatGPT plans actually use.
+    """
+    if seconds is None or seconds <= 0:
+        return fallback
+    if seconds >= 86_400:
+        days = round(seconds / 86_400)
+        return f"{days} day"
+    hours = max(1, round(seconds / 3600))
+    return f"{hours} hour"
+
+
+def _openai_window(raw: Any, now_ms: float) -> tuple[float | None, str, int | None] | None:
+    """``(used_percent, window_label, resets_at_ms)`` from one Codex window.
+
+    Two reset encodings exist and both appear in live payloads: an absolute
+    ``reset_at`` (seconds OR milliseconds — disambiguated by magnitude, since a
+    seconds value large enough to be confused with ms is a year past 33000) and a
+    relative ``reset_after_seconds``. A window with neither, and no percentage,
+    is not a window.
+    """
+    if not isinstance(raw, dict):
+        return None
+    used = _num(raw.get("used_percent"))
+    seconds = _num(raw.get("limit_window_seconds"))
+    resets_ms: int | None = None
+    reset_at = _num(raw.get("reset_at"))
+    if reset_at is not None and reset_at > 0:
+        resets_ms = int(reset_at if reset_at > 1_000_000_000_000 else reset_at * 1000)
+    else:
+        after = _num(raw.get("reset_after_seconds"))
+        if after is not None and after > 0:
+            resets_ms = int(now_ms + after * 1000)
+    if used is None and resets_ms is None:
+        return None
+    return used, _window_label(seconds, "window"), resets_ms
+
+
+def _openai_limit(
+    limit_id: str,
+    label: str,
+    parsed: tuple[float | None, str, int | None] | None,
+    *,
+    tier: str = "",
+    shared: bool = False,
+) -> UsageLimit | None:
+    """One Codex window as a ``UsageLimit``, or None when not reported."""
+    if parsed is None:
+        return None
+    used, window, resets_ms = parsed
+    if used is None:
+        return None
+    clamped = max(0.0, min(100.0, used))
+    return UsageLimit(
+        id=limit_id,
+        label=label if label else window,
+        amount=UsageAmount(
+            used=clamped,
+            limit=100.0,
+            remaining=100.0 - clamped,
+            used_fraction=clamped / 100.0,
+            unit="percent",
+        ),
+        window=window,
+        resets_at_ms=resets_ms,
+        tier=tier,
+        shared=shared,
+    )
+
+
+def _openai_extra_slug(entry: dict[str, Any]) -> tuple[str, str]:
+    """``(slug, display_name)`` for one ``additional_rate_limits`` entry.
+
+    ``codex_bengalfox`` is the internal codename for the Spark model; the entry
+    also carries the customer-facing ``limit_name``, so the slug is normalised
+    to ``spark`` while the label keeps whatever OpenAI called it.
+    """
+    limit_name = str(entry.get("limit_name") or "").strip()
+    metered = str(entry.get("metered_feature") or "").strip()
+    probe = f"{limit_name} {metered}".lower()
+    if "spark" in probe or "bengalfox" in probe:
+        return "spark", limit_name or "Spark"
+    source = (metered or limit_name or "extra").lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", re.sub(r"^codex[-_]", "", source)).strip("-") or "extra"
+    return slug, limit_name or slug.replace("-", " ").title()
 
 
 async def fetch_openai_oauth(
     client: httpx.AsyncClient, access_token: str, account_id: str | None = None
 ) -> UsageReport | None:
-    """OpenAI ChatGPT/Codex plan rate-limit windows (primary / secondary)."""
+    """OpenAI ChatGPT/Codex plan rate-limit windows.
+
+    The windows are nested under ``rate_limit`` as ``primary_window`` and
+    ``secondary_window``. This fetcher read top-level ``primary``/``secondary``
+    keys that the endpoint does not send, so it never built a single limit and
+    `/usage openai` reported nothing for a logged-in ChatGPT Pro account — the
+    same failure as the Anthropic fetcher, one level of nesting deeper.
+
+    ``additional_rate_limits`` carries the per-model caps (Spark). They are
+    reported as TIER rows: like Anthropic's model-scoped weekly caps, an
+    exhausted Spark window stops one model rather than the account, and merging
+    the two is how a usable plan reads as a dead one.
+    """
     headers = _bearer(access_token)
     headers["User-Agent"] = "LocalOperator/1.0"
     if account_id:
@@ -467,102 +858,366 @@ async def fetch_openai_oauth(
     payload = await _get_json(client, OPENAI_WHAM_USAGE_URL, headers)
     if payload is None:
         return None
+    now_ms = time.time() * 1000
+
     limits: list[UsageLimit] = []
-    for key in ("primary", "secondary"):
-        window = payload.get(key)
-        if not isinstance(window, dict):
-            continue
-        used_pct = window.get("used_percent")
-        minutes = window.get("window_minutes")
-        resets = window.get("resets_at") or window.get("resets_at_utc")
-        frac = _num(used_pct)
-        frac = frac / 100.0 if frac is not None else None
-        limits.append(
-            UsageLimit(
-                id=f"openai:{key}",
-                label=key.capitalize(),
-                amount=UsageAmount(used_fraction=frac, unit="percent"),
-                window=f"{minutes} min" if minutes else "window",
-                resets_at=str(resets) if resets else None,
+    rate_limit = payload.get("rate_limit")
+    if isinstance(rate_limit, dict):
+        for key in ("primary", "secondary"):
+            limit = _openai_limit(
+                f"openai:{key}",
+                "",
+                _openai_window(rate_limit.get(f"{key}_window"), now_ms),
+                shared=True,
             )
-        )
-    return UsageReport(provider="openai", limits=limits) if limits else None
+            if limit is not None:
+                limits.append(limit)
+
+    extra = payload.get("additional_rate_limits")
+    if isinstance(extra, list):
+        for entry in extra:
+            if not isinstance(entry, dict):
+                continue
+            nested = entry.get("rate_limit")
+            if not isinstance(nested, dict):
+                continue
+            slug, display = _openai_extra_slug(entry)
+            for key in ("primary", "secondary"):
+                limit = _openai_limit(
+                    f"openai:{slug}:{key}",
+                    "",
+                    _openai_window(nested.get(f"{key}_window"), now_ms),
+                    tier=slug,
+                )
+                if limit is not None:
+                    # The window names itself ("5 hour"); the tier says which
+                    # model it counts, and without it two identical rows differ
+                    # only by an id the user never sees.
+                    limit.label = f"{limit.window} ({display})"
+                    limits.append(limit)
+
+    if not limits:
+        return None
+    plan = payload.get("plan_type")
+    notes = f"plan: {plan}" if isinstance(plan, str) and plan.strip() else None
+    return UsageReport(provider="openai", limits=limits, notes=notes)
+
+
+def _kimi_reset_ms(data: dict[str, Any], now_ms: float) -> int | None:
+    """The reset instant from whichever key this Kimi object happens to use.
+
+    The payload mixes snake_case and camelCase for the same field across nesting
+    levels (``resetTime`` on a detail, ``reset_at`` elsewhere), and expresses it
+    as an ISO string, an epoch, or a relative number of seconds. All are read
+    here so the caller never has to know which shape it received.
+    """
+    for key in ("reset_at", "resetAt", "reset_time", "resetTime"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            parsed = _parse_iso_ms(value)
+            if parsed is not None:
+                return parsed
+        elif isinstance(value, (int, float)):
+            return int(value if value > 1_000_000_000_000 else value * 1000)
+    for key in ("reset_in", "resetIn", "ttl"):
+        seconds = _num(data.get(key))
+        if seconds is not None and seconds > 0:
+            return int(now_ms + seconds * 1000)
+    return None
+
+
+def _kimi_window_label(window: dict[str, Any]) -> str:
+    """``5h limit`` from ``{"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"}``.
+
+    Minutes are folded into hours when they divide evenly, because the plan's
+    own name for the window is "5h" and ``300m limit`` is the same number said
+    in a way no Kimi user would recognise.
+    """
+    duration = _num(window.get("duration"))
+    unit = str(window.get("timeUnit") or window.get("time_unit") or "").upper()
+    if duration is None or not unit:
+        return ""
+    amount = int(duration)
+    if "MINUTE" in unit:
+        return f"{amount // 60}h limit" if amount >= 60 and amount % 60 == 0 else f"{amount}m limit"
+    if "HOUR" in unit:
+        return f"{amount}h limit"
+    if "DAY" in unit:
+        return f"{amount}d limit"
+    if "SECOND" in unit:
+        return f"{amount}s limit"
+    return ""
+
+
+def _kimi_row(data: dict[str, Any], now_ms: float) -> tuple[UsageAmount, int | None] | None:
+    """``(amount, resets_at_ms)`` for one Kimi quota object.
+
+    Kimi quotes ``limit``/``used``/``remaining`` as STRINGS, and often omits
+    ``used`` while sending the other two — the five hour window arrives as
+    ``{"limit": "100", "remaining": "100"}``. Deriving the missing half is what
+    makes that row renderable at all; requiring ``used`` is why it was dropped.
+    """
+    limit = _num(data.get("limit"))
+    used = _num(data.get("used"))
+    remaining = _num(data.get("remaining"))
+    if used is None and remaining is not None and limit is not None:
+        used = limit - remaining
+    if used is None and limit is None:
+        return None
+    amount = UsageAmount(used=used, limit=limit, remaining=remaining, unit="unknown")
+    if limit is not None and used is not None and limit > 0:
+        amount.used_fraction = max(0.0, min(1.0, used / limit))
+    return amount, _kimi_reset_ms(data, now_ms)
 
 
 async def fetch_kimi_oauth(client: httpx.AsyncClient, access_token: str) -> UsageReport | None:
-    """Kimi coding-plan usage windows (OAuth)."""
+    """Kimi coding-plan usage windows (OAuth).
+
+    Two things were wrong. The rows live at the TOP level of the response
+    (``usage`` for the plan total, ``limits[]`` for each window) rather than
+    under a ``data`` envelope, so the fetcher returned None before parsing
+    anything. And each ``limits[]`` entry splits its numbers across
+    ``detail`` and its window length across ``window``, neither of which the old
+    flat read reached.
+    """
     payload = await _get_json(client, KIMI_USAGE_URL, _bearer(access_token))
-    if payload is None or not isinstance(payload.get("data"), dict):
+    if payload is None:
         return None
-    data = payload["data"]
-    raw_limits = data.get("limits")
-    if not isinstance(raw_limits, list):
-        return None
+    # An envelope is tolerated but not required: some deployments wrap the body
+    # in `data`, and unwrapping it here costs one line and covers both.
+    envelope = payload.get("data")
+    data: dict[str, Any] = envelope if isinstance(envelope, dict) else payload
+    now_ms = time.time() * 1000
+
     limits: list[UsageLimit] = []
-    for item in raw_limits:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or item.get("title") or "quota")
-        used = item.get("used")
-        limit = item.get("limit")
-        if used is None:
-            continue
-        resets = item.get("reset_time")
-        limits.append(
-            UsageLimit(
-                id=f"kimi:{name}",
-                label=name,
-                amount=UsageAmount(used=_num(used), limit=_num(limit) or None, unit="unknown"),
-                window=str(item.get("window") or "window"),
-                resets_at=str(resets) if resets else None,
+    summary = data.get("usage")
+    if isinstance(summary, dict):
+        row = _kimi_row(summary, now_ms)
+        if row is not None:
+            amount, resets = row
+            limits.append(
+                UsageLimit(
+                    id="kimi:total",
+                    label="Total quota",
+                    amount=amount,
+                    window="plan",
+                    resets_at_ms=resets,
+                    shared=True,
+                )
             )
-        )
+
+    raw_limits = data.get("limits")
+    if isinstance(raw_limits, list):
+        for index, item in enumerate(raw_limits):
+            if not isinstance(item, dict):
+                continue
+            raw_detail = item.get("detail")
+            detail: dict[str, Any] = raw_detail if isinstance(raw_detail, dict) else item
+            raw_window = item.get("window")
+            window_data: dict[str, Any] = raw_window if isinstance(raw_window, dict) else {}
+            label = (
+                str(item.get("name") or item.get("title") or "").strip()
+                or _kimi_window_label(window_data)
+                or f"Limit {index + 1}"
+            )
+            row = _kimi_row(detail, now_ms)
+            if row is None:
+                continue
+            amount, detail_reset = row
+            # The WINDOW's own reset wins when it has one; Kimi usually leaves it
+            # on the detail instead, which is why the fallback exists at all —
+            # without it the 5h row renders with no countdown.
+            window_reset = _kimi_reset_ms(window_data, now_ms) or detail_reset
+            limits.append(
+                UsageLimit(
+                    id=f"kimi:{index}",
+                    label=label,
+                    amount=amount,
+                    window=_kimi_window_label(window_data) or "window",
+                    resets_at_ms=window_reset,
+                    shared=True,
+                )
+            )
     return UsageReport(provider="kimi", limits=limits) if limits else None
 
 
-async def fetch_xai_oauth(client: httpx.AsyncClient, access_token: str) -> UsageReport | None:
-    """xAI Grok subscription (weekly credits and monthly included)."""
+def _xai_amount(value: Any) -> float | None:
+    """xAI quota amounts, which arrive WRAPPED as ``{"val": 300}``.
+
+    Read as a bare number, the wrapper coerces to None and the monthly rows lost
+    both their used and their limit — the report still rendered, with a label and
+    no numbers, which is the failure that looks like a working feature.
+    """
+    if isinstance(value, dict):
+        amount = _num(value.get("val"))
+    else:
+        amount = _num(value)
+    return amount if amount is not None and amount >= 0 else None
+
+
+def _xai_percent_limit(
+    limit_id: str, label: str, percent: float, window: str, resets_ms: int | None, *, tier: str = ""
+) -> UsageLimit:
+    clamped = max(0.0, min(100.0, percent))
+    return UsageLimit(
+        id=limit_id,
+        label=label,
+        amount=UsageAmount(
+            used=clamped,
+            limit=100.0,
+            remaining=100.0 - clamped,
+            used_fraction=clamped / 100.0,
+            unit="percent",
+        ),
+        window=window,
+        resets_at_ms=resets_ms,
+        tier=tier,
+        shared=not tier,
+    )
+
+
+def _xai_on_demand(config: dict[str, Any]) -> UsageLimit | None:
+    """The pay-as-you-go cap that backs an exhausted subscription.
+
+    Same reasoning as Anthropic's extra-usage meter: when an account is out of
+    included quota, whether it has on-demand headroom is the difference between
+    "wait for the reset" and "keep working".
+    """
+    cap = _xai_amount(config.get("onDemandCap"))
+    used = _xai_amount(config.get("onDemandUsed"))
+    if cap is None or cap <= 0 or used is None:
+        return None
+    return UsageLimit(
+        id="xai:on-demand",
+        label="On-demand",
+        amount=UsageAmount(
+            used=used,
+            limit=cap,
+            remaining=max(0.0, cap - used),
+            used_fraction=min(1.0, used / cap),
+            unit="unknown",
+        ),
+        window="1 month",
+        shared=True,
+    )
+
+
+def _xai_weekly_limits(config: dict[str, Any]) -> list[UsageLimit]:
+    """SuperGrok's legacy weekly credit shape (``?format=credits``)."""
+    percent = _num(config.get("creditUsagePercent"))
+    if percent is None or not 0 <= percent <= 100:
+        return []
+    period = config.get("currentPeriod")
+    resets_ms = None
+    if isinstance(period, dict):
+        resets_ms = _parse_iso_ms(period.get("end"))
+    limits = [_xai_percent_limit("xai:credits:1w", "Weekly credits", percent, "1 week", resets_ms)]
+    products = config.get("productUsage")
+    if isinstance(products, list):
+        for item in products:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("product") or "").strip()
+            product_percent = _num(item.get("usagePercent"))
+            if not name or product_percent is None:
+                continue
+            slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+            if not slug:
+                continue
+            # Per-PRODUCT rows are tier rows: one being spent does not stop the
+            # others, so they must not read as the account-wide credit pool.
+            limits.append(
+                _xai_percent_limit(
+                    f"xai:product:{slug}:1w",
+                    f"{name} (weekly)",
+                    product_percent,
+                    "1 week",
+                    resets_ms,
+                    tier=slug,
+                )
+            )
+    return limits
+
+
+def _xai_monthly_limits(config: dict[str, Any]) -> list[UsageLimit]:
+    """The unified-billing monthly included quota."""
+    limit = _xai_amount(config.get("monthlyLimit"))
+    used = _xai_amount(config.get("used"))
+    if limit is None or limit <= 0 or used is None:
+        return []
+    resets_ms = _parse_iso_ms(config.get("billingPeriodEnd"))
+    return [
+        UsageLimit(
+            id="xai:included:1mo",
+            label="Monthly included",
+            amount=UsageAmount(
+                used=used,
+                limit=limit,
+                remaining=max(0.0, limit - used),
+                used_fraction=min(1.0, used / limit),
+                unit="unknown",
+            ),
+            window="1 month",
+            resets_at_ms=resets_ms,
+            shared=True,
+        )
+    ]
+
+
+async def _xai_billing_config(
+    client: httpx.AsyncClient, access_token: str, url: str
+) -> dict[str, Any] | None:
+    """The ``config`` object from one billing URL, or None."""
     headers = _bearer(access_token)
     headers["Accept"] = "application/json"
     headers["X-XAI-Token-Auth"] = "xai-grok-cli"
-    try:
-        resp = await client.get(XAI_BILLING_URL, headers=headers, timeout=10.0)
-    except httpx.HTTPError:
+    payload = await _get_json(client, url, headers)
+    if payload is None:
         return None
-    if resp.status_code != 200:
-        return None
-    try:
-        payload = resp.json()
-    except ValueError:
-        return None
-    config = payload.get("config") if isinstance(payload, dict) else None
-    if not isinstance(config, dict):
-        return None
+    config = payload.get("config")
+    return config if isinstance(config, dict) else None
+
+
+async def fetch_xai_oauth(client: httpx.AsyncClient, access_token: str) -> UsageReport | None:
+    """xAI Grok subscription usage, across BOTH billing shapes.
+
+    xAI serves two different payloads on one endpoint. ``?format=credits`` is the
+    legacy SuperGrok weekly shape (a credit percentage plus a per-product
+    breakdown); accounts migrated to unified billing get a monthly included quota
+    (``monthlyLimit``/``used``) on the bare URL instead, and report
+    ``isUnifiedBillingUser``.
+
+    Only the first was requested before, and its amounts were read as bare
+    numbers when xAI wraps them as ``{"val": N}`` — so a unified-billing account
+    got an empty report and a weekly one got labels with no numbers. The credits
+    URL is still probed first, and the monthly URL only when the account needs
+    it, which keeps the common case at one request.
+    """
+    credits_url = f"{XAI_BILLING_URL}?format=credits"
+    config = await _xai_billing_config(client, access_token, credits_url)
+
     limits: list[UsageLimit] = []
-    # Weekly credits.
-    weekly = _num(config.get("creditUsagePercent"))
-    if weekly is not None:
-        limits.append(
-            UsageLimit(
-                id="xai:credits:1w",
-                label="Weekly credits",
-                amount=UsageAmount(used_fraction=weekly / 100.0, unit="percent"),
-                window="1 week",
-            )
-        )
-    # Monthly included.
-    monthly_limit = config.get("monthlyLimit")
-    used = config.get("used")
-    if monthly_limit is not None and used is not None:
-        limits.append(
-            UsageLimit(
-                id="xai:included:1mo",
-                label="Monthly included",
-                amount=UsageAmount(used=_num(used), limit=_num(monthly_limit), unit="unknown"),
-                window="1 month",
-            )
-        )
-    return UsageReport(provider="xai", limits=limits) if limits else None
+    unified = False
+    if config is not None:
+        unified = config.get("isUnifiedBillingUser") is True
+        limits.extend(_xai_weekly_limits(config))
+
+    if not limits or unified:
+        monthly_config = await _xai_billing_config(client, access_token, XAI_BILLING_URL)
+        if monthly_config is not None:
+            limits.extend(_xai_monthly_limits(monthly_config))
+            config = config or monthly_config
+
+    if config is not None:
+        on_demand = _xai_on_demand(config)
+        if on_demand is not None:
+            limits.append(on_demand)
+
+    # Ids are unique by construction, but both shapes can carry the same
+    # on-demand cap when an account reports weekly and monthly at once.
+    seen: set[str] = set()
+    deduped = [limit for limit in limits if not (limit.id in seen or seen.add(limit.id))]
+    return UsageReport(provider="xai", limits=deduped) if deduped else None
 
 
 def _num(value: Any, default: float | None = None) -> float | None:

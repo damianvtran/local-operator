@@ -19,7 +19,7 @@ BORDERLESS block resting on the input card:
     /help     all commands
     ctrl+d    quit
 
-Three things make this a design decision rather than a splash screen:
+Four things make this a design decision rather than a splash screen:
 
 - **No box.** The mandate forbids bordered chrome; the omp reference draws a
   two-column bordered box appended to the transcript, and this deliberately
@@ -35,11 +35,21 @@ Three things make this a design decision rather than a splash screen:
   view sheds decoration before information: the logo goes first, the hints
   second, the status rows last, and the credential warning never. See
   :func:`build_welcome_lines`.
+- **One thing breathes, and it is the identity.** The mark's rows pulse a
+  quarter of a ramp step either side of their resting ``dim`` on a 3.2 s
+  cycle; everything else — wordmark, status, hints — is fixed. A boot screen
+  with no motion at all reads as a hung app, and the motion this replaces was
+  an accident: the input's blinking caret inverting the first letter of its
+  placeholder twice a second (now off, see
+  :class:`~local_operator.tui.widgets.editor.Editor`). See
+  :data:`MARK_PULSE_PERIOD_S`.
 """
 
 from __future__ import annotations
 
+import math
 import os
+import time
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
@@ -50,10 +60,12 @@ from rich.cells import cell_len
 from rich.console import Group, RenderableType
 from rich.style import Style
 from rich.text import Text
+from textual.color import Color
 from textual.geometry import Size
 from textual.widgets import Static
 
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.shimmer import shimmer_enabled
 from local_operator.tui.widgets.status_line import format_model_label
 from local_operator.tui.widgets.transcript import NOTICE_GLYPHS
 
@@ -111,6 +123,65 @@ MARK_WIDTH = max(cell_len(row) for row in LOGO_MARK)
 #: Width at or above which the full lockup (mark over the letterspaced
 #: wordmark) is drawn.
 LOGO_FULL_MIN_WIDTH = cell_len(WORDMARK_SPACED)
+
+#: Seconds for one full breath of the mark — up, back through rest, down, back.
+#:
+#: Long enough that the eye never tracks it and short enough to complete twice
+#: while the session factory resolves. Below roughly 2.5 s a ten-row block of
+#: solid glyphs stops reading as breathing and starts reading as a pulse-rate
+#: monitor, which is the same complaint the blinking caret earned.
+MARK_PULSE_PERIOD_S = 3.2
+
+#: Timer cadence for the pulse: 12.5 fps.
+#:
+#: This is idle background motion behind whatever the user is typing, so it is
+#: budgeted like it. 30 fps would more than double the wakeups for no visible
+#: gain: the whole excursion spans only about two dozen distinct hex values per
+#: cycle (a quarter of a ramp step, quantised to 8 bits per channel), so most of
+#: the extra frames would repaint byte-identical output. At 12.5 fps each colour
+#: step is held for a frame or two, which is exactly smooth.
+MARK_PULSE_INTERVAL_S = 0.08
+
+#: How far along the ramp each half of the breath travels, as a fraction of the
+#: step from ``dim`` to its neighbour.
+#:
+#: MEASURED, not guessed. Contrast ratios on the dark ramp: the full
+#: ``dim``→``faint`` excursion swings 2.30:1 peak-to-trough and lands the mark
+#: at 1.97:1 against the ground, which reads as the logo fading out and back in
+#: rather than breathing. A quarter step each way swings 1.44:1 between
+#: ``#8F887A`` and ``#746E60``, both of which still sit clearly on the ground
+#: (5.35:1 and 3.71:1, against 4.55:1 at rest), and never approaches the flat
+#: ``muted`` mark that :func:`_logo_lines` rejected for burying the wordmark.
+MARK_PULSE_DEPTH = 0.25
+
+
+def mark_pulse_phase(elapsed_s: float) -> float:
+    """Signed pulse position at ``elapsed_s`` seconds: ``-1`` (dimmest) to ``+1``.
+
+    A SINE rather than a cosine, so the breath starts at ``0`` — precisely the
+    static ``dim`` the mark has always been drawn at. The first frame of a boot
+    is therefore identical whether the animation is on or off, and the motion
+    grows out of the still frame instead of the splash appearing pre-brightened
+    and settling.
+    """
+    return math.sin(2.0 * math.pi * (elapsed_s / MARK_PULSE_PERIOD_S))
+
+
+def mark_pulse_color(phase: float) -> str:
+    """The mark's hex at ``phase``: ``dim``, nudged along the brand ramp.
+
+    Both ends are ramp tokens read through :mod:`local_operator.tui.theme`, so
+    the pulse follows a theme switch like everything else and no hex is minted
+    here. Which NEIGHBOUR is approached follows the sign — up towards ``muted``,
+    down towards ``faint`` — because blending ``faint`` straight into ``muted``
+    would pass through THEIR midpoint, and the value the lockup's hierarchy was
+    set at is ``dim`` (see :func:`_logo_lines`). Rest has to be rest.
+    """
+    dim = Color.parse(theme_mod.semantic_color("dim"))
+    neighbour = "muted" if phase >= 0.0 else "faint"
+    target = Color.parse(theme_mod.semantic_color(neighbour))
+    return dim.blend(target, abs(phase) * MARK_PULSE_DEPTH).hex
+
 
 #: Placeholder while the session factory is still being awaited. The band uses
 #: the same word for the same state, so the two never disagree on screen.
@@ -287,7 +358,7 @@ def _center_blocks(groups: list[list[Text]], width: int) -> list[list[Text]]:
     return out
 
 
-def _logo_lines(width: int, *, flush: bool = False) -> list[Text]:
+def _logo_lines(width: int, *, flush: bool = False, mark_color: str | None = None) -> list[Text]:
     """The logo lockup at whichever width tier ``width`` allows.
 
     - ``>= LOGO_FULL_MIN_WIDTH`` (27): the mark, a blank row, then the
@@ -300,13 +371,19 @@ def _logo_lines(width: int, *, flush: bool = False) -> list[Text]:
     concession, not a width one: on a short terminal the choice is between a
     tighter lockup and no mark at all, and one row of air is not worth the
     product's own identity. The caller escalates to it before shedding sections.
+
+    ``mark_color`` overrides the mark's resting tint with one frame of the
+    breathing pulse (:func:`mark_pulse_color`). It is a colour and not a phase
+    so this stays a pure function of what it is handed — the clock lives in
+    :class:`WelcomeView`, and geometry never depends on it either way.
     """
     # `dim`, not `muted`. The intended hierarchy is a compact mark UNDER a wide
     # open name, but the mark is ten rows of solid block glyphs against a
     # wordmark of one row, so one ramp step could not overcome the area
     # difference and the eye landed on the blocks first. Two steps down makes
-    # them read as a watermark behind the name.
-    mark_style = Style(color=theme_mod.semantic_color("dim"))
+    # them read as a watermark behind the name. The pulse breathes AROUND this
+    # value rather than away from it, so the hierarchy holds at every phase.
+    mark_style = Style(color=mark_color or theme_mod.semantic_color("dim"))
     word_style = Style(color=theme_mod.semantic_color("fg"))
     mark = [_center(Text(row, style=mark_style, no_wrap=True), width) for row in LOGO_MARK]
     if width >= LOGO_FULL_MIN_WIDTH:
@@ -407,7 +484,9 @@ def _hint_lines(width: int) -> list[Text]:
     return lines
 
 
-def build_welcome_lines(info: WelcomeInfo, width: int, height: int) -> list[Text]:
+def build_welcome_lines(
+    info: WelcomeInfo, width: int, height: int, *, mark_color: str | None = None
+) -> list[Text]:
     """Render the welcome block as exactly the lines it occupies.
 
     Pure, so the geometry is testable without a running app. Returns at most
@@ -429,11 +508,17 @@ def build_welcome_lines(info: WelcomeInfo, width: int, height: int) -> list[Text
     2. the hints (with the blank row above them),
     3. status rows, lowest priority first (version, then cwd, then model),
        which stops at one row so the credential warning always survives.
+
+    ``mark_color`` tints the mark for one frame of the breathing pulse and is
+    the ONLY argument that cannot change the result's shape: it reaches
+    :func:`_logo_lines` and stops at a ``Style``. That is what lets
+    :class:`WelcomeView` repaint a pulse frame without re-measuring — see
+    :meth:`WelcomeView._pulse_tick`.
     """
     if width <= 0 or height <= 0:
         return []
 
-    logo = _logo_lines(width)
+    logo = _logo_lines(width, mark_color=mark_color)
     status_full = _status_rows(info, width)
     status = list(status_full)
     hints = _hint_lines(width)
@@ -463,7 +548,7 @@ def build_welcome_lines(info: WelcomeInfo, width: int, height: int) -> list[Text
     # 3. drop the mark.
     # 4. drop the hints — a first-time user's way in, so it goes last.
     if total(len(status)) > height:
-        logo = _logo_lines(width, flush=True)
+        logo = _logo_lines(width, flush=True, mark_color=mark_color)
     if total(len(status)) > height and len(status) > 1:
         status.pop(min(range(len(status)), key=lambda index: status[index][0]))
     if total(len(status)) > height:
@@ -513,6 +598,12 @@ class WelcomeView(Static):
     places in the app. Polling once every :data:`POLL_INTERVAL_S` from here
     covers all four with no wiring, and the timer RETIRES as soon as a label
     arrives, so an idle splash is not re-reading the credential store forever.
+
+    It also owns the mark's breathing pulse. Two timers rather than one shared
+    tick, because they answer to different things: the poll retires when the
+    model label lands, while the pulse runs for as long as the splash is on
+    screen, and folding them together would either re-read the credential store
+    twelve times a second or breathe at 4 fps.
     """
 
     #: Poll cadence while the model label is still unknown.
@@ -523,9 +614,33 @@ class WelcomeView(Static):
         self._info_source = info_source
         self._info = WelcomeInfo()
         self._timer: Any | None = None
+        self._pulse_timer: Any | None = None
+        self._pulse_origin = 0.0
+        # The mark's tint for the CURRENT frame, or None for its resting `dim`.
+        # None is not "unknown": it is the value the splash has always drawn and
+        # the value it holds whenever the pulse is not running, so a still frame
+        # is the old still frame rather than an arbitrary sample of a new
+        # animation. Caching the colour (not the phase) is also what lets a tick
+        # decide whether it has anything to repaint.
+        self._mark_color: str | None = None
 
     def on_mount(self) -> None:
         self._poll()
+        self._sync_pulse_timer()
+
+    def on_unmount(self) -> None:
+        """Both timers die with the widget.
+
+        A Textual interval outlives the widget that made it: it keeps firing at
+        a callback whose screen is gone, which this suite has already paid for
+        once as a shutdown warning and an intermittent teardown failure.
+        :meth:`set_visible` covers the ordinary retirement (the first transcript
+        block), but it is not the only exit — every ``run_test`` that never
+        sends a prompt tears the app down with the splash still up, and so does
+        ``ctrl+d`` on the boot screen.
+        """
+        self._stop_timer()
+        self._stop_pulse_timer()
 
     def get_content_height(self, container: Size, viewport: Size, width: int) -> int:
         """Rows this block needs, out of the rows the region has LEFT.
@@ -571,7 +686,9 @@ class WelcomeView(Static):
         # `self.size.height` is what `get_content_height` returned, so the block
         # rebuilt here is the one that was measured: degradation is idempotent
         # once the budget equals the block's own height.
-        lines = build_welcome_lines(self._info, self.size.width, self.size.height)
+        lines = build_welcome_lines(
+            self._info, self.size.width, self.size.height, mark_color=self._mark_color
+        )
         # A Group of one Text per row: the lines are already padded and
         # truncated to the widget, so nothing here may re-wrap them.
         return Group(*lines) if lines else Text("")
@@ -586,6 +703,7 @@ class WelcomeView(Static):
         if visible == bool(self.display):
             return
         self.display = visible
+        self._sync_pulse_timer()
         if visible:
             self._poll()
         else:
@@ -608,5 +726,61 @@ class WelcomeView(Static):
         if wanted and self._timer is None:
             self._timer = self.set_interval(self.POLL_INTERVAL_S, self._poll)
         elif not wanted and self._timer is not None:
+            self._stop_timer()
+
+    def _stop_timer(self) -> None:
+        if self._timer is not None:
             self._timer.stop()
             self._timer = None
+
+    def _sync_pulse_timer(self) -> None:
+        """Breathe only while the splash is on screen and animation is allowed.
+
+        Gated on the SAME switch as the shimmer (``LOCAL_OPERATOR_NO_SHIMMER``,
+        the ``display.shimmer`` setting) because "hold still" is one decision,
+        not one per surface: CI and the SVG snapshot harness turn animation off
+        once and expect every frame to be reproducible. With the gate closed no
+        timer is created at all — the pulse is not merely paused — and the mark
+        keeps its resting ``dim``.
+
+        The clock restarts from the moment the splash appears rather than from
+        app start, so a ``/clear`` an arbitrary number of seconds in gets the
+        same first frame as a boot: at rest, then rising.
+        """
+        wanted = bool(self.display) and shimmer_enabled()
+        if wanted and self._pulse_timer is None:
+            self._pulse_origin = time.monotonic()
+            self._pulse_timer = self.set_interval(MARK_PULSE_INTERVAL_S, self._pulse_tick)
+        elif not wanted and self._pulse_timer is not None:
+            self._stop_pulse_timer()
+
+    def _stop_pulse_timer(self) -> None:
+        """Stop breathing and return the mark to rest.
+
+        The colour is cleared with the timer so the next frame drawn after a
+        stop is the resting one — a hidden view that comes back on ``/clear``
+        must not flash the phase it happened to be paused at.
+        """
+        if self._pulse_timer is not None:
+            self._pulse_timer.stop()
+            self._pulse_timer = None
+        self._mark_color = None
+
+    def _pulse_tick(self) -> None:
+        """One breath frame: a colour, and a repaint only when it MOVED.
+
+        ``refresh()``, never ``refresh(layout=True)``. The pulse changes one
+        ``Style`` and no geometry, and a re-measure here would re-run the height
+        degradation ladder twelve times a second — on a boot frame sitting one
+        row from the threshold that drops the mark, that is a block that
+        twitches while the user reads it.
+
+        The colour is compared before repainting because the ramp quantises to
+        about two dozen hexes across the cycle's 40 ticks, so a good share of
+        them would otherwise repaint the widget with byte-identical output.
+        """
+        color = mark_pulse_color(mark_pulse_phase(time.monotonic() - self._pulse_origin))
+        if color == self._mark_color:
+            return
+        self._mark_color = color
+        self.refresh()

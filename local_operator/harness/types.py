@@ -358,6 +358,28 @@ class BrowserSurface:
         self.surface_id = ""
 
 
+@runtime_checkable
+class JobManagerProtocol(Protocol):
+    """The slice of ``harness.jobs.AsyncJobManager`` the tools drive.
+
+    Declared HERE rather than importing the manager because ``harness.jobs``
+    imports THIS module: annotating ``ToolContext.jobs`` with the concrete
+    class would be an import cycle. Exposes exactly what ``wait``/``job``
+    and cancellation need (get, list, cancel) and nothing more — spawning
+    reaches the manager through session-installed launcher closures, never
+    through this surface, so the tools cannot touch the manager's
+    registration or delivery internals. Return types stay ``Any`` for the
+    same edge reason: the ``AsyncJob`` row type cannot be named on this side
+    of the cycle.
+    """
+
+    def get(self, job_id: str, *, owner_id: str | None = None) -> Any: ...
+
+    def list(self, *, owner_id: str | None = None) -> list[Any]: ...
+
+    async def cancel(self, job_id: str, *, owner_id: str | None = None) -> bool: ...
+
+
 class ToolContext(BaseModel):
     """Minimal host-provided context handed to tool execution.
 
@@ -398,6 +420,21 @@ class ToolContext(BaseModel):
     # to the next one. ``None`` degrades the browser tool to a single-call
     # surface the session can never close.
     browser: BrowserSurfaceProtocol | None = None
+    # Launcher for one-shot child sessions run as background jobs (the
+    # ``task`` tool). ``(label, prompt) -> job_id``, registering the run as
+    # an AsyncJob on the host's job manager. The session installs a closure
+    # over its own emit and job manager; ``None`` means the host has no
+    # subagent engine and the task tool is then not advertised at all
+    # (createIf) rather than advertised and always failing — the same
+    # convention ``wake_scheduler`` uses.
+    subagent_launcher: Callable[[str, str], str] | None = None
+    # The session's background job manager. Declared as a Protocol because
+    # the concrete class lives in ``harness.jobs``, which imports this
+    # module (import cycle). The ``wait``/``job`` tools read it; ``None``
+    # means no background work is tracked and both tools are then not
+    # advertised at all (createIf) rather than advertised and always
+    # failing.
+    jobs: JobManagerProtocol | None = None
 
 
 ToolExecuteFn = Callable[
@@ -412,6 +449,34 @@ ToolExecuteFn = Callable[
 ]
 
 
+#: Renders the human sentence an approval prompt shows for one call. Takes the
+#: call's parsed arguments and the session's working directory, and returns
+#: ``"<verb>: <target>"`` — the shape the read-tier tools already use —
+#: optionally led by one of two hazard markers:
+#:
+#: * ``[outside workspace]``: the target resolved, and it is not under the root.
+#: * ``[unresolvable]``: the target could not be characterised at all, so nothing
+#:   can be said about where it is. A describer may also return this in front of
+#:   a sentence that is NOT ``<verb>: <target>`` — ``[unresolvable] unparsed url:
+#:   <raw>`` — precisely because no verb-and-target pair could be determined.
+#:
+#: Both markers escalate identically; they differ only in the words the renderer
+#: spells out, because a target visibly inside the workspace described as being
+#: outside it teaches the reader to distrust the clause that matters. The cwd is
+#: a parameter and not read
+#: from the process because a session can be rooted anywhere (the server and the
+#: scheduler both pass one), and "outside the workspace" is measured against the
+#: session's root or it means nothing.
+#:
+#: This exists because the fallback the loop can build unaided
+#: (``name({...json...})``) is the wrong string to put in front of a human who is
+#: deciding whether to authorise something: the decision-relevant argument is
+#: buried between quoting and irrelevant fields, and no amount of clever
+#: truncation in the UI can recover which end of a JSON blob matters. Only the
+#: tool knows which of its arguments IS the decision.
+ApprovalDescribeFn = Callable[[dict[str, Any], str], str]
+
+
 class AgentTool(BaseModel):
     """A tool the model can call.
 
@@ -419,6 +484,11 @@ class AgentTool(BaseModel):
     ``model_json_schema()`` output). ``concurrency`` controls batch
     scheduling: ``"shared"`` tools run in parallel, ``"exclusive"`` alone.
     ``interruptible`` tools may be aborted mid-run to deliver steering.
+
+    ``describe_approval`` is what the approval prompt says. Every write/exec
+    tier tool should set it; without one the loop falls back to a JSON dump,
+    which is legible to a reviewer of logs and not to a user answering a
+    question under time pressure.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
@@ -432,6 +502,7 @@ class AgentTool(BaseModel):
     interruptible: bool = False
     hidden: bool = False
     execute: ToolExecuteFn = Field(exclude=True)
+    describe_approval: ApprovalDescribeFn | None = Field(default=None, exclude=True)
 
 
 # ---------------------------------------------------------------------------
@@ -574,6 +645,29 @@ class MessageEndEvent(AgentEvent[Literal["message_end"]]):
     message: AgentMessage
 
 
+class ToolCallComposeEvent(AgentEvent[Literal["tool_call_compose"]]):
+    """The model is STILL WRITING a tool call; nothing has run yet.
+
+    Emitted while the arguments stream in, because for a large one they stream
+    for a long time: asking for a file of any size means tens of kilobytes of
+    `content` arriving token by token, and until the last one lands there is no
+    call to execute, no `tool_execution_start`, and — before this event — nothing
+    on screen. The user watches a spinner for minutes and reasonably concludes
+    the agent has hung. It has not; it is dictating.
+
+    ``argument_bytes`` is the running size of the arguments seen so far, which is
+    the only honest progress signal available: the model never says how much is
+    left. ``tool_call_id`` is the provider's id when it has arrived and an
+    index-derived placeholder before that, so a UI can correlate this with the
+    ``tool_execution_start`` that eventually follows.
+    """
+
+    type: Literal["tool_call_compose"] = "tool_call_compose"
+    tool_call_id: str
+    tool_name: str
+    argument_bytes: int = 0
+
+
 class ToolExecutionStartEvent(AgentEvent[Literal["tool_execution_start"]]):
     type: Literal["tool_execution_start"] = "tool_execution_start"
     tool_call_id: str
@@ -617,6 +711,49 @@ class NoticeEvent(AgentEvent[Literal["notice"]]):
     type: Literal["notice"] = "notice"
     text: str
     kind: Literal["info", "warning", "error"] = "info"
+
+
+class SubagentStartEvent(AgentEvent[Literal["subagent_start"]]):
+    """A child session was registered as a background job.
+
+    Subagent events are NOT the parent loop's own boundary events: they relay
+    one CHILD session's lifecycle onto the parent's stream so a front end can
+    render the child's progress. ``job_id`` is the AsyncJob id every event of
+    this subagent carries, which is what lets a UI group them.
+    """
+
+    type: Literal["subagent_start"] = "subagent_start"
+    job_id: str
+    label: str
+    agent_id: str | None = None
+
+
+class SubagentProgressEvent(AgentEvent[Literal["subagent_progress"]]):
+    """A throttled relay of a child session's activity.
+
+    The relay emits one of these on tool starts/ends and message ends —
+    NEVER on every stream delta — because a child streaming a file token by
+    token would otherwise flood the parent stream with per-delta events.
+    ``progress`` is a short human-readable description of the step.
+    """
+
+    type: Literal["subagent_progress"] = "subagent_progress"
+    job_id: str
+    label: str
+    progress: str
+
+
+class SubagentEndEvent(AgentEvent[Literal["subagent_end"]]):
+    """A child session settled. The front end renders completion from THIS
+    event; the runner deliberately adds no NoticeEvent or transcript write
+    for it, so there is exactly one delivery path."""
+
+    type: Literal["subagent_end"] = "subagent_end"
+    job_id: str
+    label: str
+    status: str  # completed | failed | cancelled
+    result_text: str | None = None
+    error_text: str | None = None
 
 
 class CompactionStartEvent(AgentEvent[Literal["compaction_start"]]):

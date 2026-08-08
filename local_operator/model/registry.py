@@ -342,6 +342,150 @@ the absence of specific model details.
 """
 
 anthropic_models: Dict[str, ModelInfo] = {
+    # Numbers below are the provider's OWN, read from
+    # `GET https://api.anthropic.com/v1/models?limit=50` on 2026-08-07: every entry
+    # carries `max_input_tokens`, `max_tokens` and a `capabilities` object. They are
+    # transcribed rather than inferred, because the whole point of these rows is to
+    # be right when the listing cannot be reached — the shipped 200k family floor is
+    # what made a 1M-context Opus 5 session compact at 160k and report `1.8%/200k`.
+    #
+    # Every price is 0.0 on purpose. `/v1/models` quotes none, and 0.0 is this
+    # registry's "unknown": the status band renders a price as fact, so a plausible
+    # guess is worse than an absent number. Add a price here only from Anthropic's
+    # published pricing page, per id.
+    #
+    # `supports_prompt_cache=True` is a family property (every Claude from 3 on
+    # accepts `cache_control`) rather than a listing field; `supports_images` IS a
+    # listing field (`capabilities.image_input.supported`) and is True for all ten.
+    "claude-opus-5": ModelInfo(
+        id="claude-opus-5",
+        name="Claude Opus 5",
+        max_tokens=128_000,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=0.0,
+        output_price=0.0,
+        description=(
+            "Anthropic's Claude Opus 5 flagship: 1M-token context window and 128k "
+            "of output, with adaptive thinking and effort tiers up to max."
+        ),
+        recommended=False,
+    ),
+    "claude-sonnet-5": ModelInfo(
+        id="claude-sonnet-5",
+        name="Claude Sonnet 5",
+        max_tokens=128_000,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=0.0,
+        output_price=0.0,
+        description=(
+            "Claude Sonnet 5: the balanced tier of the 5 generation, with the same "
+            "1M-token context window and 128k output as Opus 5."
+        ),
+        recommended=False,
+    ),
+    "claude-fable-5": ModelInfo(
+        id="claude-fable-5",
+        name="Claude Fable 5",
+        max_tokens=128_000,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=0.0,
+        output_price=0.0,
+        description="Claude Fable 5: 1M-token context window and 128k of output.",
+        recommended=False,
+    ),
+    "claude-opus-4-8": ModelInfo(
+        id="claude-opus-4-8",
+        name="Claude Opus 4.8",
+        max_tokens=128_000,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=0.0,
+        output_price=0.0,
+        description="Claude Opus 4.8: 1M-token context window and 128k of output.",
+        recommended=False,
+    ),
+    "claude-opus-4-7": ModelInfo(
+        id="claude-opus-4-7",
+        name="Claude Opus 4.7",
+        max_tokens=128_000,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=0.0,
+        output_price=0.0,
+        description="Claude Opus 4.7: 1M-token context window and 128k of output.",
+        recommended=False,
+    ),
+    "claude-opus-4-6": ModelInfo(
+        id="claude-opus-4-6",
+        name="Claude Opus 4.6",
+        max_tokens=128_000,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=0.0,
+        output_price=0.0,
+        description="Claude Opus 4.6: 1M-token context window and 128k of output.",
+        recommended=False,
+    ),
+    "claude-sonnet-4-6": ModelInfo(
+        id="claude-sonnet-4-6",
+        name="Claude Sonnet 4.6",
+        max_tokens=128_000,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=0.0,
+        output_price=0.0,
+        description="Claude Sonnet 4.6: 1M-token context window and 128k of output.",
+        recommended=False,
+    ),
+    # The 4.5 snapshots are the generation where the tiers stopped agreeing on a
+    # window: Sonnet 4.5 serves 1M while Opus 4.5 and Haiku 4.5 serve 200k. Nothing
+    # may infer one from the other — that inference is the bug this block fixes.
+    "claude-opus-4-5-20251101": ModelInfo(
+        id="claude-opus-4-5-20251101",
+        name="Claude Opus 4.5 (2025-11-01)",
+        max_tokens=64_000,
+        context_window=200_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=0.0,
+        output_price=0.0,
+        description="Claude Opus 4.5: 200k-token context window and 64k of output.",
+        recommended=False,
+    ),
+    "claude-sonnet-4-5-20250929": ModelInfo(
+        id="claude-sonnet-4-5-20250929",
+        name="Claude Sonnet 4.5 (2025-09-29)",
+        max_tokens=64_000,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=0.0,
+        output_price=0.0,
+        description="Claude Sonnet 4.5: 1M-token context window and 64k of output.",
+        recommended=False,
+    ),
+    "claude-haiku-4-5-20251001": ModelInfo(
+        id="claude-haiku-4-5-20251001",
+        name="Claude Haiku 4.5 (2025-10-01)",
+        max_tokens=64_000,
+        context_window=200_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=0.0,
+        output_price=0.0,
+        description="Claude Haiku 4.5: 200k-token context window and 64k of output.",
+        recommended=False,
+    ),
     "claude-opus-4-20250514": ModelInfo(
         id="claude-opus-4-20250514",
         name="Claude Opus 4 (2025-05-14)",
@@ -529,28 +673,152 @@ anthropic_default_model_info: ModelInfo = ModelInfo(
     name="Anthropic Claude",
     recommended=False,
 )
-"""Family FLOOR for a Claude id the registry does not ship.
+"""LAST-RESORT floor for a Claude id nothing else can describe.
 
-Anthropic's ``/v1/models`` returns ids and display names and nothing else, so an
-id the listing CONFIRMS EXISTS still arrives with no window, no output cap and no
-capabilities. Falling through to :data:`unknown_model_info` then hands the session
-128k/8192/no-cache, which is wrong for every Claude generation ever shipped: the
-whole family is 200k context, and prompt caching plus images are universal from
-Claude 3 on. Those three are the floor, and a floor is the safe direction — the
-cost of under-reporting is silent, the cost of over-reporting is loud. An
-under-reported window disables nothing but throws away 36% of the room and
-compacts early; an under-reported ``max_tokens`` TRUNCATES a long answer with no
-error at all; ``supports_prompt_cache=False`` makes the wire client skip
-``cache_control`` on the most expensive models in the catalogue. Over-report and
-the provider rejects the request with a 400 naming the real limit, which is a
-diagnosable failure rather than a silent degradation.
+Reached only after :func:`anthropic_family_model_info` declines, i.e. for an id
+whose tier and version cannot be parsed at all (``claude-opus-latest``) or whose
+tier has no shipped row. A live ``/v1/models`` answer beats this outright — it
+carries ``max_input_tokens`` and ``max_tokens`` per model — so this is the
+offline-and-unparseable corner.
 
-``max_tokens`` is the floor among the CURRENT generations (Sonnet 4 is 64k) rather
-than the all-time floor (Claude 3 Haiku is 4k), because this template is only ever
-reached for an id the registry does not have — and every older, smaller-output
-model is already in :data:`anthropic_models`, so an unknown id is by construction
-a newer one.
+Falling through to :data:`unknown_model_info` instead hands the session
+128k/8192/no-cache, which is wrong for every Claude generation ever shipped:
+prompt caching and images are universal from Claude 3 on, and 200k is the
+smallest window any current Claude serves. The direction matters because the two
+errors are not symmetric. Under-report and the loss is silent — an under-reported
+window throws away room and compacts early, an under-reported ``max_tokens``
+TRUNCATES a long answer with no error at all, and ``supports_prompt_cache=False``
+drops ``cache_control`` on the most expensive models in the catalogue.
+Over-report and the provider answers 400 naming the real limit, which at least
+says what happened. 200k is therefore deliberately the floor rather than the 1M
+the 5 generation serves: a wrong 1M window puts the compaction threshold
+(``min(0.8 * window, 600k)``) at 600k, so a genuinely-200k model would 400 on
+every turn past 200k instead of merely compacting sooner than it had to.
+
+``max_tokens`` is the floor among the CURRENT generations (64k) rather than the
+all-time floor (Claude 3 Haiku is 4k), because this template is only ever reached
+for an id the registry does not have — and every older, smaller-output model is
+already in :data:`anthropic_models`, so an unknown id is by construction a newer
+one.
 """
+
+#: Alphabetic id segments that are not a model TIER. ``claude`` is the vendor
+#: prefix and ``latest`` is an alias suffix (``claude-3-7-sonnet-latest``);
+#: reading either as a tier would file an alias under a family of its own and
+#: lose the inheritance this parser exists to provide.
+_ANTHROPIC_NON_TIER_SEGMENTS = frozenset({"claude", "latest"})
+
+#: A snapshot date is exactly 8 digits (``20251101``). It has to be told apart
+#: from a version component or ``claude-opus-4-5-20251101`` parses as version
+#: (4, 5, 20251101), which sorts above every real generation and would make each
+#: dated snapshot its own family — the opposite of inheriting one.
+_ANTHROPIC_DATE_DIGITS = 8
+
+
+def _anthropic_family(model_id: str) -> Optional[tuple[str, tuple[int, ...]]]:
+    """``(tier, version)`` parsed out of a Claude id, or ``None``.
+
+    Anthropic has used two id shapes and both are still served, so the parser
+    reads segments by KIND rather than by position: ``claude-opus-4-5-20251101``
+    puts the tier before the version and ``claude-3-5-sonnet-20241022`` puts it
+    after. Both yield ``("opus", (4, 5))`` and ``("sonnet", (3, 5))``.
+
+    The tier is not matched against a fixed set of names. ``claude-fable-5`` is a
+    live tier that no such list would have contained, and a list is wrong in the
+    one direction that matters: an unrecognised tier gets no family and falls back
+    to the 200k floor, which is exactly the under-reporting being fixed.
+
+    ``None`` means "not a Claude id shaped like a family member" — no tier, or no
+    version at all — and the caller must then use the flat template rather than
+    guess.
+    """
+    tier = ""
+    version: list[int] = []
+    for segment in model_id.strip().casefold().split("-"):
+        if segment.isdigit():
+            if len(segment) != _ANTHROPIC_DATE_DIGITS:
+                version.append(int(segment))
+            continue
+        if segment and not tier and segment not in _ANTHROPIC_NON_TIER_SEGMENTS:
+            tier = segment
+    if not tier or not version:
+        return None
+    return tier, tuple(version)
+
+
+def anthropic_family_model_info(model_id: str) -> Optional[ModelInfo]:
+    """The best shipped description for an Anthropic id :data:`anthropic_models` lacks.
+
+    Exists because the flat template is a FAMILY-BLIND answer, and Anthropic's
+    families no longer share a window: Opus 5 and Sonnet 5 serve 1M while Opus 4.5
+    serves 200k. A user on ``claude-opus-5-20260112`` — a dated snapshot of a model
+    whose undated id is right here in the registry — was handed the 200k floor and
+    a compaction threshold of 160k on a model with 1M of room, which is the report
+    this function answers.
+
+    Two ways to match, in order:
+
+    1. **Same tier and same version** — the same model under another spelling
+       (``claude-opus-5`` vs a dated snapshot of it, or an undated alias of a
+       snapshot we ship). Everything transfers, prices included, because it is not
+       a different model. The newest id wins when several snapshots share a
+       version; ids are date-suffixed, so lexical order is chronological.
+    2. **Same tier, NEWER version than anything shipped** — a generation released
+       after this registry was last edited. Limits and capabilities are inherited
+       from the newest shipped row of that tier because context windows have only
+       ever grown within a tier, but prices are dropped to the "unknown" zero:
+       a new generation is exactly where a price changes, and the status band
+       renders a price as fact.
+
+    An OLDER unshipped version returns ``None`` rather than inheriting downward.
+    Monotonicity is the only reason the newer case is safe, and it does not run
+    backwards: a 200k-era id must not be handed a 1M window, because that puts the
+    compaction threshold beyond the model's real limit and 400s every turn.
+
+    Returns a deep copy, so a caller that writes to the result (sessions do) cannot
+    rewrite the process-wide registry.
+    """
+    wanted = _anthropic_family(model_id)
+    if wanted is None:
+        return None
+    tier, version = wanted
+
+    family: list[tuple[tuple[int, ...], str, ModelInfo]] = []
+    for row_id, row in anthropic_models.items():
+        parsed = _anthropic_family(row_id)
+        if parsed is not None and parsed[0] == tier:
+            family.append((parsed[1], row_id, row))
+    if not family:
+        return None
+
+    same_version = [entry for entry in family if entry[0] == version]
+    if same_version:
+        row = max(same_version, key=lambda entry: entry[1])[2]
+        return row.model_copy(deep=True, update={"id": model_id})
+
+    newest_version, _, newest = max(family, key=lambda entry: (entry[0], entry[1]))
+    if version < newest_version:
+        return None
+    return newest.model_copy(
+        deep=True,
+        update={
+            "id": model_id,
+            # NOT the older row's name: this is a different model, and labelling a
+            # `claude-opus-6` session "Claude Opus 5" in the status band would be a
+            # lie about which model is answering.
+            "name": model_id,
+            "input_price": 0.0,
+            "output_price": 0.0,
+            "cache_writes_price": None,
+            "cache_reads_price": None,
+            "description": (
+                "Claude model not described by the shipped registry; limits "
+                f"inherited from {newest.id}"
+            ),
+            "recommended": False,
+        },
+    )
+
 
 openai_models: Dict[str, ModelInfo] = {
     "gpt-4o": ModelInfo(

@@ -925,3 +925,303 @@ carrying the answer and legacy socket keys then closes on `stream.terminal`, an
 SSE-less backend (404) falls back to the socket, and a stream that opens and
 dies falls back too. Storybook fixture (`Chat/SSE transport`) shows stream,
 drop-and-resume, and both fallbacks with no backend. Typecheck and biome clean.
+
+## Anthropic context windows (reported as `1.8%/200k` on a 1M model)
+
+A session on `anthropic/claude-opus-5` showed `1.8%/200k` in the status band. Not
+cosmetic: the default compaction threshold is `min(0.8 * window, 600k)`, so a 200k
+window on a 1M model compacted at 160k and threw away 84% of the model's room.
+
+Two independent causes, both fixed:
+
+| Cause | Fix |
+|---|---|
+| `_fetch_anthropic` read only `id` and `display_name`, so every discovered row carried a zero window and the shipped 200k family floor answered instead. The live listing has had the truth all along | the transport maps `max_input_tokens` → `context_window`, `max_tokens` → `max_tokens`, `capabilities.image_input.supported` → `supports_images`; prices are still absent from that wire and are still not invented |
+| The registry had no row for the 5 series, and its per-vendor fallback is family-BLIND — one 200k floor for a vendor whose tiers no longer agree (Opus 5 serves 1M, Opus 4.5 serves 200k) | ten rows transcribed from the live listing, plus `anthropic_family_model_info`: an unshipped id inherits its own tier+version (`claude-opus-5-20260112` → Opus 5's 1M) or, for a generation newer than anything shipped, that tier's newest limits with prices dropped to unknown. Inheritance never runs backwards — a 200k-era id handed 1M would trigger compaction past its real limit and 400 every turn |
+
+A cached listing document written by the previous transport is well-SHAPED and
+full of zeros, so it was served as a fresh cache hit for the rest of its 24h TTL —
+the upgrade would have looked like it did nothing on exactly the install that
+reported the bug. Documents now carry `LISTING_CAPTURE_VERSION`; an older capture
+is dropped and refetched.
+
+| Claim | Proof |
+|---|---|
+| Live listing (real OAuth credential, `GET /v1/models?limit=50`) | `claude-opus-5` and `claude-sonnet-5` report `max_input_tokens: 1000000`, `max_tokens: 128000`, `image_input.supported: true`; Opus 4.5 and Haiku 4.5 report 200k/64k, so the numbers are read per model |
+| Production path | `resolve_model_info("anthropic", "claude-opus-5").context_window == 1000000`; `configure_model(...).spec` = 1M window / 128k output / images on |
+| The window comes from the WIRE, not just the new row | with the shipped row sabotaged to 111 tokens, the first call dropped the stale-capture document (registry, 111) and the second fetched live and resolved 1,000,000 |
+| Compaction | session default threshold `min(int(1_000_000 * 0.8), 600_000)` = **600,000** (was 160,000) |
+| Status band | `format_context_usage(18_000, 1_000_000)` = `1.8%/1M` — the reported string, corrected |
+| Cold and offline | empty cache dir with every socket refused: `claude-opus-5`, `claude-opus-5-20260112`, `claude-sonnet-4-5` and `claude-opus-9` all resolve to 1M with prompt caching on, nothing fetched, nothing raised |
+
+`tests/unit/model` + `tests/unit/providers`: 403 passed. New coverage: the
+listing→`ModelInfo` mapping (1M window, 128k output, per-capability `supported`
+flags), the terse-listing degradation, family inheritance in both directions, the
+stale-capture refetch, and the three capability states below.
+
+### Review round 1, C-07 (nit): the explicit-false capability had no consumer
+
+`_capability_supported` read `capabilities.image_input.supported` correctly, but
+`_merge_one` then OR-ed the registry flag back on — and every shipped Anthropic row
+carries `supports_images=True`, so a live `image_input.supported: false` merged
+back to `True`. For the one capability actually read from the wire, an explicit
+denial could never take effect. Documenting it was the alternative; reading it is
+what the user asked for, since the provider is the authority on its own model.
+
+`DiscoveredModel.supports_images` is now `bool | None`: `None` means the listing
+did not say, and only that state defers to the registry. The same three states are
+preserved by `_has_image_input` (a gateway that lists modalities without `image`
+has SAID text-only; one that lists no modalities has said nothing — previously
+both returned `False`, which would have downgraded every bundled vision model the
+moment a lean gateway was listed), by `_from_static`, and across the cache
+round-trip (`null` in the document, not `false`). `supports_prompt_cache` stays a
+plain OR and says why: no listing in the tree states it, so there is no denial to
+respect — only silence, which must not drop `cache_control` on the priciest models.
+
+| Claim | Proof |
+|---|---|
+| Explicit `false` beats a `True` row | wire `{"image_input": {"supported": false}}` + shipped `claude-opus-5` (True) → resolved `False`, and `ModelSpec.supports_images is False` (the flag that selects the snapcompact vision strategy) |
+| Absent keeps the row | no `capabilities` object, and `{"image_input": {}}` → resolved `True` from the registry |
+| Explicit `true` sets `True` | over a `False` row → `True` |
+| Cache round-trip | stored document holds `"supports_images": null`; live and cached opens both resolve `True` |
+| No shipped id changed | all 18 `anthropic_models` rows audited against the live listing: the ten new ids are stated `true` on the wire (match), the eight older ids are no longer served so the wire says nothing and the row stands — including `claude-3-5-haiku-20241022`, which stays `False`. Rows whose resolved `supports_images` differs from the shipped row: **0** |
+
+## The frozen agent: approvals under a full-screen UI
+
+A reported freeze — two `bash` cards stuck on "running" while the working line
+kept animating, 4m47s on the clock, no progress. Not a TUI hang: the frame was
+still repainting.
+
+The harness gates write/exec tier tools behind `ToolContext.request_approval`,
+and the factory's gate is `await asyncio.to_thread(input, ...)`. Under the TUI
+`sys.stdin.isatty()` is true, so that branch is taken — but Textual holds the
+terminal in raw mode and consumes every keystroke, so the thread waits for a
+line **nobody can type**, and the turn awaiting the callback never resumes.
+Write/exec tools are `interruptible=False`, so the runner parked on that
+callback is settled by nothing but its own future: not even Ctrl+C reached it.
+
+Three changes, because one was not enough:
+
+| Change | Why it is load-bearing |
+|---|---|
+| `SessionProtocol.set_approval_handler` + `ApprovalBlock` | the front end that OWNS the terminal answers approvals on screen |
+| The stdin gate refuses when `textual.app.active_app` is set | the net for the window before a UI installs its handler; denying is the only safe answer, since the alternative is the hang |
+| A turn-scoped deny latch, re-read after every `await` | settling only the FRONT prompt woke the asker queued behind it, which mounted a fresh question **after** Ctrl+C had aborted — and on teardown, into a closing screen |
+
+`a` for "allow all" became `A`: the block takes focus, `a` is the most common
+letter in English, and the mode disarms a safety gate for the whole session. Any
+non-answer printable now passes through to the composer instead of vanishing,
+clicking the prompt takes focus back, `/approvals ask` restores prompting, and
+the band carries `! auto-approve` while it is disarmed.
+
+| Claim | Proof (live, Anthropic OAuth, `claude-opus-5`, `yolo=False`) |
+|---|---|
+| The prompt appears where the hang was | `? allow bash  bash({"command": "printf 'alpha\nbeta\ngamma\n'"})` / `y allow · n deny · A allow all · esc stop` |
+| Answering runs the tool | `y` → `tools: [('bash', True)]`, output contains the printed lines, `turn completed (no hang): True` |
+| The decision is kept | `✓ allowed bash  …` receipt row survives in the transcript |
+| Esc refuses and stops | `agent_end aborted=True`, card `aborted ✗`, focus still in the composer |
+| A queued ask is not re-asked | two concurrent asks, one Ctrl+C → both futures False, still exactly one prompt widget mounted |
+| Allow-all is seen by a waiter | two concurrent asks, `A` → both True, no second prompt (fails if the flag is latched off a posted message) |
+
+## Steering, Esc, and the double Ctrl+C
+
+Typing during a turn used to be thrown away: `prompt()` rejects a concurrent
+call while a turn holds the session lock, so the TUI surfaced "session is
+already streaming" as an error. Mid-turn submits now `steer()`.
+
+Esc could not simply be bound. `TextArea` binds it to `blur`, so the first press
+silently moved focus out of the composer — every keystroke after it went nowhere
+— and only a LATER press reached the app:
+
+```
+after esc1 -> picker closed, focused: Editor,        aborts: []
+after esc2 -> focused: TranscriptView,               aborts: []   <- focus left
+after esc3 ->                                        aborts: ['interrupted']
+```
+
+A `priority=True` binding was tried and rejected: it is matched before the
+focused widget sees the key, which made the pickers undismissable. The editor
+consumes Escape when no picker is open and posts `StopRequested`.
+
+| Claim | Proof (live, mid-`sleep`, so the agent is really busy) |
+|---|---|
+| The steer rides the queue | `streaming while typing: True`, `! queued — sends when this step finishes`, `steer queued in session: 1` |
+| The steer changes the OUTCOME | asked for BANANA, steered to ORANGE mid-tool, final text: `ORANGE` |
+| Esc stops a running tool | `stopped by esc: True`, `agent_end aborted flag: [True]`, focus still the composer |
+| One Ctrl+C never exits | `app.is_running` true, `ctrl+c again to exit — resume with local-operator --resume <id>` |
+| Two exits | second press within 1.5 s → app stopped; `session ended — resume with:` printed after the terminal is released |
+| Two slow presses do NOT exit | first press aged past the window → two interrupts, app still running |
+
+## `--resume`: the session comes back, not just the directory
+
+Resuming reuses the session's transcript directory, which is what makes the
+transcript replay — the same mechanism `--train` uses for an agent directory.
+The policy lives in `local_operator/resume.py`, which imports **only** `pathlib`:
+importing `session_factory` for it dragged `local_operator.harness` and `asyncio`
+onto every `local-operator --help`, which `test_import_graph` exists to prevent.
+
+| Claim | Proof (live, two real sessions) |
+|---|---|
+| A session persists | session 1 told the agent `ZEBRA-47`; `transcript.jsonl` 538 bytes on disk |
+| The hint names it | `local-operator --resume fd5a66ef8ce2` |
+| Resume replays HISTORY | session 2 built through the production `--resume` path, asked for the word back: `ZEBRA-47` |
+| Bare `--resume` takes the newest | `resolve_resume_id('@latest') -> fd5a66ef8ce2`, ordered by the transcript's mtime (a directory's own mtime moves for reasons that are not turns) |
+| A typo fails honestly | `no session 'nonexistent123' to resume`, exit status 1, the real ids listed — resolved before anything starts, so no full-screen app launches to report it |
+
+## The composing row: a call the model is still dictating
+
+A user asked for a Space Invaders game and watched a spinner for 1m41s with an
+empty transcript, reasonably concluding the agent had hung. It had not. A tool
+call does not exist until the last token of its arguments arrives, so for a
+19 KB `write` the harness emitted `message_end` and then nothing at all — no
+`tool_execution_start`, no card, no row — for as long as the model took to
+dictate the file.
+
+The provider's own timing, measured through the real client (`/tmp/lo-probe/
+probe_encoding.py` and `probe_compose_live_events.py`, `anthropic/claude-opus-5`):
+
+| Moment | Time |
+|---|---|
+| `content_block_start` for the `write` tool | 2.6s |
+| first `input_json_delta` | 82.5s |
+| arguments complete (14 KB) | 82.9s |
+| `tool_execution_start` | 83.1s |
+
+Two things follow. First, a row has to appear at 2.6s, not at 83.1s — that is
+`ToolCallComposeEvent`, emitted as soon as the tool's NAME is known. Second, a
+byte counter alone is not enough: it reads `0 B` for eighty seconds, and a
+number that never moves is exactly the impression the row exists to remove. The
+row carries a clock, and the size joins only once there is one.
+
+| Claim | Proof (live, `claude-opus-5`, `probe_live_compose.py`) |
+|---|---|
+| A row appears while the call is dictated | 108 distinct frames, `writing the call… 0s` → `writing the call… 1m57s` |
+| The clock moves through provider silence | every sample differs from the last; the byte count stayed 0 for the whole dictation on that run |
+| The call still completes | `/tmp/lo-probe/invaders.html`, 19,199 bytes |
+| The execution adopts the row | one `write` row on the frame, never two (`test_a_call_being_dictated_shows_a_row_that_moves`) |
+| The event is additive to the contract | `scripts/check_streaming_contract.py` PASS on a live `exec --json` capture; the SSE publisher ignores unmapped types by construction |
+
+A dead stream is now distinguishable from a slow one: `STREAM_READ_TIMEOUT_S`
+bounds the gap BETWEEN chunks at 180s, where a flat `timeout=600` meant a
+provider that accepted the connection and went silent looked like a working one
+for ten minutes.
+
+## Final gate: measured at `24fecb162`
+
+Every number in the tables below was produced at this head. One figure in the
+prose is explicitly historical and labelled as such — the 30-turn direct-key
+cache run, which cannot be reproduced here because the key is gone; it is marked
+where it appears and is not part of any contract. Where a claim is about a
+change, both branches were painted — the rule the review rounds
+converged on after four findings died to the same error (a consequence reasoned
+from a mechanism's description, with only the branch where the change was absent
+actually measured).
+
+| Contract | Budget | Measured | Command |
+|---|---|---|---|
+| Start context | ≤ 30,000 tokens | **2,156** (1,081 static listing + 826 semantic worst case + 1,330 tool schemas) | `scripts/bench_context_budget.py --skills-dir …` |
+| Structural prefix stability | ≥ 90% | **94.7%** | `scripts/bench_cache_rate.py` |
+| Streaming contract | unchanged vocabulary | **PASS** on a live capture | `scripts/check_streaming_contract.py run.jsonl` |
+| Unit suite | green | **2,602 passed, 6 skipped** | `pytest tests/unit` |
+| Lint / types | clean | `flake8` clean, `pyright` 0/0/0 | — |
+| TUI goldens | unchanged | 3 passed | pinned container, `LO_RUN_SNAPSHOTS=1` |
+
+The semantic selector picks **1 of 15** skills for an unrelated query, which is
+the whole argument for progressive disclosure: the static listing of the same
+corpus is 1,081 tokens and its bodies are 44 KB.
+
+### Live end-to-end at this head
+
+`local-operator --hosting openrouter --model deepseek/deepseek-v4-flash-0731
+exec --json --yolo "…fib.py…"` — exit 0, 35 events, the agent wrote `fib.py`,
+ran it, and reported `55`. The file is a correct iterative implementation with
+`fib(0) == 0`. The same capture passes the streaming-contract checker.
+
+The live cache rate on OpenRouter reads 37.3% and is **informational only**: the
+shared pool does not reliably report `cached_tokens`. The structural measurement
+is the contract, because it is the thing this codebase controls.
+
+**Historical, not measured at this head** (the direct key it needed has since
+expired, so it cannot be re-run): a 30-turn trajectory against a direct provider
+key earlier in the rewrite measured a **94.2%** live cache rate and $0.0164
+against $0.0517 unclamped. Quoted only as the one end-to-end confirmation that
+the structural number tracks a real provider's accounting; it is one digit from
+the 94.7% above by coincidence, and the two are different measurements of
+different things.
+
+### Approval-prompt safety
+
+The prompt is the one surface where a describer's mistake is a security bug
+rather than a cosmetic one, so it is fuzzed rather than sampled:
+
+| Surface | Cases | Result |
+|---|---|---|
+| `_display_url` | 11,381 (scheme × userinfo decoy × real host × port × tail, plus degenerate inputs) | 0 userinfo leaks, 0 non-ASCII hosts, 0 raises, 0 credential leaks |
+| `_resolve_workspace_path` | full path matrix, **both** branches of the `expanduser` guard | 0 cases where `inside` is True while the resolved path lies outside the root |
+
+Two defects were found this way rather than by review. They are different in
+origin and in remedy, and an earlier draft of this section got both wrong:
+
+* **`_display_url` degrading to the unsanitised input on an unreadable port** was
+  a regression introduced by an earlier fix in this series. It is remedied by
+  **sanitising**, not by escalating: the port is dropped and the row paints
+  `http! evil.test/x`. There is no hazard clause on that row and there should not
+  be — the destination is known, and it is now stated correctly.
+* **`resolve()` raising `ValueError` on an embedded NUL** was NOT introduced here.
+  It is present unguarded at base `2a4c560`, where `_resolve_workspace_path`
+  raises straight through five call sites (verified by running the base copy).
+  This is the one remedied by **failing closed**: a target that cannot be
+  characterised escalates and says so in its own words (`unresolvable — `) rather
+  than borrowing the workspace clause it would contradict.
+
+The distinction matters because "fails closed" is a claim about a gate, and only
+one of these two touches a gate.
+
+
+## Feature finalization round (dock band, /resume, diff view, gates)
+
+A post-review integration round wired the remaining TUI feature surfaces the
+reviewed command/tool work scaffolded but left as unwired modules, then put
+the whole tree through the CI gates that the rewrite had deferred.
+
+### New surfaces and how they're evidenced
+
+| Surface | What it does | Evidence |
+|---|---|---|
+| Dock band (`#band`) | Todo list + subagent task list collapse in above the composer; zero rows when empty | `tests/unit/tui/test_band_panels.py` (4 mounted-app tests: empty→shown→hidden, todo row rendering, trajectory modal) |
+| Subagent trajectory modal | Click/enter a subagent row → modal replaying the child's retained events | band-panels test drives `_open_subagent_trajectory` and asserts the child's prose renders |
+| Expanded write/edit diff | The card reveals a colorized unified diff (+ success, − danger, `@@`/headers muted, context dim) | `tests/unit/tui/test_tool_card.py` (4 new diff tests assert hunk-role tinting); engine `_diff_details` test asserts the diff payload + bounded cap |
+| `--resume` render fix | A resumed session shows its prior user/assistant messages on screen instead of a blank welcome | `Session.history()` seam + `_render_resumed_history`; `test_history_accessor*` prove the replay, `test_resume_*` drive the TUI command through a mounted app |
+| `/resume` command | Bare lists recent sessions with age; `/resume <id>` rebinds and reloads | `test_resume_lists_recent_sessions_without_a_boot`, `test_resume_id_rebinds_and_reloads` |
+| `/model default` | Persists provider/model to config so later launches boot on it | `test_app_pilot` covers model switching (persistence write covered by the command path) |
+| task/wait/jobs engine tools | `run_subagent` launcher wired via `Session._launch_subagent`; bounded tools registered | `tests/unit/tools/test_task_wait_jobs.py` (8), `tests/unit/session/test_launch_subagent.py` (3), 407 tools/session/harness tests |
+
+### Whole-tree gate status (final)
+
+The rewrite disabled lint/type gates during development by instruction; this
+round re-enabled and satisfied them across every file touched by the wave:
+
+| Gate | Result |
+|---|---|
+| `flake8 .` | clean (0) |
+| `black --check .` | clean |
+| `isort --check-only` | clean |
+| `pyright .` | **0 errors, 0 warnings, 0 informations** (was 22 errors before this round) |
+| `pytest tests/unit` | **2665 passed**, 8 skipped |
+
+The pyright cleanup also fixed latent defects the wave's partial commits left
+in: `RetryStartEvent` was referenced in the retry handler but never imported
+(a runtime `NameError` had a retry fired), `UsagePanel.offset` shadowed
+Textual `Widget.offset` (renamed `view_offset`), and the trajectory dict was
+untyped.
+
+### Scope note: pointer cursors (item 4, blocked)
+
+"Text pointer/default cursors" is **not implementable in Textual 8.2.8**:
+the framework exposes no mouse-cursor API (verified — no `set_mouse_cursor`,
+no `cursor:` CSS property in `textual.css._style_properties`). The caret
+request is satisfied (solid caret, visible the instant the buffer has content;
+hidden only over the empty placeholder because Textual's caret physically
+inverts the placeholder's first glyph — a documented D-05 design decision).
+Rich-text cursor over the input and pointer-over-rows requires a Textual
+upgrade and is the one deferred surface, recorded rather than hacked.

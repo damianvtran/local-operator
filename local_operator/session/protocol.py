@@ -14,9 +14,9 @@ superseded — UIs must handle that (see docs/REWRITE.md, stream D).
 
 from __future__ import annotations
 
-from typing import Callable, Protocol, runtime_checkable
+from typing import Awaitable, Callable, Protocol, runtime_checkable
 
-from local_operator.harness.types import EventHandler, Message, ModelSpec
+from local_operator.harness.types import AgentMessage, EventHandler, Message, ModelSpec
 
 
 @runtime_checkable
@@ -88,6 +88,17 @@ class SessionProtocol(Protocol):
         """
         ...
 
+    def history(self) -> list[AgentMessage]:
+        """The conversation as replayed into LLM context.
+
+        Read-only for RENDERING (a resumed session's transcript back on
+        screen): returns the messages the loop sees, in order — user prompts,
+        assistant replies, tool results. A front end mounts them as blocks;
+        it must NOT mutate them. Empty before the first prompt on a fresh
+        session; on ``--resume`` it carries the prior conversation.
+        """
+        ...
+
     # --- driving turns ----------------------------------------------------
     async def prompt(self, text: str) -> None:
         """Run one user turn to completion (awaitable) or raise."""
@@ -111,6 +122,18 @@ class SessionProtocol(Protocol):
 
     def abort(self, reason: str = "interrupted") -> None:
         """Abort the running turn; the engine emits an aborted agent_end."""
+        ...
+
+    def set_approval_handler(self, handler: Callable[[str, str], Awaitable[bool]] | None) -> None:
+        """Replace the host's tool-approval gate for write/exec tier tools.
+
+        A front end that OWNS the terminal must own approvals with it: the
+        default gate reads a y/N answer off stdin, which a full-screen UI has
+        taken over, so leaving it installed hangs the turn instead of asking
+        anyone. The handler is read when the per-turn tool context is built, so
+        installing one mid-session applies from the next tool call. ``None``
+        restores auto-approval (what ``--yolo`` already does).
+        """
         ...
 
     # --- events -----------------------------------------------------------

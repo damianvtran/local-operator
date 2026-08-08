@@ -49,6 +49,10 @@ from local_operator.harness.types import (
     NoticeEvent,
     RetryEndEvent,
     RetryStartEvent,
+    SubagentEndEvent,
+    SubagentProgressEvent,
+    SubagentStartEvent,
+    ToolCallComposeEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolExecutionUpdateEvent,
@@ -56,6 +60,7 @@ from local_operator.harness.types import (
     TurnStartEvent,
     Usage,
 )
+from local_operator.tui.widgets.transcript import NoticeKind
 
 #: Streaming updates flush at ~30 fps (the coalesced cadence).
 FLUSH_INTERVAL_S = 1.0 / 30.0
@@ -119,6 +124,14 @@ class AssistantMessageEnd(Message):
         self.text = text
 
 
+class ToolComposing(Message):
+    """The model is still dictating a tool call's arguments."""
+
+    def __init__(self, event: ToolCallComposeEvent) -> None:
+        super().__init__()
+        self.event = event
+
+
 class ToolStarted(Message):
     """A tool execution started; a buffered completion may follow."""
 
@@ -146,10 +159,13 @@ class ToolUpdated(Message):
 class NoticePosted(Message):
     """A notice to surface in the transcript."""
 
-    def __init__(self, text: str, kind: str) -> None:
+    def __init__(self, text: str, kind: NoticeKind) -> None:
         super().__init__()
         self.text = text
-        self.kind = kind
+        # Annotated, not inferred: pyright WIDENS a literal to ``str`` when it
+        # infers an attribute's type from an assignment, which silently undid the
+        # typing at the one hop that carries a kind across a thread boundary.
+        self.kind: NoticeKind = kind
 
 
 class CompactionStarted(Message):
@@ -185,6 +201,50 @@ class RetryEnded(Message):
     def __init__(self, success: bool) -> None:
         super().__init__()
         self.success = success
+
+
+class SubagentStarted(Message):
+    """A child session was registered as a background ``task`` job."""
+
+    def __init__(self, job_id: str, label: str, agent_id: str | None = None) -> None:
+        super().__init__()
+        self.job_id = job_id
+        self.label = label
+        self.agent_id = agent_id
+
+
+class SubagentProgress(Message):
+    """A throttled relay of a child session's activity (tool starts/ends,
+    message ends — never per-token deltas; the relay bounds that)."""
+
+    def __init__(self, job_id: str, label: str, progress: str) -> None:
+        super().__init__()
+        self.job_id = job_id
+        self.label = label
+        self.progress = progress
+
+
+class SubagentEnded(Message):
+    """A child session settled; the app repaints the band's subagent row.
+
+    The band is the only surface this touches — the row flips from its
+    spinner to the ✓/✗ outcome glyph on the next refresh. No transcript line
+    is appended; the live band row IS the news."""
+
+    def __init__(
+        self,
+        job_id: str,
+        label: str,
+        status: str,
+        result_text: str | None = None,
+        error_text: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.job_id = job_id
+        self.label = label
+        self.status = status
+        self.result_text = result_text
+        self.error_text = error_text
 
 
 class EventController:
@@ -355,6 +415,9 @@ class EventController:
         self._stop_flush_timer()
         self._post(AssistantMessageEnd(text))
 
+    def _handle_tool_compose(self, event: ToolCallComposeEvent) -> None:
+        self._post(ToolComposing(event))
+
     def _handle_tool_start(self, event: ToolExecutionStartEvent) -> None:
         self._started_tools.add(event.tool_call_id)
         self._post(ToolStarted(event))
@@ -390,6 +453,24 @@ class EventController:
     def _handle_retry_end(self, event: RetryEndEvent) -> None:
         self._post(RetryEnded(event.success))
 
+    # Subagent events ride the PARENT session stream: the child session's own
+    # stream is the job manager's problem, and the TUI subscribes to exactly
+    # one session. No generation guard here — a child's lifecycle events are
+    # not the parent loop's boundary events, so a stale turn cannot supersede
+    # them; the job id groups them.
+    def _handle_subagent_start(self, event: SubagentStartEvent) -> None:
+        self._post(SubagentStarted(event.job_id, event.label, event.agent_id))
+
+    def _handle_subagent_progress(self, event: SubagentProgressEvent) -> None:
+        self._post(SubagentProgress(event.job_id, event.label, event.progress))
+
+    def _handle_subagent_end(self, event: SubagentEndEvent) -> None:
+        self._post(
+            SubagentEnded(
+                event.job_id, event.label, event.status, event.result_text, event.error_text
+            )
+        )
+
     _HANDLERS = {
         "agent_start": _handle_agent_start,
         "agent_end": _handle_agent_end,
@@ -398,6 +479,7 @@ class EventController:
         "message_start": _handle_message_start,
         "message_update": _handle_message_update,
         "message_end": _handle_message_end,
+        "tool_call_compose": _handle_tool_compose,
         "tool_execution_start": _handle_tool_start,
         "tool_execution_update": _handle_tool_update,
         "tool_execution_end": _handle_tool_end,
@@ -406,6 +488,9 @@ class EventController:
         "compaction_end": _handle_compaction_end,
         "retry_start": _handle_retry_start,
         "retry_end": _handle_retry_end,
+        "subagent_start": _handle_subagent_start,
+        "subagent_progress": _handle_subagent_progress,
+        "subagent_end": _handle_subagent_end,
     }
 
     # -- flush timer --------------------------------------------------------

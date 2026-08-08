@@ -303,3 +303,56 @@ async def test_real_compaction_then_resume_replays_the_kept_window(tmp_path):
     ids_after_marker = [m.id for m in resumed[1:]]
     entry_ids = [entry.id for entry in entries]
     assert ids_after_marker == entry_ids[entry_ids.index(cut_id) :][: len(ids_after_marker)]
+
+
+@pytest.mark.asyncio
+async def test_history_accessor_returns_the_resumed_conversation(tmp_path):
+    """``Session.history()`` exposes the replayed conversation for rendering.
+
+    The TUI renders a resumed session from this accessor (:meth:`Session.history`)
+    — the seam added for the ``--resume`` fix. Guard: a session constructed
+    against a populated transcript must surface the prior prompts and replies
+    IN ORDER, and an empty one must surface nothing.
+    """
+    directory = tmp_path / "sess"
+    first = Session(
+        model=MODEL,
+        stream_fn=ScriptedStream([_read_turn("c1"), _final_turn("done")]),
+        tools=[read_tool()],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda: ["stable"],
+    )
+    await first.prompt("read engine.py")
+    assert first.history(), "a live turn must be visible in history()"
+
+    resumed = Session(
+        model=MODEL,
+        stream_fn=ScriptedStream([]),  # never prompted
+        tools=[read_tool()],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda: ["stable"],
+    )
+    history = resumed.history()
+    messages = [m for m in history if isinstance(m, Message)]
+    roles = [m.role for m in messages]
+    # The prior prompt survived the resume and sits first: the exact render
+    # input the TUI needs to show the conversation before the first live turn.
+    assert "user" in roles
+    assert messages[roles.index("user")].text == "read engine.py"
+
+
+@pytest.mark.asyncio
+async def test_history_accessor_is_empty_on_a_fresh_session(tmp_path):
+    """A session that never prompted has no history to render.
+
+    The TUI's resume render is guarded on this: an empty history must mean
+    "fresh session, keep the welcome splash", never "render nothing".
+    """
+    fresh = Session(
+        model=MODEL,
+        stream_fn=ScriptedStream([]),
+        tools=[read_tool()],
+        transcript=Transcript(tmp_path / "fresh"),
+        system_blocks_provider=lambda: ["stable"],
+    )
+    assert fresh.history() == []

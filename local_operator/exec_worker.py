@@ -63,6 +63,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--hosting", type=str, default=None, help="Hosting platform override")
     parser.add_argument("--model", type=str, default=None, help="Model override")
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        metavar="SESSION_ID",
+        # A background job is the same request run elsewhere, so it has to be able
+        # to continue a session. Without this the flag was accepted by the front
+        # end, dropped at the process boundary, and the worker started a fresh
+        # session while reporting success.
+        help="Resume a previous session by id (or '@latest')",
+    )
     return parser
 
 
@@ -116,6 +127,7 @@ def _default_session_factory(parsed: argparse.Namespace) -> Awaitable[SessionPro
         agent_id=parsed.agent_id,
         yolo=parsed.yolo,
         train=bool(getattr(parsed, "train", False)),
+        resume=parsed.resume,
     )
     config_dir = Path.home() / ".local-operator"
     config_manager = ConfigManager(config_dir)

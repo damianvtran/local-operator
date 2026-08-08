@@ -8,6 +8,8 @@ exercised through it.
 
 from __future__ import annotations
 
+import time
+
 import httpx
 import pytest
 
@@ -207,29 +209,467 @@ async def test_an_unavailable_deepseek_account_says_so() -> None:
     assert report.notes == "account not available for requests"
 
 
+#: A verbatim ``/api/oauth/usage`` body, captured from the live endpoint on
+#: 2026-08-08 with a real Claude subscription token (200 OK). Trimmed only of
+#: the dozen always-null internal codename buckets it also carries.
+#:
+#: The shape is the whole point of pinning it. The previous fixture was written
+#: by hand against ``{"used": ..., "limit": ...}`` keys that this endpoint has
+#: NEVER sent — it reports ``utilization`` as a percent — so the parser and its
+#: test agreed with each other and disagreed with Anthropic, and `/usage` said
+#: "no usage data" for an account whose weekly window was at 100%.
+ANTHROPIC_USAGE_BODY = {
+    "five_hour": {"utilization": 2.0, "resets_at": "2026-08-08T20:19:59.196141+00:00"},
+    "seven_day": {"utilization": 100.0, "resets_at": "2026-08-12T03:59:59.196163+00:00"},
+    "seven_day_opus": None,
+    "seven_day_sonnet": None,
+    "limits": [
+        {
+            "kind": "session",
+            "percent": 2,
+            "resets_at": "2026-08-08T20:19:59.196141+00:00",
+            "scope": None,
+            "is_active": False,
+        },
+        {
+            "kind": "weekly_all",
+            "percent": 100,
+            "resets_at": "2026-08-12T03:59:59.196163+00:00",
+            "scope": None,
+            "is_active": True,
+        },
+        {
+            "kind": "weekly_scoped",
+            "percent": 0,
+            "resets_at": None,
+            "scope": {"model": {"id": None, "display_name": "Fable"}},
+            "is_active": False,
+        },
+    ],
+    "extra_usage": {
+        "is_enabled": False,
+        "monthly_limit": 20000,
+        "used_credits": 0.0,
+        "currency": "USD",
+        "decimal_places": 2,
+        "disabled_reason": "out_of_credits",
+    },
+    "spend": {
+        "used": {"amount_minor": 0, "currency": "USD", "exponent": 2},
+        "limit": {"amount_minor": 20000, "currency": "USD", "exponent": 2},
+        "enabled": False,
+        "disabled_reason": "out_of_credits",
+    },
+}
+
+
 @pytest.mark.asyncio
-async def test_anthropic_oauth_parses_five_hour() -> None:
+async def test_anthropic_oauth_reads_utilization_not_used_limit() -> None:
+    """The regression: a 200 with full data rendered an empty table.
+
+    Anthropic reports each window as a ``utilization`` PERCENT. The fetcher
+    looked for ``used``/``limit``, found neither, skipped every bucket and
+    returned None — indistinguishable, at the `/usage` surface, from a provider
+    with no endpoint at all.
+    """
+    client = _client_for(ANTHROPIC_USAGE_BODY)
+    async with client:
+        report = await fetch_usage(client, "anthropic", access_token="tok")
+    assert report is not None
+    by_id = {limit.id: limit for limit in report.limits}
+    assert by_id["anthropic:5h"].amount.fraction() == pytest.approx(0.02)
+    assert by_id["anthropic:7d"].amount.fraction() == pytest.approx(1.0)
+    assert by_id["anthropic:7d"].effective_status() == "exhausted"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_reads_model_scoped_weekly_caps_from_limits_array() -> None:
+    """As of mid-2026 the legacy per-model buckets are permanently null and the
+    scoped caps arrive only as ``weekly_scoped`` entries naming the family in
+    ``scope.model.display_name``. Reading the legacy keys alone lost them all."""
+    client = _client_for(ANTHROPIC_USAGE_BODY)
+    async with client:
+        report = await fetch_usage(client, "anthropic", access_token="tok")
+    assert report is not None
+    fable = next(limit for limit in report.limits if limit.tier == "fable")
+    assert fable.label == "7 day (Fable)"
+    assert fable.amount.fraction() == pytest.approx(0.0)
+    # A per-model cap is NOT account-wide: a 100% Fable row must not read as an
+    # account that can no longer serve any request.
+    assert fable.shared is False
+    assert next(lim for lim in report.limits if lim.id == "anthropic:7d").shared is True
+
+
+@pytest.mark.asyncio
+async def test_anthropic_does_not_list_each_window_twice() -> None:
+    """``limits[]`` repeats ``five_hour``/``seven_day`` as ``session``/
+    ``weekly_all``. Reading both unconditionally listed every window twice."""
+    client = _client_for(ANTHROPIC_USAGE_BODY)
+    async with client:
+        report = await fetch_usage(client, "anthropic", access_token="tok")
+    assert report is not None
+    ids = [limit.id for limit in report.limits]
+    assert len(ids) == len(set(ids)), ids
+    assert ids == ["anthropic:5h", "anthropic:7d", "anthropic:7d:fable"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_falls_back_to_the_generic_limits_array() -> None:
+    """The named buckets are the primary source; the generic array is the
+    fallback for an account that only gets the newer shape."""
     payload = {
-        "five_hour": {"used": 30, "limit": 100, "resets_at": "2026-08-05T12:00:00Z"},
-        "limits": [],
+        "five_hour": None,
+        "seven_day": None,
+        "limits": [
+            {"kind": "session", "percent": 40, "resets_at": None},
+            {"kind": "weekly_all", "percent": 12, "resets_at": None},
+        ],
     }
     client = _client_for(payload)
     async with client:
         report = await fetch_usage(client, "anthropic", access_token="tok")
     assert report is not None
-    labels = [lim.label for lim in report.limits]
-    assert "5 hour" in labels
+    by_id = {limit.id: limit for limit in report.limits}
+    assert by_id["anthropic:5h"].amount.fraction() == pytest.approx(0.4)
+    assert by_id["anthropic:7d"].amount.fraction() == pytest.approx(0.12)
 
 
 @pytest.mark.asyncio
-async def test_openai_oauth_parses_primary_window() -> None:
-    payload = {"primary": {"used_percent": 40, "window_minutes": 300}, "secondary": {}}
+async def test_anthropic_parses_the_reset_timestamp_into_a_countdown() -> None:
+    """The panel renders "resets in 3h24m", which needs a number rather than the
+    vendor's ISO string."""
+    client = _client_for(ANTHROPIC_USAGE_BODY)
+    async with client:
+        report = await fetch_usage(client, "anthropic", access_token="tok")
+    assert report is not None
+    five_hour = next(limit for limit in report.limits if limit.id == "anthropic:5h")
+    assert five_hour.resets_at_ms == 1786220399196
+    # One hour before the reset, the countdown is an hour — not the raw epoch.
+    assert five_hour.resets_in_ms(1786220399196 - 3_600_000) == 3_600_000
+    # A window that already rolled over reports nothing rather than a negative.
+    assert five_hour.resets_in_ms(1786220399196 + 1) is None
+
+
+@pytest.mark.asyncio
+async def test_anthropic_reports_a_disabled_credit_meter_as_a_note() -> None:
+    """A disabled extra-usage meter is a $0.00/$200.00 row that reads as spare
+    headroom the account cannot draw on. Naming the reason is what tells a user
+    at 100% weekly whether waiting is their only option."""
+    client = _client_for(ANTHROPIC_USAGE_BODY)
+    async with client:
+        report = await fetch_usage(client, "anthropic", access_token="tok")
+    assert report is not None
+    assert [limit for limit in report.limits if limit.id == "anthropic:extra"] == []
+    assert report.notes == "extra usage disabled — out of credits"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_reports_an_enabled_credit_meter_as_a_limit() -> None:
+    """Enabled, it is real spendable headroom and belongs in the table — in
+    dollars, decoded from the minor units the endpoint quotes."""
+    payload = {
+        "five_hour": {"utilization": 10.0, "resets_at": None},
+        "spend": {
+            "used": {"amount_minor": 1250, "currency": "USD", "exponent": 2},
+            "limit": {"amount_minor": 20000, "currency": "USD", "exponent": 2},
+            "enabled": True,
+        },
+    }
+    client = _client_for(payload)
+    async with client:
+        report = await fetch_usage(client, "anthropic", access_token="tok")
+    assert report is not None
+    extra = next(limit for limit in report.limits if limit.id == "anthropic:extra")
+    assert extra.amount.used == pytest.approx(12.50)
+    assert extra.amount.limit == pytest.approx(200.00)
+    assert extra.amount.unit == "usd"
+    assert report.notes is None
+
+
+@pytest.mark.asyncio
+async def test_anthropic_drops_a_bucket_that_reported_no_number() -> None:
+    """A ``resets_at``-only bucket is not zero usage: rendering it as an empty
+    bar claims nothing has been spent when nothing was said."""
+    payload = {
+        "five_hour": {"resets_at": "2026-08-08T20:19:59+00:00"},
+        "seven_day": {"utilization": 5.0, "resets_at": None},
+    }
+    client = _client_for(payload)
+    async with client:
+        report = await fetch_usage(client, "anthropic", access_token="tok")
+    assert report is not None
+    assert [limit.id for limit in report.limits] == ["anthropic:7d"]
+
+
+#: A real ``/backend-api/wham/usage`` body for a ChatGPT Pro account, matching
+#: the live response verified on 2026-08-08 (windows nested under ``rate_limit``,
+#: per-model caps under ``additional_rate_limits``).
+#:
+#: The previous fixture invented top-level ``primary``/``secondary`` keys with a
+#: ``window_minutes`` field, none of which this endpoint sends.
+OPENAI_USAGE_BODY = {
+    "plan_type": "pro",
+    "rate_limit": {
+        "allowed": True,
+        "limit_reached": False,
+        "primary_window": {
+            "used_percent": 4,
+            "limit_window_seconds": 17940,
+            "reset_at": 2_000_000_000,
+        },
+        "secondary_window": {
+            "used_percent": 1,
+            "limit_window_seconds": 604_740,
+            "reset_at": 2_000_500_000,
+        },
+    },
+    "additional_rate_limits": [
+        {
+            "limit_name": "GPT-5.3-Codex-Spark",
+            "metered_feature": "codex_bengalfox",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 17,
+                    "limit_window_seconds": 18000,
+                    "reset_at": 2_000_001_000,
+                }
+            },
+        }
+    ],
+}
+
+
+@pytest.mark.asyncio
+async def test_openai_reads_windows_nested_under_rate_limit() -> None:
+    """The regression: the windows live under ``rate_limit`` as
+    ``primary_window``/``secondary_window``. Reading top-level ``primary`` found
+    nothing, so a logged-in ChatGPT Pro account reported no usage at all."""
+    client = _client_for(OPENAI_USAGE_BODY)
+    async with client:
+        report = await fetch_usage(client, "openai", access_token="tok")
+    assert report is not None
+    by_id = {limit.id: limit for limit in report.limits}
+    assert by_id["openai:primary"].amount.fraction() == pytest.approx(0.04)
+    assert by_id["openai:secondary"].amount.fraction() == pytest.approx(0.01)
+    # The window is quoted as a DURATION in seconds, not a name: 17940s is the
+    # five hour window a minute short, and 604740s the seven day one.
+    assert by_id["openai:primary"].window == "5 hour"
+    assert by_id["openai:secondary"].window == "7 day"
+    assert report.notes == "plan: pro"
+
+
+@pytest.mark.asyncio
+async def test_openai_reports_per_model_caps_as_tier_rows() -> None:
+    """``additional_rate_limits`` carries the Spark cap. It gates one model, so
+    it must not read as an account-wide window the way the plan windows do."""
+    client = _client_for(OPENAI_USAGE_BODY)
+    async with client:
+        report = await fetch_usage(client, "openai", access_token="tok")
+    assert report is not None
+    spark = next(limit for limit in report.limits if limit.tier == "spark")
+    assert spark.amount.fraction() == pytest.approx(0.17)
+    assert spark.label == "5 hour (GPT-5.3-Codex-Spark)"
+    assert spark.shared is False
+    assert next(lim for lim in report.limits if lim.id == "openai:primary").shared is True
+
+
+@pytest.mark.asyncio
+async def test_openai_accepts_both_reset_encodings() -> None:
+    """``reset_at`` arrives in seconds or milliseconds, and some windows send a
+    relative ``reset_after_seconds`` instead. A countdown read off the wrong one
+    is out by a factor of a thousand."""
+    payload = {
+        "rate_limit": {
+            "primary_window": {"used_percent": 5, "reset_at": 2_000_000_000},
+            "secondary_window": {"used_percent": 5, "reset_after_seconds": 3600},
+        }
+    }
     client = _client_for(payload)
     async with client:
         report = await fetch_usage(client, "openai", access_token="tok")
     assert report is not None
-    primary = next(lim for lim in report.limits if lim.id == "openai:primary")
-    assert primary.amount.fraction() == pytest.approx(0.4)
+    by_id = {limit.id: limit for limit in report.limits}
+    assert by_id["openai:primary"].resets_at_ms == 2_000_000_000_000
+    relative = by_id["openai:secondary"].resets_at_ms
+    assert relative is not None
+    # Roughly an hour out, allowing for the clock read inside the fetcher.
+    assert 3_500_000 <= relative - time.time() * 1000 <= 3_600_000
+
+
+#: A real ``/coding/v1/usages`` body. The plan total is at ``usage``; each window
+#: splits its numbers across ``detail`` and its length across ``window``, and
+#: every number is a STRING.
+KIMI_USAGE_BODY = {
+    "usage": {
+        "limit": "100",
+        "used": "28",
+        "remaining": "72",
+        "resetTime": "2026-07-21T07:43:35.355947Z",
+    },
+    "limits": [
+        {
+            "window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"},
+            "detail": {
+                "limit": "100",
+                "remaining": "100",
+                "resetTime": "2026-07-18T05:43:35.355947Z",
+            },
+        }
+    ],
+}
+
+
+@pytest.mark.asyncio
+async def test_kimi_oauth_reads_the_top_level_usage_and_limits() -> None:
+    """The regression: the rows are at the top level, not under a ``data``
+    envelope, so the fetcher returned None before parsing anything."""
+    client = _client_for(KIMI_USAGE_BODY)
+    async with client:
+        report = await fetch_usage(client, "kimi", access_token="tok")
+    assert report is not None
+    by_id = {limit.id: limit for limit in report.limits}
+    assert by_id["kimi:total"].label == "Total quota"
+    assert by_id["kimi:total"].amount.fraction() == pytest.approx(0.28)
+    # 300 minutes is the plan's "5h" window; `300m limit` is the same number
+    # said in a way no Kimi user would recognise.
+    assert by_id["kimi:0"].label == "5h limit"
+
+
+@pytest.mark.asyncio
+async def test_kimi_derives_used_from_limit_and_remaining() -> None:
+    """The 5h window arrives as ``{"limit": "100", "remaining": "100"}`` with no
+    ``used``. Requiring ``used`` dropped the row entirely."""
+    client = _client_for(KIMI_USAGE_BODY)
+    async with client:
+        report = await fetch_usage(client, "kimi", access_token="tok")
+    assert report is not None
+    five_hour = next(limit for limit in report.limits if limit.id == "kimi:0")
+    assert five_hour.amount.used == pytest.approx(0.0)
+    assert five_hour.amount.fraction() == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_kimi_takes_the_window_reset_from_the_limit_detail() -> None:
+    """Kimi puts ``resetTime`` on the detail while ``window`` carries only the
+    duration, so a window-only read left the 5h row with no countdown."""
+    client = _client_for(KIMI_USAGE_BODY)
+    async with client:
+        report = await fetch_usage(client, "kimi", access_token="tok")
+    assert report is not None
+    by_id = {limit.id: limit for limit in report.limits}
+    assert by_id["kimi:0"].resets_at_ms == 1_784_353_415_355
+    assert by_id["kimi:total"].resets_at_ms == 1_784_619_815_355
+
+
+#: The legacy SuperGrok weekly billing shape (``?format=credits``). Amounts are
+#: WRAPPED objects, which is what the old bare-number read lost.
+XAI_WEEKLY_BODY = {
+    "config": {
+        "currentPeriod": {
+            "start": "2026-08-01T00:00:00Z",
+            "end": "2026-08-08T00:00:00Z",
+            "type": "PERIOD_TYPE_WEEK",
+        },
+        "creditUsagePercent": 42,
+        "productUsage": [{"product": "GrokBuild", "usagePercent": 10}],
+        "onDemandCap": {"val": 100},
+        "onDemandUsed": {"val": 25},
+    }
+}
+
+#: The unified-billing monthly shape, served on the BARE billing URL.
+XAI_MONTHLY_BODY = {
+    "config": {
+        "billingPeriodStart": "2026-08-01T00:00:00Z",
+        "billingPeriodEnd": "2026-09-01T00:00:00Z",
+        "monthlyLimit": {"val": 300},
+        "used": {"val": 120},
+    }
+}
+
+
+@pytest.mark.asyncio
+async def test_xai_weekly_credits_and_per_product_rows() -> None:
+    """A per-product row is a tier row: spending Grok Build does not stop the
+    rest of the subscription."""
+    client = _client_for(XAI_WEEKLY_BODY)
+    async with client:
+        report = await fetch_usage(client, "xai", access_token="tok")
+    assert report is not None
+    by_id = {limit.id: limit for limit in report.limits}
+    assert by_id["xai:credits:1w"].amount.fraction() == pytest.approx(0.42)
+    assert by_id["xai:credits:1w"].shared is True
+    product = by_id["xai:product:grokbuild:1w"]
+    assert product.amount.fraction() == pytest.approx(0.10)
+    assert product.tier == "grokbuild"
+    assert product.shared is False
+    assert by_id["xai:credits:1w"].resets_at_ms == 1_786_147_200_000
+
+
+@pytest.mark.asyncio
+async def test_xai_unwraps_the_val_object_its_amounts_arrive_in() -> None:
+    """The regression: ``monthlyLimit``/``used`` are ``{"val": N}``. Read as bare
+    numbers they coerced to None, so a unified-billing account rendered a label
+    with no numbers — a row that looks like a working feature and says nothing."""
+    client = _client_for(XAI_MONTHLY_BODY)
+    async with client:
+        report = await fetch_usage(client, "xai", access_token="tok")
+    assert report is not None
+    monthly = next(limit for limit in report.limits if limit.id == "xai:included:1mo")
+    assert monthly.amount.used == pytest.approx(120.0)
+    assert monthly.amount.limit == pytest.approx(300.0)
+    assert monthly.amount.fraction() == pytest.approx(0.4)
+
+
+@pytest.mark.asyncio
+async def test_xai_reports_the_on_demand_cap_that_backs_an_empty_plan() -> None:
+    """Whether on-demand headroom exists is the difference between "wait for the
+    reset" and "keep working", so it is a row rather than a footnote."""
+    client = _client_for(XAI_WEEKLY_BODY)
+    async with client:
+        report = await fetch_usage(client, "xai", access_token="tok")
+    assert report is not None
+    on_demand = next(limit for limit in report.limits if limit.id == "xai:on-demand")
+    assert on_demand.amount.fraction() == pytest.approx(0.25)
+
+
+@pytest.mark.asyncio
+async def test_xai_falls_back_to_the_monthly_url_for_a_unified_account() -> None:
+    """xAI serves two shapes on one endpoint: the credits URL answers with no
+    weekly percentage for a unified account, and the monthly quota is only on the
+    bare URL. Probing one alone leaves half the accounts with an empty report."""
+    bodies = {"credits": {"config": {"isUnifiedBillingUser": True}}, "bare": XAI_MONTHLY_BODY}
+    urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        urls.append(str(request.url))
+        key = "credits" if "format=credits" in str(request.url) else "bare"
+        return httpx.Response(200, json=bodies[key])
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with client:
+        report = await fetch_usage(client, "xai", access_token="tok")
+    assert report is not None
+    assert any("format=credits" in url for url in urls)
+    assert any("format=credits" not in url for url in urls)
+    assert [limit.id for limit in report.limits] == ["xai:included:1mo"]
+
+
+@pytest.mark.asyncio
+async def test_xai_asks_once_when_the_weekly_shape_answers() -> None:
+    """The common case stays one request: a second probe per `/usage` is a
+    round trip spent to learn nothing."""
+    urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        urls.append(str(request.url))
+        return httpx.Response(200, json=XAI_WEEKLY_BODY)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with client:
+        report = await fetch_usage(client, "xai", access_token="tok")
+    assert report is not None
+    assert len(urls) == 1, urls
 
 
 @pytest.mark.asyncio

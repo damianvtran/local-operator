@@ -30,6 +30,7 @@ from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
 
+from local_operator.ansi import sanitize_prompt_line
 from local_operator.harness.types import (
     AbortSignal,
     AgentEndEvent,
@@ -56,6 +57,7 @@ from local_operator.harness.types import (
     StreamUsageEvent,
     TextContent,
     ToolCall,
+    ToolCallComposeEvent,
     ToolContext,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
@@ -65,6 +67,12 @@ from local_operator.harness.types import (
     TurnStartEvent,
     Usage,
 )
+
+#: How often a still-composing tool call re-announces its size. Fast enough that
+#: the byte counter visibly moves (so the row reads as progress rather than as a
+#: frozen label), slow enough that a token-by-token argument stream cannot flood
+#: the UI thread with repaints.
+COMPOSE_NOTICE_INTERVAL_S = 0.2
 
 logger = logging.getLogger(__name__)
 
@@ -378,7 +386,16 @@ class AgentLoop:
                     yield MessageUpdateEvent(message=assistant, delta=event.delta)
                 elif isinstance(event, StreamToolCallDelta):
                     state = tool_states.setdefault(
-                        event.index, {"id": "", "name": "", "arg_parts": []}
+                        event.index,
+                        {
+                            "id": "",
+                            "name": "",
+                            "arg_parts": [],
+                            "bytes": 0,
+                            "announced": 0.0,
+                            "key": "",
+                            "reported": -1,
+                        },
                     )
                     if event.id:
                         state["id"] = event.id
@@ -386,9 +403,50 @@ class AgentLoop:
                         state["name"] += event.name
                     if event.argument_delta:
                         state["arg_parts"].append(event.argument_delta)
+                        state["bytes"] += len(event.argument_delta)
+                    # Tell the UI a call is being COMPOSED. Without this the
+                    # screen holds still for as long as the model takes to
+                    # dictate the arguments — minutes for a file — with no tool
+                    # card, because the call does not exist until its last token
+                    # arrives. Throttled so a token-by-token stream cannot turn
+                    # into a repaint storm; the first announcement is immediate
+                    # so the row appears the moment the tool's name is known.
+                    if state["name"]:
+                        # The key is latched on the FIRST announcement and never
+                        # recomputed. Evaluated each time, a provider that sends
+                        # the name before the id changed the key mid-stream, and
+                        # the UI — which keys its rows by it — mounted a second
+                        # row for the same call and then marked the abandoned one
+                        # interrupted.
+                        if not state["key"]:
+                            state["key"] = state["id"] or f"compose:{event.index}"
+                        now = time.monotonic()
+                        first = state["announced"] == 0.0
+                        if first or now - state["announced"] >= COMPOSE_NOTICE_INTERVAL_S:
+                            state["announced"] = now
+                            state["reported"] = state["bytes"]
+                            yield ToolCallComposeEvent(
+                                tool_call_id=state["key"],
+                                tool_name=state["name"],
+                                argument_bytes=state["bytes"],
+                            )
                 elif isinstance(event, StreamUsageEvent):
                     usage = event.usage
                 elif isinstance(event, StreamEndEvent):
+                    # Flush what the throttle swallowed. Arguments commonly land
+                    # in one burst inside a single window, so without this the
+                    # row's size could report a fraction of the call — or, when
+                    # the whole payload arrives faster than one window, never
+                    # display a size at all. It matters most on an aborted turn,
+                    # where the frozen row is what the user is left reading.
+                    for state in tool_states.values():
+                        if state["name"] and state["bytes"] != state["reported"]:
+                            state["reported"] = state["bytes"]
+                            yield ToolCallComposeEvent(
+                                tool_call_id=state["key"] or "compose:0",
+                                tool_name=state["name"],
+                                argument_bytes=state["bytes"],
+                            )
                     stop_reason = event.stop_reason
                     if event.usage is not None:
                         usage = event.usage
@@ -563,9 +621,11 @@ class AgentLoop:
             and tool_context is not None
             and tool_context.request_approval is not None
         ):
-            summary = f"{call.name}({call.raw_arguments or json.dumps(call.arguments)})"
+            summary = self._approval_summary(tool, call, tool_context.cwd)
             try:
-                approved = await tool_context.request_approval(call.name, summary[:500])
+                approved = await tool_context.request_approval(
+                    sanitize_prompt_line(call.name, limit=120), summary
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -732,6 +792,35 @@ class AgentLoop:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _approval_summary(tool: AgentTool, call: ToolCall, cwd: str) -> str:
+        """The sentence the approval prompt shows for ``call``.
+
+        The tool's own ``describe_approval`` when it has one, because only the
+        tool knows which argument IS the decision — `bash`'s command, `write`'s
+        resolved path, `browser`'s URL. The JSON fallback is for third-party and
+        MCP tools the harness cannot introspect; it is honest but unranked, so a
+        narrow terminal shows whichever field the serialiser happened to put
+        first rather than the one that matters.
+        """
+        describe = tool.describe_approval
+        if describe is not None:
+            try:
+                described = describe(call.arguments, cwd)
+            except Exception:
+                # A description is never worth failing a call over: fall through
+                # to the dump, which is always renderable.
+                logger.warning("approval description failed for %s", call.name, exc_info=True)
+            else:
+                # `isinstance`, not truthiness: a describer that returns a dict or
+                # a Path is a bug in that tool, and letting it through raised deep
+                # in the renderer where the failure reads as "approval denied".
+                if isinstance(described, str) and described.strip():
+                    return sanitize_prompt_line(described)
+        return sanitize_prompt_line(
+            f"{call.name}({call.raw_arguments or json.dumps(call.arguments)})"
+        )
 
     @staticmethod
     def _synthetic_result(call: ToolCall, text: str) -> ToolResult:
