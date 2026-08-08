@@ -201,8 +201,14 @@ class ModelConfiguration:
 #: happily accept ``temperature`` on those variants. Dropping it there would
 #: trade a loud 400 for a silent loss of a real setting, which is the worse
 #: bug. Only families with observed rejection belong in this pattern.
+# The Claude arm matches ANY tier name at generation 5 and above, not a fixed
+# list of them. `opus|sonnet|haiku` was written when those were all there were,
+# and `claude-fable-5` — a real tier no such list contained — sailed through it
+# and sent `temperature`/`top_p` to an endpoint that rejects the pair. This is
+# the same reasoning `_anthropic_family` uses for avoiding tier lists, applied
+# to the one place that still had one.
 _NO_SAMPLING_PARAMS = re.compile(
-    r"claude-(?:opus|sonnet|haiku)-(?:[5-9]|\d{2,})(?!\d)" r"|(?:^|[/:-])o[1-9](?:-|$)" r"|gpt-5"
+    r"claude-[a-z]+-(?:[5-9]|\d{2,})(?!\d)" r"|(?:^|[/:-])o[1-9](?:-|$)" r"|gpt-5"
 )
 
 

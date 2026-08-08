@@ -574,6 +574,16 @@ class TranscriptView(ScrollableContainer):
                 # be refused, and the widening survived the refusal.
                 if not getattr(block, "LEDGER_ROW", False):
                     continue
+                # A call the model is still DICTATING is the same case one state
+                # over, and it arrived with the rename fix: the name is
+                # model-controlled and arrives in fragments, so a single announced
+                # 200-character name took the column to its cap and shifted every
+                # settled receipt sixteen cells right — and, exactly as with the
+                # refusal, the widening outlived the row when it settled as
+                # `never sent`. A row contributes its name once the call it names
+                # has actually started.
+                if getattr(block, "contributes_name", True) is False:
+                    continue
                 name = getattr(block, "tool_name", "")
                 if isinstance(name, str) and name:
                     longest = max(longest, cell_len(display_name(name)))

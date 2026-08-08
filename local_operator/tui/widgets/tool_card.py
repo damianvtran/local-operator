@@ -565,17 +565,23 @@ class ToolCard(TranscriptBlock):
         """
         if self._state not in ("composing", "running"):
             return
+        entering = self._state != "composing"
         self._state = "composing"
         # The name can arrive in FRAGMENTS: the first announcement fires on the
         # first piece so the row appears at once, so a provider that splits
         # `write` sends `wr` and then `write`. Following it keeps the visible row
         # and its icon honest for the whole dictation, not just once the call
         # starts running.
-        if tool_name and tool_name != self.tool_name:
+        renamed = bool(tool_name and tool_name != self.tool_name)
+        if renamed:
             self.tool_name = _strip_control_sequences(tool_name)
-            # The ledger's shared column is derived from these names, so a rename
-            # can widen it — and the cache would otherwise hold the old width for
-            # the rest of the session.
+        # Two reasons the shared column may have moved: this row's NAME changed,
+        # or the row just stopped contributing a name at all by entering
+        # `composing`. The second matters because the card is mounted as
+        # `running` and flipped here — with the same name it was constructed
+        # with, so a rename-only check never fired and a dictated name kept the
+        # column it had already widened.
+        if renamed or entering:
             parent = self.parent
             if isinstance(parent, TranscriptView):
                 parent.invalidate_name_col()
@@ -1090,8 +1096,16 @@ class ToolCard(TranscriptBlock):
             # say nothing new next to a row that is already visibly live — while
             # cutting the byte count and the clock, which are the only two
             # things on the row that move.
+            #
+            # The trigger is the CARD's width, not the residual budget, because
+            # the budget is not monotone in the width: the status segment's cap
+            # (`max(8, width // 3)`) crosses the reason's length on the way down
+            # and hands cells BACK, so a budget test shed the label at 66,
+            # restored it at 62 and shed it again at 54. A width the full form
+            # needs is a constant, so comparing against it can only flip once —
+            # the same argument `_verbose_min_width` makes for the approval row.
             summary = self._summary
-            if cell_len(summary) > budget:
+            if width < self._label_min_width() or cell_len(summary) > budget:
                 summary = truncate_cells(self._compose_facts, budget)
         else:
             summary = truncate_cells(self._summary, budget)
@@ -1122,6 +1136,50 @@ class ToolCard(TranscriptBlock):
             for text, style in status_runs:
                 row.append(text, style=style)
         return row
+
+    @property
+    def contributes_name(self) -> bool:
+        """Whether this row's name may widen the ledger's shared column.
+
+        A call still being DICTATED must not: the name is model-controlled and
+        arrives in fragments, so one announced 200-character name took the column
+        to its cap, shifted every settled receipt beside it, and kept the width
+        after the row settled as `never sent`. The same argument the column already
+        makes for a pending approval — a name earns the column when the call it
+        names has actually started.
+        """
+        return self._state != "composing" and self._summary[:10] != "never sent"
+
+    def _ledger_name_col(self) -> int:
+        """The shared column's current width, or the fixed floor off-ledger."""
+        parent = self.parent
+        return parent.tool_name_col if isinstance(parent, TranscriptView) else NAME_COL
+
+    def _label_min_width(self) -> int:
+        """Card width at or above which the summary keeps its whole label.
+
+        Counted, not discovered by comparing against a live budget: the budget
+        moves non-monotonically as the frame narrows, because the status segment's
+        cap sheds its reason on the way down and returns those cells to the
+        summary. A width the full row needs is a constant, so the label can only
+        flip once — shed as the terminal narrows, never restored.
+
+        Everything the row spends before the summary at its WIDEST: the inner
+        padding, icon, name column and their separators, the widest status the
+        card can show, and the label itself.
+        """
+        widest_status = sum(cell_len(text) for text, _style in self._status_runs())
+        return (
+            2  # inner padding, one cell each side (kit rule)
+            + 2  # icon and its separator
+            # The WIDEST column the ledger can hand this row: the threshold has
+            # to be a constant, so it cannot depend on the frame that is being
+            # tested against it.
+            + max(NAME_COL, self._ledger_name_col())
+            + 1  # separator after the name column
+            + cell_len(self._summary)
+            + (widest_status + 2 if widest_status else 0)
+        )
 
     def _status_runs(self, cap: int = 0, *, terse: bool = False) -> list[tuple[str, Style]]:
         """The right-aligned status as (text, style) runs (D12/D13/D28).

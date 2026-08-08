@@ -443,15 +443,30 @@ class OperatorApp(App[None]):
 
     async def _reload_session(self) -> None:
         """Dispose the current session (if any) and re-run boot."""
-        if self._controller is not None:
-            self._controller.dispose()
-            self._controller = None
+        # The same three steps as `on_unmount`, in the same order, for the same
+        # reasons — this path had drifted from it on all three.
+        #
+        # 1. Deny first: `dispose` AWAITS teardown, and a turn parked on an
+        #    unanswered on-screen approval never reaches it. Measured: `/reload`
+        #    with a parked question stalled for the whole 5s dispose budget while
+        #    unmount with the identical turn returned immediately.
+        # 2. Session before controller: disposing the controller first drops the
+        #    dying session's `agent_end`, so the working line kept its spinner
+        #    running and live cards stayed `running` until the next turn.
+        self._deny_queued_approvals()
         if self._session is not None:
             try:
                 await self._session.dispose()
             except Exception:
                 pass
             self._session = None
+        if self._controller is not None:
+            self._controller.dispose()
+            self._controller = None
+        # 3. The pending approval belonged to the session that just died. Left
+        #    set, the NEW session's first write/exec approval queued behind a
+        #    question that is no longer on screen and nothing could answer it.
+        self._approval = None
         assert self._status is not None
         # A reload is a new conversation: its title and its one naming
         # attempt both reset, or the old name would outlive its session.
@@ -1617,6 +1632,14 @@ class OperatorApp(App[None]):
             for index in range(iterations):
                 if self._loop_cancelled:
                     break
+                # Re-checked every iteration, not captured once: `/reload`
+                # replaces `self._session` underneath a running loop, and the
+                # captured reference went on driving the DISPOSED session — the
+                # old one took the remaining prompts, the new one took none, and
+                # `_loop_running` stayed True so `/loop` answered "already
+                # running". Same guard `_name_conversation_worker` already makes.
+                if session is not self._session:
+                    break
                 self._append_block(UserBlock(f"[loop {index + 1}/{iterations}]"))
                 if self._status is not None:
                     self._status.update(streaming=True)
@@ -1633,6 +1656,10 @@ class OperatorApp(App[None]):
             self._loop_running = False
         if self._loop_cancelled:
             notice(f"loop cancelled after {completed} iteration(s)")
+        elif session is not self._session:
+            # Reported as stopped, not finished: the remaining iterations never
+            # ran, and "finished" on a reload reads as the loop having completed.
+            notice(f"loop stopped by reload after {completed} iteration(s)", "warning")
         else:
             notice(f"loop finished after {completed} iteration(s)")
 

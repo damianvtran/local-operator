@@ -563,7 +563,13 @@ class StatusLine:
             # whole left/right architecture read as one undifferentiated run and
             # abuts a filesystem path against a percentage. Reachable by dragging
             # a window one cell at ordinary widths like 98 or 116 (D3).
-            if cell_len(left.plain) + cell_len(right.plain) + _MIN_GROUP_GAP <= width:
+            #
+            # Reserved only when there IS a right group. Charged unconditionally,
+            # the gap bought separation from nothing: the two-group layout was
+            # abandoned four columns early and the spinner hopped across the model
+            # label at a width where the row it reflowed to was no narrower.
+            gap = _MIN_GROUP_GAP if right.plain else 0
+            if cell_len(left.plain) + cell_len(right.plain) + gap <= width:
                 return self._compose(left, right, width, dim)
 
         # Even the irreducible row overflows. Truncate the model label rather
@@ -742,7 +748,15 @@ class StatusLine:
         return right
 
     def _compose(self, left: Text, right: Text, width: int, dim: Style) -> Text:
-        """Left group, filler, right group — right-aligned to the band edge."""
+        """Left group, filler, right group — right-aligned to the band edge.
+
+        With no right group there is nothing to align and nothing to separate, so
+        the filler is not emitted at all. Padding unconditionally pushed a row
+        that exactly fitted its frame `_MIN_GROUP_GAP` cells past it, on trailing
+        blanks that aligned nothing.
+        """
+        if not right.plain:
+            return left
         gap = max(_MIN_GROUP_GAP, width - cell_len(left.plain) - cell_len(right.plain))
         row = Text()
         row.append_text(left)

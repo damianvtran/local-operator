@@ -868,3 +868,55 @@ def test_broken_internal_import_is_not_blamed_on_the_extra(monkeypatch, capsys) 
     err = _run_scheduler_with_import_error(monkeypatch, capsys, "local_operator.scheduler_service")
     assert "server" not in err or "extra" not in err
     assert "local_operator.scheduler_service" in err
+
+
+def test_resume_survives_in_front_of_the_subcommand() -> None:
+    """A global option has to work where `--help` says it does.
+
+    Routed only through `parent_parser`, argparse re-applied the parent action's
+    default under the subparser and clobbered a value set BEFORE the subcommand:
+    `--resume ID exec "…"` parsed as `resume=None` and started a FRESH session,
+    which is verbatim the failure the field exists to prevent. Validation could
+    not catch it either, because validation reads the post-clobber value.
+    """
+    parser = build_cli_parser()
+
+    after = parser.parse_args(["exec", "--resume", "sess-abc123", "hi"])
+    before = parser.parse_args(["--resume", "sess-abc123", "exec", "hi"])
+    assert after.resume == before.resume == "sess-abc123"
+
+    # Same for a subcommand that only reads it for validation.
+    assert parser.parse_args(["--resume", "bogus", "config", "list"]).resume == "bogus"
+    assert parser.parse_args(["config", "list", "--resume", "bogus"]).resume == "bogus"
+
+    # And the bare form still means "the most recent". It has to come last: with
+    # `nargs="?"` a following word IS the id, so `--resume hi` names a session
+    # called `hi` and leaves exec without a prompt. That exits 2 with a usage
+    # message rather than doing something surprising, which is the acceptable end
+    # of an ambiguity argparse cannot resolve for us.
+    assert parser.parse_args(["exec", "hi", "--resume"]).resume == cli.RESUME_LATEST
+    with pytest.raises(SystemExit):
+        parser.parse_args(["exec", "--resume", "hi"])
+
+
+def test_a_background_job_carries_the_session_it_was_told_to_resume() -> None:
+    """`--background` is the same request run elsewhere.
+
+    The flag was accepted by the front end and dropped at the process boundary:
+    `build_worker_argv` serialized every other field, so the worker started a new
+    session and reported success against the wrong history.
+    """
+    from local_operator.exec_mode import ExecArgs, build_worker_argv
+    from local_operator.exec_worker import build_parser
+
+    argv = build_worker_argv("hi", ExecArgs(resume="sess-abc123"))
+    assert "--resume" in argv
+    assert argv[argv.index("--resume") + 1] == "sess-abc123"
+
+    # And the worker on the other side accepts what was serialized — parsed from
+    # the real argv minus the `python -m <module>` prefix, so the test breaks if
+    # the serialization and the worker's parser ever disagree.
+    assert build_parser().parse_args(argv[3:]).resume == "sess-abc123"
+
+    # Nothing is emitted when nothing was asked for.
+    assert "--resume" not in build_worker_argv("hi", ExecArgs())

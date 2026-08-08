@@ -1095,35 +1095,52 @@ async def test_an_interrupted_record_sheds_its_label_like_the_live_row() -> None
 
 
 @pytest.mark.asyncio
-async def test_a_renamed_card_rewidens_the_shared_name_column() -> None:
-    """A composing row follows the tool name as fragments arrive.
+async def test_a_dictated_name_moves_its_own_row_but_not_the_shared_column() -> None:
+    """Two rules meet on this row and the narrower one wins.
 
-    The ledger's column is derived from those names and cached, so the first
-    fragment's width outlived the rename for the rest of the session.
+    The ROW must follow the tool name as its fragments arrive — a provider that
+    splits `mcp__linear_create_issue` left `mcp` on screen with the wrong icon for
+    the whole dictation. The shared COLUMN must not: the name is model-controlled
+    and arrives in pieces, so one announced 200-character name took the column to
+    its cap and shifted every settled receipt beside it, and the width outlived
+    the row when it settled as `never sent`. Same argument the column already
+    makes for a pending approval — a name earns the column once the call it names
+    has started.
     """
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
-    async with app.run_test(size=(100, 30)) as pilot:
+    async with app.run_test(size=(110, 24)) as pilot:
+        view = app.query_one(TranscriptView)
+        settled = ToolCard("s1", "read", {}, None)
+        view.append_block(settled)
+        settled.mark_done("read a file")
+        await pilot.pause(0.1)
+
+        def settled_row() -> str:
+            return next(
+                (s.text for s in app.screen._compositor.render_strips() if "read a file" in s.text),
+                "",
+            )
+
+        before = settled_row()
         app.post_message(ToolComposing(ToolCallComposeEvent(tool_call_id="c1", tool_name="mcp")))
-        await pilot.pause(0.2)
-        narrow = next(
+        await pilot.pause(0.15)
+        first = next(
             (s.text for s in app.screen._compositor.render_strips() if "composing" in s.text), ""
         )
         app.post_message(
-            ToolComposing(
-                ToolCallComposeEvent(tool_call_id="c1", tool_name="mcp__linear_create_issue")
-            )
+            ToolComposing(ToolCallComposeEvent(tool_call_id="c1", tool_name="mcp__" + "z" * 200))
         )
-        await pilot.pause(0.2)
-        wide = next(
+        await pilot.pause(0.15)
+        renamed = next(
             (s.text for s in app.screen._compositor.render_strips() if "composing" in s.text), ""
         )
+        during = settled_row()
 
-    # The ledger shows the SHORTENED name (`mcp__linear_create_issue` scans as
-    # `create_issue`), so the observable effect of the invalidation is that the
-    # shared column grew to fit it: the summary starts further right than it did
-    # for the one-fragment name.
-    assert narrow.index("composing") < wide.index("composing"), (narrow, wide)
+    # The row itself followed the fragment.
+    assert first != renamed, (first, renamed)
+    # The settled receipt beside it did not move a cell.
+    assert before == during, (before, during)
 
 
 @pytest.mark.asyncio

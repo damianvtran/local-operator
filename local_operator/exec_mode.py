@@ -101,6 +101,13 @@ def build_worker_argv(command: str, exec_args: ExecArgs) -> list[str]:
         argv.extend(["--hosting", exec_args.hosting])
     if exec_args.model:
         argv.extend(["--model", exec_args.model])
+    if exec_args.resume:
+        # Serialized like every other field, because `--background` is supposed to
+        # be the same request run elsewhere. Omitted, `exec --background --resume`
+        # silently started a FRESH session in the worker and reported success
+        # against the wrong history — the failure `ExecArgs.resume` exists to
+        # prevent, one process boundary further out.
+        argv.extend(["--resume", exec_args.resume])
     return argv
 
 

@@ -1130,6 +1130,12 @@ def test_the_memo_can_be_dropped_when_the_cause_of_a_bad_answer_is_fixed(monkeyp
         ("anthropic", "claude-sonnet-4-5", True),
         ("anthropic", "claude-haiku-4-5", True),
         ("anthropic", "claude-3-5-sonnet-latest", True),
+        # A tier name no fixed list contains. `opus|sonnet|haiku` was written when
+        # those were all there were, and `claude-fable-5` — a real tier — sailed
+        # straight through it and sent the pair to an endpoint that rejects it.
+        # The generation is what decides, not the tier's name.
+        ("anthropic", "claude-fable-5", False),
+        ("anthropic", "claude-fable-4", True),
         # The aggregator returns 200 either way because it strips the pair
         # before forwarding, so the model — not the wire — decides. Same
         # answer on both routes, or the flag would be untestable and the fix
