@@ -66,6 +66,15 @@ class AsyncJob(BaseModel):
     owner_id: str | None = None
     agent_id: str | None = None
     queued: bool = False
+    # Serialized child events of a ``task`` job (``model_dump(mode="json")``
+    # of each relayed AgentEvent), kept in memory for click-through trajectory
+    # rendering. Bounded by the writer (``subagent.TRAJECTORY_CAP``) — the
+    # runner appends one dict per child event and drops the oldest past the
+    # cap, so this field can never grow a live session out of memory.
+    # ``None`` (not []) on jobs without a trajectory: a host probing
+    # ``getattr(job, "trajectory", None)`` must be able to tell "no child
+    # events recorded" apart from "this job type has none".
+    trajectory: list[dict] | None = None
 
 
 class AsyncJobManager:
@@ -334,3 +343,23 @@ class AsyncJobManager:
         if inspect.isawaitable(value):
             return await value
         return value
+
+    # -- capacity bookkeeping ------------------------------------------------
+
+    def queued_ids(self) -> list[str]:
+        """Ids of jobs parked by ``register(..., queued=True)`` that have not
+        been promoted yet, oldest first.
+
+        The manager deliberately does NOT auto-start queued jobs: a queued row
+        holds no execution slot and its promotion moment is the registering
+        subsystem's decision (the subagent runner promotes one job each time a
+        child settles). This accessor is the bookkeeping half of that contract
+        — the runner asks "who is waiting" exactly when a slot frees, and an
+        empty list means nothing is owed.
+        """
+        waiting = [
+            job
+            for job in self._jobs.values()
+            if job.status == "running" and job.queued and job.id in self._queued_runners
+        ]
+        return [job.id for job in sorted(waiting, key=lambda job: job.start_time)]

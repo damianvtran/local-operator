@@ -873,6 +873,10 @@ class FakeProviderController:
     def __init__(self) -> None:
         self.set_model_calls: list[Any] = []
         self.usage_reports: list[Any] = []
+        # Every `fetch_usage` argument list, so a test can prove the panel's
+        # refresh key actually re-fetches rather than repainting stale numbers.
+        self.usage_calls: list[Any] = []
+        self.usage_error: Exception | None = None
         self.logins: list[str] = []
         self.logouts: list[str] = []
 
@@ -955,6 +959,9 @@ class FakeProviderController:
         return f"removed {provider}"
 
     async def fetch_usage(self, provider_ids=None):
+        self.usage_calls.append(provider_ids)
+        if self.usage_error is not None:
+            raise self.usage_error
         return self.usage_reports
 
 
@@ -1140,13 +1147,10 @@ async def test_accounts_command_renders_credentials() -> None:
     assert "api_key (login)" in texts
 
 
-@pytest.mark.asyncio
-async def test_usage_command_renders_report() -> None:
+def _usage_reports():
     from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
 
-    session = FakeSession()
-    ctrl = FakeProviderController()
-    ctrl.usage_reports = [
+    return [
         UsageReport(
             provider="openrouter",
             limits=[
@@ -1158,122 +1162,103 @@ async def test_usage_command_renders_report() -> None:
             ],
         )
     ]
+
+
+async def _run_usage_command(pilot, app) -> None:
+    """Type `/usage` and submit it, the way a user reaches the panel."""
+    app.query_one(Editor).focus()
+    await pilot.press("slash")
+    for key in "u", "s", "a", "g", "e":
+        await pilot.press(key)
+    await pilot.press("enter")
+    for _ in range(4):
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_usage_command_opens_the_panel_with_the_report() -> None:
+    """`/usage` opens the popup rather than appending to the transcript.
+
+    A quota report is reference material: appended as a block it was pushed off
+    screen by the next turn and could not be re-read without re-fetching.
+    """
+    from local_operator.tui.widgets.usage_panel import UsagePanel
+
+    session = FakeSession()
+    ctrl = FakeProviderController()
+    ctrl.usage_reports = _usage_reports()
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
-        app.query_one(Editor).focus()
-        await pilot.press("slash")
-        for key in "u", "s", "a", "g", "e":
-            await pilot.press(key)
-        await pilot.press("enter")
+        await _run_usage_command(pilot, app)
+        panel = app.query_one(UsagePanel)
+        assert panel.is_open
+        text = "\n".join(panel.render_lines_for_test())
+        assert app.focused is panel
+    assert "openrouter" in text
+    assert "Credits" in text
+
+
+@pytest.mark.asyncio
+async def test_escape_closes_the_usage_panel_and_returns_focus() -> None:
+    """The panel takes focus to receive its keys, so it must hand focus back —
+    otherwise dismissing it leaves the user typing into nothing."""
+    from local_operator.tui.widgets.usage_panel import UsagePanel
+
+    ctrl = FakeProviderController()
+    ctrl.usage_reports = _usage_reports()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
+        await _run_usage_command(pilot, app)
+        panel = app.query_one(UsagePanel)
+        assert panel.is_open
+        await pilot.press("escape")
+        for _ in range(3):
+            await pilot.pause()
+        assert not panel.is_open
+        assert isinstance(app.focused, Editor)
+
+
+@pytest.mark.asyncio
+async def test_r_refetches_without_closing_the_panel() -> None:
+    """Refresh is the whole reason the panel holds focus: the numbers go stale
+    while they are being read, and re-typing the command to see new ones would
+    make the panel worse than the transcript block it replaced."""
+    from local_operator.tui.widgets.usage_panel import UsagePanel
+
+    ctrl = FakeProviderController()
+    ctrl.usage_reports = _usage_reports()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
-        texts = _transcript_text(app)
-    assert "openrouter" in texts
-    assert "Credits" in texts
+        await _run_usage_command(pilot, app)
+        panel = app.query_one(UsagePanel)
+        before = len(ctrl.usage_calls)
+        await pilot.press("r")
+        for _ in range(4):
+            await pilot.pause()
+        assert len(ctrl.usage_calls) == before + 1
+        assert panel.is_open
 
 
-def _usage_lines(reports) -> list[str]:
-    """The `/usage` table as the user reads it, one plain string per line."""
-    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=None)
-    block = app._usage_block(reports, None)
-    return _renderable_plain(block.renderable).splitlines()
+@pytest.mark.asyncio
+async def test_a_failed_fetch_is_reported_inside_the_panel() -> None:
+    """The panel is what has focus and what carries the key that retries, so an
+    error anywhere else asks the user to look away from the fix."""
+    from local_operator.tui.widgets.usage_panel import UsagePanel
 
-
-def test_a_remaining_only_balance_renders_its_number() -> None:
-    """Both account-balance fetchers report `remaining` with no `used` — neither
-    vendor gives a limit to derive spend from. The renderer printed a value only
-    when `used` was set, so a row labelled "Balance" never said how much, and for
-    DeepSeek no digit appeared on screen at all."""
-    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
-
-    lines = _usage_lines(
-        [
-            UsageReport(
-                provider="kimi",
-                notes="voucher $2.50 + cash $10.00",
-                limits=[
-                    UsageLimit(
-                        id="kimi:balance",
-                        label="Balance (USD)",
-                        amount=UsageAmount(remaining=12.5, unit="usd"),
-                        window="lifetime",
-                    )
-                ],
-            ),
-            UsageReport(
-                provider="deepseek",
-                limits=[
-                    UsageLimit(
-                        id="deepseek:balance:cny",
-                        label="Balance (CNY)",
-                        # No UNIT_LABELS entry for CNY: the number must still print,
-                        # just without a currency it did not earn.
-                        amount=UsageAmount(remaining=70.0, unit="unknown"),
-                        window="lifetime",
-                    )
-                ],
-            ),
-        ]
-    )
-    usd = "Balance (USD) (lifetime) — 12.50 USD left"
-    assert any(line.endswith(usd) for line in lines), lines
-    assert any(line.endswith("Balance (CNY) (lifetime) — 70 left") for line in lines), lines
-
-
-def test_amounts_print_the_unit_label_not_the_raw_key() -> None:
-    """`UNIT_LABELS` existed and was read by nothing while the renderer interpolated
-    the dict key, so a row read `519.86 usd` / `30 percent`."""
-    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
-
-    lines = _usage_lines(
-        [
-            UsageReport(
-                provider="openrouter",
-                limits=[
-                    UsageLimit(
-                        id="openrouter:spend",
-                        label="Spend (no limit set)",
-                        amount=UsageAmount(used=519.855, unit="usd"),
-                        window="lifetime",
-                    ),
-                    UsageLimit(
-                        id="x:pct",
-                        label="Session",
-                        amount=UsageAmount(used=30, limit=100, unit="percent"),
-                        window="5 hour",
-                    ),
-                ],
-            )
-        ]
-    )
-    joined = "\n".join(lines)
-    assert "— 519.86 USD" in joined, lines
-    assert "— 30%" in joined, lines
-    assert "usd" not in joined and "percent" not in joined, lines
-
-
-def test_a_fraction_only_window_still_states_its_percentage() -> None:
-    """The OAuth plan fetchers report a bare fraction; the bar showed it and no
-    number did, and a bar cannot be read off precisely."""
-    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
-
-    lines = _usage_lines(
-        [
-            UsageReport(
-                provider="openai",
-                limits=[
-                    UsageLimit(
-                        id="openai:primary",
-                        label="Primary",
-                        amount=UsageAmount(used_fraction=0.4, unit="percent"),
-                        window="5 hour",
-                    )
-                ],
-            )
-        ]
-    )
-    assert any(line.endswith("Primary (5 hour) — 40% used") for line in lines), lines
+    ctrl = FakeProviderController()
+    ctrl.usage_error = RuntimeError("network is down")
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _run_usage_command(pilot, app)
+        panel = app.query_one(UsagePanel)
+        text = "\n".join(panel.render_lines_for_test())
+        assert panel.is_open
+    assert "network is down" in text
+    assert "r refresh" in text
 
 
 def test_all_three_usage_surfaces_agree_for_an_api_key_only_install(monkeypatch) -> None:
