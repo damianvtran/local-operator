@@ -41,6 +41,7 @@ from rich.style import Style
 from rich.text import Text
 from textual.events import Key
 
+from local_operator.ansi import strip_control_sequences
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.tool_card import truncate_cells
 from local_operator.tui.widgets.transcript import SPINE_INDENT, TranscriptBlock
@@ -105,7 +106,15 @@ def fg_style() -> Style:
     return Style(color=theme_mod.semantic_color("fg"))
 
 
-def fit_target(text: str, width: int) -> str:
+#: Description verbs whose target is a PATH. Everything else keeps its head.
+#: Declared rather than sniffed: `run: /usr/local/bin/deploy --env prod` starts
+#: with a slash and is not a path, and treating it as one truncated away the
+#: binary (`run: …od --force`) and rewrote `$HOME` inside a command string —
+#: a prompt showing a command that is not the command that will run.
+PATH_VERBS = frozenset({"write", "edit", "read", "grep", "append"})
+
+
+def fit_target(text: str, width: int, *, is_path: bool) -> str:
     """``text`` reduced to ``width`` cells, keeping the end that carries meaning.
 
     A PATH's meaning is at its tail: `/Users/<name>/` is boilerplate every path
@@ -120,7 +129,7 @@ def fit_target(text: str, width: int) -> str:
     test is deliberately narrow — an absolute or home-relative path — so anything
     ambiguous keeps its head, which is the safer default for prose.
     """
-    if text.startswith("/") or text.startswith("~"):
+    if is_path:
         return fit_tail(text, width)
     return truncate_cells(text, width)
 
@@ -170,7 +179,12 @@ class _Row:
     """
 
     text: Text
-    hazard: bool
+    #: 2 = the full clause, 1 = the `!` marker or glyph, 0 = the risk is not on
+    #: the row. A rank rather than a bool because degrading the 24-cell clause to
+    #: two cells is a REAL loss that has to compete with what those 22 cells buy;
+    #: scored as a bool it looked free, and the wordier rung won a six-column band
+    #: where the narrower frame said more.
+    hazard: int
     target: int
     prefix: int
 
@@ -185,7 +199,13 @@ class _Row:
         way, "shorter prefix" quietly outranked "say the word `allowed`".
         """
         fits = cell_len(self.text.plain) <= width
-        return (int(fits), int(self.hazard), self.target, 0 if fits else -self.prefix)
+        # Hazard OUTRANKS fit. At one width the safety glyph was the single cell
+        # that broke the fit, so the ladder traded it away and the dangerous
+        # receipt painted exactly like the safe one — the failure this whole
+        # ladder exists to prevent, reintroduced by the tidiness term. Overflowing
+        # by a cell costs the last character of a name the row already repeats;
+        # dropping the marker costs the only difference between the two rows.
+        return (self.hazard, int(fits), self.target, 0 if fits else -self.prefix)
 
 
 class ApprovalBlock(TranscriptBlock):
@@ -231,8 +251,17 @@ class ApprovalBlock(TranscriptBlock):
     ) -> None:
         super().__init__()
         self.add_class("approval-card")
-        self.tool_name = tool_name
-        self.description = description
+        # Both strings are MODEL-CONTROLLED and both reach a real terminal, so
+        # both are stripped here — the same discipline `ToolCard` applies to every
+        # untrusted string it renders. This prompt is the surface where it matters
+        # most: the description now carries the tool's own rendering of its
+        # arguments (a shell command, a URL) where it used to carry a JSON dump,
+        # whose escaping made control bytes inert by accident. Without this, a
+        # command argument containing CSI can erase the row above the prompt and
+        # repaint a forged receipt over it, mis-measure the width ladder (cell_len
+        # counts the escape bytes), and be cut mid-sequence by truncation.
+        self.tool_name = strip_control_sequences(tool_name)
+        self.description = strip_control_sequences(description)
         self._answer: str | None = None
         # `get_running_loop`, not `get_event_loop`: the future must belong to the
         # loop that will await it, and stating that precondition turns a future
@@ -385,12 +414,18 @@ class ApprovalBlock(TranscriptBlock):
         # is not a concession the ladder chose), then the hazard must be visible,
         # then as much of the target as possible. Ties go to the earliest rung,
         # which is the most explicit wording.
-        rungs: list[tuple[bool, bool]] = [(True, False), (False, False)]
+        shapes: list[tuple[bool, bool]] = [(True, False), (False, False)]
         if self._detail()[1]:
-            rungs.append((False, True))
+            shapes.append((False, True))
+        # The spine indent is the LAST thing offered up, and only because at 16
+        # columns it is 12% of the row spent on alignment with blocks that are
+        # scrolled off screen. A rung, not a special case, so it competes on the
+        # same terms as everything else and never fires while the row fits.
+        rungs = [(verb, glyph, True) for verb, glyph in shapes]
+        rungs += [(verb, glyph, False) for verb, glyph in shapes]
         best: _Row | None = None
-        for verb, glyph_hazard in rungs:
-            row = self._compose_question(width, verb=verb, glyph_hazard=glyph_hazard)
+        for verb, glyph_hazard, spine in rungs:
+            row = self._compose_question(width, verb=verb, glyph_hazard=glyph_hazard, spine=spine)
             if best is None or row.score(width) > best.score(width):
                 best = row
         assert best is not None
@@ -404,7 +439,9 @@ class ApprovalBlock(TranscriptBlock):
             return Group(question)
         return Group(question, self._hint_row(width))
 
-    def _compose_question(self, width: int, *, verb: bool, glyph_hazard: bool) -> _Row:
+    def _compose_question(
+        self, width: int, *, verb: bool, glyph_hazard: bool, spine: bool = True
+    ) -> _Row:
         """The question row, and whether the hazard reached the user at all.
 
         ``glyph_hazard`` moves the warning from a clause into the prompt glyph, for
@@ -417,8 +454,9 @@ class ApprovalBlock(TranscriptBlock):
         dim = Style(color=theme_mod.semantic_color("dim"))
         danger = Style(color=theme_mod.semantic_color("danger"))
 
-        question = Text(" " * SPINE_INDENT, no_wrap=True, overflow="ellipsis")
-        hazard_shown = False
+        indent = SPINE_INDENT if spine else 0
+        question = Text(" " * indent, no_wrap=True, overflow="ellipsis")
+        hazard_rank = 0
         if self._answer is None:
             # The question glyph is the ONE place the prompt spends warning ink
             # while it is live, so the hazard clause below can outrank it — unless
@@ -426,7 +464,7 @@ class ApprovalBlock(TranscriptBlock):
             # clause would have had.
             if glyph_hazard:
                 question.append(f"{HAZARD_GLYPH} ", style=warning + Style(bold=True))
-                hazard_shown = True
+                hazard_rank = 1
             else:
                 question.append(f"{PROMPT_GLYPH} ", style=warning)
             if verb:
@@ -441,7 +479,7 @@ class ApprovalBlock(TranscriptBlock):
                 # one cell instead of the clause's three. Outcome first, because
                 # the record answers "what happened" before "how risky was it".
                 question.append(HAZARD_GLYPH, style=warning + Style(bold=True))
-                hazard_shown = True
+                hazard_rank = 1
             question.append(" ")
             if verb:
                 # The word repeats the glyph beside it, so it is shed on the same
@@ -477,7 +515,10 @@ class ApprovalBlock(TranscriptBlock):
             hazard_style = warning + Style(bold=True) if self._answer is None else dim
             spare = width - question.cell_len - _SEPARATOR_CELLS
             hazard = ""
-            if outside:
+            # H-11: the glyph already IS the hazard on that rung; repeating it as
+            # a clause paints `! write_file  ! ` and spends a separator on a
+            # duplicate. The rung's whole premise is that no clause fits.
+            if outside and not glyph_hazard:
                 if spare - cell_len(HAZARD_WORDS) >= HAZARD_MIN_TARGET:
                     hazard = HAZARD_WORDS
                 elif spare >= cell_len(HAZARD_MARKER):
@@ -504,13 +545,13 @@ class ApprovalBlock(TranscriptBlock):
                 question.append("  ", style=dim)
             if hazard:
                 question.append(hazard, style=hazard_style)
-                hazard_shown = True
+                hazard_rank = 2 if hazard == HAZARD_WORDS else 1
             if body_budget >= TARGET_MIN_USEFUL:
                 if body:
                     question.append(body, style=dim)
                 # The subject gets the brightest ink and the end that carries its
                 # meaning — a path keeps its tail, a command keeps its head.
-                shown = fit_target(target, body_budget)
+                shown = fit_target(target, body_budget, is_path=self._target_is_path(detail))
                 question.append(shown, style=fg)
                 # The verb prefix counts as detail too. Scoring only the target
                 # made the wordier rung win at 34 columns — `allow` survived and
@@ -518,7 +559,7 @@ class ApprovalBlock(TranscriptBlock):
                 # seven cells of path AND the `write:` that says what happens to
                 # it. The comparison is "how much of the SENTENCE is on screen".
                 target_cells = cell_len(body) + cell_len(shown)
-        return _Row(question, hazard_shown, target_cells, prefix_cells)
+        return _Row(question, hazard_rank, target_cells, prefix_cells)
 
     def _hint_row(self, width: int) -> Text:
         """The key hints, shedding WHOLE choices rather than truncating one.
@@ -566,6 +607,16 @@ class ApprovalBlock(TranscriptBlock):
             row.append(key, style=fg_style())
             row.append(f" {label}", style=dim)
         return row
+
+    def _target_is_path(self, detail: str) -> bool:
+        """Does this description's target name a FILE?
+
+        Read from the verb the describer chose, not from the string: only the
+        tool knows whether its argument is a path, and it already said so by
+        picking `write:`/`edit:`/`read:`/`grep:` over `run:`/`browse:`/`schedule:`.
+        """
+        verb, _target = self._split_target(detail)
+        return verb.rstrip(": ").strip().lower() in PATH_VERBS
 
     def _split_target(self, detail: str) -> tuple[str, str]:
         """``("write: ", "/path")`` when the description carries a verb prefix.

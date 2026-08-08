@@ -125,6 +125,12 @@ class TranscriptBlock(Static):
     #: True for blocks that appear and vanish within a turn. They neither
     #: take a gap nor anchor one, so nothing flickers when they are lifted.
     SPACING_TRANSIENT: ClassVar[bool] = False
+    #: True for a block that is a ROW OF THE TOOL LEDGER — one settled or running
+    #: tool call, drawn in the shared name column. Only these size that column:
+    #: an approval prompt also carries a ``tool_name``, and letting it count made
+    #: a pending question widen every settled row beneath it for a call that had
+    #: not run and might yet be refused.
+    LEDGER_ROW: ClassVar[bool] = False
     #: True for a block that takes a blank row above itself even after its
     #: OWN kind. Tool rows are the case: a run of them is a list of separate
     #: actions, not a paragraph of one, and stacked flush they read as a
@@ -433,7 +439,10 @@ def needs_gap_above(
         return True
     if block.SPACING_AIRY:
         return True
-    return previous.spans_multiple_rows()
+    # Either side being tall opens the gap. Asking only about the block ABOVE
+    # separated tall→short correctly and left short→tall packed flush, which is
+    # the same wall the rule exists to prevent — just built in the other order.
+    return previous.spans_multiple_rows() or block.spans_multiple_rows()
 
 
 class TranscriptView(ScrollableContainer):
@@ -547,7 +556,13 @@ class TranscriptView(ScrollableContainer):
 
             longest = 0
             for block in self._blocks:
-                name = getattr(block, "tool_name", None)
+                # `LEDGER_ROW`, not "has a tool_name": the approval prompt has one
+                # too, and a PENDING question was widening the column for every
+                # settled row beneath it — for a tool that had not run and might
+                # be refused, and the widening survived the refusal.
+                if not getattr(block, "LEDGER_ROW", False):
+                    continue
+                name = getattr(block, "tool_name", "")
                 if isinstance(name, str) and name:
                     longest = max(longest, cell_len(display_name(name)))
             self._name_col_cache = max(TOOL_NAME_COL, min(longest, TOOL_NAME_COL_MAX))
@@ -669,6 +684,10 @@ class TranscriptView(ScrollableContainer):
         for block in self._blocks:
             block.remove()
         self._blocks.clear()
+        # Every derived measurement goes with them. The name column is computed
+        # FROM the blocks, so a stale one made the next ledger inherit the width
+        # of a transcript the user just cleared.
+        self._name_col_cache = None
         self.scroll_home(animate=False)
         if self._on_clear is not None:
             self._on_clear()

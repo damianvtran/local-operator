@@ -453,7 +453,7 @@ def _describe_path_approval(action: str, key: str = "path") -> ApprovalDescribeF
             return ""
         try:
             path, inside = _resolve_workspace_path(raw, cwd or ".")
-        except OSError:
+        except (OSError, ValueError):
             # An unresolvable path is still worth naming; the tool will fail with
             # its own error, and a prompt that says nothing is worse than one
             # that quotes what the model asked for.
@@ -464,27 +464,80 @@ def _describe_path_approval(action: str, key: str = "path") -> ApprovalDescribeF
 
 
 def _describe_wake_approval(args: dict[str, Any], cwd: str) -> str:
-    """``schedule: <when> — <prompt>`` (or the action for list/cancel).
+    """``schedule: <when> — <message>`` (or the operation for list/cancel).
 
-    Wake is the one tool that arms an unattended future turn, so the decision is
-    WHEN it will run and WHAT it will be told, not the parameter shape.
+    Wake is the one tool that arms an UNATTENDED future turn, so the decision is
+    when it will run, how often, and what it will be told — not the parameter
+    shape. The recurrence is part of the sentence because "once in 30m" and
+    "every 30m forever" are different commitments and the difference is one
+    word.
+
+    Keys come from :class:`WakeParams`, which is ``extra="forbid"``: ``op``,
+    ``message``, ``in`` (aliased, so the raw key is what arrives here), ``at``,
+    ``every``, ``until``, ``limit``, ``id``. The first version of this function
+    invented `action`/`when`/`prompt`, which cannot appear — so it silently never
+    ran and the most dangerous tool in the set kept showing a JSON dump.
     """
-    action = str(args.get("action") or "create").strip()
-    if action != "create":
-        return f"wake: {action}"
-    when = str(args.get("when") or args.get("every") or "").strip()
-    prompt = " ".join(str(args.get("prompt") or "").split())
-    if when and prompt:
-        return f"schedule: {when} — {prompt}"
-    return f"schedule: {when or prompt}" if (when or prompt) else ""
+    op = str(args.get("op") or "create").strip()
+    if op == "cancel":
+        identifier = str(args.get("id") or "").strip()
+        return f"cancel wake: {identifier}" if identifier else "cancel wake"
+    if op != "create":
+        return f"wake: {op}"
+
+    first = str(args.get("in") or args.get("at") or "").strip()
+    every = str(args.get("every") or "").strip()
+    if first and every:
+        when = f"{first}, then every {every}"
+    elif every:
+        when = f"every {every}"
+    else:
+        when = first
+
+    bound = ""
+    if every:
+        until = str(args.get("until") or "").strip()
+        limit = args.get("limit")
+        if until:
+            bound = f" until {until}"
+        elif isinstance(limit, int):
+            bound = f" ×{limit}"
+        else:
+            # An unbounded recurrence is the one wake shape that never stops on
+            # its own, which is exactly what the person answering needs told.
+            bound = " (no end)"
+
+    message = " ".join(str(args.get("message") or "").split())
+    head = f"schedule: {when}{bound}" if when else "schedule"
+    return f"{head} — {message}" if message else head
+
+
+#: Browser actions whose whole effect is "go somewhere". Everything else acts on
+#: the page that is already open, and says so.
+NAVIGATING_BROWSER_ACTIONS = frozenset({"open", "goto", "navigate"})
 
 
 def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
-    """``browse: <url>`` / ``browser: <action>`` — the site, then the verb."""
+    """``browse: <host/path>`` / ``browser: <action>`` — the site, then the verb.
+
+    ``https://`` is dropped for the same reason ``$HOME`` collapses to ``~``: it
+    is on every URL, it decides nothing, and it was eating eight of the forty
+    cells a narrow prompt has — at 32 columns the row read `browse: http…` and
+    named no site at all. A NON-https scheme is kept, because "this fetch is not
+    encrypted" is exactly the kind of thing this prompt exists to surface.
+    """
     url = str(args.get("url") or "").strip()
     action = str(args.get("action") or "").strip()
-    if url:
-        return f"browse: {url}"
+    # A `url` argument is only what the call DOES when the action navigates.
+    # `click` and `type` carry the page they act on for context, and announcing
+    # "browse: <url>" for them describes a navigation that will not happen while
+    # hiding the interaction that will.
+    if url and action in NAVIGATING_BROWSER_ACTIONS:
+        shown = url[len("https://") :] if url.startswith("https://") else url
+        return f"browse: {shown}"
+    if action and url:
+        host = url[len("https://") :] if url.startswith("https://") else url
+        return f"{action}: {host}"
     return f"browser: {action}" if action else ""
 
 

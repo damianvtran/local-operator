@@ -164,11 +164,13 @@ NAME_COL = TOOL_NAME_COL
 #: The ceiling that widening respects. Past roughly this width the eye stops
 #: scanning a column of names and starts reading a list of them.
 NAME_COL_MAX = TOOL_NAME_COL_MAX
-#: Below this frame width the column never grows: at 60 columns the summary
-#: needs those cells more than the name does. Above it, a ledger that renders
-#: `create_…` twice for two different MCP tools is spending 180 idle cells to
-#: make two calls look like one.
-NAME_GROWTH_MIN_WIDTH = 72
+#: Below this ROW width the column never grows: at 60 columns the summary needs
+#: those cells more than the name does. Measured against the card's own inner
+#: width — the value `_build_row` works in, already reduced by the transcript's
+#: padding — not the terminal's, so the growth engages at a frame around six
+#: cells wider. Named for what it is compared against, because a threshold that
+#: does not mean what it says is what makes the next measurement disagree.
+NAME_GROWTH_MIN_ROW = 70
 #: Right-justification width for the duration, so the outcome glyph in front
 #: of it lands in the same column whether the tool took 0.4s or 12.3s. Five
 #: cells covers every duration the format produces up to ``9999s``.
@@ -375,6 +377,7 @@ class ToolCard(TranscriptBlock):
     #: Adaptive spacing: every tool row takes a blank row above it, because
     #: each row is a separate action (see `transcript.needs_gap_above`).
     SPACING_KIND = "tool"
+    LEDGER_ROW = True
     SPACING_AIRY = True
 
     #: The keyboard half of the expand affordance. Enter and Space both
@@ -817,7 +820,7 @@ class ToolCard(TranscriptBlock):
         distinguishable at the widths where there is obviously room.
         """
         parent = self.parent
-        if isinstance(parent, TranscriptView) and width >= NAME_GROWTH_MIN_WIDTH:
+        if isinstance(parent, TranscriptView) and width >= NAME_GROWTH_MIN_ROW:
             return parent.tool_name_col
         return NAME_COL
 

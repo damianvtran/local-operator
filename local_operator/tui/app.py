@@ -951,7 +951,11 @@ class OperatorApp(App[None]):
         """
         approval = self._approval
         if approval is not None and not approval.answered:
-            approval.resolve(True, answer="a")
+            # `y`, not `a`: the COMMAND is what changed the mode, and it prints
+            # its own notice. Answering as the `A` key would run the keystroke's
+            # latch hook too, so the frame carried the same statement twice in the
+            # loudest ink it has.
+            approval.resolve(True, answer="y")
             approval.restore_focus()
         self._approval = None
 
