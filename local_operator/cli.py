@@ -105,7 +105,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         " learn from its experiences and improve its performance over time.  Omit this flag to"
         " have the agent not store the conversation history, thus resetting it after each session.",
     )
-    parent_parser.add_argument(
+
+    # Main parser
+    parser = argparse.ArgumentParser(description=CLI_DESCRIPTION, parents=[parent_parser])
+
+    parser.add_argument(
         "--resume",
         nargs="?",
         const=RESUME_LATEST,
@@ -117,10 +121,6 @@ def build_cli_parser() -> argparse.ArgumentParser:
         " ~/.local-operator/sessions. Pass --resume with no id to reopen the most recent"
         " session.",
     )
-
-    # Main parser
-    parser = argparse.ArgumentParser(description=CLI_DESCRIPTION, parents=[parent_parser])
-
     parser.add_argument(
         "--version",
         action="version",
@@ -454,19 +454,28 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # inside a subcommand NEVER clobbers a root-level ``--yolo`` (the
     # argparse re-default quirk that already applies to the legacy parent
     # flags must not swallow this one — ``--yolo exec "task"`` is documented).
-    _propagate_yolo(parser)
+    _propagate_global_flags(parser)
 
     return parser
 
 
-def _propagate_yolo(parser: argparse.ArgumentParser) -> None:
-    """Add a default-suppressed ``--yolo`` to every subparser (recursively).
+def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
+    """Re-declare the position-independent global options on every subparser.
 
-    Not routed through ``parent_parser``: a shared parent action with a
-    SUPPRESS default still re-applies under argparse's subparser namespace
-    reset, and resolve-style conflicts mutate the shared action. A fresh
-    action per subparser is deterministic: each accepts ``--yolo`` locally
-    and never resets the value set before the subcommand.
+    Not routed through ``parent_parser``: a shared parent action with a SUPPRESS
+    default still re-applies under argparse's subparser namespace reset, and
+    resolve-style conflicts mutate the shared action. A fresh action per
+    subparser is deterministic: each accepts the option locally and never resets
+    a value set BEFORE the subcommand.
+
+    `--yolo` needed this from the start. `--resume` needs it for a sharper
+    reason: routed only through the parent, `local-operator --resume ID exec "…"`
+    parsed the id and then had it clobbered back to ``None`` by the subparser,
+    so exec started a FRESH session — verbatim the failure the field exists to
+    prevent, and invisible because `--help` advertises the option as global.
+    Validation could not catch it either, since validation reads the value after
+    the clobber: `--resume bogus config list` exited 0 in silence while
+    `config list --resume bogus` exited 1 with the recovery listing.
     """
     for action in parser._actions:
         if not isinstance(action, argparse._SubParsersAction):
@@ -483,7 +492,16 @@ def _propagate_yolo(parser: argparse.ArgumentParser) -> None:
                 help="Auto-approve all tool executions (read/write/exec tiers)"
                 " without prompting",
             )
-            _propagate_yolo(subparser)
+            subparser.add_argument(
+                "--resume",
+                nargs="?",
+                const=RESUME_LATEST,
+                default=argparse.SUPPRESS,
+                metavar="SESSION_ID",
+                dest="resume",
+                help="Resume a previous session by id. Pass with no id for the most recent.",
+            )
+            _propagate_global_flags(subparser)
 
 
 def credential_update_command(args: argparse.Namespace) -> int:

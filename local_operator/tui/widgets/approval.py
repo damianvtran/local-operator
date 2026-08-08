@@ -561,7 +561,13 @@ class ApprovalBlock(TranscriptBlock):
                 # the width where the upgrade happens: the clause grew, the budget
                 # shrank past the label's floor, and a wider frame showed less of
                 # the sentence across a four-column band.
-                total += cell_len(HAZARD_WORDS) + HAZARD_MIN_TARGET
+                #
+                # Only the SHORTFALL, because `cell_len(detail)` above already
+                # counts the target in full. Adding the floor flat double-counted
+                # it and pushed the threshold 12 columns too high, so a hazardous
+                # prompt shed `allow` while the explicit form still fitted with
+                # cells to spare — the same class of defect one direction over.
+                total += cell_len(HAZARD_WORDS) + max(0, HAZARD_MIN_TARGET - cell_len(detail))
             target_verb, _target = self._split_target(detail)
             if target_verb:
                 # Same reasoning for the `verb:` label, which `_compose_question`

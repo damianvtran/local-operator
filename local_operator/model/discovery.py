@@ -931,7 +931,13 @@ def _rows_from_payload(
     """
     if payload is None:
         return None
-    if _positive_int(payload.get("capture")) != expected_capture:
+    # An ABSENT stamp is version 1, not version 0. Documents written before the
+    # stamp existed carry no `capture` key at all, and reading that as 0 rejected
+    # every one of them for every transport — including the aggregators the
+    # per-transport map exists precisely to spare, whose registry has no static
+    # rows to answer with. The unstamped shape IS the original shape.
+    stamp = _positive_int(payload.get("capture")) or LISTING_CAPTURE_DEFAULT
+    if stamp != expected_capture:
         return None
     entries = payload.get("models")
     if not isinstance(entries, list):

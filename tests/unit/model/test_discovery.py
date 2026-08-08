@@ -1140,3 +1140,31 @@ def test_only_the_transport_that_changed_invalidates_its_cache(tmp_path) -> None
     assert status == "cached"
     assert not client.calls
     assert "vendor/model" in {row.id for row in models}
+
+
+def test_an_unstamped_document_is_the_original_shape_not_a_stale_one(tmp_path) -> None:
+    """Pre-upgrade caches carry no `capture` key at all.
+
+    Reading that absence as version 0 rejected every document written before the
+    stamp existed — for every transport, including the aggregators the
+    per-transport map exists to spare, whose registry has no static rows to answer
+    with. Measured before the fix: `static` with 0 models on any failed fetch.
+    """
+    cached = tmp_path / "openrouter.listing.json"
+    cached.write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time(),
+                # Exactly what the pre-stamp writer produced: no `capture`.
+                "payload": {"models": [{"id": "vendor/model", "context_window": 1_000}]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = _StubClient([])
+
+    models, status = available_models("openrouter", api_key="k", client=client, cache_dir=tmp_path)
+
+    assert status == "cached"
+    assert not client.calls
+    assert "vendor/model" in {row.id for row in models}
