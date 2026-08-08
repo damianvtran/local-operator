@@ -95,7 +95,21 @@ LYING_MAX_TOKENS = 4096
 #: zeros, is served as a fresh cache hit for the rest of its 24h TTL, and the
 #: upgrade that fixed the numbers appears to have done nothing — which is
 #: precisely the state the reported ``1.8%/200k`` install was left in.
-LISTING_CAPTURE_VERSION = 2
+#: Stamped PER TRANSPORT, because only one of them changed. A single global
+#: number invalidated every provider's cache on upgrade — including transports
+#: whose payload was already correct — and for an aggregator with no static rows
+#: to fall back on, the replacement answer was an EMPTY model list.
+LISTING_CAPTURE_VERSIONS: dict[str, int] = {"anthropic": 2}
+#: What a transport not named above is stamped with. Version 1 is the original
+#: shape; a transport only earns a bump when its own reader starts needing a
+#: field its writer did not record.
+LISTING_CAPTURE_DEFAULT = 1
+
+
+def listing_capture_version(provider_id: str) -> int:
+    """Capture stamp this provider's cached listing is written and read with."""
+    return LISTING_CAPTURE_VERSIONS.get(provider_id, LISTING_CAPTURE_DEFAULT)
+
 
 #: Providers whose MODEL LISTING is public even though inference is not.
 #:
@@ -894,22 +908,30 @@ def _cache_key(provider_id: str) -> str:
     return f"{provider_id}.listing"
 
 
-def _rows_from_payload(payload: Mapping[str, object] | None) -> list[DiscoveredModel] | None:
+def _rows_from_payload(
+    payload: Mapping[str, object] | None, expected_capture: int
+) -> list[DiscoveredModel] | None:
     """Cached rows, or ``None`` when the document is absent, unrecognised or stale.
 
     An unrecognised document is treated as no document, so a change to the
     payload shape degrades to the registry rather than to a silently empty model
     list that looks like a provider with nothing to offer.
 
-    A document from an older ``LISTING_CAPTURE_VERSION`` is rejected for a
-    different reason: its SHAPE is fine and every field maps, so nothing else here
-    could notice that the transport now reads a field the writer left at zero. The
-    caller drops such a document, which costs one call served from the registry
-    and refetches on the next.
+    A document from an older capture stamp (see :func:`listing_capture_version`)
+    is rejected for a different reason: its SHAPE is fine and every field maps,
+    so nothing else here could notice that the transport now reads a field the
+    writer left at zero.
+
+    Either way the caller drops the document and refetches IN THE SAME CALL. An
+    earlier version deferred to "the next call", which was wrong for exactly the
+    providers this matters to: the drop happens on a call already served from a
+    fresh cache hit, so no fetch ran, and the answer fell back to the registry's
+    static rows — of which an aggregator has none. The user saw an empty model
+    list and had to invoke twice to get a catalogue.
     """
     if payload is None:
         return None
-    if _positive_int(payload.get("capture")) != LISTING_CAPTURE_VERSION:
+    if _positive_int(payload.get("capture")) != expected_capture:
         return None
     entries = payload.get("models")
     if not isinstance(entries, list):
@@ -1024,6 +1046,8 @@ def _available_models(
     # the whole difference between the "ok" and "cached" statuses.
     fetched = False
 
+    capture = listing_capture_version(definition.id)
+
     def fetch() -> dict[str, Any]:
         nonlocal fetched
         live = fetch_models(
@@ -1038,13 +1062,14 @@ def _available_models(
             raise _ListingUnavailable(definition.id)
         fetched = True
         return {
-            "capture": LISTING_CAPTURE_VERSION,
+            "capture": capture,
             "models": [dataclasses.asdict(row) for row in live],
         }
 
+    capture = listing_capture_version(definition.id)
     key = _cache_key(definition.id)
     payload = cached_listing(key, fetch, ttl_s=ttl_s, cache_dir=cache_dir)
-    live_rows = _rows_from_payload(payload)
+    live_rows = _rows_from_payload(payload, capture)
     if live_rows is None:
         if payload is not None:
             # A document `cached_listing` could read but this reader cannot use:
@@ -1056,8 +1081,18 @@ def _available_models(
             # produced three consecutive `static` results and zero fetches.
             # Dropping it costs one refetch.
             invalidate(key, cache_dir=cache_dir)
-        # Neither a listing nor a cache: the registry is all there is.
-        return merge_models(rows, None), "static"
+            # RE-ENTER once. Dropping the document without retrying meant the
+            # fetch that was supposed to replace it never ran: `cached_listing`
+            # had already served this call from a fresh hit, so the thunk was
+            # never invoked, and the answer fell through to the registry's static
+            # rows — of which an aggregator has NONE. Offline that is an empty
+            # model list on every start; online it memoises a session booted at
+            # default context, no prompt cache and zero prices.
+            payload = cached_listing(key, fetch, ttl_s=ttl_s, cache_dir=cache_dir)
+            live_rows = _rows_from_payload(payload, capture)
+        if live_rows is None:
+            # Neither a listing nor a cache: the registry is all there is.
+            return merge_models(rows, None), "static"
 
     merged = merge_models(rows, live_rows)
     if not fetched:

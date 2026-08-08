@@ -63,6 +63,11 @@ class ExecArgs:
     hosting: str | None = None
     model: str | None = None
     train: bool = False
+    #: Session id to resume, or the `@latest` sentinel. Accepted because the
+    #: shared parent parser offers `--resume` on every subcommand; carried
+    #: through so `exec` continues a session rather than silently starting a new
+    #: one and reporting success against the wrong history.
+    resume: str | None = None
 
 
 def slugify(command: str, max_length: int = 40) -> str:
@@ -308,6 +313,7 @@ def _make_default_session_factory(exec_args: ExecArgs) -> SessionFactory:
             agent_id=exec_args.agent_id,
             yolo=exec_args.yolo,
             train=exec_args.train,
+            resume=exec_args.resume,
         )
         return create_session(session_args, config_manager, credential_manager, agent_registry)
 

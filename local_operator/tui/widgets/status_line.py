@@ -171,9 +171,20 @@ _DROP_LADDER: tuple[str, ...] = (
 
 
 def _mcp_before_cwd(ladder: tuple[str, ...]) -> tuple[str, ...]:
-    """``ladder`` with the mcp rung moved to just ahead of ``cwd``."""
+    """``ladder`` with the mcp rung moved to just ahead of ``cwd``.
+
+    Moving mcp forward leaves whatever followed it at the END of the ladder, and
+    in the full order that is ``approvals`` — the 14-cell segment this ladder
+    documents as the FIRST alarm to shed because dropping it buys the most width.
+    Left last it became the thing that outlived the context number in the quiet
+    band, which inverts the whole argument. So the tail is re-ordered too: the
+    narrowest survivor goes last.
+    """
     rungs = [step for step in ladder if step != "mcp"]
     rungs.insert(rungs.index("cwd"), "mcp")
+    if rungs[-1] == "approvals":
+        rungs.remove("approvals")
+        rungs.insert(rungs.index("context"), "approvals")
     return tuple(rungs)
 
 

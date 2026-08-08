@@ -445,9 +445,17 @@ class ApprovalBlock(TranscriptBlock):
         # name is the one string this prompt exists to name, and Rich clipping it
         # is not a concession the ladder chose), then the hazard must be visible,
         # then as much of the target as possible.
-        shapes: list[tuple[bool, bool]] = [(True, False), (False, False)]
+        # Two lists, not one with an index convention. `shapes` are PEERS that
+        # compete on measurement; `floor_shapes` are last resorts consulted only
+        # when no peer can carry the hazard at all. Expressing that as a slice of
+        # one ordered list made the outcome depend on the order the rungs happen
+        # to be written in: reordering did not bring back the tie this replaced,
+        # but it silently deleted the marker rung across ~30 columns, turning a
+        # row that leads with `?` and carries a distinct `!` into a bare `!`.
+        shapes: list[tuple[bool, bool]] = [(False, False)]
+        floor_shapes: list[tuple[bool, bool]] = []
         if self._detail()[1]:
-            shapes.append((False, True))
+            floor_shapes.append((False, True))
         # The spine is decided by the FRAME, not by this row. As a rung it was
         # chosen per block, so four prompts on one screen sat at three different
         # left edges — each having individually traded the transcript's
@@ -483,13 +491,29 @@ class ApprovalBlock(TranscriptBlock):
             # came back at a narrower width after the threshold had already
             # ruled it out — the same defect one level down from the predicate
             # that used to be non-monotone.
-            best: _Row | None = None
-            for verb, glyph_hazard in shapes[1:]:
-                row = self._compose_question(
-                    width, verb=verb, glyph_hazard=glyph_hazard, spine=spine
-                )
-                if best is None or row.score(width) > best.score(width):
-                    best = row
+            def pick(candidates: list[tuple[bool, bool]]) -> _Row | None:
+                chosen: _Row | None = None
+                for verb, glyph_hazard in candidates:
+                    row = self._compose_question(
+                        width, verb=verb, glyph_hazard=glyph_hazard, spine=spine
+                    )
+                    if chosen is None or row.score(width) > chosen.score(width):
+                        chosen = row
+                return chosen
+
+            # The glyph rung is the ladder's FLOOR, not a peer. Scored against the
+            # marker rung it tied on every term but `target` — and `target` is not
+            # monotone in the width, because the clause has its own ladder inside
+            # it — so the winner alternated marker, glyph, marker as the frame
+            # narrowed and the hazard visibly hopped between two slots. So the
+            # peers are settled FIRST and the floor is consulted only if none of
+            # them can carry the risk at all, which makes the outcome independent
+            # of the order the rungs are declared in.
+            best = pick(shapes)
+            if best is None or not best.hazard:
+                floor = pick(floor_shapes)
+                if floor is not None and (best is None or floor.score(width) > best.score(width)):
+                    best = floor
             assert best is not None
             question = best.text
 
@@ -531,17 +555,19 @@ class ApprovalBlock(TranscriptBlock):
         if detail:
             total += _SEPARATOR_CELLS + cell_len(detail)
             if outside:
-                total += cell_len(HAZARD_WORDS)
+                # The clause's own floor counts too. `_compose_question` upgrades
+                # `!` to the full words only when HAZARD_MIN_TARGET cells of
+                # target survive, so a threshold that ignored it sat just BELOW
+                # the width where the upgrade happens: the clause grew, the budget
+                # shrank past the label's floor, and a wider frame showed less of
+                # the sentence across a four-column band.
+                total += cell_len(HAZARD_WORDS) + HAZARD_MIN_TARGET
+            target_verb, _target = self._split_target(detail)
+            if target_verb:
+                # Same reasoning for the `verb:` label, which `_compose_question`
+                # keeps only while TARGET_LABELLED_MIN cells of target remain.
+                total += max(0, TARGET_LABELLED_MIN - cell_len(_target))
         return total
-
-    def _detail_cells(self) -> int:
-        """Cells the whole description would occupy if nothing were truncated.
-
-        The yardstick for "this wording hides nothing", which is what decides
-        whether the full form is free.
-        """
-        detail, _outside = self._detail()
-        return cell_len(detail)
 
     def _compose_question(
         self, width: int, *, verb: bool, glyph_hazard: bool, spine: bool = True

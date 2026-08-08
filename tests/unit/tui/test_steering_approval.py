@@ -1069,3 +1069,93 @@ async def test_the_composing_row_sheds_its_label_before_its_facts() -> None:
         painted = [strip.text for strip in app.screen._compositor.render_strips()]
         row = next(row for row in painted if "12.4 KB" in row)
         assert "composing" not in row
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_record_sheds_its_label_like_the_live_row() -> None:
+    """Three different interrupted records must not paint identically.
+
+    `mark_interrupted` set the summary but not the composing facts, so the
+    label-shed ladder — gated on the composing STATE — could not reach the row
+    the live one turns into, and 40 columns down three materially different
+    records were byte-identical.
+    """
+    from local_operator.tui.widgets.tool_card import ToolCard
+
+    seen: set[str] = set()
+    for size in (12, 19_199, 4_011_000):
+        card = ToolCard("c1", "write", {}, None)
+        card.set_composing(size)
+        card.mark_interrupted()
+        seen.add(card._summary)
+
+    assert len(seen) == 3, seen
+    # And the facts are what survives the shed, not the prose.
+    assert all("composed" in text for text in seen)
+
+
+@pytest.mark.asyncio
+async def test_a_renamed_card_rewidens_the_shared_name_column() -> None:
+    """A composing row follows the tool name as fragments arrive.
+
+    The ledger's column is derived from those names and cached, so the first
+    fragment's width outlived the rename for the rest of the session.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.post_message(ToolComposing(ToolCallComposeEvent(tool_call_id="c1", tool_name="mcp")))
+        await pilot.pause(0.2)
+        narrow = next(
+            (s.text for s in app.screen._compositor.render_strips() if "composing" in s.text), ""
+        )
+        app.post_message(
+            ToolComposing(
+                ToolCallComposeEvent(tool_call_id="c1", tool_name="mcp__linear_create_issue")
+            )
+        )
+        await pilot.pause(0.2)
+        wide = next(
+            (s.text for s in app.screen._compositor.render_strips() if "composing" in s.text), ""
+        )
+
+    # The ledger shows the SHORTENED name (`mcp__linear_create_issue` scans as
+    # `create_issue`), so the observable effect of the invalidation is that the
+    # shared column grew to fit it: the summary starts further right than it did
+    # for the one-fragment name.
+    assert narrow.index("composing") < wide.index("composing"), (narrow, wide)
+
+
+@pytest.mark.asyncio
+async def test_a_marker_rung_exists_between_the_words_and_the_glyph() -> None:
+    """The hazard ladder has THREE rungs, and the middle one must be reachable.
+
+    A test asserting only "the grammar never returns as the frame narrows" passes
+    whether or not the middle rung exists, so it defends nothing: collapsing the
+    marker rung into the glyph rung is monotone too. What distinguishes them is
+    that some width must exist where the row still leads with the prompt glyph
+    `?` — it is a question — AND carries a separate `!` for the hazard. Measured:
+    true on ~30 widths as written, 0 with the floor rung treated as a peer.
+    """
+    both: list[int] = []
+    # A fresh app per width: `screen.styles.width` does not re-run the frame
+    # decision the block makes from its own size, so an in-place resize measures
+    # the first frame over and over.
+    for width in range(90, 19, -1):
+        app = OperatorApp(lambda: _factory(SteerableSession()))
+        async with app.run_test(size=(width, 20)) as pilot:
+            view = app.query_one(TranscriptView)
+            view.append_block(ApprovalBlock("write_file", f"{OUTSIDE_MARKER} write: /etc/hosts"))
+            await pilot.pause(0.05)
+            row = next(
+                (
+                    strip.text
+                    for strip in app.screen._compositor.render_strips()
+                    if "write_file" in strip.text
+                ),
+                "",
+            )
+        if PROMPT_GLYPH in row and HAZARD_GLYPH in row:
+            both.append(width)
+
+    assert both, "no width leads with `?` and carries a separate `!`"

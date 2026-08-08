@@ -109,11 +109,20 @@ PLAIN_ICON_DEFAULT = "▸"
 def _single_cell(glyph: str, fallback: str) -> str:
     """``glyph`` when it measures one cell, otherwise ``fallback``.
 
-    The row builder reserves exactly one cell for the icon. A glyph that
-    measures two would not merely look wrong — it would shift the summary
-    budget and the right-aligned status column by a cell, which is the one
-    class of bug the "one width model" rule exists to prevent. So width is
-    checked here, once, against the same ``cell_len`` the row math uses.
+    The row builder reserves exactly one cell for the icon. A glyph that measures
+    two would not merely look wrong — it would shift the summary budget and the
+    right-aligned status column by a cell, which is the one class of bug the "one
+    width model" rule exists to prevent. So width is checked here, once, against
+    the same ``cell_len`` the row math uses.
+
+    What this canNOT do is detect a MISSING glyph. Every Nerd Font codepoint in
+    this module is East-Asian-Width Ambiguous, so `cell_len` reports 1 for all of
+    them whatever the terminal actually has installed, and the fallback branch is
+    unreachable in practice. It is kept because it is the correct guard for the
+    thing it does check — a future icon from a Wide block would be caught — and
+    because the honest alternative, probing the terminal for glyph coverage, is
+    not something a renderer can do. The plain table remains the answer for a
+    host without the font, selected by configuration rather than by measurement.
     """
     return glyph if cell_len(glyph) == 1 else fallback
 

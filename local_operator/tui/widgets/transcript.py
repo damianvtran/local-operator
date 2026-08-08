@@ -67,10 +67,16 @@ def wrap_cells(text: str, width: int) -> list[str]:
             current = ""
         while cell_len(word) > width:
             head = ""
+            used = 0
             for char in word:
-                if cell_len(head) + cell_len(char) > width:
+                size = cell_len(char)
+                if used + size > width:
                     break
                 head += char
+                # Accumulated, not re-measured: `cell_len(head)` on a growing
+                # string is quadratic in the word's length, and this runs on
+                # every notice repaint.
+                used += size
             if not head:
                 # A single character WIDER than the row (any CJK ideograph or
                 # emoji at width 1). Taking nothing appended "" forever and grew
@@ -567,6 +573,15 @@ class TranscriptView(ScrollableContainer):
                     longest = max(longest, cell_len(display_name(name)))
             self._name_col_cache = max(TOOL_NAME_COL, min(longest, TOOL_NAME_COL_MAX))
         return self._name_col_cache
+
+    def invalidate_name_col(self) -> None:
+        """Public entry point: a card's NAME changed, so the column may have.
+
+        A composing row follows the tool name as its fragments arrive, and the
+        column is derived from those names — without this the first fragment's
+        width outlived it for the rest of the session.
+        """
+        self._invalidate_name_col()
 
     def _invalidate_name_col(self) -> None:
         """Forget the cached column and repaint the ledger if it moved.

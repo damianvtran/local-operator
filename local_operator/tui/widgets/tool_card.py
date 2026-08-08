@@ -535,7 +535,13 @@ class ToolCard(TranscriptBlock):
             # The call was never sent, so the row must stop saying it is being
             # written. It keeps the size as a record of how far the model got.
             size = _format_bytes(self._compose_bytes) if self._compose_bytes else "nothing"
-            self._summary = f"never sent · {size} composed"
+            # Facts first, and `_compose_facts` set so the label-shed ladder can
+            # reach this row too: gated on the composing STATE, the ladder built
+            # for the live row could not touch the record it turns into, and
+            # three materially different interrupted rows painted identically
+            # from 40 columns down.
+            self._compose_facts = f"{size} composed"
+            self._summary = f"never sent · {self._compose_facts}"
         self._duration = time.monotonic() - self._started
         self._state = "interrupted"
         self.remove_class("tool-running")
@@ -567,6 +573,12 @@ class ToolCard(TranscriptBlock):
         # starts running.
         if tool_name and tool_name != self.tool_name:
             self.tool_name = _strip_control_sequences(tool_name)
+            # The ledger's shared column is derived from these names, so a rename
+            # can widen it — and the cache would otherwise hold the old width for
+            # the rest of the session.
+            parent = self.parent
+            if isinstance(parent, TranscriptView):
+                parent.invalidate_name_col()
         self._compose_bytes = argument_bytes
         if self._compose_started is None:
             self._compose_started = time.monotonic()
@@ -1071,7 +1083,7 @@ class ToolCard(TranscriptBlock):
                     break
         slot_cells = cell_len(slot) + 1 if slot else 0
         budget = max(0, remaining - slot_cells)
-        if self._state == "composing" and self._compose_facts:
+        if self._compose_facts:
             # The label is shed WHOLE before the facts are touched, the same
             # ladder this file uses for the key hints and the approval clause.
             # Truncating instead protected `composing…` — seventeen cells that
