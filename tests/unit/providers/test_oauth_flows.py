@@ -405,8 +405,12 @@ async def test_callback_server_rejects_state_mismatch() -> None:
     await asyncio.wait_for(drive(), timeout=10)
 
 
-async def test_openai_exchange_sends_state() -> None:
-    """PR-13: the token exchange echoes the verified state."""
+async def test_openai_exchange_omits_state() -> None:
+    """OpenAI's token endpoint rejects unknown parameters outright (400
+    ``invalid_request_error`` / ``unknown_parameter: state``), so the browser
+    exchange must NOT send ``state``. The device-code flow never did. CSRF
+    protection is unaffected: state is verified at the callback, before the code
+    is trusted (:func:`test_callback_server_rejects_state_mismatch`)."""
     from local_operator.providers.oauth.openai import (
         REDIRECT_URI,
         TOKEN_URL,
@@ -442,8 +446,11 @@ async def test_openai_exchange_sends_state() -> None:
         open_browser=lambda url: None,
         http_client=httpx.AsyncClient(transport=transport),
     )
+    # Drive the real pair so the PKCE verifier exists, as it does in the flow.
+    await flow.generate_auth_url("state-xyz", REDIRECT_URI)
     result = await flow.exchange_token("code-1", "state-xyz", REDIRECT_URI)
-    assert captured["body"]["state"] == "state-xyz"
+    assert "state" not in captured["body"]
+    assert captured["body"]["code_verifier"]
     assert captured["url"] == TOKEN_URL
     assert result["org_id"] == "acct-1"
 
