@@ -90,6 +90,7 @@ from rich.style import Style
 from rich.text import Text
 from textual.binding import Binding
 from textual.events import Key
+from textual.timer import Timer
 
 from local_operator.ansi import strip_control_sequences
 from local_operator.tui import theme as theme_mod
@@ -204,6 +205,39 @@ IDENTITY_ARGS = frozenset(
         "message",
     }
 )
+
+
+def _format_bytes(count: int) -> str:
+    """A byte count at a glance: `812 B`, `12.4 KB`, `1.2 MB`.
+
+    One decimal above a kilobyte, because the point of the number is that it
+    MOVES — a counter that ticks tells the user the model is still dictating,
+    which is the whole reason the composing row exists.
+    """
+    if count < 1024:
+        return f"{count} B"
+    if count < 1024 * 1024:
+        return f"{count / 1024:.1f} KB"
+    return f"{count / (1024 * 1024):.1f} MB"
+
+
+def format_duration(seconds: float) -> str:
+    """Active processing time: ``9s``, ``41m1s``, ``1h2m``.
+
+    Units are dropped once they stop carrying information: past an hour the
+    seconds are noise, and a whole minute renders as ``5m`` rather than
+    ``5m0s``. Sub-second work renders as ``0s`` rather than vanishing, so a
+    finished turn always leaves a mark.
+    """
+    total = int(seconds)
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        minutes, secs = divmod(total, 60)
+        return f"{minutes}m{secs}s" if secs else f"{minutes}m"
+    hours, remainder = divmod(total, 3600)
+    minutes = remainder // 60
+    return f"{hours}h{minutes}m" if minutes else f"{hours}h"
 
 
 def truncate_cells(text: str, width: int, ellipsis: str = "…") -> str:
@@ -436,6 +470,12 @@ class ToolCard(TranscriptBlock):
             intent or _summary_from_args(tool_name, args or {})
         )
         self._state: str = "running"
+        # Composing-row bookkeeping: bytes seen so far, when dictation started,
+        # and the clock that keeps the row visibly alive through a provider's
+        # silence. All three are None/0 for a row that never composed.
+        self._compose_bytes: int = 0
+        self._compose_started: float | None = None
+        self._compose_timer: Timer | None = None
         self._duration: float | None = None
         self._error: str = ""
         self._started = time.monotonic()
@@ -459,6 +499,7 @@ class ToolCard(TranscriptBlock):
     # -- lifecycle ----------------------------------------------------------
     def mark_done(self, result_text: str = "", details: dict[str, Any] | None = None) -> None:
         """Record success with elapsed duration; the row goes quiet."""
+        self._stop_composing()
         self._duration = time.monotonic() - self._started
         self._state = "success"
         self._absorb_result(result_text, details)
@@ -487,12 +528,81 @@ class ToolCard(TranscriptBlock):
 
     def mark_interrupted(self) -> None:
         """Turn ended before this tool completed: dim 'interrupted' state."""
+        self._stop_composing()
         self._duration = time.monotonic() - self._started
         self._state = "interrupted"
         self.remove_class("tool-running")
         self.add_class("tool-interrupted")
         self._refresh_row()
         self.finalize()
+
+    def set_composing(self, argument_bytes: int) -> None:
+        """Show that the model is still WRITING this call's arguments.
+
+        A separate state from `running`, because nothing has run: the row must
+        not claim a tool is executing while the request is still being dictated.
+
+        It shows BOTH what has arrived and how long it has been going, and the
+        second half is not decoration. Providers pause mid-call — measured on a
+        real Anthropic stream, a `write` block opened and then sent nothing for
+        eighty seconds before delivering fourteen kilobytes in under a second.
+        A byte count alone is static text through the whole of that pause, which
+        is precisely the frame a user reads as a hung agent. A clock that ticks
+        says "still going" during exactly the silence that needs it said.
+        """
+        if self._state not in ("composing", "running"):
+            return
+        self._state = "composing"
+        self._compose_bytes = argument_bytes
+        if self._compose_started is None:
+            self._compose_started = time.monotonic()
+            # One second: fast enough to read as alive, slow enough that the
+            # repaint cost is nothing next to the stream it is reporting on.
+            self._compose_timer = self.set_interval(1.0, self._tick_composing)
+        self._render_composing()
+
+    def _tick_composing(self) -> None:
+        """Repaint the elapsed half of a composing row (no new bytes needed)."""
+        if self._state == "composing":
+            self._render_composing()
+
+    def _render_composing(self) -> None:
+        started = self._compose_started or time.monotonic()
+        elapsed = max(0, int(time.monotonic() - started))
+        clock = format_duration(elapsed)
+        # The size joins only once there IS one. Providers commonly open the
+        # call and then deliver its arguments in one late burst, so a leading
+        # `0 B` sat on screen for two minutes on a measured run — a number that
+        # never moves reads as a stuck counter, which is the impression this row
+        # exists to remove.
+        if self._compose_bytes:
+            self._summary = f"writing the call… {_format_bytes(self._compose_bytes)} · {clock}"
+        else:
+            self._summary = f"writing the call… {clock}"
+        self._refresh_row()
+
+    def _stop_composing(self) -> None:
+        """Retire the clock; the row is about to become something else."""
+        if self._compose_timer is not None:
+            self._compose_timer.stop()
+            self._compose_timer = None
+
+    def begin_running(self, args: dict[str, object] | None, intent: str | None) -> None:
+        """Adopt a composing row as the real execution of the call it announced.
+
+        The same widget rather than a fresh one: the composing row already sits
+        in the transcript in the right place, and replacing it would make the
+        ledger flicker a row out and an identical row back in at the moment the
+        call finally starts.
+        """
+        self._stop_composing()
+        self._state = "running"
+        # The same construction the constructor uses, so an adopted row is
+        # byte-identical to one that had never been a composing row.
+        self._summary = _strip_control_sequences(
+            intent or _summary_from_args(self.tool_name, args or {})
+        )
+        self._refresh_row()
 
     def set_partial_detail(self, detail: str) -> None:
         """Replace the running summary with a streaming partial result line."""
@@ -714,7 +824,8 @@ class ToolCard(TranscriptBlock):
         Saying which is the difference between "wait" and "there is nothing
         here", and the row is the only place the user is looking.
         """
-        self._notice = RUNNING_NOTICE if self._state == "running" else NO_OUTPUT_NOTICE
+        live = self._state in ("running", "composing")
+        self._notice = RUNNING_NOTICE if live else NO_OUTPUT_NOTICE
         self._refresh_row()
         if self._notice_timer is not None:
             self._notice_timer.stop()
@@ -831,7 +942,10 @@ class ToolCard(TranscriptBlock):
         # Two-step fade on settle: the live row keeps the string green on the
         # name and readable `muted` body text; a settled row drops both one
         # step so the running row is the brightest thing on screen.
-        running = self._state == "running"
+        # Composing counts as live: the model is actively producing this call,
+        # and a row that dimmed while its arguments streamed would read as a
+        # finished action rather than as the one thing currently happening.
+        running = self._state in ("running", "composing")
         name_style = Style(color=theme_mod.semantic_color("string")) if running else muted
         summary_style = muted if running else dim
         width = max(width - 2, 10)  # 1-cell inner padding each side (kit rule)
@@ -956,7 +1070,7 @@ class ToolCard(TranscriptBlock):
         it wrote is meta. ``terse`` goes one step further and drops the
         failure reason too; see :meth:`_outcome_runs`.
         """
-        if self._state == "running":
+        if self._state in ("running", "composing"):
             return []  # D28: no trailing glyph until the duration lands
         core = self._outcome_runs(cap, terse=terse)
         diff = self._diff_runs()

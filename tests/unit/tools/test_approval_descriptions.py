@@ -126,11 +126,11 @@ def test_wake_says_when_it_fires_and_what_it_will_say() -> None:
     assert once == "schedule: 30m — check the deploy"
 
     bounded = _summary(tool, {"op": "create", "message": "poll", "every": "15m", "limit": 8})
-    assert bounded == "schedule: ⟳15m ×8 — poll"
+    assert bounded == "schedule: x8 ⟳15m — poll"
 
     # An unbounded recurrence is the one wake shape that never stops on its own.
     forever = _summary(tool, {"op": "create", "message": "watch", "every": "1h"})
-    assert forever == "schedule: ⟳1h ×∞ — watch"
+    assert forever == "schedule: forever ⟳1h — watch"
 
     assert _summary(tool, {"op": "list"}) == "wake: list"
     assert _summary(tool, {"op": "cancel", "id": "w1"}) == "cancel wake: w1"
@@ -151,7 +151,7 @@ def test_browser_only_promises_navigation_when_it_navigates() -> None:
     # Carrying the page it acts on is not the same as going there.
     assert _summary(tool, {"action": "click", "url": "https://ex.test/a"}) == "click: ex.test/a"
     # A non-https scheme is KEPT: "this fetch is not encrypted" is decision-relevant.
-    assert _summary(tool, {"action": "goto", "url": "http://ex.test"}) == "browse: ex.test (http)"
+    assert _summary(tool, {"action": "goto", "url": "http://ex.test"}) == "browse: http! ex.test"
 
 
 def test_a_broken_describer_falls_back_instead_of_failing_the_call() -> None:
@@ -217,7 +217,7 @@ def test_a_url_prompt_names_where_the_browser_will_actually_go() -> None:
         describe_approval=builtin._describe_browser_approval,
     )
     spoof = _summary(tool, {"action": "goto", "url": "http://accounts.google.com@evil.test/x"})
-    assert spoof == "browse: evil.test/x (http)"
+    assert spoof == "browse: http! evil.test/x"
     assert "accounts.google.com" not in spoof
 
 
@@ -226,3 +226,51 @@ def test_the_path_prompt_names_the_file_the_tool_will_open(tmp_path: Path) -> No
     spaced = _summary(build_write_tool(), {"path": "notes.md "}, str(tmp_path))
     assert spaced == f"write: '{tmp_path.resolve() / 'notes.md '}'"
     assert spaced.endswith(" '")  # the trailing space is VISIBLE, not stripped
+
+
+def test_a_screenshot_names_the_file_it_writes(tmp_path: Path) -> None:
+    """The one browser action whose effect is on the filesystem (J-06).
+
+    It rides the write gate BECAUSE it writes, and for two rounds it was the
+    only write-gated call that never named its destination.
+    """
+    tool = AgentTool(
+        name="browser",
+        approval_tier="write",
+        execute=_unused_execute,
+        describe_approval=builtin._describe_browser_approval,
+    )
+    inside = _summary(tool, {"action": "screenshot", "path": "shot.png"}, str(tmp_path))
+    assert inside == f"screenshot: {tmp_path.resolve() / 'shot.png'}"
+
+    outside = _summary(tool, {"action": "screenshot", "path": "/etc/shadow.png"}, str(tmp_path))
+    assert outside.startswith("[outside workspace] screenshot: ")
+
+    # Not stripped: `_browser_screenshot` resolves the raw string.
+    # Quoted, because the sanitiser would otherwise collapse the double space
+    # into one and name a file that will not be written.
+    spaced = _summary(tool, {"action": "screenshot", "path": "  shot.png"}, str(tmp_path))
+    assert spaced.endswith(r"\x20\x20shot.png'"), spaced
+
+    assert _summary(tool, {"action": "screenshot"}) == "screenshot: a temporary file"
+
+
+def test_a_homograph_host_is_shown_as_punycode() -> None:
+    """`аpple.com` (Cyrillic а) resolves to xn--pple-43d.com and must say so."""
+    tool = AgentTool(
+        name="browser",
+        approval_tier="write",
+        execute=_unused_execute,
+        describe_approval=builtin._describe_browser_approval,
+    )
+    described = _summary(tool, {"action": "goto", "url": "https://\u0430pple.com/login"})
+    assert described == "browse: xn--pple-43d.com/login"
+
+
+def test_bidi_overrides_cannot_reverse_a_prompt() -> None:
+    """RLO makes `/etc/\u202egnp.terces` READ as `/etc/secret.png`."""
+    from local_operator.ansi import sanitize_prompt_line
+
+    line = sanitize_prompt_line("write: /etc/\u202egnp.terces")
+    assert "\u202e" not in line
+    assert "\\u202e" in line

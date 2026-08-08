@@ -39,7 +39,7 @@ from rich.text import Text
 from textual.widgets import Static
 
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.widgets.tool_card import truncate_cells
+from local_operator.tui.widgets.tool_card import format_duration, truncate_cells
 
 #: Spinner frames shown while the session is streaming (~12.5 fps glyph
 #: cadence when shimmer is disabled).
@@ -248,25 +248,6 @@ def format_cost(cost: float) -> str:
     if cost < 1.0:
         return f"${cost:.3f}"
     return f"${cost:.2f}"
-
-
-def format_duration(seconds: float) -> str:
-    """Active processing time: ``9s``, ``41m1s``, ``1h2m``.
-
-    Units are dropped once they stop carrying information: past an hour the
-    seconds are noise, and a whole minute renders as ``5m`` rather than
-    ``5m0s``. Sub-second work renders as ``0s`` rather than vanishing, so a
-    finished turn always leaves a mark.
-    """
-    total = int(seconds)
-    if total < 60:
-        return f"{total}s"
-    if total < 3600:
-        minutes, secs = divmod(total, 60)
-        return f"{minutes}m{secs}s" if secs else f"{minutes}m"
-    hours, remainder = divmod(total, 3600)
-    minutes = remainder // 60
-    return f"{hours}h{minutes}m" if minutes else f"{hours}h"
 
 
 def format_agents(count: int) -> str:

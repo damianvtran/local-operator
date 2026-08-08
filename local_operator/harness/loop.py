@@ -57,6 +57,7 @@ from local_operator.harness.types import (
     StreamUsageEvent,
     TextContent,
     ToolCall,
+    ToolCallComposeEvent,
     ToolContext,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
@@ -66,6 +67,12 @@ from local_operator.harness.types import (
     TurnStartEvent,
     Usage,
 )
+
+#: How often a still-composing tool call re-announces its size. Fast enough that
+#: the byte counter visibly moves (so the row reads as progress rather than as a
+#: frozen label), slow enough that a token-by-token argument stream cannot flood
+#: the UI thread with repaints.
+COMPOSE_NOTICE_INTERVAL_S = 0.2
 
 logger = logging.getLogger(__name__)
 
@@ -379,7 +386,8 @@ class AgentLoop:
                     yield MessageUpdateEvent(message=assistant, delta=event.delta)
                 elif isinstance(event, StreamToolCallDelta):
                     state = tool_states.setdefault(
-                        event.index, {"id": "", "name": "", "arg_parts": []}
+                        event.index,
+                        {"id": "", "name": "", "arg_parts": [], "bytes": 0, "announced": 0.0},
                     )
                     if event.id:
                         state["id"] = event.id
@@ -387,6 +395,24 @@ class AgentLoop:
                         state["name"] += event.name
                     if event.argument_delta:
                         state["arg_parts"].append(event.argument_delta)
+                        state["bytes"] += len(event.argument_delta)
+                    # Tell the UI a call is being COMPOSED. Without this the
+                    # screen holds still for as long as the model takes to
+                    # dictate the arguments — minutes for a file — with no tool
+                    # card, because the call does not exist until its last token
+                    # arrives. Throttled so a token-by-token stream cannot turn
+                    # into a repaint storm; the first announcement is immediate
+                    # so the row appears the moment the tool's name is known.
+                    if state["name"]:
+                        now = time.monotonic()
+                        first = state["announced"] == 0.0
+                        if first or now - state["announced"] >= COMPOSE_NOTICE_INTERVAL_S:
+                            state["announced"] = now
+                            yield ToolCallComposeEvent(
+                                tool_call_id=state["id"] or f"compose:{event.index}",
+                                tool_name=state["name"],
+                                argument_bytes=state["bytes"],
+                            )
                 elif isinstance(event, StreamUsageEvent):
                     usage = event.usage
                 elif isinstance(event, StreamEndEvent):

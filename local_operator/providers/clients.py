@@ -278,6 +278,27 @@ _FINISH_TO_STOP_REASON = {
 # ---------------------------------------------------------------------------
 
 
+#: Longest silence tolerated BETWEEN chunks of a streaming response. Providers
+#: emit tokens or keep-alives well inside this; a stream that says nothing for
+#: three minutes has stalled, and treating that as patience turns a dead
+#: connection into a UI that looks frozen for the whole request timeout.
+STREAM_READ_TIMEOUT_S = 180.0
+
+
+def _stream_timeout(total: float) -> httpx.Timeout:
+    """Timeouts shaped for a STREAMING response, not a single request/response.
+
+    A bare ``timeout=600`` sets the read timeout to ten minutes, and for an SSE
+    stream "read" means the gap BETWEEN chunks — so a provider that accepts the
+    connection and then goes silent is indistinguishable from a model that is
+    thinking, for ten minutes, with the UI spinning. Connect stays short (a
+    refused endpoint is immediate), write is generous because a large prompt
+    takes real time to upload, and the TOTAL is left as the caller set it: a long
+    generation is legitimate for as long as bytes keep arriving.
+    """
+    return httpx.Timeout(total, connect=30.0, read=STREAM_READ_TIMEOUT_S, write=120.0)
+
+
 class OpenAICompatClient:
     """``POST {base_url}/chat/completions`` with SSE streaming.
 
@@ -304,7 +325,7 @@ class OpenAICompatClient:
         self._base_url = base_url.rstrip("/")
         self._extra_headers = dict(extra_headers or {})
         self._owns_client = http_client is None
-        self._http = http_client or httpx.AsyncClient(timeout=timeout)
+        self._http = http_client or httpx.AsyncClient(timeout=_stream_timeout(timeout))
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -624,7 +645,7 @@ class AnthropicClient:
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._owns_client = http_client is None
-        self._http = http_client or httpx.AsyncClient(timeout=timeout)
+        self._http = http_client or httpx.AsyncClient(timeout=_stream_timeout(timeout))
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -959,7 +980,7 @@ class GoogleClient:
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._owns_client = http_client is None
-        self._http = http_client or httpx.AsyncClient(timeout=timeout)
+        self._http = http_client or httpx.AsyncClient(timeout=_stream_timeout(timeout))
 
     async def aclose(self) -> None:
         if self._owns_client:

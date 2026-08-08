@@ -94,6 +94,10 @@ TARGET_MIN_USEFUL = 4
 #: label plus a stub names a category and hides the instance, which on this row
 #: means two different authorisations paint the same text.
 TARGET_LABELLED_MIN = 10
+#: Row width at or above which the two-cell spine indent is kept. Below it the
+#: indent is 12% of everything the row has, and the whole transcript gives it up
+#: together — an alignment edge that only some blocks honour is not an edge.
+SPINE_FLOOR_WIDTH = 24
 
 #: Marker prefix the builtin tools put on a description whose target sits
 #: outside the workspace. Surfaced as its own tinted clause because "outside
@@ -226,7 +230,13 @@ class _Row:
             int(fits),
             self.target,
             self.hazard,
-            0 if fits else -self.prefix,
+            # Fewest cells before the name wins in the two cases where nothing
+            # else separates the rungs: when no row fits, and when none of them
+            # can show any of the detail. Without the second case the wordier
+            # form came BACK at the narrowest widths — `allow` shed at 40 and
+            # returning at 20 — because with no target to compare, the rungs tied
+            # and the tie fell to the most verbose one.
+            0 if (fits and self.target) else -self.prefix,
         )
 
 
@@ -434,24 +444,39 @@ class ApprovalBlock(TranscriptBlock):
         # Preference order, applied to every variant: the row must FIT (the tool
         # name is the one string this prompt exists to name, and Rich clipping it
         # is not a concession the ladder chose), then the hazard must be visible,
-        # then as much of the target as possible. Ties go to the earliest rung,
-        # which is the most explicit wording.
+        # then as much of the target as possible.
         shapes: list[tuple[bool, bool]] = [(True, False), (False, False)]
         if self._detail()[1]:
             shapes.append((False, True))
-        # The spine indent is the LAST thing offered up, and only because at 16
-        # columns it is 12% of the row spent on alignment with blocks that are
-        # scrolled off screen. A rung, not a special case, so it competes on the
-        # same terms as everything else and never fires while the row fits.
-        rungs = [(verb, glyph, True) for verb, glyph in shapes]
-        rungs += [(verb, glyph, False) for verb, glyph in shapes]
-        best: _Row | None = None
-        for verb, glyph_hazard, spine in rungs:
-            row = self._compose_question(width, verb=verb, glyph_hazard=glyph_hazard, spine=spine)
-            if best is None or row.score(width) > best.score(width):
-                best = row
-        assert best is not None
-        question = best.text
+        # The spine is decided by the FRAME, not by this row. As a rung it was
+        # chosen per block, so four prompts on one screen sat at three different
+        # left edges — each having individually traded the transcript's
+        # structural edge for one or two more cells of target. That edge is worth
+        # more than the cells precisely because it is SHARED, and a rule only one
+        # block obeys is not an edge. Below the width where a tool name stops
+        # fitting beside it, every block gives it up together.
+        spine = width >= SPINE_FLOOR_WIDTH
+
+        # The full wording wins whenever it costs the user NOTHING — it fits and
+        # it hides no part of the sentence. Everywhere else the rungs compete on
+        # measurement. Deciding it this way rather than by a tiebreak is what
+        # makes the grammar flip exactly once as the frame narrows: "shows the
+        # whole sentence" can only go from true to false as width shrinks, so
+        # `allow` cannot come back after it has been shed. A pure argmax could
+        # not promise that — two rungs carrying identical information tie, and
+        # whichever way the tie is broken it flips back at some width.
+        verbose = self._compose_question(width, verb=True, glyph_hazard=False, spine=spine)
+        if verbose.score(width)[1] and verbose.target >= self._detail_cells():
+            question = verbose.text
+        else:
+            best = verbose
+            for verb, glyph_hazard in shapes[1:]:
+                row = self._compose_question(
+                    width, verb=verb, glyph_hazard=glyph_hazard, spine=spine
+                )
+                if row.score(width) > best.score(width):
+                    best = row
+            question = best.text
 
         if self._answer is not None:
             # A Group even with one child: rich honours ``Text.no_wrap`` for a
@@ -459,11 +484,9 @@ class ApprovalBlock(TranscriptBlock):
             # answered receipt wrapped onto column zero — the composer's own
             # gutter — at narrow widths while the pending two-row form did not.
             return Group(question)
-        # The hint row follows the question's SPINE decision. Hard-coding the
-        # indent let the block's two rows disagree by four cells whenever the
-        # spine rung fired — one row at column 0 and its own answer keys at
-        # column 4, which reads as two unrelated things rather than one prompt.
-        return Group(question, self._hint_row(width, spine=best.spine))
+        # The hint row uses the SAME frame-wide spine decision as the question,
+        # so the block's two rows always start in the same column.
+        return Group(question, self._hint_row(width, spine=spine))
 
     def _hazard_ink(self) -> Style:
         """Amber and bold while the question is LIVE; plain dim once it is not.
@@ -477,6 +500,15 @@ class ApprovalBlock(TranscriptBlock):
         if self._answer is None:
             return Style(color=theme_mod.semantic_color("warning"), bold=True)
         return Style(color=theme_mod.semantic_color("dim"))
+
+    def _detail_cells(self) -> int:
+        """Cells the whole description would occupy if nothing were truncated.
+
+        The yardstick for "this wording hides nothing", which is what decides
+        whether the full form is free.
+        """
+        detail, _outside = self._detail()
+        return cell_len(detail)
 
     def _compose_question(
         self, width: int, *, verb: bool, glyph_hazard: bool, spine: bool = True
@@ -494,6 +526,12 @@ class ApprovalBlock(TranscriptBlock):
         danger = Style(color=theme_mod.semantic_color("danger"))
 
         indent = SPINE_INDENT if spine else 0
+        # Dropping the spine must not buy the TARGET room, only the tool name.
+        # Left free, the two reclaimed cells went to the path, so the frame one
+        # column narrower than the breakpoint said MORE than the frame above it —
+        # the same non-monotonicity the scored ladder replaced a hand-ordered one
+        # to prevent, reintroduced by the fix for the ragged left edge.
+        budget_width = width - (SPINE_INDENT - indent)
         question = Text(" " * indent, no_wrap=True, overflow="ellipsis")
         hazard_rank = 0
         if self._answer is None:
@@ -552,7 +590,7 @@ class ApprovalBlock(TranscriptBlock):
             # made, and a permanent alarm in the transcript trains the eye to
             # ignore the live one.
             hazard_style = self._hazard_ink()
-            spare = width - question.cell_len - _SEPARATOR_CELLS
+            spare = budget_width - question.cell_len - _SEPARATOR_CELLS
             hazard = ""
             # H-11: the glyph already IS the hazard on that rung; repeating it as
             # a clause paints `! write_file  ! ` and spends a separator on a
@@ -569,7 +607,7 @@ class ApprovalBlock(TranscriptBlock):
             # trailing spaces and the prompt claimed a truncation that never
             # happened.
             target_verb, target = self._split_target(detail)
-            budget = width - question.cell_len - _SEPARATOR_CELLS - cell_len(hazard)
+            budget = budget_width - question.cell_len - _SEPARATOR_CELLS - cell_len(hazard)
             with_verb = budget - cell_len(target_verb)
             # The verb needs to leave more than the bare minimum, or it is
             # spending its cells to say a category while hiding the instance:

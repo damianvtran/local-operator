@@ -121,6 +121,12 @@ async def test_full_turn_text_tool_text():
         "turn_start",
         "message_start",
         "message_update",
+        # The model announces the call it is composing as soon as the tool's
+        # NAME is known — long before the call exists for a large argument. A UI
+        # with nothing between `message_end` and `tool_execution_start` has
+        # nothing to paint while the arguments stream, which is the frozen frame
+        # this event was added to remove.
+        "tool_call_compose",
         "message_update",
         "message_end",
         "tool_execution_start",
@@ -190,6 +196,12 @@ async def test_abort_pairs_dangling_tool_calls():
         "agent_start",
         "turn_start",
         "message_start",
+        # Two calls were being composed when the abort landed. The announcements
+        # stay in the stream: they are what the UI already painted, and a turn
+        # that stops has to reconcile those rows rather than pretend they never
+        # appeared.
+        "tool_call_compose",
+        "tool_call_compose",
         "message_end",
         "turn_end",
         "agent_end",

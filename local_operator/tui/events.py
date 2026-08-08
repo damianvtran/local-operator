@@ -49,6 +49,7 @@ from local_operator.harness.types import (
     NoticeEvent,
     RetryEndEvent,
     RetryStartEvent,
+    ToolCallComposeEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolExecutionUpdateEvent,
@@ -118,6 +119,14 @@ class AssistantMessageEnd(Message):
     def __init__(self, text: str) -> None:
         super().__init__()
         self.text = text
+
+
+class ToolComposing(Message):
+    """The model is still dictating a tool call's arguments."""
+
+    def __init__(self, event: ToolCallComposeEvent) -> None:
+        super().__init__()
+        self.event = event
 
 
 class ToolStarted(Message):
@@ -359,6 +368,9 @@ class EventController:
         self._stop_flush_timer()
         self._post(AssistantMessageEnd(text))
 
+    def _handle_tool_compose(self, event: ToolCallComposeEvent) -> None:
+        self._post(ToolComposing(event))
+
     def _handle_tool_start(self, event: ToolExecutionStartEvent) -> None:
         self._started_tools.add(event.tool_call_id)
         self._post(ToolStarted(event))
@@ -402,6 +414,7 @@ class EventController:
         "message_start": _handle_message_start,
         "message_update": _handle_message_update,
         "message_end": _handle_message_end,
+        "tool_call_compose": _handle_tool_compose,
         "tool_execution_start": _handle_tool_start,
         "tool_execution_update": _handle_tool_update,
         "tool_execution_end": _handle_tool_end,

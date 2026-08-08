@@ -19,6 +19,7 @@ human-facing renderers that are exposed.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 #: Terminal control sequences that must never reach a rendered frame.
 #:
@@ -100,5 +101,17 @@ def sanitize_prompt_line(text: str, limit: int = 500) -> str:
     "every human-facing approval surface remembers to sanitise" is a rule that
     was already broken twice: the full-screen prompt and then the headless one.
     """
-    flattened = " ".join(strip_control_sequences(text).split())
+    stripped = strip_control_sequences(text)
+    # Cf (format) characters survive control-sequence stripping because they are
+    # not control sequences: RLO/LRO reverse the rendered order of what follows,
+    # so `write: /etc/\u202egnp.terces` READS as `write: /etc/secret.png`, and
+    # zero-width joiners hide the seam in a spliced word. Neither has any place
+    # in a line whose entire job is to be read literally, so they are replaced
+    # with a visible escape rather than dropped — a prompt that silently removes
+    # characters is the defect this function's own callers were fixed for.
+    visible = "".join(
+        ch if unicodedata.category(ch) != "Cf" else ch.encode("unicode_escape").decode("ascii")
+        for ch in stripped
+    )
+    flattened = " ".join(visible.split())
     return flattened[:limit]
