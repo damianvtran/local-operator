@@ -30,6 +30,7 @@ from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
 
+from local_operator.ansi import sanitize_prompt_line
 from local_operator.harness.types import (
     AbortSignal,
     AgentEndEvent,
@@ -565,7 +566,9 @@ class AgentLoop:
         ):
             summary = self._approval_summary(tool, call, tool_context.cwd)
             try:
-                approved = await tool_context.request_approval(call.name, summary[:500])
+                approved = await tool_context.request_approval(
+                    sanitize_prompt_line(call.name, limit=120), summary
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -757,8 +760,10 @@ class AgentLoop:
                 # a Path is a bug in that tool, and letting it through raised deep
                 # in the renderer where the failure reads as "approval denied".
                 if isinstance(described, str) and described.strip():
-                    return described
-        return f"{call.name}({call.raw_arguments or json.dumps(call.arguments)})"
+                    return sanitize_prompt_line(described)
+        return sanitize_prompt_line(
+            f"{call.name}({call.raw_arguments or json.dumps(call.arguments)})"
+        )
 
     @staticmethod
     def _synthetic_result(call: ToolCall, text: str) -> ToolResult:

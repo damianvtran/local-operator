@@ -53,6 +53,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -420,11 +421,26 @@ def _resolve_workspace_path(raw: str, cwd: str) -> tuple[Path, bool]:
     return path, True
 
 
+def _display_target(text: str) -> str:
+    """A target rendered so that what the user reads IS what the tool will use.
+
+    Plain text passes through. Anything whose displayed form would differ from
+    the real string — leading or trailing whitespace, an embedded newline, a
+    control byte — is quoted with Python escapes instead, because the prompt is
+    sanitised into one inert line downstream and a silent clean-up is the same
+    defect as naming the wrong file: `notes.md ` and `notes.md` are two files,
+    and `a\x00b` is not `ab`.
+    """
+    if text and text == text.strip() and text.isprintable():
+        return text
+    return repr(text)
+
+
 def _approval_description(path: Path, inside: bool, action: str) -> str:
     """Approval prompt text for ``action`` on a RESOLVED path (the user must
     approve the exact target, not the raw string the model typed)."""
     marker = "" if inside else f"{OUTSIDE_WORKSPACE_MARKER} "
-    return f"{marker}{action}: {path}"
+    return f"{marker}{action}: {_display_target(str(path))}"
 
 
 def _describe_shell_approval(args: dict[str, Any], cwd: str) -> str:
@@ -435,7 +451,10 @@ def _describe_shell_approval(args: dict[str, Any], cwd: str) -> str:
     make the prompt and the executed string differ.
     """
     command = str(args.get("command") or "").strip()
-    return f"run: {command}" if command else ""
+    # Quoted when it spans lines: the sanitiser downstream collapses newlines to
+    # spaces so a command cannot forge a second prompt, and a silently joined
+    # two-line command would read as one command that was never typed.
+    return f"run: {_display_target(command)}" if command else ""
 
 
 def _describe_path_approval(action: str, key: str = "path") -> ApprovalDescribeFn:
@@ -448,8 +467,12 @@ def _describe_path_approval(action: str, key: str = "path") -> ApprovalDescribeF
     """
 
     def describe(args: dict[str, Any], cwd: str) -> str:
-        raw = str(args.get(key) or "").strip()
-        if not raw:
+        # NOT stripped: `execute_write` and `execute_edit` pass the raw string to
+        # the resolver, and " notes.md" and "notes.md" are different files on a
+        # POSIX filesystem. A prompt that quietly normalises names a file the tool
+        # will not touch.
+        raw = str(args.get(key) or "")
+        if not raw.strip():
             return ""
         try:
             path, inside = _resolve_workspace_path(raw, cwd or ".")
@@ -457,7 +480,7 @@ def _describe_path_approval(action: str, key: str = "path") -> ApprovalDescribeF
             # An unresolvable path is still worth naming; the tool will fail with
             # its own error, and a prompt that says nothing is worse than one
             # that quotes what the model asked for.
-            return f"{action}: {raw}"
+            return f"{action}: {_display_target(raw)}"
         return _approval_description(path, inside, action)
 
     return describe
@@ -487,10 +510,14 @@ def _describe_wake_approval(args: dict[str, Any], cwd: str) -> str:
 
     first = str(args.get("in") or args.get("at") or "").strip()
     every = str(args.get("every") or "").strip()
+    # `⟳` rather than the word "every", for one cell instead of six. The word was
+    # shared boilerplate at the FRONT of the one field that distinguishes two
+    # wakes, so at 18 columns `every 15m ×8` and `every 1h ×∞` both painted
+    # `every 1…` — two different unattended commitments, one row.
     if first and every:
-        when = f"{first}, then every {every}"
+        when = f"{first} then ⟳{every}"
     elif every:
-        when = f"every {every}"
+        when = f"⟳{every}"
     else:
         when = first
 
@@ -503,9 +530,11 @@ def _describe_wake_approval(args: dict[str, Any], cwd: str) -> str:
         elif isinstance(limit, int):
             bound = f" ×{limit}"
         else:
-            # An unbounded recurrence is the one wake shape that never stops on
-            # its own, which is exactly what the person answering needs told.
-            bound = " (no end)"
+            # The SAME slot and the same shape as a count, because an unbounded
+            # recurrence is the one wake that never stops on its own and it must
+            # not be the only bound rendered in a different grammar — the shape
+            # that most needs emphasis was the one wearing parentheses.
+            bound = " ×∞"
 
     message = " ".join(str(args.get("message") or "").split())
     head = f"schedule: {when}{bound}" if when else "schedule"
@@ -526,19 +555,67 @@ def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
     named no site at all. A NON-https scheme is kept, because "this fetch is not
     encrypted" is exactly the kind of thing this prompt exists to surface.
     """
-    url = str(args.get("url") or "").strip()
+    url = _display_url(str(args.get("url") or "").strip())
     action = str(args.get("action") or "").strip()
     # A `url` argument is only what the call DOES when the action navigates.
     # `click` and `type` carry the page they act on for context, and announcing
     # "browse: <url>" for them describes a navigation that will not happen while
     # hiding the interaction that will.
+    if action == "screenshot":
+        # The one browser action whose effect is on the FILESYSTEM. It rides the
+        # write gate because it writes, so the prompt names what it writes —
+        # resolved through the tool's own resolver and marked when it leaves the
+        # workspace, exactly like `write`. Without this the row said
+        # `browser: screenshot` while the call landed a PNG on /etc.
+        raw_path = str(args.get("path") or "").strip()
+        if not raw_path:
+            return "screenshot: (temporary file)"
+        try:
+            path, inside = _resolve_workspace_path(raw_path, cwd or ".")
+        except (OSError, ValueError):
+            return f"screenshot: {_display_target(raw_path)}"
+        return _approval_description(path, inside, "screenshot")
     if url and action in NAVIGATING_BROWSER_ACTIONS:
-        shown = url[len("https://") :] if url.startswith("https://") else url
-        return f"browse: {shown}"
+        return f"browse: {url}"
     if action and url:
-        host = url[len("https://") :] if url.startswith("https://") else url
-        return f"{action}: {host}"
+        return f"{action}: {url}"
     return f"browser: {action}" if action else ""
+
+
+def _display_url(raw: str) -> str:
+    """The URL as a DESTINATION: host first, no userinfo, no redundant scheme.
+
+    `https://` is dropped because it is on every URL and discriminates nothing —
+    the same trade `~` makes for `$HOME`. A non-https scheme is KEPT: "this fetch
+    is not encrypted" is exactly what this prompt exists to surface.
+
+    Userinfo is dropped entirely. `http://accounts.google.com@evil.test/x` is a
+    request to **evil.test**, and it is the one part of a URL an attacker fully
+    controls AND the one part a left-anchored row never truncates — so the
+    never-cut opening of the sentence would have been attacker-chosen text that
+    is not where the browser goes.
+    """
+    if not raw:
+        return raw
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        return raw
+    if not parts.hostname:
+        return raw
+    host = parts.hostname
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    tail = parts.path or ""
+    if parts.query:
+        tail += f"?{parts.query}"
+    # The scheme rides at the END for a non-https URL. Led with, it spent eight
+    # of a narrow row's cells before naming anything — at 32 columns the row
+    # said `browse: http…`, which identifies no site at all. Trailing, the host
+    # is what survives truncation and the insecurity is still stated whenever
+    # there is room for it.
+    flag = "" if parts.scheme == "https" else f" ({parts.scheme})"
+    return f"{host}{tail}{flag}"
 
 
 def _error(tool_call_id: str, tool_name: str, message: str) -> ToolResult:

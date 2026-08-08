@@ -46,7 +46,8 @@ from local_operator.tui.widgets.approval import (
 )
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import Editor
-from local_operator.tui.widgets.transcript import TranscriptView
+from local_operator.tui.widgets.tool_card import ToolCard
+from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
 
 from .test_app_pilot import FakeSession, _factory
 
@@ -883,3 +884,73 @@ async def test_the_prompt_cannot_be_repainted_from_a_tool_argument() -> None:
         # The forged receipt text may survive as PROSE — it is inert once the
         # escapes are gone — but it must not be able to move the cursor.
         assert not [row for row in painted if "[2K" in row or "[1A" in row]
+
+
+@pytest.mark.asyncio
+async def test_a_pending_prompt_does_not_widen_the_tool_ledger() -> None:
+    """The ledger's name column is sized by rows that RAN, not by questions.
+
+    An approval prompt carries a `tool_name` and draws nothing in that column,
+    so counting it shifted every settled summary right for a call that had not
+    run — and refusing the call did not give the cells back.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(90, 30)) as pilot:
+        await pilot.pause(0.25)
+        view = app.query_one(TranscriptView)
+        view.append_block(ToolCard("t1", "bash", {}, ""))
+        await pilot.pause(0.1)
+        settled = view.tool_name_col
+
+        block = ApprovalBlock("mcp__linear_create_initiative", "run: x")
+        view.append_block(block)
+        await pilot.pause(0.1)
+        assert view.tool_name_col == settled
+
+        block.resolve(False, answer="n")
+        await pilot.pause(0.1)
+        assert view.tool_name_col == settled
+
+
+@pytest.mark.asyncio
+async def test_clearing_the_transcript_forgets_the_ledger_width() -> None:
+    """A derived measurement must not outlive the blocks it was derived from."""
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause(0.25)
+        view = app.query_one(TranscriptView)
+        view.append_block(ToolCard("t1", "mcp__linear_create_initiative", {}, ""))
+        await pilot.pause(0.1)
+        widened = view.tool_name_col
+        assert widened > 8
+
+        view.clear_blocks()
+        await pilot.pause(0.1)
+        assert view.tool_name_col == 8
+
+
+@pytest.mark.asyncio
+async def test_a_tall_notice_is_separated_from_what_precedes_it() -> None:
+    """Adaptive spacing reads BOTH neighbours, not just the one above.
+
+    Asking only "was the previous block tall?" separated tall→short correctly
+    and left short→tall packed flush — the same wall, built in the other order.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(40, 30)) as pilot:
+        await pilot.pause(0.25)
+        view = app.query_one(TranscriptView)
+        short = NoticeBlock("resumed session 4c1f", "info")
+        tall = NoticeBlock(
+            "tool approvals: auto - /approvals ask restores prompting for the rest "
+            "of this session, including write and command tools",
+            "warning",
+        )
+        view.append_block(short)
+        view.append_block(tall)
+        await pilot.pause(0.3)
+        assert tall.spans_multiple_rows()
+        assert tall.has_class("gap-above")

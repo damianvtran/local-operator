@@ -90,6 +90,10 @@ _SEPARATOR_CELLS = 2
 #: shorter answer to "which file", it is a different question; the row is more
 #: honest ending after the tool name than ending on a one-character stub.
 TARGET_MIN_USEFUL = 4
+#: Cells the target must keep for a `verb:` label to be worth its own room. A
+#: label plus a stub names a category and hides the instance, which on this row
+#: means two different authorisations paint the same text.
+TARGET_LABELLED_MIN = 10
 
 #: Marker prefix the builtin tools put on a description whose target sits
 #: outside the workspace. Surfaced as its own tinted clause because "outside
@@ -187,8 +191,11 @@ class _Row:
     hazard: int
     target: int
     prefix: int
+    #: Whether this rendering kept the two-cell spine indent, so the hint row
+    #: below it can start in the same column as the question above it.
+    spine: bool
 
-    def score(self, width: int) -> tuple[int, int, int, int]:
+    def score(self, width: int) -> tuple[int, int, int, int, int]:
         """Higher is better, compared left to right.
 
         The last term is ZERO for any row that fits, so it can only decide
@@ -199,13 +206,28 @@ class _Row:
         way, "shorter prefix" quietly outranked "say the word `allowed`".
         """
         fits = cell_len(self.text.plain) <= width
-        # Hazard OUTRANKS fit. At one width the safety glyph was the single cell
-        # that broke the fit, so the ladder traded it away and the dangerous
-        # receipt painted exactly like the safe one — the failure this whole
-        # ladder exists to prevent, reintroduced by the tidiness term. Overflowing
-        # by a cell costs the last character of a name the row already repeats;
-        # dropping the marker costs the only difference between the two rows.
-        return (self.hazard, int(fits), self.target, 0 if fits else -self.prefix)
+        # Three separate questions, in the order they matter:
+        #
+        # 1. Is the risk on the row AT ALL (`min(hazard, 1)`)? This outranks the
+        #    fit: at one width the safety glyph was the single cell breaking the
+        #    fit, so the ladder traded it and the dangerous receipt painted
+        #    exactly like the safe one. Overflowing by a cell costs the last
+        #    character of a name the row repeats two words earlier.
+        # 2. Does the row fit, and how much of the SENTENCE does it show?
+        # 3. Only then, is the risk spelled out in full (`hazard` == 2)?
+        #
+        # Ranking the FORM first instead made it dominate rather than compete:
+        # over a ten-column band the 24-cell clause won against the whole path,
+        # and the row showed less of the target than the same prompt one column
+        # narrower — the exact non-monotonicity this scoring replaced a hand-
+        # ordered ladder to prevent.
+        return (
+            min(self.hazard, 1),
+            int(fits),
+            self.target,
+            self.hazard,
+            0 if fits else -self.prefix,
+        )
 
 
 class ApprovalBlock(TranscriptBlock):
@@ -437,7 +459,24 @@ class ApprovalBlock(TranscriptBlock):
             # answered receipt wrapped onto column zero — the composer's own
             # gutter — at narrow widths while the pending two-row form did not.
             return Group(question)
-        return Group(question, self._hint_row(width))
+        # The hint row follows the question's SPINE decision. Hard-coding the
+        # indent let the block's two rows disagree by four cells whenever the
+        # spine rung fired — one row at column 0 and its own answer keys at
+        # column 4, which reads as two unrelated things rather than one prompt.
+        return Group(question, self._hint_row(width, spine=best.spine))
+
+    def _hazard_ink(self) -> Style:
+        """Amber and bold while the question is LIVE; plain dim once it is not.
+
+        One helper, because the three places that paint the hazard drifted: the
+        clause honoured this rule and the two glyph forms did not, so below ~53
+        columns a scrollback of settled receipts wore the live alarm's amber
+        permanently. A transcript where four consecutive rows are alarms trains
+        the eye to ignore the one that is asking for an answer.
+        """
+        if self._answer is None:
+            return Style(color=theme_mod.semantic_color("warning"), bold=True)
+        return Style(color=theme_mod.semantic_color("dim"))
 
     def _compose_question(
         self, width: int, *, verb: bool, glyph_hazard: bool, spine: bool = True
@@ -463,7 +502,7 @@ class ApprovalBlock(TranscriptBlock):
             # the glyph IS the hazard, in which case it takes the bold weight the
             # clause would have had.
             if glyph_hazard:
-                question.append(f"{HAZARD_GLYPH} ", style=warning + Style(bold=True))
+                question.append(f"{HAZARD_GLYPH} ", style=self._hazard_ink())
                 hazard_rank = 1
             else:
                 question.append(f"{PROMPT_GLYPH} ", style=warning)
@@ -478,7 +517,7 @@ class ApprovalBlock(TranscriptBlock):
                 # hazard rides BESIDE it in the space that was there anyway, for
                 # one cell instead of the clause's three. Outcome first, because
                 # the record answers "what happened" before "how risky was it".
-                question.append(HAZARD_GLYPH, style=warning + Style(bold=True))
+                question.append(HAZARD_GLYPH, style=self._hazard_ink())
                 hazard_rank = 1
             question.append(" ")
             if verb:
@@ -512,7 +551,7 @@ class ApprovalBlock(TranscriptBlock):
             # On a settled receipt the hazard drops to plain dim: the decision is
             # made, and a permanent alarm in the transcript trains the eye to
             # ignore the live one.
-            hazard_style = warning + Style(bold=True) if self._answer is None else dim
+            hazard_style = self._hazard_ink()
             spare = width - question.cell_len - _SEPARATOR_CELLS
             hazard = ""
             # H-11: the glyph already IS the hazard on that rung; repeating it as
@@ -532,7 +571,12 @@ class ApprovalBlock(TranscriptBlock):
             target_verb, target = self._split_target(detail)
             budget = width - question.cell_len - _SEPARATOR_CELLS - cell_len(hazard)
             with_verb = budget - cell_len(target_verb)
-            if target_verb and with_verb >= TARGET_MIN_USEFUL:
+            # The verb needs to leave more than the bare minimum, or it is
+            # spending its cells to say a category while hiding the instance:
+            # `schedule: e…` was byte-identical for a wake firing eight times and
+            # one that never stops, because ten cells went to the word `schedule`
+            # and one to the thing that differed.
+            if target_verb and with_verb >= TARGET_LABELLED_MIN:
                 body, body_budget = target_verb, with_verb
             else:
                 # The verb is dropped whole rather than fitted: `edit: /etc/…`
@@ -541,6 +585,12 @@ class ApprovalBlock(TranscriptBlock):
                 # says what is being done to it.
                 body, body_budget = "", budget
 
+            # A trailing `!` with no target behind it is a one-column island —
+            # two cells of separator and a dangling marker — where the fused
+            # glyph form says the same thing for less and reads as one row. The
+            # marker is dropped here so THAT rung wins the comparison on rank.
+            if hazard == HAZARD_MARKER and body_budget < TARGET_MIN_USEFUL:
+                hazard = ""
             if hazard or body_budget >= TARGET_MIN_USEFUL:
                 question.append("  ", style=dim)
             if hazard:
@@ -559,9 +609,9 @@ class ApprovalBlock(TranscriptBlock):
                 # seven cells of path AND the `write:` that says what happens to
                 # it. The comparison is "how much of the SENTENCE is on screen".
                 target_cells = cell_len(body) + cell_len(shown)
-        return _Row(question, hazard_rank, target_cells, prefix_cells)
+        return _Row(question, hazard_rank, target_cells, prefix_cells, spine)
 
-    def _hint_row(self, width: int) -> Text:
+    def _hint_row(self, width: int, *, spine: bool = True) -> Text:
         """The key hints, shedding WHOLE choices rather than truncating one.
 
         Sheds from the right, which is what makes :data:`CHOICES`' order a
@@ -570,7 +620,7 @@ class ApprovalBlock(TranscriptBlock):
         answers longest. Truncating instead left rows ending `A allow all …` and
         then `A …`, offering a key whose consequence had been cut off.
         """
-        indent = " " * (SPINE_INDENT + 2)
+        indent = " " * ((SPINE_INDENT if spine else 0) + 2)
         for count in range(len(CHOICES), 1, -1):
             row = self._render_hints(indent, CHOICES[:count])
             if cell_len(row.plain) <= width:
@@ -615,8 +665,15 @@ class ApprovalBlock(TranscriptBlock):
         tool knows whether its argument is a path, and it already said so by
         picking `write:`/`edit:`/`read:`/`grep:` over `run:`/`browse:`/`schedule:`.
         """
-        verb, _target = self._split_target(detail)
-        return verb.rstrip(": ").strip().lower() in PATH_VERBS
+        verb, target = self._split_target(detail)
+        if verb.rstrip(": ").strip().lower() not in PATH_VERBS:
+            return False
+        # The verb alone is not enough: `read` is a filesystem verb AND a browser
+        # action, so `read: accounts.google.com/settings` was being tail-truncated
+        # into `…s.google.com/settings` — host gone — and `$HOME`-rewritten inside
+        # a URL. A resolved path always starts at the root or at `~`; nothing the
+        # describers produce for a URL ever does.
+        return target.startswith("/") or target.startswith("~")
 
     def _split_target(self, detail: str) -> tuple[str, str]:
         """``("write: ", "/path")`` when the description carries a verb prefix.
