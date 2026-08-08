@@ -494,6 +494,16 @@ class Session:
         batches at the next boundary)."""
         self._steering_queue.put_nowait(Message.user(text))
 
+    def set_approval_handler(self, handler: Callable[[str, str], Awaitable[bool]] | None) -> None:
+        """Install the host's tool-approval gate (see SessionProtocol).
+
+        Read when the per-turn tool context is built rather than captured once,
+        so a front end that installs its own gate after the session is already
+        constructed (the TUI resolves its session in a worker, well after the
+        factory ran) governs every tool call from the next one onward.
+        """
+        self._request_approval = handler
+
     def abort(self, reason: str = "interrupted") -> None:
         """Abort the running turn; the engine emits an aborted agent_end.
 

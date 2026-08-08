@@ -3,7 +3,7 @@
 - The tcss sheet carries NO literal hex: every color resolves through the
   brand-token CSS variables injected from ``tui/theme.py`` (single source).
 - A COLLAPSED tool execution is ONE row (the filled card); it only grows
-  when the user clicks it open.
+  when the user opens it, by click or by Enter on the focused row.
 - The status line is ONE full-width band row.
 - Separation is adaptive and opt-in: no block selector carries a uniform
   margin, and the only spacing declaration in the sheet is the class the
@@ -82,6 +82,12 @@ def test_gap_class_is_the_only_block_spacing_declaration() -> None:
 
     A second source of vertical spacing is how "adaptive" quietly decays
     back into "a blank row everywhere", so the count is pinned at one.
+
+    It is also how a gap DOUBLES. Tool rows now take ``.gap-above``
+    unconditionally (every action gets its own blank row), so any margin on
+    a `ToolCard` selector would stack on top of it and put two blank rows
+    between every pair of actions — the "too much spacing" complaint, moved
+    from above the group to inside it.
     """
     text = TCSS.read_text()
     gap = re.search(r"^\.gap-above\s*\{([^}]*)\}", text, re.MULTILINE)
@@ -90,6 +96,11 @@ def test_gap_class_is_the_only_block_spacing_declaration() -> None:
     # No other rule anywhere in the sheet declares a vertical margin.
     margins = re.findall(r"margin(?:-top|-bottom)?\s*:[^;]*;", text)
     assert margins == ["margin-top: 1;"], margins
+    # And no ToolCard rule declares spacing of ANY kind, margin or padding:
+    # the card's own 1-cell inner padding is drawn by the row builder, not by
+    # the sheet, precisely so it cannot become a vertical row.
+    for block in re.findall(r"^ToolCard[^{]*\{([^}]*)\}", text, re.MULTILINE):
+        assert not re.search(r"\b(margin|padding)\s*:", block), block
 
 
 def test_tool_card_renders_a_single_row() -> None:

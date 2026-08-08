@@ -5,19 +5,27 @@ background-filled cards — one elevation step brighter than the ground
 (kit ``surface`` on ``bg``), full-width single rows with 1-cell inner
 padding, NO border. Elevation is a background step, never a shadow or line.
 
-Row anatomy::
+Row anatomy — one COLUMN per field, so a ledger is scanned down, not read
+across::
 
-    ▸ bash       pytest -q ⟨expand⟩                       ✓ 0.4s
-    ▸ edit       tui/theme.py ⟨expand⟩             +12 -3 ✓ 0.1s
+     bash     pytest -q                                     ✓  0.4s
+     edit     tui/theme.py                           +12 -3 ✓  0.1s
+     bash     false                    exit status 1 ✗  0.2s
 
-- per-tool glyph ``▸``: the QUIET STATIC running marker (D25 — the shimmer
-  rides the aggregate working line, not individual rows), painted in the
-  accent while running so a still frame reads "live" (D26 fallback)
-- tool NAME ljust'd into a 10-cell column spine (D7). The name and the
-  summary each carry a two-step tint ramp: while the tool is LIVE the name
-  is the string green and the summary is ``muted``; once it settles both
-  drop one step (``muted``/``dim``) so the running row is always the
-  brightest thing in the transcript.
+- a per-TOOL icon (``local_operator.tui.glyphs``) leads the row: shape
+  before name, so the one ``edit`` in a run of ``read``s is found without
+  parsing ten words. It doubles as the QUIET STATIC running marker (D25 —
+  the shimmer rides the aggregate working line, not individual rows),
+  painted in the accent while running so a still frame reads "live" (D26
+  fallback). Exactly one cell wide, enforced in ``glyphs`` against the same
+  ``cell_len`` this row's arithmetic uses.
+- tool NAME ljust'd into an 8-cell column spine (D7). The column paid for
+  the icon: the glyph now carries identity at a glance, so the name needs
+  less room than it did when it was the only thing telling one row from the
+  next. The name and the summary each carry a two-step tint ramp: while the
+  tool is LIVE the name is the string green and the summary is ``muted``;
+  once it settles both drop one step (``muted``/``dim``) so the running row
+  is always the brightest thing in the transcript.
 - command/summary ellipsized to the remaining budget, with absolute paths
   compacted against the cwd/home so a deep path does not eat the row
 - diff counters for file-mutating tools: ``+N`` in the success tint and
@@ -27,14 +35,27 @@ Row anatomy::
   column stays clear until the duration lands (D28); ``✓ duration`` all
   dim on success (D12: only failure gets color); ``✗ error`` danger with
   the duration dim as a second run (D13); ``⊘ interrupted`` dim when the
-  turn ended before completion (TUI-019)
+  turn ended before completion (TUI-019). The duration is right-justified
+  into a fixed :data:`DURATION_COL` so the outcome glyph sits in a STABLE
+  column — otherwise ``✓ 0.4s`` and ``✓ 12.3s`` put the glyph one cell
+  apart, and the pass/fail scan that right-alignment exists to serve has to
+  hunt for the answer.
+- the outcome glyph is what a still, COLOURLESS frame reads: ``✓``/``✗``/
+  ``⊘`` separate success, failure and interruption without a single colour,
+  and their absence is what says "still running". Tint is a second channel
+  on top of the glyph, never the only one.
 - an ``⟨expand⟩`` hint trailing the summary — the whole ROW is the click
-  target, and clicking it reveals the tool's full output indented beneath
-  the summary; clicking again collapses back to exactly one row. The hint
-  appears only when there is output worth revealing and flips to
-  ``⟨collapse⟩`` when open. It rests at ``faint`` (the ramp's inert-hint
-  step, all but invisible) and steps up to ``dim`` while the pointer is on
-  the row, so a settled transcript reads as content, not as controls.
+  target AND a focus stop, and activating it (mouse click, or Enter/Space
+  with the row focused) reveals the tool's full output indented beneath the
+  summary; activating again collapses back to exactly one row. The hint
+  appears while the pointer is on the row or the row holds focus, and flips
+  to ``⟨collapse⟩`` when open, so a settled transcript reads as content
+  rather than as a wall of controls.
+- a row with NOTHING to reveal answers anyway: activating it flashes
+  :data:`NO_OUTPUT_NOTICE` (or :data:`RUNNING_NOTICE`) in the hint slot for
+  :data:`NOTICE_SECONDS`. Silence was read in the field as the app being
+  broken — "when I click to expand these lines, nothing happens" — and an
+  affordance that sometimes does nothing has to say which time this is.
 
 State also reaches the ground: the card's background is ``raised`` while
 running, ``surface`` once it settles, and the warm ``tint-danger`` ground
@@ -53,9 +74,12 @@ from typing import Any
 from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
+from textual.binding import Binding
+from textual.events import Key
 
 from local_operator.ansi import strip_control_sequences
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.glyphs import tool_icon
 from local_operator.tui.widgets.transcript import TranscriptBlock, TranscriptView
 
 #: Control-sequence stripping lives in `local_operator.ansi` because the
@@ -64,8 +88,12 @@ from local_operator.tui.widgets.transcript import TranscriptBlock, TranscriptVie
 _strip_control_sequences = strip_control_sequences
 
 
-#: Status glyphs (no Nerd fonts; plain unicode).
-ICON_GLYPH = "▸"  # row prefix: one tool-action marker
+#: Outcome glyphs. Plain unicode, NOT Nerd Font: these three are the only
+#: thing distinguishing success from failure from interruption in a still,
+#: colourless frame, so they may not depend on the user having a patched
+#: font. The per-tool ICON at the head of the row may (see `tui.glyphs`) —
+#: a wrench where a magnifier belongs loses a scanning aid; a missing ✗
+#: loses the answer.
 ICON_SUCCESS = "✓"
 ICON_ERROR = "✗"
 ICON_INTERRUPTED = "⊘"
@@ -74,12 +102,24 @@ ICON_INTERRUPTED = "⊘"
 EXPAND_HINT = "⟨expand⟩"
 COLLAPSE_HINT = "⟨collapse⟩"
 
-#: Spinner frames — kept for the aggregate working line; running cards use
-#: the quiet static marker (D25), but legacy callers/tests may still read.
-SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+#: Answers given in the hint slot when the affordance has nothing to open.
+#: An expander that silently ignores half its activations is indistinguishable
+#: from a frozen app, which is precisely how it was reported.
+NO_OUTPUT_NOTICE = "no output"
+RUNNING_NOTICE = "still running"
+#: How long that answer stays on the row. Long enough to read at a glance,
+#: short enough that it is gone before the eye returns — it is feedback for
+#: a keystroke, not a state the row is in.
+NOTICE_SECONDS = 2.0
 
-#: Tool-name column width (D7: a spine for the eye to scan names).
-NAME_COL = 10
+#: Tool-name column width (D7: a spine for the eye to scan names). Eight,
+#: not ten: the icon column now carries identity, and the two cells it costs
+#: come out of the name rather than out of the summary.
+NAME_COL = 8
+#: Right-justification width for the duration, so the outcome glyph in front
+#: of it lands in the same column whether the tool took 0.4s or 12.3s. Five
+#: cells covers every duration the format produces up to ``9999s``.
+DURATION_COL = 5
 #: Minimum summary budget before we drop the expand hint (D8 floor).
 _SUMMARY_FLOOR = 16
 #: Indent of the expanded output block, aligned under the tool name column.
@@ -271,10 +311,52 @@ class ToolCard(TranscriptBlock):
     powers the diff counters and the click-to-expand output. Passing them is
     optional so a host that has not wired the result through still gets a
     correct — merely quieter — card.
+
+    The card is a FOCUS STOP. Expansion used to be mouse-only, which made it
+    invisible to anyone driving the app from the keyboard and unreachable in
+    a terminal without mouse reporting; ``can_focus`` puts every row in the
+    screen's tab order, so Shift+Tab out of the composer lands on the last
+    action and Up/Down walk the ledger from there.
     """
 
-    #: Adaptive spacing: consecutive tool rows stack tight (see transcript).
+    #: Adaptive spacing: every tool row takes a blank row above it, because
+    #: each row is a separate action (see `transcript.needs_gap_above`).
     SPACING_KIND = "tool"
+    SPACING_AIRY = True
+
+    #: The keyboard half of the expand affordance. Enter and Space both
+    #: activate because both are what a user reaches for on a focused row and
+    #: neither means anything else here. Up/Down move between ACTIONS rather
+    #: than scrolling by a line: once focus is on a card the ledger is what
+    #: the arrows are addressing, and the transcript keeps the scroll keys
+    #: for when nothing in it is focused.
+    #:
+    #: Escape is deliberately absent — the app owns it as the "stop the turn"
+    #: binding, and a second meaning for the key that aborts work is the last
+    #: thing this row should introduce. With no binding here the key simply
+    #: bubbles from a focused row to the app, which is the wanted precedence.
+    BINDINGS = [
+        Binding("enter", "activate", "Expand/collapse", show=False),
+        Binding("space", "activate", "Expand/collapse", show=False),
+        Binding("up", "focus_previous_action", "Previous action", show=False),
+        Binding("down", "focus_next_action", "Next action", show=False),
+    ]
+
+    #: The keys above, flattened. ``on_key`` runs BEFORE Textual resolves a
+    #: focused widget's bindings, so the typing passthrough has to step aside
+    #: for the row's own keys explicitly: Space is both this row's toggle and
+    #: a printable character, and without this it typed a space into the
+    #: composer instead of expanding the row it was standing on. Derived from
+    #: BINDINGS rather than restated, so a fifth key cannot drift out of sync.
+    #: BINDINGS is typed as accepting bare tuples as well as Binding objects, so
+    #: the key name is read through a narrowing step rather than assumed.
+    _BOUND_KEYS = frozenset(
+        key.strip()
+        for binding in BINDINGS
+        for key in (binding.key if isinstance(binding, Binding) else binding[0]).split(",")
+    )
+
+    can_focus = True
 
     def __init__(
         self,
@@ -303,6 +385,13 @@ class ToolCard(TranscriptBlock):
         self._started = time.monotonic()
         self._expanded = False
         self._hovered = False
+        #: True while the row holds keyboard focus. Tracked separately from
+        #: hover: both light the hint, but a pointer leaving the row must not
+        #: put out a hint the keyboard is still standing on.
+        self._focused = False
+        #: One-shot answer occupying the hint slot ("" = nothing to say).
+        self._notice = ""
+        self._notice_timer: Any = None
         self._added = 0
         self._removed = 0
         #: Cleaned result lines, populated once the tool finishes.
@@ -400,25 +489,122 @@ class ToolCard(TranscriptBlock):
         """Flip the expansion (no-op with nothing to show); returns the state.
 
         Also nudges the transcript to re-decide the gap below this card: a
-        card that just grew from one row to twenty has earned the breathing
-        room its collapsed self did not need.
+        card that just grew from one row to twenty may change what the block
+        under it needs, and only the container can answer that.
         """
         if not self.can_expand():
             return self._expanded
         self._expanded = not self._expanded
         self.set_class(self._expanded, "tool-expanded")
+        self._clear_notice(repaint=False)
         self._refresh_row()
         parent = self.parent
         if isinstance(parent, TranscriptView):
             parent.refresh_gap_after(self)
         return self._expanded
 
-    def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Mouse affordance: the whole row toggles the output view."""
+    def activate(self) -> bool:
+        """Run the row's one action; returns True when it expanded/collapsed.
+
+        The SINGLE entry point behind both the mouse and the keyboard, so the
+        two can never drift into answering a click and ignoring a keystroke.
+        With nothing to reveal it flashes an answer instead of returning
+        silently: an affordance the user has already been told about (the row
+        lights, the hint slot exists) must never absorb an activation without
+        a visible consequence.
+        """
         if not self.can_expand():
-            return
+            self._flash_notice()
+            return False
         self.toggle_expanded()
+        return True
+
+    def action_activate(self) -> None:
+        """Enter/Space on a focused row."""
+        self.activate()
+
+    def action_focus_next_action(self) -> None:
+        """Down: the next focusable row, or out of the ledger entirely."""
+        self._move_focus(1)
+
+    def action_focus_previous_action(self) -> None:
+        """Up: the previous focusable row, or out of the ledger entirely."""
+        self._move_focus(-1)
+
+    def _move_focus(self, delta: int) -> None:
+        """Hand focus to a neighbouring card, else to the screen's tab order.
+
+        Falling through at the ends is what makes the ledger something a
+        keyboard can pass THROUGH rather than get stuck in: Down off the last
+        action reaches the composer, Up off the first reaches the transcript
+        itself, where the scroll keys mean what they always meant.
+        """
+        parent = self.parent
+        if isinstance(parent, TranscriptView) and parent.focus_neighbour(self, delta):
+            return
+        screen = self.screen
+        if delta > 0:
+            screen.focus_next()
+        else:
+            screen.focus_previous()
+
+    def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Mouse affordance: the whole row is the target.
+
+        The event is only stopped when the click actually toggled something.
+        A click on an inert row still gets its answer, but it keeps bubbling
+        so the transcript's own click handling (selection, scroll anchoring)
+        is not swallowed by a row that had nothing to do.
+        """
+        if self.activate():
+            event.stop()
+
+    def on_key(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Typing on a focused row goes to the COMPOSER, not into the void.
+
+        The row is a focus stop so the keyboard can reach the expander — but
+        it is not somewhere to type, and a transcript that silently swallows
+        a sentence is a worse trap than one that could never be focused. The
+        app has exactly one text input, so any printable key is unambiguous:
+        hand it the focus and re-post the keystroke there, and the user never
+        has to discover that a row had focus at all.
+
+        This runs BEFORE :attr:`BINDINGS` — Textual dispatches the focused
+        widget's message handlers first and only then resolves its bindings —
+        so the row's own keys are excluded here by hand. That is not a
+        formality: Space is a printable character, and without the exclusion
+        it typed a space into the composer instead of expanding the row the
+        user was standing on.
+
+        A FRESH ``Key`` is posted rather than the original: the event that
+        reached this handler is already part-way through Textual's dispatch
+        (bubbling, default-handling flags) and re-delivering it would be
+        re-entering a lifecycle it has half finished.
+        """
+        if event.key in self._BOUND_KEYS or not event.is_printable:
+            return
+        composer = self._composer()
+        if composer is None:
+            return
+        composer.focus()
+        composer.post_message(Key(event.key, event.character))
         event.stop()
+        event.prevent_default()
+
+    def _composer(self):  # type: ignore[no-untyped-def]
+        """The app's one text input, or None when there is not one.
+
+        Imported lazily and queried defensively: the card is mounted in
+        harnesses that host a transcript and nothing else, and a missing
+        composer there must degrade to "the key does nothing" rather than
+        raise out of a key handler.
+        """
+        from local_operator.tui.widgets.editor import Editor
+
+        try:
+            return self.app.query_one(Editor)
+        except Exception:
+            return None
 
     def on_enter(self, event) -> None:  # type: ignore[no-untyped-def]
         """Pointer over an expandable row: light the hint up to `dim`."""
@@ -428,18 +614,73 @@ class ToolCard(TranscriptBlock):
         """Pointer gone: the hint recedes to `faint` again."""
         self._set_hovered(False)
 
+    def on_focus(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Keyboard on the row: show what Enter would do."""
+        self._set_focused(True)
+
+    def on_blur(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Focus elsewhere: the offer goes quiet, and so does any notice."""
+        self._set_focused(False)
+
     def _set_hovered(self, hovered: bool) -> None:
         """Repaint only when the hover state actually changes something.
 
         A row with nothing to expand shows no hint, so hovering it costs
         nothing — the transcript is a long list and the pointer crosses a
-        lot of rows on the way anywhere.
+        lot of rows on the way anywhere. The focus check is what keeps the
+        pointer from erasing a hint the keyboard put there.
         """
         if hovered == self._hovered or not self.can_expand():
             self._hovered = hovered
             return
         self._hovered = hovered
+        if not self._focused:
+            self._refresh_row()
+
+    def _set_focused(self, focused: bool) -> None:
+        """Track keyboard focus; repaint only when it changes what the row says."""
+        if focused == self._focused:
+            return
+        self._focused = focused
+        had_notice = bool(self._notice)
+        if not focused:
+            # A notice is the answer to an activation on THIS row. Carrying it
+            # past the row losing focus would leave "no output" sitting on a
+            # card the user has moved away from, reading as a permanent state.
+            self._clear_notice(repaint=False)
+        if self.can_expand() or had_notice:
+            self._refresh_row()
+
+    def _flash_notice(self) -> None:
+        """Put the inert-row answer in the hint slot for a couple of seconds.
+
+        A RUNNING tool has no output yet but will; a settled one never will.
+        Saying which is the difference between "wait" and "there is nothing
+        here", and the row is the only place the user is looking.
+        """
+        self._notice = RUNNING_NOTICE if self._state == "running" else NO_OUTPUT_NOTICE
         self._refresh_row()
+        if self._notice_timer is not None:
+            self._notice_timer.stop()
+            self._notice_timer = None
+        if self.is_running:
+            self._notice_timer = self.set_timer(NOTICE_SECONDS, self._clear_notice)
+        # A card with no running message pump (built but not yet mounted, or a
+        # unit test holding one directly) has no clock to schedule against, and
+        # `set_timer` would leave an unawaited coroutine behind. The notice then
+        # simply persists until the next repaint — the right degradation for a
+        # purely cosmetic timer, and never a crash.
+
+    def _clear_notice(self, repaint: bool = True) -> None:
+        """Retire the one-shot answer (no-op when there is none)."""
+        if self._notice_timer is not None:
+            self._notice_timer.stop()
+            self._notice_timer = None
+        if not self._notice:
+            return
+        self._notice = ""
+        if repaint:
+            self._refresh_row()
 
     # -- resize (TUI-017: rebuild the row when the width changes) -----------
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -522,18 +763,19 @@ class ToolCard(TranscriptBlock):
         status_runs = _clamp_runs(self._status_runs(status_cap), max(0, width - 3))
         status_cells = sum(cell_len(text) for text, _style in status_runs)
 
-        # Prefix: glyph + space + name column + space. The status segment and
+        # Prefix: icon + space + name column + space. The status segment and
         # both separator cells are part of the summary budget (TUI-018). The
         # name column is cell-width bound and ADAPTIVE: below the full column
         # width the name shrinks (truncated by CELL width — len() on a wide
         # CJK/emoji name would break the spine) before the row overflows its
         # card and clips the status off-screen.
+        icon = tool_icon(self.tool_name)
         name_budget = width - (2 + status_cells + 2)
         if name_budget < 2:
-            # Too narrow for even a shrunken name: degrade to glyph + status
+            # Too narrow for even a shrunken name: degrade to icon + status
             # so the status column survives.
             row = _row_text()
-            row.append(ICON_GLYPH + " ", style=dim)
+            row.append(icon + " ", style=dim)
             if status_runs:
                 used = cell_len(row.plain)
                 pad = max(1, width - used - status_cells)
@@ -547,34 +789,51 @@ class ToolCard(TranscriptBlock):
         name = name + " " * max(0, name_col - cell_len(name))
         prefix_cells = 2 + name_col + 1
 
-        # Expand hint: only when there IS something to expand and the summary
-        # floor survives it (D8). The label states the action a click performs.
+        # The trailing slot holds ONE of two things, never both: the expand
+        # affordance when there is output to reveal, or the one-shot answer
+        # when the user activated a row that has none. They are mutually
+        # exclusive by construction — a notice is only ever set on a row that
+        # cannot expand — so they share a budget and a column.
         hint = ""
+        hint_token = "dim"
         if self.can_expand():
             hint = COLLAPSE_HINT if self._expanded else EXPAND_HINT
+            # Offered under the pointer or under keyboard focus, silent at
+            # rest. A settled transcript is content, not a wall of controls:
+            # printing ⟨expand⟩ on every row costs ~9 cells of permanent
+            # chrome on the common 80-column terminal, and the row's ground
+            # already lifts on :hover and :focus to say it is a target.
+            if not (self._hovered or self._focused):
+                hint = ""
+        elif self._notice:
+            hint = self._notice
+            # `muted`, one step brighter than the hint's `dim`: this is not an
+            # offer the eye may skip, it is the answer to something the user
+            # just did, and it is on screen for two seconds.
+            hint_token = "muted"
         hint_cells = cell_len(hint) + 1 if hint else 0
         budget = max(0, width - prefix_cells - status_cells - hint_cells - 2)
         if hint and budget < _SUMMARY_FLOOR:
+            # D8 floor: the summary is the row's content and the trailing slot
+            # is chrome, so the slot goes first. A notice loses its column too
+            # — an answer that pushes the command off the row answers the
+            # wrong question.
             hint = ""
             budget = max(0, width - prefix_cells - status_cells - 2)
         summary = truncate_cells(self._summary, budget)
 
         row = _row_text()
-        glyph_style = Style(color=theme_mod.semantic_color("accent")) if running else dim
-        row.append(ICON_GLYPH + " ", style=glyph_style)
+        # The icon carries the running state: accent while live (D26 — a still
+        # frame must read "live" without the shimmer), dim once settled. This
+        # is one of the five places in the app the accent green is spent.
+        icon_style = Style(color=theme_mod.semantic_color("accent")) if running else dim
+        row.append(icon + " ", style=icon_style)
         row.append(name, style=name_style)
         row.append(" ", style=dim)
         row.append(summary, style=summary_style)
-        # The hint appears ONLY under the pointer. A settled transcript is
-        # content, not a wall of controls: at rest the ▸ chevron is the whole
-        # affordance (and the card's ground lifts on :hover), so printing
-        # ⟨expand⟩ on every row costs ~9 cells of permanent chrome on the
-        # common 80-column terminal to say what the chevron already says.
-        # Keeping it hover-only is what holds the borderless/minimal contract
-        # while still giving the mouse a visible target.
-        if hint and self._hovered:
+        if hint:
             row.append(" ", style=dim)
-            row.append(hint, style=Style(color=theme_mod.semantic_color("dim")))
+            row.append(hint, style=Style(color=theme_mod.semantic_color(hint_token)))
 
         # Right-align the status column against the content width (D27).
         if status_runs:
@@ -614,10 +873,19 @@ class ToolCard(TranscriptBlock):
         return runs
 
     def _outcome_runs(self, cap: int = 0) -> list[tuple[str, Style]]:
-        """Glyph + duration (or error text) for the settled states."""
+        """Glyph + duration (or error text) for the settled states.
+
+        The duration is right-justified into :data:`DURATION_COL` so the
+        outcome glyph occupies a FIXED column relative to the row's right
+        edge. Unpadded, ``✓ 0.4s`` and ``✓ 12.3s`` put their glyphs one cell
+        apart, and a column of pass/fail marks that wobbles by a cell per row
+        is a column the eye has to read instead of scan — which defeats the
+        reason the status segment is right-aligned in the first place.
+        """
         dim = Style(color=theme_mod.semantic_color("dim"))
         elapsed = self._duration or 0.0
         duration = f"{elapsed:.1f}s" if elapsed < 10 else f"{elapsed:.0f}s"
+        duration = duration.rjust(DURATION_COL)
         if self._state == "success":
             # D12: success is quiet — check + duration both dim.
             return [(f"{ICON_SUCCESS} ", dim), (duration, dim)]
@@ -636,7 +904,9 @@ class ToolCard(TranscriptBlock):
         # should be. The message keeps the space to the glyph's left.
         error = self._error
         if cap:
-            error = truncate_cells(error, max(1, cap - len(f"{ICON_ERROR}  ") - len(duration)))
+            error = truncate_cells(
+                error, max(1, cap - cell_len(f"{ICON_ERROR}  ") - cell_len(duration))
+            )
         return [
             (f"{error} ", Style(color=theme_mod.semantic_color("danger"))),
             (f"{ICON_ERROR} ", Style(color=theme_mod.semantic_color("danger"))),

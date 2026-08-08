@@ -152,6 +152,23 @@ ToolCard:hover {
     background: $lo-overlay;
 }
 
+/* Keyboard affordance, and the reason the card is a focus stop at all: a row
+ * the arrows have landed on has to look landed-on, or Enter is a guess.
+ *
+ * `tint-select` rather than the hover `overlay` on purpose. They are two
+ * different pointers — the mouse is where the hand is, focus is where the
+ * KEYBOARD is, and only one of them survives the hand leaving the mouse — so
+ * a focused row under a wandering pointer must not lose its mark. The tint is
+ * the same cool-green ground the command picker gives its highlighted row,
+ * which is already this app's word for "this is the one you are on".
+ *
+ * Last rule in the block, so it wins over the state tints AND over :hover:
+ * where the keyboard is, is the more load-bearing fact. Still no border —
+ * elevation is a background step here as everywhere. */
+ToolCard:focus {
+    background: $lo-tint-select;
+}
+
 /* The status band is the LAST row of the input panel, below the editor. It reads
  * as a footer for the whole app rather than a caption on the input, and it puts
  * the least volatile information at the screen's least volatile edge.
@@ -476,4 +493,38 @@ CommandPicker {
     width: 1fr;
     background: $lo-surface;
     color: $lo-fg;
+}
+
+/* The tool-approval prompt. Same borderless, filled-card language as the tool
+ * ledger, because it IS a row in that ledger's story — the difference is that
+ * this one is waiting on the user.
+ *
+ * Height is content-sized rather than pinned (the exception the ToolCard note
+ * above explains): a pending prompt is deliberately two rows, the question and
+ * the key hints, and it collapses to one when answered. Both counts come from
+ * the widget's own state, not from a width-dependent measurement, so the
+ * doubling trap that forced ToolCard's pin cannot happen here.
+ *
+ * Pending sits one elevation step proud — the same "this is live" signal a
+ * running tool row uses — and the amber lives in the TEXT (glyph and keys), so
+ * the ground never shouts a colour the palette reserves for warnings. */
+ApprovalBlock {
+    height: auto;
+    background: $lo-surface;
+}
+
+ApprovalBlock.approval-pending {
+    background: $lo-raised;
+}
+
+/* Focused is the state that matters here: the prompt takes focus so its answer
+ * keys reach it instead of the composer, and the user must be able to SEE where
+ * those keys are going.
+ *
+ * `tint-select` rather than an elevation step, matching `ToolCard:focus`: it is
+ * the app's existing word for "this is the one you are on", and it stays
+ * distinguishable from hover (`$lo-overlay`) when both are live on the same row.
+ * Two focusable transcript blocks must not spell focus two different ways. */
+ApprovalBlock:focus {
+    background: $lo-tint-select;
 }

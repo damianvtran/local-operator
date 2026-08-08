@@ -925,3 +925,36 @@ carrying the answer and legacy socket keys then closes on `stream.terminal`, an
 SSE-less backend (404) falls back to the socket, and a stream that opens and
 dies falls back too. Storybook fixture (`Chat/SSE transport`) shows stream,
 drop-and-resume, and both fallbacks with no backend. Typecheck and biome clean.
+
+## Anthropic context windows (reported as `1.8%/200k` on a 1M model)
+
+A session on `anthropic/claude-opus-5` showed `1.8%/200k` in the status band. Not
+cosmetic: the default compaction threshold is `min(0.8 * window, 600k)`, so a 200k
+window on a 1M model compacted at 160k and threw away 84% of the model's room.
+
+Two independent causes, both fixed:
+
+| Cause | Fix |
+|---|---|
+| `_fetch_anthropic` read only `id` and `display_name`, so every discovered row carried a zero window and the shipped 200k family floor answered instead. The live listing has had the truth all along | the transport maps `max_input_tokens` → `context_window`, `max_tokens` → `max_tokens`, `capabilities.image_input.supported` → `supports_images`; prices are still absent from that wire and are still not invented |
+| The registry had no row for the 5 series, and its per-vendor fallback is family-BLIND — one 200k floor for a vendor whose tiers no longer agree (Opus 5 serves 1M, Opus 4.5 serves 200k) | ten rows transcribed from the live listing, plus `anthropic_family_model_info`: an unshipped id inherits its own tier+version (`claude-opus-5-20260112` → Opus 5's 1M) or, for a generation newer than anything shipped, that tier's newest limits with prices dropped to unknown. Inheritance never runs backwards — a 200k-era id handed 1M would trigger compaction past its real limit and 400 every turn |
+
+A cached listing document written by the previous transport is well-SHAPED and
+full of zeros, so it was served as a fresh cache hit for the rest of its 24h TTL —
+the upgrade would have looked like it did nothing on exactly the install that
+reported the bug. Documents now carry `LISTING_CAPTURE_VERSION`; an older capture
+is dropped and refetched.
+
+| Claim | Proof |
+|---|---|
+| Live listing (real OAuth credential, `GET /v1/models?limit=50`) | `claude-opus-5` and `claude-sonnet-5` report `max_input_tokens: 1000000`, `max_tokens: 128000`, `image_input.supported: true`; Opus 4.5 and Haiku 4.5 report 200k/64k, so the numbers are read per model |
+| Production path | `resolve_model_info("anthropic", "claude-opus-5").context_window == 1000000`; `configure_model(...).spec` = 1M window / 128k output / images on |
+| The window comes from the WIRE, not just the new row | with the shipped row sabotaged to 111 tokens, the first call dropped the stale-capture document (registry, 111) and the second fetched live and resolved 1,000,000 |
+| Compaction | session default threshold `min(int(1_000_000 * 0.8), 600_000)` = **600,000** (was 160,000) |
+| Status band | `format_context_usage(18_000, 1_000_000)` = `1.8%/1M` — the reported string, corrected |
+| Cold and offline | empty cache dir with every socket refused: `claude-opus-5`, `claude-opus-5-20260112`, `claude-sonnet-4-5` and `claude-opus-9` all resolve to 1M with prompt caching on, nothing fetched, nothing raised |
+
+`tests/unit/model` + `tests/unit/providers`: 395 passed. New coverage: the
+listing→`ModelInfo` mapping (1M window, 128k output, per-capability `supported`
+flags), the terse-listing degradation, family inheritance in both directions, and
+the stale-capture refetch.

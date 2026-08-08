@@ -7,14 +7,17 @@ and ``settled_rows()`` reports how many of its rows are provably stable now
 (used later for scroll accounting).
 
 Spacing rhythm (the brand): blocks own NO uniform outer margin — the
-container never pads a run of one-line tool rows apart. Separation is
-ADAPTIVE and opt-in: a block takes a single blank row above it only when
-the block before it was a different KIND of thing, or when that block
-rendered taller than one row. Consecutive one-line tool traces therefore
-stack into a dense ledger, while a paragraph of prose or an expanded tool
-output gets air on both sides. The gap rides one CSS class
-(:data:`GAP_CLASS`); the base block selectors stay margin-free so no
-"filler row everywhere" regression can slip back in.
+container decides every gap. Separation is ADAPTIVE and opt-in: a block
+takes a single blank row above it when the block before it was a different
+KIND of thing, when that block rendered taller than one row, or when the
+block itself is AIRY (:attr:`TranscriptBlock.SPACING_AIRY`). Tool rows are
+airy: each one is a separate action, and stacked flush a run of them reads
+as one wrapped block rather than as a ledger — reported from the field as
+"there should be one line spacing between each". A list of one-line
+notices still stacks tight, because that IS one thing said in parts. The
+gap rides one CSS class (:data:`GAP_CLASS`); the base block selectors stay
+margin-free so no "filler row everywhere" regression can slip back in, and
+so the class can never be doubled by a margin underneath it.
 
 Layout rhythm (D20): user blocks sit at the gutter (``❯`` at column 0);
 everything else indents two cells so the turn spine reads at a glance.
@@ -68,6 +71,14 @@ class TranscriptBlock(Static):
     #: True for blocks that appear and vanish within a turn. They neither
     #: take a gap nor anchor one, so nothing flickers when they are lifted.
     SPACING_TRANSIENT: ClassVar[bool] = False
+    #: True for a block that takes a blank row above itself even after its
+    #: OWN kind. Tool rows are the case: a run of them is a list of separate
+    #: actions, not a paragraph of one, and stacked flush they read as a
+    #: single wrapped block — the user reported exactly that ("there should
+    #: be one line spacing between each"). Distinct from ``SPACING_LEAD``,
+    #: which also fires against the empty transcript's top edge because it
+    #: marks a turn boundary; this one only separates neighbours.
+    SPACING_AIRY: ClassVar[bool] = False
 
     #: Set False once the block will never mutate again.
     _finalized: bool = False
@@ -267,8 +278,10 @@ def needs_gap_above(
     - either side transient (the working line) → no gap; it will vanish
     - a turn-leading block (a user prompt) → always a gap
     - a different KIND of block → a gap; the change of subject is the cue
-    - same kind, previous was ONE row → no gap; one-line tool traces are a
-      ledger and a ledger is dense
+    - an AIRY block (a tool row) → a gap even after its own kind; each row
+      is a separate action and flush rows read as one wrapped block
+    - same kind, previous was ONE row → no gap; a list of one-line notices
+      is a list, not a stack of paragraphs
     - same kind, previous was taller → a gap; multi-row output needs air or
       the next block reads as its continuation
     """
@@ -280,6 +293,8 @@ def needs_gap_above(
         return True
     if previous.SPACING_KIND != block.SPACING_KIND:
         return True
+    if block.SPACING_AIRY:
+        return True
     return previous.spans_multiple_rows()
 
 
@@ -287,12 +302,16 @@ class TranscriptView(ScrollableContainer):
     """The scrolling column every block appends into.
 
     Separation is ADAPTIVE, decided by :func:`needs_gap_above` at the moment
-    a block is appended (and re-decided for the one block below a tool card
-    that expands). Consecutive one-line tool rows stay flush; prose and
-    multi-row output get a single blank row. Nothing else pads: the base
-    block selectors in the tcss declare no margin at all, so the gap can
-    only ever come from the deliberate class. Appends scroll to the bottom
-    unless the user has scrolled up to read.
+    a block is appended (and re-decided for the one block below a block that
+    changes height after the fact). Tool rows each take a blank row; a run of
+    one-line notices stays flush. Nothing else pads: the base block selectors
+    in the tcss declare no margin at all, so the gap can only ever come from
+    the deliberate class. Appends scroll to the bottom unless the user has
+    scrolled up to read.
+
+    The container also owns KEYBOARD movement between focusable blocks
+    (:meth:`focus_neighbour`): only it knows the append order, and a card
+    asked to hand focus on has no other way to find its neighbour.
 
     ``clear_blocks`` notifies an optional ``on_clear`` hook (TUI-009) so the
     app can reset its streaming/tool-card bookkeeping.
@@ -357,6 +376,35 @@ class TranscriptView(ScrollableContainer):
                 continue
             self._apply_gap(block, following)
             return
+
+    def focus_neighbour(self, block: TranscriptBlock, delta: int) -> bool:
+        """Focus the nearest focusable block ``delta`` steps from ``block``.
+
+        The keyboard half of the expand affordance. Returns False when there
+        is nothing in that direction, which is the caller's cue to fall
+        through to the screen's ordinary tab order — walking off the bottom
+        of the ledger lands in the composer, which is where a user who just
+        finished reading wants to be, and walking off the top lands on the
+        transcript itself so the scroll keys take over.
+
+        Skips blocks that cannot take focus (prose, notices) rather than
+        stopping at them: what the arrow keys traverse is the list of
+        ACTIONABLE rows, and a stop on an inert paragraph would read as the
+        key having failed.
+        """
+        try:
+            index = self._blocks.index(block)
+        except ValueError:
+            return False
+        step = 1 if delta > 0 else -1
+        cursor = index + step
+        while 0 <= cursor < len(self._blocks):
+            candidate = self._blocks[cursor]
+            if candidate.focusable:
+                candidate.focus()
+                return True
+            cursor += step
+        return False
 
     def _anchor_before(self, index: int) -> TranscriptBlock | None:
         """The last block before ``index`` that counts as "what came before".

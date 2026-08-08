@@ -61,6 +61,7 @@ from local_operator.tui.markdown_theme import (
     brand_markdown_theme,
     install_markdown_theme,
 )
+from local_operator.tui.widgets.approval import ApprovalAnswered, ApprovalBlock
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import (
     Editor,
@@ -69,6 +70,7 @@ from local_operator.tui.widgets.editor import (
     InterruptRequested,
     ModelQueryOpened,
     ProviderQueryOpened,
+    StopRequested,
 )
 from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.status_line import McpStatus, StatusLine, format_cost
@@ -219,6 +221,17 @@ class OperatorApp(App[None]):
     BINDINGS = [
         Binding("ctrl+c", "interrupt", "Interrupt", show=False),
         Binding("ctrl+l", "clear_transcript", "Clear transcript", show=False),
+        # Esc is the key a user reaches for to make the agent stop, so it is the
+        # same stop as Ctrl+C rather than a second, weaker notion of "pause" the
+        # engine has no concept of.
+        #
+        # NOT `priority=True`: a priority binding is matched before the key is
+        # dispatched to the focused widget, which stole Esc from the editor's
+        # picker-close path — the model/provider/command lists could no longer be
+        # dismissed. Bubbling is exactly the precedence wanted: the editor
+        # consumes Esc (and stops the event) only while it has a list open, and
+        # every other time the key arrives here.
+        Binding("escape", "stop", "Stop", show=False),
     ]
 
     def __init__(
@@ -258,6 +271,12 @@ class OperatorApp(App[None]):
         # the turn boundary (never mid-turn, so a turn is never half-applied).
         self._loop_running: bool = False
         self._loop_cancelled: bool = False
+        # The one pending tool-approval prompt, if any. The TUI owns approvals
+        # (see widgets/approval.py) because the default stdin gate deadlocks
+        # under a full-screen app; `_approve_all` is the session-scoped "allow
+        # all" the prompt's `a` answer latches.
+        self._approval: ApprovalBlock | None = None
+        self._approve_all: bool = False
 
     # -- composition --------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -353,6 +372,10 @@ class OperatorApp(App[None]):
             self._on_boot_failed(error)
             return
         self._session = session
+        # Approvals must be answered ON SCREEN from here on: the factory's
+        # default gate reads stdin, which this app has taken over, so leaving it
+        # installed hangs the first write/exec tool call forever.
+        session.set_approval_handler(self.request_tool_approval)
         self._controller = EventController(session, self)
         self._controller.subscribe()
         assert self._status is not None
@@ -654,6 +677,10 @@ class OperatorApp(App[None]):
     def on_interrupt_requested(self, message: InterruptRequested) -> None:
         self._interrupt()
 
+    def on_stop_requested(self, message: StopRequested) -> None:
+        """Esc from the composer (the editor consumes the key so it never blurs)."""
+        self.action_stop()
+
     def action_interrupt(self) -> None:
         """App-level Ctrl+C: interrupt the turn, never exit."""
         self._interrupt()
@@ -667,8 +694,81 @@ class OperatorApp(App[None]):
         """
         if self._loop_running:
             self._loop_cancelled = True
+        # A turn parked on an approval cannot see the abort signal until the
+        # callback returns, so the prompt is denied first: aborting alone would
+        # leave the engine waiting on a future nobody is going to answer.
+        self._cancel_pending_approval()
         if self._session is not None:
             self._session.abort("interrupted")
+
+    def action_stop(self) -> None:
+        """Esc: answer a pending approval with "no", otherwise stop the turn.
+
+        The pending prompt takes precedence because that is the thing the user
+        is looking at, and "stop" applied to a question means "don't do it".
+        With nothing running Esc does nothing — it must not clear the composer,
+        which would throw away typed text on the key people press to cancel.
+        """
+        approval = self._approval
+        if approval is not None and not approval.answered:
+            self._answer_approval(approval, False)
+            return
+        if self._session is not None and self._session.is_streaming:
+            self._interrupt()
+
+    # -- tool approvals -------------------------------------------------------
+    async def request_tool_approval(self, tool_name: str, description: str) -> bool:
+        """The session's approval gate while this app owns the terminal.
+
+        Awaited by the engine on its own loop (the harness awaits the callback
+        inline before executing a write/exec tier tool), which is the same loop
+        the app runs on — so the prompt is mounted directly here rather than
+        marshalled across threads.
+
+        Serialization: only ONE prompt is live at a time. A tool batch can ask
+        twice concurrently, and two cards competing for focus would leave the
+        second unanswerable; the later ask waits for the earlier card to settle
+        and is then asked in turn.
+        """
+        if self._approve_all:
+            return True
+        while self._approval is not None and not self._approval.answered:
+            await self._approval.wait()
+            if self._approve_all:
+                return True
+        block = ApprovalBlock(tool_name, description)
+        self._approval = block
+        self._append_block(block)
+        try:
+            return await block.wait()
+        finally:
+            block.restore_focus()
+            if self._approval is block:
+                self._approval = None
+
+    def _answer_approval(self, block: ApprovalBlock, approved: bool) -> None:
+        """Settle a prompt from outside the widget (Esc, abort, teardown)."""
+        block.resolve(approved)
+        block.restore_focus()
+        if self._approval is block:
+            self._approval = None
+
+    def _cancel_pending_approval(self) -> None:
+        """Deny any live prompt so the awaiting turn is never left hanging."""
+        approval = self._approval
+        if approval is not None and not approval.answered:
+            self._answer_approval(approval, False)
+        self._approval = None
+
+    def on_approval_answered(self, message: ApprovalAnswered) -> None:
+        """The prompt was answered by keystroke: latch "allow all" and tidy up."""
+        if message.answer == "a":
+            self._approve_all = True
+            self._append_block(NoticeBlock("approving every tool for this session", "warning"))
+        block = self._approval
+        if block is not None and block.answered:
+            block.restore_focus()
+            self._approval = None
 
     def action_clear_transcript(self) -> None:
         self._clear_transcript()
@@ -683,6 +783,9 @@ class OperatorApp(App[None]):
         if self._working_block is not None:
             self._working_block.stop()
             self._working_block = None
+        # The prompt's widget is about to be removed with the rest of the
+        # transcript, so the turn awaiting it is denied rather than orphaned.
+        self._cancel_pending_approval()
         self._streaming_block = None
         self._tool_cards = {}
         # An empty transcript is the welcome view's whole precondition, so the
@@ -717,6 +820,9 @@ class OperatorApp(App[None]):
         self._sync_boot_layout()
 
     async def on_unmount(self) -> None:
+        # Before disposing the session: dispose awaits teardown, and a turn
+        # parked on an unanswered approval would never reach it.
+        self._cancel_pending_approval()
         if self._status is not None:
             self._status.dispose()
         if self._controller is not None:
@@ -731,6 +837,19 @@ class OperatorApp(App[None]):
             return
         session = self._session
         assert self._status is not None
+        # A turn already running is STEERED, never re-prompted: `prompt()`
+        # rejects a concurrent call outright (the session serializes turns on a
+        # lock), so sending one here surfaced "session is already streaming" as
+        # an error and threw the user's text away. Steering is the supported
+        # mid-turn channel — the engine drains the queue at its next tool/message
+        # boundary, which is exactly "send it after the current step finishes".
+        if session.is_streaming:
+            session.steer(text)
+            self._append_block(NoticeBlock("queued — sent at the next boundary", "info"))
+            # Still worth a title: the steering message can be the first thing
+            # in the conversation that actually says what the task is.
+            self._maybe_name_conversation(text)
+            return
         self._status.update(streaming=True)
 
         async def run_prompt() -> None:
@@ -1926,20 +2045,47 @@ class OperatorApp(App[None]):
         self._tool_cards.clear()
 
     def on_assistant_message_start(self, message: AssistantMessageStart) -> None:
-        block = AssistantBlock()
-        self._streaming_block = block
-        self._append_block(block)
+        """A message opened — but nothing is MOUNTED until text actually arrives.
+
+        A tool-use turn opens a message and goes straight to the tool calls with
+        no prose at all (every Anthropic tool turn looks like this, so it is the
+        common shape, not an edge case). Mounting the block here spent two rows
+        on it regardless: the empty block's own row, plus the blank row the
+        spacing rule opens above a block of a different kind. That read as a
+        hole between the working line and the first tool row — the excess
+        spacing reported against the tool ledger was this, not the ledger.
+
+        Deferring the mount to the first delta costs nothing: the block carries
+        no state of its own before it has text, so there is nothing to hold.
+        """
+        self._streaming_block = None
+
+    def _ensure_streaming_block(self) -> AssistantBlock:
+        """The block for the message being streamed, mounted on first use."""
+        block = self._streaming_block
+        if block is None:
+            block = AssistantBlock()
+            self._streaming_block = block
+            self._append_block(block)
+        return block
 
     def on_assistant_delta(self, message: AssistantDelta) -> None:
-        if self._streaming_block is not None:
-            self._streaming_block.update_text(message.text)
+        # Empty deltas are not text: flushing one would mount a block that then
+        # sits blank until real content lands, which is the hole this avoids.
+        if not message.text:
+            return
+        self._ensure_streaming_block().update_text(message.text)
 
     def on_assistant_message_end(self, message: AssistantMessageEnd) -> None:
-        if self._streaming_block is not None:
-            # TUI-020: adopt the authoritative text carried by the event.
-            self._streaming_block.update_text(message.text)
-            self._streaming_block.finalize_text()
-            self._streaming_block = None
+        # A message that carried no text never mounted a block, and must not
+        # mount one now just to finalize it as empty.
+        if not message.text and self._streaming_block is None:
+            return
+        block = self._ensure_streaming_block()
+        # TUI-020: adopt the authoritative text carried by the event.
+        block.update_text(message.text)
+        block.finalize_text()
+        self._streaming_block = None
 
     def on_tool_started(self, message: ToolStarted) -> None:
         event = message.event

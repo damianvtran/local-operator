@@ -15,14 +15,19 @@ Two layers, because the widget has two independent failure modes:
 
 from __future__ import annotations
 
+import asyncio
 import re
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 from rich.cells import cell_len
+from rich.style import Style
 from rich.text import Text
+from textual.color import Color
 
+from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.transcript import TranscriptView, UserBlock
 from local_operator.tui.widgets.welcome import (
@@ -30,6 +35,9 @@ from local_operator.tui.widgets.welcome import (
     HINTS,
     LOGO_FULL_MIN_WIDTH,
     LOGO_MARK,
+    MARK_PULSE_DEPTH,
+    MARK_PULSE_INTERVAL_S,
+    MARK_PULSE_PERIOD_S,
     MARK_WIDTH,
     MODEL_PENDING,
     WORDMARK,
@@ -37,6 +45,8 @@ from local_operator.tui.widgets.welcome import (
     WelcomeInfo,
     WelcomeView,
     build_welcome_lines,
+    mark_pulse_color,
+    mark_pulse_phase,
 )
 
 TCSS = Path(__file__).parent.parent.parent.parent / "local_operator" / "tui" / "local_operator.tcss"
@@ -281,6 +291,132 @@ def test_empty_box_renders_nothing() -> None:
     assert build_welcome_lines(_info(), 10, 0) == []
 
 
+# --- pure pulse: the mark breathes and nothing else moves ----------------------
+
+
+def _mark_styles(lines: list[Text]) -> list[Style]:
+    """The style each mark row is drawn in, one per glyph row."""
+    out: list[Style] = []
+    for line in lines:
+        if not any(glyph in line.plain for glyph in ("█", "▄", "▀")):
+            continue
+        # The centring pad is a span of its own; the glyphs carry the tint.
+        out.append(next(span.style for span in line.spans if isinstance(span.style, Style)))
+    return out
+
+
+def _row_styles(lines: list[Text]) -> list[list[Any]]:
+    """Every row's spans, so a style-only difference is visible to a compare."""
+    return [[(span.start, span.end, str(span.style)) for span in line.spans] for line in lines]
+
+
+def _relative_luminance(color: Color) -> float:
+    """WCAG relative luminance — what the eye reads, not what the hex says."""
+
+    def channel(value: int) -> float:
+        srgb = value / 255.0
+        return srgb / 12.92 if srgb <= 0.04045 else ((srgb + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
+
+
+def _contrast(a: Color, b: Color) -> float:
+    high, low = sorted((_relative_luminance(a), _relative_luminance(b)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def test_the_pulse_rests_at_the_marks_own_dim() -> None:
+    """Phase zero is the mark's historical tint, not a sample of the animation.
+
+    This is what makes the still frame the OLD frame: with the animation gated
+    off the view never overrides the colour at all, and the first tick of a
+    running pulse starts from exactly the same place.
+    """
+    assert mark_pulse_phase(0.0) == 0.0
+    assert mark_pulse_phase(MARK_PULSE_PERIOD_S) == pytest.approx(0.0, abs=1e-9)
+    dim = theme_mod.semantic_color("dim")
+    assert mark_pulse_color(0.0).lower() == dim.lower()
+
+
+def test_the_pulse_swings_both_ways_and_stays_inside_its_ramp_neighbours() -> None:
+    """Up towards ``muted``, down towards ``faint``, a quarter step each way.
+
+    The bound is the point: an excursion that reached either neighbour outright
+    would be the flat ``muted`` mark the lockup rejected, or a mark that fades
+    to ``faint`` and reads as dropping out.
+    """
+    peak = mark_pulse_phase(MARK_PULSE_PERIOD_S / 4)
+    trough = mark_pulse_phase(3 * MARK_PULSE_PERIOD_S / 4)
+    assert peak == pytest.approx(1.0)
+    assert trough == pytest.approx(-1.0)
+
+    dim = Color.parse(theme_mod.semantic_color("dim"))
+    muted = Color.parse(theme_mod.semantic_color("muted"))
+    faint = Color.parse(theme_mod.semantic_color("faint"))
+    assert mark_pulse_color(1.0) == dim.blend(muted, MARK_PULSE_DEPTH).hex
+    assert mark_pulse_color(-1.0) == dim.blend(faint, MARK_PULSE_DEPTH).hex
+    # Brighter at the peak, darker at the trough — a pulse, not a colour cycle.
+    assert Color.parse(mark_pulse_color(1.0)).brightness > dim.brightness
+    assert Color.parse(mark_pulse_color(-1.0)).brightness < dim.brightness
+
+    # Breathing, not flashing — and this is the assertion that says so, because
+    # the two above only restate the constant. The excursion is bounded as a
+    # CONTRAST RATIO between its extremes: the full `dim`->`faint` swing that
+    # was rejected measures 2.30:1 and reads as the logo dropping out, and
+    # reaching both neighbours outright measures 4.37:1. The shipped amplitude
+    # is 1.44:1, and the mark stays legible on the ground at either end.
+    high, low = Color.parse(mark_pulse_color(1.0)), Color.parse(mark_pulse_color(-1.0))
+    ground = Color.parse(theme_mod.semantic_color("bg"))
+    assert _contrast(high, low) < 1.6
+    assert _contrast(low, ground) > 3.0
+    assert high.hex.lower() != muted.hex.lower()
+    assert low.hex.lower() != faint.hex.lower()
+
+
+def test_a_pulse_frame_moves_the_marks_style_and_nothing_else() -> None:
+    """Two frames of the breath: identical text, identical row count, and the
+    ONLY styles that differ are the mark's.
+
+    Geometry is what the boot composition is measured from, so a pulse that
+    could change a row count or a pad would move the splash on the card twelve
+    times a second. Asserting the text is not enough — a style-only change is
+    invisible to a plain-text dump, which is exactly why this compares spans.
+    """
+    peak = build_welcome_lines(_info(), ROOMY_W, ROOMY_H, mark_color=mark_pulse_color(1.0))
+    trough = build_welcome_lines(_info(), ROOMY_W, ROOMY_H, mark_color=mark_pulse_color(-1.0))
+    rest = build_welcome_lines(_info(), ROOMY_W, ROOMY_H)
+
+    assert len(peak) == len(trough) == len(rest)
+    assert plain(peak) == plain(trough) == plain(rest)
+    assert len(_mark_styles(rest)) == len(LOGO_MARK)
+
+    peak_rows, trough_rows = _row_styles(peak), _row_styles(trough)
+    differing = [i for i in range(len(peak)) if peak_rows[i] != trough_rows[i]]
+    glyph_rows = [i for i, line in enumerate(peak) if any(g in line.plain for g in ("█", "▄", "▀"))]
+    # EVERY mark row moves and ONLY the mark rows move: one leaked span would
+    # mean a row of the wordmark or the status stack breathing along with it.
+    assert differing == glyph_rows == list(range(len(LOGO_MARK)))
+    assert _mark_styles(peak) != _mark_styles(trough)
+
+
+def test_the_pulse_cannot_change_the_blocks_height_at_any_size() -> None:
+    """The degradation ladder is blind to the tint.
+
+    Checked across the sizes where the ladder actually fires, because a pulse
+    that shifted a height would do it at the threshold — the one row of budget
+    that decides whether the mark is drawn at all.
+    """
+    for width in (20, MARK_WIDTH, LOGO_FULL_MIN_WIDTH, ROOMY_W):
+        for height in range(1, ROOMY_H + 1):
+            rest = build_welcome_lines(_info(), width, height)
+            for phase in (-1.0, -0.5, 0.5, 1.0):
+                frame = build_welcome_lines(
+                    _info(), width, height, mark_color=mark_pulse_color(phase)
+                )
+                assert len(frame) == len(rest), f"{width}x{height} moved at phase {phase}"
+                assert plain(frame) == plain(rest)
+
+
 # --- pilot wiring --------------------------------------------------------------
 
 
@@ -342,6 +478,11 @@ class FakeSession:
     def steer(self, text: str) -> None:
         pass
 
+    def set_approval_handler(self, handler: object | None) -> None:
+        # The TUI installs its own approval gate on boot (the stdin gate
+        # deadlocks under a full-screen app); fakes only need to accept it.
+        self.approval_handler = handler
+
     def abort(self, reason: str = "interrupted") -> None:
         self.aborts.append(reason)
 
@@ -388,6 +529,19 @@ def _make_app(
 
 def _welcome(app: OperatorApp) -> WelcomeView:
     return app.query_one(WelcomeView)
+
+
+def _frame(app: OperatorApp) -> list[tuple[str, list[tuple[str, str]]]]:
+    """The composed frame as (row text, [(segment style, segment text)]).
+
+    Styles and not just text, because the pulse is a STYLE-ONLY change: a dump
+    of ``strip.text`` is byte-identical across every frame of the breath, so a
+    text comparison would pass an animation that had stopped working.
+    """
+    return [
+        (strip.text, [(str(segment.style), segment.text) for segment in strip._segments])
+        for strip in app.screen._compositor.render_strips()
+    ]
 
 
 @pytest.mark.asyncio
@@ -526,8 +680,6 @@ async def test_no_warning_when_credential_store_explodes() -> None:
 async def test_model_label_polls_in_after_boot() -> None:
     """The label lands via the session worker AFTER mount; the view must pick
     it up on its own timer rather than be pushed it."""
-    import asyncio
-
     app = _make_app(FakeSession())
     async with app.run_test(size=(80, 26)) as pilot:
         await pilot.pause()
@@ -538,6 +690,182 @@ async def test_model_label_polls_in_after_boot() -> None:
         welcome = _welcome(app)
         assert welcome._info.model_label == "openrouter/deepseek/deepseek-chat"
         assert welcome._timer is None  # retired once the label arrived
+
+
+# --- pulse lifecycle: a timer that only exists while it can be seen ------------
+
+
+async def _settled_welcome(pilot: Any) -> WelcomeView:
+    """Pause until the splash has stopped changing for reasons of its OWN.
+
+    The model label lands on the poll timer a fraction of a second into every
+    boot and re-centres the whole block, so a frame captured before that is not
+    a still frame and comparing two of them measures the poll, not the pulse.
+    The poll timer retiring IS the settled edge.
+    """
+    welcome = pilot.app.query_one(WelcomeView)
+    for _ in range(24):
+        await pilot.pause()
+        if welcome._timer is None:
+            break
+        await asyncio.sleep(WelcomeView.POLL_INTERVAL_S)
+    await pilot.pause()
+    return welcome
+
+
+@pytest.fixture
+def animation_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Undo the suite-wide shimmer pin for the tests that need real motion.
+
+    The autouse fixture sets ``LOCAL_OPERATOR_NO_SHIMMER`` so every other test
+    reads a deterministic still frame; the pulse's own lifecycle can only be
+    observed with the gate open.
+    """
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_SHIMMER", raising=False)
+
+
+@pytest.mark.asyncio
+async def test_the_pulse_is_a_no_op_when_animation_is_disabled() -> None:
+    """``LOCAL_OPERATOR_NO_SHIMMER`` (set by this suite's autouse fixture) buys
+    a STILL frame, not a slow one: no timer is created, no colour is overridden,
+    and the composed frame is byte-identical across a second of wall clock.
+
+    Deterministic stills are a hard requirement here — the SVG goldens are
+    captured from exactly this path — so "the pulse is paused" would not be
+    good enough. Nothing may be scheduled at all.
+    """
+    app = _make_app(FakeSession())
+    async with app.run_test(size=(100, 30)) as pilot:
+        welcome = await _settled_welcome(pilot)
+        assert welcome._pulse_timer is None
+        assert welcome._mark_color is None
+
+        before = _frame(app)
+        await asyncio.sleep(1.0)
+        await pilot.pause()
+        assert _frame(app) == before
+        assert welcome._pulse_timer is None
+
+
+@pytest.mark.asyncio
+async def test_the_pulse_runs_only_while_the_splash_is_on_screen(animation_on: None) -> None:
+    """Visible: breathing. Hidden by the first transcript block: stopped, and
+    back to rest. Returned by ``/clear``: breathing again, from rest.
+
+    The stopped timer is checked through the Timer OBJECT rather than through
+    the view's attribute: dropping the reference is not stopping it, and a
+    Textual interval whose widget is gone keeps waking the event loop.
+    """
+    app = _make_app(FakeSession())
+    async with app.run_test(size=(100, 30)) as pilot:
+        welcome = await _settled_welcome(pilot)
+        running = welcome._pulse_timer
+        assert running is not None
+
+        app._append_block(UserBlock("hello"))
+        await pilot.pause()
+        assert welcome.display is False
+        assert welcome._pulse_timer is None
+        assert running._task is None, "the timer was dereferenced but never stopped"
+        assert welcome._mark_color is None, "a hidden splash kept the phase it paused at"
+
+        app.query_one(TranscriptView).clear_blocks()
+        await pilot.pause()
+        assert welcome.display is True
+        assert welcome._pulse_timer is not None
+        assert welcome._pulse_timer is not running
+
+
+@pytest.mark.asyncio
+async def test_both_timers_stop_when_the_view_is_unmounted(animation_on: None) -> None:
+    """Teardown with the splash still up — the commonest exit there is, since
+    every boot that quits without a prompt takes it — leaves nothing running."""
+    app = _make_app(FakeSession())
+    async with app.run_test(size=(100, 30)) as pilot:
+        welcome = await _settled_welcome(pilot)
+        pulse, poll = welcome._pulse_timer, welcome._timer
+        assert pulse is not None
+
+        await welcome.remove()
+        await pilot.pause()
+
+        assert welcome._pulse_timer is None
+        assert welcome._timer is None
+        assert pulse._task is None
+        assert poll is None or poll._task is None
+
+
+@pytest.mark.asyncio
+async def test_a_pulse_frame_repaints_the_mark_and_moves_no_row(animation_on: None) -> None:
+    """The composed frame, not the builder: two phases of the breath restyle the
+    mark's rows and leave every row's TEXT and the frame's height untouched.
+
+    Sampled at the two extrema, where the sine is flat, so the assertion does
+    not depend on how long the pilot's pause actually took. A text-only dump
+    cannot see this change at all, which is the trap this test exists to avoid:
+    the comparison is over rendered SEGMENT STYLES.
+    """
+    app = _make_app(FakeSession())
+    async with app.run_test(size=(100, 30)) as pilot:
+        welcome = await _settled_welcome(pilot)
+
+        welcome._pulse_origin = time.monotonic() - MARK_PULSE_PERIOD_S / 4
+        welcome._pulse_tick()
+        await pilot.pause()
+        peak = _frame(app)
+
+        welcome._pulse_origin = time.monotonic() - 3 * MARK_PULSE_PERIOD_S / 4
+        welcome._pulse_tick()
+        await pilot.pause()
+        trough = _frame(app)
+
+        assert len(peak) == len(trough)
+        assert [text for text, _ in peak] == [text for text, _ in trough]
+        differing = [i for i in range(len(peak)) if peak[i][1] != trough[i][1]]
+        glyphs = [i for i, (text, _) in enumerate(peak) if any(g in text for g in ("█", "▄", "▀"))]
+        assert differing == glyphs
+        assert len(glyphs) == len(LOGO_MARK), "a mark row went missing between frames"
+
+
+@pytest.mark.asyncio
+async def test_a_tick_never_re_measures_and_skips_the_colours_it_already_drew(
+    animation_on: None,
+) -> None:
+    """Two properties of one tick, both about cost.
+
+    A tick may NOT ask for layout: ``refresh(layout=True)`` re-runs the height
+    degradation ladder, and doing that twelve times a second on a boot frame
+    sitting one row from the threshold that drops the mark is a splash that
+    twitches while the user reads it.
+
+    And a tick that resolves to the colour already on screen must do nothing:
+    the ramp quantises to about two dozen hexes across 40 ticks, so repainting
+    the widget to draw identical bytes is the waste this cadence exists to avoid.
+    """
+    app = _make_app(FakeSession())
+    async with app.run_test(size=(100, 30)) as pilot:
+        welcome = await _settled_welcome(pilot)
+        calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        original = welcome.refresh
+
+        def recording_refresh(*args: Any, **kwargs: Any) -> Any:
+            calls.append((args, kwargs))
+            return original(*args, **kwargs)
+
+        welcome.refresh = recording_refresh  # type: ignore[method-assign]
+
+        # Land on the peak: a colour a long way from rest, so the tick repaints.
+        welcome._pulse_origin = time.monotonic() - MARK_PULSE_PERIOD_S / 4
+        welcome._pulse_tick()
+        assert len(calls) == 1, "a moved colour did not repaint"
+        assert not any(kwargs.get("layout") for _, kwargs in calls)
+
+        # Immediately again: at 12.5 fps the sine cannot have left the flat top,
+        # so the second tick must cost nothing.
+        welcome._pulse_tick()
+        assert len(calls) == 1, "an unchanged colour still repainted the widget"
+        assert MARK_PULSE_INTERVAL_S <= 0.1, "the pulse is budgeted at 10-15 fps"
+        assert 2.5 <= MARK_PULSE_PERIOD_S <= 4.0, "the breath left its slow band"
 
 
 # --- the stylesheet carries no literal hex in the welcome region ---------------

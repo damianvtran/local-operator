@@ -10,10 +10,14 @@ Three properties are load-bearing, and each exists because the obvious version
 of this feature broke in exactly that way:
 
 - **The listing never subtracts.** Ids are UNIONed and every numeric field falls
-  back to the registry, because most listings are far poorer than the bundled
-  data. Anthropic's ``/v1/models`` returns nothing but an id and a display name;
-  replacing a registry row with it is how a session ends up with
-  ``context_window = -1`` and auto-compaction that never fires.
+  back to the registry, because a listing is only as rich as the provider chose
+  to make it and several are far poorer than the bundled data. A lean
+  OpenAI-compatible gateway returns nothing but an id; replacing a registry row
+  with that is how a session ends up with ``context_window = -1`` and auto
+  compaction that never fires. Where a listing IS rich it wins outright, which is
+  the other half of the same rule: Anthropic's ``/v1/models`` reports
+  ``max_input_tokens``, and that is the only place a model released after this
+  package can state its real 1M window.
 - **Failure and emptiness are different answers.** A transport error yields
   ``None`` ("keep what we had") and a successful listing with no models yields
   ``[]`` ("this provider really has nothing"). Collapsing them turns a flaky
@@ -79,6 +83,17 @@ GEMINI_MAX_PAGES = 25
 #: hardcoded default rather than a real limit. Believing it silently caps a
 #: 32k-output model at 4k, so an exact 4096 loses to a larger bundled value.
 LYING_MAX_TOKENS = 4096
+
+#: Stamped into every cached listing document and required when one is read back.
+#: Bump it whenever a transport starts capturing a FIELD it used to leave at zero.
+#:
+#: Version 2 is ``_fetch_anthropic`` reading ``max_input_tokens``, ``max_tokens``
+#: and ``capabilities.image_input``. Without the stamp, a document written by
+#: version 1 has a perfectly valid shape full of zeros, is served as a fresh cache
+#: hit for the rest of its 24h TTL, and the upgrade that fixed the numbers appears
+#: to have done nothing — which is precisely the state the reported
+#: ``1.8%/200k`` install was left in.
+LISTING_CAPTURE_VERSION = 2
 
 #: Providers whose MODEL LISTING is public even though inference is not.
 #:
@@ -387,14 +402,40 @@ def _anthropic_models_url(base_url: str) -> str:
     return f"{base_url}/v1/models"
 
 
-def _fetch_anthropic(ctx: _FetchContext) -> list[DiscoveredModel] | None:
-    """Anthropic's listing: ids and display names, and nothing else.
+def _capability_supported(capabilities: Mapping[str, object], name: str) -> bool:
+    """True when Anthropic's ``capabilities`` object advertises ``name``.
 
-    The response carries only ``id``, ``display_name``, ``created_at`` and
-    ``type`` -- no context window, no output cap, no prices. Rows therefore come
-    back with zeros on purpose and :func:`merge_models` restores the bundled
-    numbers. Inventing defaults here instead is what produced a live session
-    running at ``context_window = -1`` whose compaction never triggered.
+    Each capability is an OBJECT with its own ``supported`` boolean rather than a
+    bare flag (``{"image_input": {"supported": true}}``), because several of them
+    carry sub-variants alongside it (``thinking`` lists ``adaptive``/``enabled``,
+    ``effort`` lists five tiers). Reading the object's truthiness instead would
+    report every listed capability as supported, including the ones explicitly
+    marked ``false``.
+
+    Absent or malformed reads as False, and the merge then ORs the registry's own
+    flag back on top, so an older wire that omits ``capabilities`` entirely cannot
+    downgrade a vision model to text-only.
+    """
+    return bool(_mapping(capabilities.get(name)).get("supported"))
+
+
+def _fetch_anthropic(ctx: _FetchContext) -> list[DiscoveredModel] | None:
+    """Anthropic's listing: ids, display names, limits and capabilities.
+
+    The response carries ``max_input_tokens`` (the context window),
+    ``max_tokens`` (the output cap) and a ``capabilities`` object per model —
+    verified against ``api.anthropic.com/v1/models`` on 2026-08-07, which reported
+    1,000,000 / 128,000 for ``claude-opus-5`` while the shipped registry's family
+    floor said 200,000. Reading them here is the only way a model released after a
+    release of this package gets its real window, and the window is what the
+    compaction threshold is derived from.
+
+    Prices are still absent from this listing and are NOT invented: a zero price
+    means "unknown" downstream, and the merge restores whatever the registry knows.
+    The limits are equally optional — a proxy, an older API version or a future
+    schema change may omit them — so each field falls through to ``0`` and lets
+    :func:`merge_models` supply the bundled number rather than zeroing the one the
+    session runs on.
     """
     headers = {"anthropic-version": ANTHROPIC_VERSION, "Accept": "application/json"}
     if ctx.is_oauth:
@@ -426,7 +467,16 @@ def _fetch_anthropic(ctx: _FetchContext) -> list[DiscoveredModel] | None:
         model_id = _first_str(entry.get("id"))
         if not model_id:
             continue
-        rows.append(DiscoveredModel(id=model_id, name=_first_str(entry.get("display_name"))))
+        capabilities = _mapping(entry.get("capabilities"))
+        rows.append(
+            DiscoveredModel(
+                id=model_id,
+                name=_first_str(entry.get("display_name")),
+                context_window=_positive_int(entry.get("max_input_tokens")),
+                max_tokens=_positive_int(entry.get("max_tokens")),
+                supports_images=_capability_supported(capabilities, "image_input"),
+            )
+        )
     return rows
 
 
@@ -740,9 +790,10 @@ def _merge_one(row: DiscoveredModel, info: ModelInfo | None) -> DiscoveredModel:
     return DiscoveredModel(
         id=row.id,
         name=_merge_name(row.name, info.name, row.id),
-        # Only a positive live window beats the registry. A listing that omits
-        # the field (Anthropic omits it for every model) must not zero out the
-        # number auto-compaction derives its threshold from.
+        # Only a positive live window beats the registry. A listing that omits the
+        # field (a lean OpenAI-compatible gateway, or an Anthropic proxy on an API
+        # version predating ``max_input_tokens``) must not zero out the number auto
+        # compaction derives its threshold from.
         context_window=_positive_int(row.context_window) or _positive_int(info.context_window),
         max_tokens=max_tokens,
         # A zero or absent price means "unknown", never "free": the cost display
@@ -792,13 +843,21 @@ def _cache_key(provider_id: str) -> str:
 
 
 def _rows_from_payload(payload: Mapping[str, object] | None) -> list[DiscoveredModel] | None:
-    """Cached rows, or ``None`` when the document is absent or unrecognised.
+    """Cached rows, or ``None`` when the document is absent, unrecognised or stale.
 
     An unrecognised document is treated as no document, so a change to the
     payload shape degrades to the registry rather than to a silently empty model
     list that looks like a provider with nothing to offer.
+
+    A document from an older ``LISTING_CAPTURE_VERSION`` is rejected for a
+    different reason: its SHAPE is fine and every field maps, so nothing else here
+    could notice that the transport now reads a field the writer left at zero. The
+    caller drops such a document, which costs one call served from the registry
+    and refetches on the next.
     """
     if payload is None:
+        return None
+    if _positive_int(payload.get("capture")) != LISTING_CAPTURE_VERSION:
         return None
     entries = payload.get("models")
     if not isinstance(entries, list):
@@ -922,20 +981,24 @@ def _available_models(
         if live is None:
             raise _ListingUnavailable(definition.id)
         fetched = True
-        return {"models": [dataclasses.asdict(row) for row in live]}
+        return {
+            "capture": LISTING_CAPTURE_VERSION,
+            "models": [dataclasses.asdict(row) for row in live],
+        }
 
     key = _cache_key(definition.id)
     payload = cached_listing(key, fetch, ttl_s=ttl_s, cache_dir=cache_dir)
     live_rows = _rows_from_payload(payload)
     if live_rows is None:
         if payload is not None:
-            # A document that survived `cached_listing`'s shape checks but holds
-            # nothing this reader can map -- a `models` key that is not an array,
-            # after a payload-shape change or a truncated write. It is written
-            # before anything interprets it, so leaving it in place serves the same
-            # failure as a FRESH cache hit on every start until the TTL expires: a
-            # planted document with a dict `models` produced three consecutive
-            # `static` results and zero fetches. Dropping it costs one refetch.
+            # A document `cached_listing` could read but this reader cannot use:
+            # a `models` key that is not an array (a payload-shape change, a
+            # truncated write) or a capture older than the transports that will
+            # read it. It is written before anything interprets it, so leaving it
+            # in place serves the same failure as a FRESH cache hit on every start
+            # until the TTL expires: a planted document with a dict `models`
+            # produced three consecutive `static` results and zero fetches.
+            # Dropping it costs one refetch.
             invalidate(key, cache_dir=cache_dir)
         # Neither a listing nor a cache: the registry is all there is.
         return merge_models(rows, None), "static"

@@ -13,6 +13,10 @@ from typing import Any
 #: Display flags and their defaults. Tests may poke ``_cache`` directly.
 _DEFAULTS: dict[str, Any] = {
     "display.shimmer": True,
+    # Nerd Font glyphs on tool rows. Defaults ON because the audience runs
+    # patched fonts, and OFF is one `config set` (or the env kill switch in
+    # `tui/glyphs.py`) away for a terminal that would draw them as boxes.
+    "display.nerd_icons": True,
 }
 
 _cache: dict[str, Any] | None = None

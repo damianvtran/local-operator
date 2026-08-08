@@ -1,6 +1,6 @@
 """Boot layout — the input is a centred card until the session has content.
 
-Two things are worth machine-checking here, and they are not the same thing:
+Three things are worth machine-checking here, and they are not the same thing:
 
 - the SWITCH: one class on the Screen carries both layouts, and it rides the
   same condition as the welcome splash. If those two can disagree the app shows
@@ -10,6 +10,12 @@ Two things are worth machine-checking here, and they are not the same thing:
   row, and no rendered row is ever wider than the terminal — including at 16 and
   20 cells, where the clamp has to degrade to "as wide as there is room for"
   rather than hold its floor and overflow.
+- the STILLNESS: the frame the user stares at while the session connects holds
+  perfectly still except for the mark's own pulse, and holds still ENTIRELY
+  once animation is gated off. The strobe this pins out was never a design
+  choice — it was the editor's blinking caret inverting a letter of the
+  placeholder twice a second — so it is worth a test that a future default
+  cannot quietly reinstate.
 
 The frame is read from the compositor rather than from widget sizes: a size
 field can be stale and a region can be off-screen, while the composed strips are
@@ -18,6 +24,7 @@ what the terminal is actually sent.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 from typing import Any
@@ -99,6 +106,11 @@ class FakeSession:
     def steer(self, text: str) -> None:
         pass
 
+    def set_approval_handler(self, handler: object | None) -> None:
+        # The TUI installs its own approval gate on boot (the stdin gate
+        # deadlocks under a full-screen app); fakes only need to accept it.
+        self.approval_handler = handler
+
     def abort(self, reason: str = "interrupted") -> None:
         pass
 
@@ -146,6 +158,20 @@ def _reserve(app: OperatorApp) -> tuple[bool, int]:
 def _rows(app: OperatorApp) -> list[str]:
     """The composed frame, one string per terminal row."""
     return [strip.text for strip in app.screen._compositor.render_strips()]
+
+
+def _styled_rows(app: OperatorApp) -> list[tuple[str, tuple[tuple[str, str], ...]]]:
+    """The composed frame WITH its segment styles.
+
+    :func:`_rows` answers "what does it say"; a repaint that only recolours a
+    cell — a blinking caret inverting a letter, the mark breathing — is
+    invisible to it. Stillness is a claim about the bytes the terminal receives,
+    so the styles have to be in the comparison.
+    """
+    return [
+        (strip.text, tuple((str(segment.style), segment.text) for segment in strip._segments))
+        for strip in app.screen._compositor.render_strips()
+    ]
 
 
 def _clamp() -> tuple[int, int, int]:
@@ -589,3 +615,89 @@ async def test_the_conversation_layout_reserves_nothing_and_clear_puts_it_back()
         await _settle(pilot)
         assert app.screen.has_class(BOOT_LAYOUT_CLASS)
         assert _reserve(app) != (False, 0), "and the centring comes back"
+
+
+# --- what MOVES on the boot frame ---------------------------------------------
+
+
+def _placeholder_caret(app: OperatorApp) -> tuple[int, str, str]:
+    """(row, style, char) of the cell the caret sits on inside the placeholder.
+
+    Textual paints the caret onto the placeholder's first character rather than
+    beside it, so this cell IS the caret: whatever style it carries is what the
+    terminal is told to draw.
+    """
+    needle = "Message Local Operator"
+    for index, strip in enumerate(app.screen._compositor.render_strips()):
+        column = strip.text.find(needle)
+        if column < 0:
+            continue
+        walked = 0
+        for segment in strip._segments:
+            if walked <= column < walked + len(segment.text):
+                return index, str(segment.style), segment.text[column - walked]
+            walked += len(segment.text)
+    raise AssertionError("the placeholder is not on the boot frame at all")
+
+
+@pytest.mark.asyncio
+async def test_the_caret_is_drawn_solid_and_the_placeholder_never_strobes() -> None:
+    """The boot frame's one-time animation, pinned out of existence.
+
+    Nothing on the splash repaints; the only thing that ever did was the
+    editor's blinking block caret, which Textual draws by INVERTING the first
+    letter of ``Message Local Operator…``. At the stock 500 ms cadence that put
+    a 2 Hz strobe on a letter beside a static logo, and it is what users read as
+    the obnoxious startup animation.
+
+    Sampled across four blink periods, so a caret that still blinked would have
+    to hit the same phase eight times running to pass. The caret must also still
+    be THERE — inverted, foreground on the panel's ground — because hiding it
+    would trade a strobe for an input with no visible insertion point.
+    """
+    app = _make_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        assert app.query_one(Editor).cursor_blink is False
+
+        samples = set()
+        for _ in range(8):
+            await asyncio.sleep(0.25)
+            await pilot.pause()
+            samples.add(_placeholder_caret(app))
+        assert len(samples) == 1, f"the placeholder cell changed: {samples}"
+
+        row, style, char = samples.pop()
+        assert char == "M"
+        # Inverted: the caret's ink is the PANEL's ground and its ground is the
+        # text colour (the `text-area--cursor` component class), which is only
+        # true while the caret is actually drawn on this cell.
+        assert theme_mod.semantic_color("surface").lower() in style.lower()
+        assert theme_mod.semantic_color("fg").lower() in style.lower()
+
+
+@pytest.mark.asyncio
+async def test_the_splash_holds_completely_still_under_the_animation_gate() -> None:
+    """With animation off (this suite's autouse fixture), the whole boot frame
+    is byte-identical over two seconds — text AND styles.
+
+    Both moving parts are covered at once here: the caret, which is static
+    unconditionally, and the mark's pulse, which the gate suppresses. The SVG
+    goldens are captured from exactly this state, so anything that moves here
+    turns a snapshot into a coin flip.
+    """
+    app = _make_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        app.query_one(Editor).focus()
+        await pilot.pause()
+
+        before = _styled_rows(app)
+        for _ in range(4):
+            await asyncio.sleep(0.5)
+            await pilot.pause()
+            assert _styled_rows(app) == before
