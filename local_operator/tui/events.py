@@ -225,8 +225,11 @@ class SubagentProgress(Message):
 
 
 class SubagentEnded(Message):
-    """A child session settled; the band repaints and the transcript gets one
-    line of news."""
+    """A child session settled; the app repaints the band's subagent row.
+
+    The band is the only surface this touches — the row flips from its
+    spinner to the ✓/✗ outcome glyph on the next refresh. No transcript line
+    is appended; the live band row IS the news."""
 
     def __init__(
         self,

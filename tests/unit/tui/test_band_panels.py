@@ -281,3 +281,35 @@ async def test_todo_panel_hides_on_store_error_or_empty() -> None:
         app._refresh_band()
         await pilot.pause()
         assert todo.display is False
+
+
+@pytest.mark.asyncio
+async def test_subagent_band_does_not_crush_the_transcript() -> None:
+    """D-01 regression: a populated subagent band must stay as tall as its
+    rows, not stretch to fill the screen and push the transcript to one row.
+
+    The inner rows container defaulted to ``1fr``, so one subagent ballooned
+    the band across the whole terminal. This measures the real layout: the
+    band's rendered height must stay small (a handful of rows) and the
+    transcript must keep the bulk of the vertical budget.
+    """
+    session = FakeSession()
+    session.jobs = _fake_jobs(_Job("sub-1", "summarize workspace"))
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 28)) as pilot:
+        await pilot.pause()
+        app._refresh_band()
+        await pilot.pause()
+
+        from local_operator.tui.widgets.subagent_panel import SubagentPanel
+        from local_operator.tui.widgets.transcript import TranscriptView
+
+        sub = app.query_one(SubagentPanel)
+        transcript = app.query_one(TranscriptView)
+        assert sub.display is True
+        # The band (header + one row + slot padding) must be a few rows, NOT
+        # the full height. The transcript must keep the great majority.
+        band_height = sub.region.height
+        trans_height = transcript.region.height
+        assert band_height <= 4, f"band ballooned to {band_height} rows"
+        assert trans_height >= 10, f"transcript crushed to {trans_height} rows"

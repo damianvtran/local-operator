@@ -296,6 +296,27 @@ class AsyncJobManager:
             logger.warning("delivery sink raised for job %s", job.id, exc_info=True)
         finally:
             self._sweep_due()
+            # The slot this job just freed belongs to the longest-waiting
+            # parked job. Without this, a ``queued`` job sat forever as
+            # ``running + queued`` (occupying neither a slot nor a clear
+            # status): the task tool answered "waiting", the wait tool timed
+            # out on "still running", and the band painted it as done. Order
+            # is FIFO so the oldest request runs first.
+            self._promote_oldest_queued()
+
+    def _promote_oldest_queued(self) -> None:
+        """Start the longest-waiting ``queued`` job now that a slot is free.
+
+        Called after a running job settles (its slot is free). Idempotent and
+        safe to call from anywhere: promotes at most one job, and only when
+        the manager is under capacity — so a burst of completions promotes a
+        matching burst of parked jobs without ever exceeding
+        ``self._max_running``.
+        """
+        for job_id in self.queued_ids():
+            if self.at_capacity():
+                return
+            self.start_queued(job_id)
 
     async def _deliver(self, job: AsyncJob) -> None:
         # ``_run_job`` always stores a string on completion, so the ``or ""``

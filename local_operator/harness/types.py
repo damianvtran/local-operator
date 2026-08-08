@@ -428,13 +428,6 @@ class ToolContext(BaseModel):
     # (createIf) rather than advertised and always failing — the same
     # convention ``wake_scheduler`` uses.
     subagent_launcher: Callable[[str, str], str] | None = None
-    # Launcher for background shell commands (``bash`` with
-    # ``background: true``). ``(label, command) -> job_id``; output streams
-    # into the job's ``latest_details['output']`` as a bounded tail and the
-    # exit code is recorded at settle. Session-installed like the subagent
-    # launcher; ``None`` (a host without a job manager) degrades bash to its
-    # foreground-only behaviour instead of erroring.
-    background_bash_launcher: Callable[[str, str], str] | None = None
     # The session's background job manager. Declared as a Protocol because
     # the concrete class lives in ``harness.jobs``, which imports this
     # module (import cycle). The ``wait``/``job`` tools read it; ``None``

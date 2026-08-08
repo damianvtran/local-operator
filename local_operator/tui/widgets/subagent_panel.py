@@ -96,7 +96,8 @@ class SubagentRow(Static):
         """Rebuild the row from the job's live state; returns its running-ness."""
         status = str(getattr(job, "status", "running"))
         label = strip_control_sequences(str(getattr(job, "label", "") or self._job_id))
-        running = status == "running" and not getattr(job, "queued", False)
+        queued = bool(getattr(job, "queued", False))
+        running = status == "running" and not queued
         self._running = running
 
         details = getattr(job, "latest_details", None) or {}
@@ -114,11 +115,13 @@ class SubagentRow(Static):
         progress = " ".join(strip_control_sequences(progress).split())
         elapsed = job_elapsed(job)
 
-        fingerprint = (status, label, progress, elapsed, spinner_glyph if running else "")
+        fingerprint = (status, label, progress, elapsed, spinner_glyph if running else "", queued)
         if fingerprint == self._fingerprint:
             return running
         self._fingerprint = fingerprint
-        self.update(self._build_row(status, label, progress, elapsed, spinner_glyph, running))
+        self.update(
+            self._build_row(status, label, progress, elapsed, spinner_glyph, running, queued)
+        )
         return running
 
     def _build_row(
@@ -129,6 +132,7 @@ class SubagentRow(Static):
         elapsed: str,
         spinner_glyph: str,
         running: bool,
+        queued: bool = False,
     ) -> RenderableType:
         fg = Style(color=theme_mod.semantic_color("fg"))
         muted = Style(color=theme_mod.semantic_color("muted"))
@@ -139,7 +143,12 @@ class SubagentRow(Static):
         row.append("• ", style=dim)
         row.append(label, style=fg)
         row.append("  ", style=dim)
-        if running:
+        if queued:
+            # Parked behind a full manager: a distinct WAITING mark, never the
+            # done ✓ — a queued subagent has not run, so a settled glyph would
+            # lie about it. The dim hourglass reads as "not started yet".
+            row.append("⏳", style=dim)
+        elif running:
             # Motion says "alive"; the ink stays neutral. The glyph advances
             # on the panel's timer (``paint`` is re-called with the next
             # frame), so a stopped timer means a frozen row — visible at once.
@@ -188,7 +197,9 @@ class SubagentPanel(Container):
         self._spinner_index = 0
         self._spinner_timer = None
         #: Fingerprint of the header row's inputs.
-        self._header_shown: tuple[int, int] | None = None
+        #: Whether the header has been painted once (it is a static label;
+        #: the running-count that would change it moved to the status band).
+        self._header_shown: int | None = None
         self.display = False
 
     def compose(self):  # type: ignore[override]
@@ -259,18 +270,21 @@ class SubagentPanel(Container):
         self._paint_header()
 
     def _paint_header(self) -> None:
-        running = sum(1 for row in self._rows.values() if row.running)
-        total = len(self._rows)
-        fingerprint = (running, total)
-        if fingerprint == self._header_shown:
+        """Paint the panel's identifying label.
+
+        Deliberately a bare ``Subagents`` word and NOT a ``running/total``
+        counter (D-04): the running-count is already on the status band, where
+        the same jobs are tallied, and a second copy would add a redundant
+        counter vocabulary to a symbol-driven screen. The label exists to
+        distinguish the two independent panels that share the band — the user
+        needs to know which list they are reading.
+        """
+        if self._header_shown == 0:
             return
-        self._header_shown = fingerprint
-        dim = Style(color=theme_mod.semantic_color("dim"))
+        self._header_shown = 0
         muted = Style(color=theme_mod.semantic_color("muted"))
         header = Text(no_wrap=True, overflow="ellipsis")
         header.append("Subagents", style=muted)
-        header.append(" · ", style=dim)
-        header.append(f"{running}/{total}", style=dim)
         self._header.update(header)
 
     def _job_for(self, job_id: str) -> Any:

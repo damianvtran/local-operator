@@ -588,7 +588,7 @@ class OperatorApp(App[None]):
         resume path is unavailable and only the listing is offered.
         """
         from local_operator.paths import config_dir
-        from local_operator.resume import format_age, recent_sessions
+        from local_operator.resume import RESUME_LATEST, format_age, recent_sessions
 
         if self._resume_factory is None:
             notice("resume requires a resume-capable launcher — see CLI", "warning")
@@ -603,7 +603,12 @@ class OperatorApp(App[None]):
                 lines.append(f"  {session_id}   {format_age(now - mtime)}")
             notice("\n".join(lines), "note")
             return
-        resume_id = (arg.strip() or "latest").lstrip("@")
+        # ``@latest`` is the oldest part of the CLI vocabulary (--resume
+        # accepts it), so the sentinel must survive verbatim: resume.py only
+        # resolves the newest session on an EXACT ``RESUME_LATEST`` match.
+        # A bare arg is the same request, spelled the way a user would type it
+        # without remembering the symbol.
+        resume_id = (arg.strip() or RESUME_LATEST)
         if self._resume_factory is None:
             notice("resume unavailable: no resume-capable launcher", "warning")
             return
@@ -1539,13 +1544,16 @@ class OperatorApp(App[None]):
             return
         old_label = session.model_label
         session.set_model(spec)
+        persist_result: str | None = None
         if persist_default:
             # Persist as the boot default. Written independently of the live
             # switch above so the two stay composable (``/model default p/m``
             # both switches AND persists; a future flag could persist-only).
             # Failure to write is reported but not fatal — the session already
             # switched, and a read-only config dir should not take down a
-            # working prompt.
+            # working prompt. The status line is repainted regardless (the
+            # ``return`` below used to skip it, leaving the band's model label
+            # stale on the very config the user just asked to make permanent).
             try:
                 from local_operator.config import ConfigManager
                 from local_operator.paths import config_dir
@@ -1554,12 +1562,7 @@ class OperatorApp(App[None]):
                 manager.set_config_value("hosting", provider)
                 manager.set_config_value("model_name", model_id)
             except Exception as error:  # config write failure
-                notice(f"model switched, but could not save default: {error}", "warning")
-                suffix, warning = self._model_access_note(provider)
-                notice(f"model: {old_label} → {session.model_label} (next turn){suffix}")
-                if warning:
-                    notice(warning, "warning")
-                return
+                persist_result = f"model switched, but could not save default: {error}"
         if self._status is not None:
             # The window and the effort belong to the SPEC, not the session:
             # a switch that repainted only the label would leave the context
@@ -1570,7 +1573,9 @@ class OperatorApp(App[None]):
                 context_window=_context_window(session),
             )
         suffix, warning = self._model_access_note(provider)
-        if persist_default:
+        if persist_result is not None:
+            notice(persist_result, "warning")
+        elif persist_default:
             notice(f"default model saved: {provider}/{model_id} (next launch){suffix}")
         else:
             notice(f"model: {old_label} → {session.model_label} (next turn){suffix}")
