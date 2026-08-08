@@ -296,6 +296,49 @@ def test_an_unknown_claude_generation_does_not_inherit_downward(monkeypatch, tmp
     assert config.spec.max_output_tokens == 64_000
 
 
+@pytest.mark.parametrize(
+    "listing_says, expected",
+    [
+        # The provider denies image input: that reaches the spec, which is what
+        # gates the snapcompact VISION strategy for the session.
+        (False, False),
+        # The provider affirms it.
+        (True, True),
+        # The provider said nothing, so the registry's own answer stands.
+        (None, True),
+    ],
+)
+def test_the_providers_own_capability_answer_reaches_the_spec(
+    monkeypatch, tmp_path, listing_says, expected
+) -> None:
+    """Review finding C-07, at the end of the chain it matters for.
+
+    `ModelSpec.supports_images` selects the compaction strategy, so a wrong value
+    is not cosmetic: a text-only model routed through the vision path builds an
+    archive of image frames the provider will reject. Every shipped Anthropic row
+    says `supports_images=True`, so under the previous OR a live `false` could
+    never take effect and the precision of the capability read had no consumer.
+    """
+    from local_operator.model import configure as configure_mod
+    from local_operator.model.registry import anthropic_models
+
+    assert anthropic_models["claude-opus-5"].supports_images is True, "fixture drifted"
+    _stub_discovery(
+        monkeypatch,
+        [_anthropic_row("claude-opus-5", "Claude Opus 5", supports_images=listing_says)],
+    )
+    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+    # All three cases resolve the SAME id, and resolution is memoized per TTL
+    # bucket for the life of the process — without this the second and third cases
+    # would assert against the first case's answer and pass for the wrong reason.
+    configure_mod.invalidate_model_info_cache()
+
+    config = configure_mod.configure_model(hosting="anthropic", model_name="claude-opus-5")
+    assert config.spec.supports_images is expected
+    # A capability answer must not disturb the limits the same listing carried.
+    assert config.spec.context_window == 1_000_000
+
+
 @pytest.mark.parametrize("break_it", ["discovery-raises", "no-such-model", "empty-listing"])
 def test_configure_model_never_fails_on_a_bad_listing(monkeypatch, tmp_path, break_it: str) -> None:
     """Every listing failure mode degrades to the static fallback. A session MUST

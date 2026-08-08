@@ -40,6 +40,10 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from local_operator.harness.types import AgentMessage, Message
 
+# Pure path policy, no engine — see local_operator/resume.py for why it is
+# its own module rather than living here.
+from local_operator.resume import resume_dir
+
 if TYPE_CHECKING:
     # Type-only imports: this module's whole discipline is that the heavy
     # engine, registry and provider modules load lazily inside the functions
@@ -505,6 +509,10 @@ def _transcript_dir_and_agent_id(
 ) -> tuple[Path, str]:
     """Pick where this session's JSONL transcript lives (CL-02).
 
+    ``--resume <id>`` wins over every rule below: it names an existing session
+    directory, and reusing it is what makes the transcript replay (the same
+    mechanism ``--train`` uses for an agent directory).
+
     Legacy ``--train`` semantics:
 
     - named agent + ``--train`` -> the agent's own directory, so history is
@@ -517,6 +525,13 @@ def _transcript_dir_and_agent_id(
       default agent must not persist its session.
     """
     config_dir = Path(agent_registry.config_dir)
+    resume = getattr(args, "resume", None)
+    # `is not None`, not truthiness: `--resume ""` is a user error and must be
+    # refused, where silently starting a NEW session would look like a resume
+    # that lost the history.
+    if resume is not None:
+        resumed = resume_dir(config_dir, str(resume))
+        return resumed, str(agent.id) if agent is not None else "main"
     train = bool(getattr(args, "train", False))
     if agent is not None:
         agent_id = str(agent.id)

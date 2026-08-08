@@ -954,7 +954,34 @@ is dropped and refetched.
 | Status band | `format_context_usage(18_000, 1_000_000)` = `1.8%/1M` — the reported string, corrected |
 | Cold and offline | empty cache dir with every socket refused: `claude-opus-5`, `claude-opus-5-20260112`, `claude-sonnet-4-5` and `claude-opus-9` all resolve to 1M with prompt caching on, nothing fetched, nothing raised |
 
-`tests/unit/model` + `tests/unit/providers`: 395 passed. New coverage: the
+`tests/unit/model` + `tests/unit/providers`: 403 passed. New coverage: the
 listing→`ModelInfo` mapping (1M window, 128k output, per-capability `supported`
-flags), the terse-listing degradation, family inheritance in both directions, and
-the stale-capture refetch.
+flags), the terse-listing degradation, family inheritance in both directions, the
+stale-capture refetch, and the three capability states below.
+
+### Review round 1, C-07 (nit): the explicit-false capability had no consumer
+
+`_capability_supported` read `capabilities.image_input.supported` correctly, but
+`_merge_one` then OR-ed the registry flag back on — and every shipped Anthropic row
+carries `supports_images=True`, so a live `image_input.supported: false` merged
+back to `True`. For the one capability actually read from the wire, an explicit
+denial could never take effect. Documenting it was the alternative; reading it is
+what the user asked for, since the provider is the authority on its own model.
+
+`DiscoveredModel.supports_images` is now `bool | None`: `None` means the listing
+did not say, and only that state defers to the registry. The same three states are
+preserved by `_has_image_input` (a gateway that lists modalities without `image`
+has SAID text-only; one that lists no modalities has said nothing — previously
+both returned `False`, which would have downgraded every bundled vision model the
+moment a lean gateway was listed), by `_from_static`, and across the cache
+round-trip (`null` in the document, not `false`). `supports_prompt_cache` stays a
+plain OR and says why: no listing in the tree states it, so there is no denial to
+respect — only silence, which must not drop `cache_control` on the priciest models.
+
+| Claim | Proof |
+|---|---|
+| Explicit `false` beats a `True` row | wire `{"image_input": {"supported": false}}` + shipped `claude-opus-5` (True) → resolved `False`, and `ModelSpec.supports_images is False` (the flag that selects the snapcompact vision strategy) |
+| Absent keeps the row | no `capabilities` object, and `{"image_input": {}}` → resolved `True` from the registry |
+| Explicit `true` sets `True` | over a `False` row → `True` |
+| Cache round-trip | stored document holds `"supports_images": null`; live and cached opens both resolve `True` |
+| No shipped id changed | all 18 `anthropic_models` rows audited against the live listing: the ten new ids are stated `true` on the wire (match), the eight older ids are no longer served so the wire says nothing and the row stands — including `claude-3-5-haiku-20241022`, which stays `False`. Rows whose resolved `supports_images` differs from the shipped row: **0** |

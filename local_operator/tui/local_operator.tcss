@@ -12,7 +12,8 @@
  *   - NO uniform filler rows. Blocks own no outer margin; separation is
  *     ADAPTIVE and rides one opt-in class (.gap-above) that the transcript
  *     container applies only where the rhythm needs it — a run of one-line
- *     tool traces stays flush, prose and expanded output get a blank row.
+ *     notices stays flush, while prose, expanded output and each separate
+ *     tool action get a blank row (SPACING_AIRY in widgets/transcript.py).
  *   - one line per tool action while collapsed; each action is a subtle
  *     background-filled card (elevation = a background step, never a border
  *     or shadow) whose FILL carries the outcome

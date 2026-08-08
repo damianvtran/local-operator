@@ -10,7 +10,8 @@ across::
 
      bash     pytest -q                                     ✓  0.4s
      edit     tui/theme.py                           +12 -3 ✓  0.1s
-     bash     false                    exit status 1 ✗  0.2s
+     bash     false                          exit status 1 ✗  0.2s
+     grep     needle                           interrupted ⊘  5.0s
 
 - a per-TOOL icon (``local_operator.tui.glyphs``) leads the row: shape
   before name, so the one ``edit`` in a run of ``read``s is found without
@@ -79,7 +80,7 @@ from textual.events import Key
 
 from local_operator.ansi import strip_control_sequences
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.glyphs import tool_icon
+from local_operator.tui.glyphs import display_name, tool_icon
 from local_operator.tui.widgets.transcript import TranscriptBlock, TranscriptView
 
 #: Control-sequence stripping lives in `local_operator.ansi` because the
@@ -105,8 +106,15 @@ COLLAPSE_HINT = "⟨collapse⟩"
 #: Answers given in the hint slot when the affordance has nothing to open.
 #: An expander that silently ignores half its activations is indistinguishable
 #: from a frozen app, which is precisely how it was reported.
-NO_OUTPUT_NOTICE = "no output"
-RUNNING_NOTICE = "still running"
+#:
+#: Bracketed in the SAME idiom as the expand affordance they stand in for.
+#: Bare, they read as summary text — `todo     a no output` is one space and
+#: one colour step from the argument beside it, and with no colour at all it
+#: is just `a no output`. This slot is the direct remedy for "nothing
+#: happens when I click", so it has to be the least ambiguous thing on the
+#: row, and the app already owns a bracket for "this is chrome, not content".
+NO_OUTPUT_NOTICE = "⟨no output⟩"
+RUNNING_NOTICE = "⟨still running⟩"
 #: How long that answer stays on the row. Long enough to read at a glance,
 #: short enough that it is gone before the eye returns — it is feedback for
 #: a keystroke, not a state the row is in.
@@ -611,7 +619,7 @@ class ToolCard(TranscriptBlock):
         self._set_hovered(True)
 
     def on_leave(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Pointer gone: the hint recedes to `faint` again."""
+        """Pointer gone: the hint goes out again, unless focus is holding it."""
         self._set_hovered(False)
 
     def on_focus(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -770,10 +778,21 @@ class ToolCard(TranscriptBlock):
         # CJK/emoji name would break the spine) before the row overflows its
         # card and clips the status off-screen.
         icon = tool_icon(self.tool_name)
+        label = display_name(self.tool_name)
         name_budget = width - (2 + status_cells + 2)
+        if name_budget < 2 and self._state in ("error", "interrupted"):
+            # The status is the only segment carrying free text, so it is the
+            # one that gives way first. A failing row used to be the ONLY row
+            # in a narrow ledger to lose its name — its neighbours kept three
+            # cells of identity while it rendered `<icon>  … ✗ 0.0s`, spending
+            # a cell on an ellipsis to say nothing and dropping the one fact
+            # that makes the row worth reading: WHICH tool failed.
+            status_runs = _clamp_runs(self._status_runs(status_cap, terse=True), max(0, width - 3))
+            status_cells = sum(cell_len(text) for text, _style in status_runs)
+            name_budget = width - (2 + status_cells + 2)
         if name_budget < 2:
             # Too narrow for even a shrunken name: degrade to icon + status
-            # so the status column survives.
+            # so the outcome column survives. This is the last rung.
             row = _row_text()
             row.append(icon + " ", style=dim)
             if status_runs:
@@ -785,7 +804,7 @@ class ToolCard(TranscriptBlock):
             return row
 
         name_col = min(NAME_COL, name_budget)
-        name = truncate_cells(self.tool_name, name_col, ellipsis="")
+        name = truncate_cells(label, name_col, ellipsis="")
         name = name + " " * max(0, name_col - cell_len(name))
         prefix_cells = 2 + name_col + 1
 
@@ -819,6 +838,7 @@ class ToolCard(TranscriptBlock):
             # — an answer that pushes the command off the row answers the
             # wrong question.
             hint = ""
+            hint_cells = 0
             budget = max(0, width - prefix_cells - status_cells - 2)
         summary = truncate_cells(self._summary, budget)
 
@@ -831,29 +851,35 @@ class ToolCard(TranscriptBlock):
         row.append(name, style=name_style)
         row.append(" ", style=dim)
         row.append(summary, style=summary_style)
-        if hint:
-            row.append(" ", style=dim)
-            row.append(hint, style=Style(color=theme_mod.semantic_color(hint_token)))
 
-        # Right-align the status column against the content width (D27).
-        if status_runs:
+        # ONE right-aligned tail: the hint and the status share a single pad,
+        # so the hint gets a COLUMN instead of trailing the summary wherever
+        # that happens to end. Appended after the summary it landed at a
+        # different cell on every row and slid as the summary truncated —
+        # jogging left and right under the eye while the outcome beside it
+        # was pinned precisely so that would not happen (D27).
+        tail_cells = hint_cells + status_cells
+        if tail_cells:
             used = cell_len(row.plain)
-            pad = max(1, width - used - status_cells)
-            row.append(" " * pad, style=dim)
+            row.append(" " * max(1, width - used - tail_cells), style=dim)
+            if hint:
+                row.append(hint, style=Style(color=theme_mod.semantic_color(hint_token)))
+                row.append(" ", style=dim)
             for text, style in status_runs:
                 row.append(text, style=style)
         return row
 
-    def _status_runs(self, cap: int = 0) -> list[tuple[str, Style]]:
+    def _status_runs(self, cap: int = 0, *, terse: bool = False) -> list[tuple[str, Style]]:
         """The right-aligned status as (text, style) runs (D12/D13/D28).
 
         Diff counters ride in FRONT of the outcome glyph and are the first
         thing dropped when the cap bites: how a write went is core, how much
-        it wrote is meta.
+        it wrote is meta. ``terse`` goes one step further and drops the
+        failure reason too; see :meth:`_outcome_runs`.
         """
         if self._state == "running":
             return []  # D28: no trailing glyph until the duration lands
-        core = self._outcome_runs(cap)
+        core = self._outcome_runs(cap, terse=terse)
         diff = self._diff_runs()
         if not diff:
             return core
@@ -872,46 +898,64 @@ class ToolCard(TranscriptBlock):
             runs.append((f"-{self._removed} ", Style(color=theme_mod.semantic_color("danger"))))
         return runs
 
-    def _outcome_runs(self, cap: int = 0) -> list[tuple[str, Style]]:
-        """Glyph + duration (or error text) for the settled states.
+    def _outcome_runs(self, cap: int = 0, *, terse: bool = False) -> list[tuple[str, Style]]:
+        """The settled outcome as runs: ``[reason] <glyph> <duration>``.
 
-        The duration is right-justified into :data:`DURATION_COL` so the
-        outcome glyph occupies a FIXED column relative to the row's right
-        edge. Unpadded, ``✓ 0.4s`` and ``✓ 12.3s`` put their glyphs one cell
-        apart, and a column of pass/fail marks that wobbles by a cell per row
-        is a column the eye has to read instead of scan — which defeats the
-        reason the status segment is right-aligned in the first place.
+        ONE shape for all three settled states, which is what makes the
+        column a column. The duration is right-justified into
+        :data:`DURATION_COL` and the glyph sits immediately in front of it,
+        so ``✓``, ``✗`` and ``⊘`` land on the same cell whatever preceded
+        them and whether the tool took 0.4s or 12.3s. A column of pass/fail
+        marks that wobbles by a cell per row is a column the eye has to read
+        instead of scan — which defeats the reason the status segment is
+        right-aligned in the first place.
+
+        Interrupted used to be the exception: it returned ``⊘ interrupted``
+        with no duration at all and sat six cells left of its neighbours.
+        That is the worst row to leave out of the column, because one Esc
+        marks EVERY tool still in flight, so the hole opened across a whole
+        run of rows exactly where an operator scans to find where work
+        stopped.
+
+        ``terse`` drops the reason text. The caller reaches for it when the
+        row is too narrow to keep both a tool NAME and a message: identity
+        outranks explanation, because a row that cannot say which tool failed
+        has stopped being a ledger entry.
         """
         dim = Style(color=theme_mod.semantic_color("dim"))
         elapsed = self._duration or 0.0
         duration = f"{elapsed:.1f}s" if elapsed < 10 else f"{elapsed:.0f}s"
         duration = duration.rjust(DURATION_COL)
         if self._state == "success":
-            # D12: success is quiet — check + duration both dim.
+            # D12: success is quiet — check + duration both dim, no reason.
             return [(f"{ICON_SUCCESS} ", dim), (duration, dim)]
-        if self._state == "interrupted":
-            label = f"{ICON_INTERRUPTED} interrupted"
-            if cap:
-                label = truncate_cells(label, cap, ellipsis="")
-            return [(label, dim)]
-        # Error message and glyph danger, duration dim — three runs.
-        #
+
         # The GLYPH sits in the status column with the duration, not at the head
-        # of the message (D20). The right edge is where an operator scans a run
+        # of the reason (D20). The right edge is where an operator scans a run
         # of tool rows for pass/fail, and putting `✗` before a right-aligned
         # message moved the failed row's glyph ~25 cells left of the `✓` on every
         # neighbouring row — so the scan found a hole exactly where the answer
-        # should be. The message keeps the space to the glyph's left.
-        error = self._error
-        if cap:
-            error = truncate_cells(
-                error, max(1, cap - cell_len(f"{ICON_ERROR}  ") - cell_len(duration))
-            )
-        return [
-            (f"{error} ", Style(color=theme_mod.semantic_color("danger"))),
-            (f"{ICON_ERROR} ", Style(color=theme_mod.semantic_color("danger"))),
-            (duration, dim),
-        ]
+        # should be. The reason keeps the space to the glyph's left.
+        if self._state == "interrupted":
+            glyph, reason, tint = ICON_INTERRUPTED, "interrupted", dim
+        else:
+            danger = Style(color=theme_mod.semantic_color("danger"))
+            glyph, reason, tint = ICON_ERROR, self._error, danger
+
+        runs: list[tuple[str, Style]] = []
+        if not terse and reason:
+            if cap:
+                reason = truncate_cells(
+                    reason, max(0, cap - cell_len(f"{glyph}  ") - cell_len(duration))
+                )
+            # A reason cut down to a bare ellipsis is a cell spent saying
+            # "there were words here". Drop it and give the cell back to the
+            # columns that still mean something.
+            if reason and reason != "…":
+                runs.append((f"{reason} ", tint))
+        runs.append((f"{glyph} ", tint))
+        runs.append((duration, dim))
+        return runs
 
     # -- FINALIZED-BLOCK protocol -------------------------------------------
     def settled_rows(self) -> int:

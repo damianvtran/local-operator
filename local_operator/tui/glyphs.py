@@ -59,7 +59,12 @@ NERD_TOOL_ICONS: dict[str, str] = {
     "edit": "\uf044",  # nf-fa-pencil_square_o
     "glob": "\uf115",  # nf-fa-folder_open_o
     "grep": "\uf002",  # nf-fa-search
-    "todo": "\uf046",  # nf-fa-check_square_o
+    # nf-fa-tasks, NOT nf-fa-check_square_o. Every other glyph in this table
+    # is a noun — terminal, file, pencil, folder, magnifier, clock, globe —
+    # and a check mark is a verdict: it is the exact mark the row prints at
+    # its right edge for "succeeded", so a todo row opened and closed with a
+    # check and a colourless frame could not tell the two apart.
+    "todo": "\uf0ae",
     "wake": "\uf017",  # nf-fa-clock_o
     "list_variables": "\uf0ca",  # nf-fa-list_ul
     "read_variable": "\uf02b",  # nf-fa-tag
@@ -154,3 +159,46 @@ def tool_icon(tool_name: str) -> str:
     if icon is not None:
         return icon
     return PLAIN_ICON_MCP if name.startswith(MCP_NAME_PREFIX) else PLAIN_ICON_DEFAULT
+
+
+def display_name(tool_name: str) -> str:
+    """What the row's NAME column should say for ``tool_name``.
+
+    Builtins are already their own best name and pass straight through. MCP
+    tools do not: ``create_mcp_tool_name`` mints ``mcp__<server>_<tool>``,
+    and in an 8-cell column that constant ``mcp__`` eats five cells before a
+    single informative character — three tools from one Linear server all
+    rendered ``mcp__lin``, which is the ledger's whole scan-by-shape premise
+    failing for the tool class a user is most likely to have a dozen of. The
+    plug icon already says "this came from a server"; the name column
+    repeating that is the waste.
+
+    So the prefix goes and the server segment goes with it, leaving the CALL:
+    ``mcp__linear_create_issue`` -> ``create_issue``, which the column then
+    truncates to ``create_i`` — distinct from ``list_iss`` and ``get_issu``,
+    which is the discrimination that was missing.
+
+    Two accepted imprecisions, both preferable to what they replace:
+
+    - A server whose own name contains an underscore cannot be split back out
+      of the minted string (``mcp__my_server_do_thing`` is genuinely
+      ambiguous), so only the FIRST segment is treated as the server. The
+      remainder is still the call's own identifier, never the constant.
+    - Two servers exposing the same tool name still collide
+      (``mcp__github_create_issue`` and ``mcp__gitlab_create_issue`` both read
+      ``create_i``). Eight cells cannot hold both halves, and between the two
+      the verb is what changes down a run of rows; the summary carries the
+      arguments that say which repository.
+
+    Never returns empty: a name that is nothing but the prefix and a server
+    keeps whatever it had, because a blank name column is worse than a
+    repetitive one.
+    """
+    name = tool_name.strip()
+    if not name.lower().startswith(MCP_NAME_PREFIX):
+        return name
+    remainder = name[len(MCP_NAME_PREFIX) :]
+    _server, separator, call = remainder.partition("_")
+    if separator and call:
+        return call
+    return remainder or name

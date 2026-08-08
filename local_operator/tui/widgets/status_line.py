@@ -65,6 +65,10 @@ ICON_DURATION = "◷"
 #: was checked rather than assumed, because the band's arithmetic is exact and
 #: a two-cell glyph would drift the right group's edge by one column.
 ICON_MCP = "⊙"
+#: Auto-approve indicator. Deliberately NOT one of the geometric segment icons
+#: above: this one is an ALARM, not a reading, and it reuses the app-wide
+#: warning glyph so it reads the same as a warning notice in the transcript.
+ICON_APPROVALS = "!"
 
 #: Separators point INWARD: the left group's chevrons aim right and the right
 #: group's aim left, so both runs converge on the centre gap and frame it. A
@@ -141,6 +145,16 @@ _DROP_LADDER: tuple[str, ...] = (
     # these the other way round, which contradicted this very ladder's rationale.
     "cwd",
     "context",
+    # Second-to-last, just ahead of mcp. This rung only EXISTS while the
+    # tool-approval gate has been disarmed for the session, so it is an alarm by
+    # the same argument mcp's failure branch is one — but it is the WIDEST
+    # segment in the band (`! auto-approve` is 14 cells against `⊙ 3 MCP`'s 7),
+    # and this ladder sheds by what a drop BUYS. Dropping the widest alarm first
+    # is what lets the narrow one survive to the very last step, so a cramped
+    # terminal keeps saying something rather than falling straight to the
+    # truncated tail. The mode is still not silent when it goes: `/approvals`
+    # reports it, and the notice that latched it is in the transcript.
+    "approvals",
     # DEAD LAST *when it is an alarm*, mirroring the reference's
     # `flexShrink={0}` on this indicator. Two reasons it then outlives even the
     # context number. It is the narrowest segment in the band — `⊙ 3 MCP` is 7
@@ -439,6 +453,10 @@ class StatusLine:
         self._cost: str = ""
         self._conversation_name: str = ""
         self._mcp: McpStatus = McpStatus()
+        # True once the user has answered a tool-approval prompt with "allow
+        # all": a session-wide mode with no persistent indicator is how a
+        # disarmed gate gets forgotten about.
+        self._approvals_auto: bool = False
         # Cumulative ACTIVE processing time: the sum of turn durations, not
         # wall clock since launch. A session left open over lunch has not
         # been working for two hours, and reporting that it has makes the
@@ -463,6 +481,7 @@ class StatusLine:
         cost: str | None = None,
         conversation_name: str | None = None,
         mcp: McpStatus | None = None,
+        approvals_auto: bool | None = None,
     ) -> None:
         """Update any subset of segments and repaint the band."""
         if model_label is not None:
@@ -481,6 +500,8 @@ class StatusLine:
             self._jobs = jobs
         if mcp is not None:
             self._mcp = mcp
+        if approvals_auto is not None:
+            self._approvals_auto = approvals_auto
         if cost is not None:
             self._cost = cost
         if conversation_name is not None:
@@ -676,6 +697,14 @@ class StatusLine:
         at all — it belongs to the running indicator.
         """
         parts: list[tuple[str, str, Style]] = []
+        if self._approvals_auto and "approvals" not in dropped:
+            parts.append(
+                (
+                    ICON_APPROVALS,
+                    "auto-approve",
+                    Style(color=theme_mod.semantic_color("warning"), bold=True),
+                )
+            )
         if "subagents" not in dropped:
             agents = format_agents(self._subagents)
             if agents:
