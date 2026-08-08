@@ -1105,3 +1105,54 @@ A dead stream is now distinguishable from a slow one: `STREAM_READ_TIMEOUT_S`
 bounds the gap BETWEEN chunks at 180s, where a flat `timeout=600` meant a
 provider that accepted the connection and went silent looked like a working one
 for ten minutes.
+
+## Final gate: measured at `24fecb162`
+
+Every number below was produced at this head, not carried forward. Where a claim
+is about a change, both branches were painted — the rule the review rounds
+converged on after four findings died to the same error (a consequence reasoned
+from a mechanism's description, with only the branch where the change was absent
+actually measured).
+
+| Contract | Budget | Measured | Command |
+|---|---|---|---|
+| Start context | ≤ 30,000 tokens | **2,156** (1,081 static listing + 826 semantic worst case + 1,330 tool schemas) | `scripts/bench_context_budget.py --skills-dir …` |
+| Structural prefix stability | ≥ 90% | **94.7%** | `scripts/bench_cache_rate.py` |
+| Streaming contract | unchanged vocabulary | **PASS** on a live capture | `scripts/check_streaming_contract.py run.jsonl` |
+| Unit suite | green | **2,602 passed, 6 skipped** | `pytest tests/unit` |
+| Lint / types | clean | `flake8` clean, `pyright` 0/0/0 | — |
+| TUI goldens | unchanged | 3 passed | pinned container, `LO_RUN_SNAPSHOTS=1` |
+
+The semantic selector picks **1 of 15** skills for an unrelated query, which is
+the whole argument for progressive disclosure: the static listing of the same
+corpus is 1,081 tokens and its bodies are 44 KB.
+
+### Live end-to-end at this head
+
+`local-operator --hosting openrouter --model deepseek/deepseek-v4-flash-0731
+exec --json --yolo "…fib.py…"` — exit 0, 35 events, the agent wrote `fib.py`,
+ran it, and reported `55`. The file is a correct iterative implementation with
+`fib(0) == 0`. The same capture passes the streaming-contract checker.
+
+The live cache rate on OpenRouter reads 37.3% and is **informational only**: the
+shared pool does not reliably report `cached_tokens`. The structural measurement
+is the contract, because it is the thing this codebase controls — a 30-turn run
+against a direct key earlier in the rewrite measured 94.2% and $0.0164 against
+$0.0517 unclamped.
+
+### Approval-prompt safety
+
+The prompt is the one surface where a describer's mistake is a security bug
+rather than a cosmetic one, so it is fuzzed rather than sampled:
+
+| Surface | Cases | Result |
+|---|---|---|
+| `_display_url` | 11,381 (scheme × userinfo decoy × real host × port × tail, plus degenerate inputs) | 0 userinfo leaks, 0 non-ASCII hosts, 0 raises, 0 credential leaks |
+| `_resolve_workspace_path` | full path matrix, **both** branches of the `expanduser` guard | 0 cases where `inside` is True while the resolved path lies outside the root |
+
+Two defects were found this way rather than by review, and both were regressions
+introduced by earlier fixes in the same series: `_display_url` degrading to the
+unsanitised input on an unreadable port, and `resolve()` raising `ValueError` on
+an embedded NUL. Both now fail closed — a target that cannot be characterised
+escalates and says so, in its own words (`unresolvable — `) rather than borrowing
+the workspace clause it would contradict.
