@@ -26,7 +26,7 @@ import pytest
 from rich.cells import cell_len
 from textual.binding import Binding
 
-from local_operator.harness.types import ToolExecutionStartEvent
+from local_operator.harness.types import ToolCallComposeEvent, ToolExecutionStartEvent
 from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.resume import TRANSCRIPT_NAME
 from local_operator.tui.app import DOUBLE_INTERRUPT_WINDOW_S, OperatorApp
@@ -34,6 +34,7 @@ from local_operator.tui.events import (
     AssistantDelta,
     AssistantMessageEnd,
     AssistantMessageStart,
+    ToolComposing,
     ToolStarted,
     TurnStarted,
 )
@@ -954,3 +955,50 @@ async def test_a_tall_notice_is_separated_from_what_precedes_it() -> None:
         await pilot.pause(0.3)
         assert tall.spans_multiple_rows()
         assert tall.has_class("gap-above")
+
+
+@pytest.mark.asyncio
+async def test_a_call_being_dictated_shows_a_row_that_moves() -> None:
+    """The reported freeze: a large `write` painted NOTHING while it streamed.
+
+    A tool call does not exist until its last argument token arrives, so the
+    transcript held still for as long as the model took to dictate one — minutes
+    for a file — and the only reasonable reading of that frame was a hung agent.
+
+    Two halves, and the second is not decoration: providers open the call and
+    then go silent before delivering the arguments in a burst (measured at 80
+    seconds on a real Anthropic stream), so a byte counter alone is static text
+    through exactly the pause that needs explaining. The clock is what moves.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.2)
+        app.post_message(ToolComposing(ToolCallComposeEvent(tool_call_id="c1", tool_name="write")))
+        await pilot.pause(0.1)
+        painted = [strip.text for strip in app.screen._compositor.render_strips()]
+        assert [row for row in painted if "writing the call" in row]
+        # No size until there is one: a `0 B` that never moves reads as stuck.
+        assert not [row for row in painted if "0 B" in row]
+
+        app.post_message(
+            ToolComposing(
+                ToolCallComposeEvent(tool_call_id="c1", tool_name="write", argument_bytes=14079)
+            )
+        )
+        await pilot.pause(0.1)
+        painted = [strip.text for strip in app.screen._compositor.render_strips()]
+        assert [row for row in painted if "13.7 KB" in row]
+
+        # The execution ADOPTS that row rather than mounting a second one.
+        app.post_message(
+            ToolStarted(
+                ToolExecutionStartEvent(
+                    tool_call_id="c1", tool_name="write", args={"path": "/tmp/x"}
+                )
+            )
+        )
+        await pilot.pause(0.1)
+        painted = [strip.text for strip in app.screen._compositor.render_strips()]
+        assert len([row for row in painted if "write" in row]) == 1
+        assert not [row for row in painted if "writing the call" in row]

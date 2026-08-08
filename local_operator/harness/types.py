@@ -597,6 +597,29 @@ class MessageEndEvent(AgentEvent[Literal["message_end"]]):
     message: AgentMessage
 
 
+class ToolCallComposeEvent(AgentEvent[Literal["tool_call_compose"]]):
+    """The model is STILL WRITING a tool call; nothing has run yet.
+
+    Emitted while the arguments stream in, because for a large one they stream
+    for a long time: asking for a file of any size means tens of kilobytes of
+    `content` arriving token by token, and until the last one lands there is no
+    call to execute, no `tool_execution_start`, and — before this event — nothing
+    on screen. The user watches a spinner for minutes and reasonably concludes
+    the agent has hung. It has not; it is dictating.
+
+    ``argument_bytes`` is the running size of the arguments seen so far, which is
+    the only honest progress signal available: the model never says how much is
+    left. ``tool_call_id`` is the provider's id when it has arrived and an
+    index-derived placeholder before that, so a UI can correlate this with the
+    ``tool_execution_start`` that eventually follows.
+    """
+
+    type: Literal["tool_call_compose"] = "tool_call_compose"
+    tool_call_id: str
+    tool_name: str
+    argument_bytes: int = 0
+
+
 class ToolExecutionStartEvent(AgentEvent[Literal["tool_execution_start"]]):
     type: Literal["tool_execution_start"] = "tool_execution_start"
     tool_call_id: str

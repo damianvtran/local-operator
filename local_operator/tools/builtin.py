@@ -56,6 +56,7 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from rich.cells import cell_len
 
 from local_operator.harness.types import (
     AbortSignal,
@@ -421,6 +422,11 @@ def _resolve_workspace_path(raw: str, cwd: str) -> tuple[Path, bool]:
     return path, True
 
 
+#: Two or more consecutive spaces — the part of a name a flattened prompt line
+#: cannot show literally.
+_SPACE_RUN = re.compile(r"  +")
+
+
 def _display_target(text: str) -> str:
     """A target rendered so that what the user reads IS what the tool will use.
 
@@ -431,9 +437,16 @@ def _display_target(text: str) -> str:
     defect as naming the wrong file: `notes.md ` and `notes.md` are two files,
     and `a\x00b` is not `ab`.
     """
-    if text and text == text.strip() and text.isprintable():
+    # The test is against what SURVIVES the prompt sanitiser, not just against
+    # leading and trailing space: it collapses internal runs too, so `/ws/  a.png`
+    # would reach the user as `/ws/ a.png` — a different file, named silently.
+    if text and text.isprintable() and text == " ".join(text.split()):
         return text
-    return repr(text)
+    # Quoting alone is not enough: the prompt sanitiser collapses whitespace runs
+    # AFTER this, so a quoted `'/ws/  a.png'` still reached the user as
+    # `'/ws/ a.png'`. Each space in a run becomes an explicit escape, which no
+    # later flattening can touch and which a technical reader can count.
+    return _SPACE_RUN.sub(lambda match: "\\x20" * len(match.group()), repr(text))
 
 
 def _approval_description(path: Path, inside: bool, action: str) -> str:
@@ -486,6 +499,13 @@ def _describe_path_approval(action: str, key: str = "path") -> ApprovalDescribeF
     return describe
 
 
+#: Recurrence mark for a repeating wake. `⟳` when the terminal can draw it in
+#: one cell, `*` otherwise: this sentence reaches the headless stdin gate too,
+#: where none of the TUI's glyph machinery runs, and a tofu box in a security
+#: prompt is worse than a plain character.
+REPEAT_MARK = "⟳" if cell_len("⟳") == 1 else "*"
+
+
 def _describe_wake_approval(args: dict[str, Any], cwd: str) -> str:
     """``schedule: <when> — <message>`` (or the operation for list/cancel).
 
@@ -515,9 +535,9 @@ def _describe_wake_approval(args: dict[str, Any], cwd: str) -> str:
     # wakes, so at 18 columns `every 15m ×8` and `every 1h ×∞` both painted
     # `every 1…` — two different unattended commitments, one row.
     if first and every:
-        when = f"{first} then ⟳{every}"
+        when = f"{first} then {REPEAT_MARK}{every}"
     elif every:
-        when = f"⟳{every}"
+        when = f"{REPEAT_MARK}{every}"
     else:
         when = first
 
@@ -528,16 +548,21 @@ def _describe_wake_approval(args: dict[str, Any], cwd: str) -> str:
         if until:
             bound = f" until {until}"
         elif isinstance(limit, int):
-            bound = f" ×{limit}"
+            bound = f" x{limit}"
         else:
             # The SAME slot and the same shape as a count, because an unbounded
             # recurrence is the one wake that never stops on its own and it must
             # not be the only bound rendered in a different grammar — the shape
             # that most needs emphasis was the one wearing parentheses.
-            bound = " ×∞"
+            bound = " forever"
 
     message = " ".join(str(args.get("message") or "").split())
-    head = f"schedule: {when}{bound}" if when else "schedule"
+    # The BOUND leads the interval. Trailing, it was the last token on the row
+    # and therefore the first thing a head-keeping truncation cut, so a wake
+    # firing eight times and one that never stops painted the same text at three
+    # widths — the collision this sentence was restructured to remove, recreated
+    # inside the slot that removed it.
+    head = f"schedule:{bound} {when}" if when else "schedule"
     return f"{head} — {message}" if message else head
 
 
@@ -567,9 +592,13 @@ def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
         # resolved through the tool's own resolver and marked when it leaves the
         # workspace, exactly like `write`. Without this the row said
         # `browser: screenshot` while the call landed a PNG on /etc.
-        raw_path = str(args.get("path") or "").strip()
-        if not raw_path:
-            return "screenshot: (temporary file)"
+        # NOT stripped, for the same reason `_describe_path_approval` is not:
+        # `_browser_screenshot` resolves the raw string, so `"  shot.png"` is a
+        # different file from `"shot.png"` and the prompt must name the one that
+        # will actually be written. Only the emptiness test is stripped.
+        raw_path = str(args.get("path") or "")
+        if not raw_path.strip():
+            return "screenshot: a temporary file"
         try:
             path, inside = _resolve_workspace_path(raw_path, cwd or ".")
         except (OSError, ValueError):
@@ -580,6 +609,24 @@ def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
     if action and url:
         return f"{action}: {url}"
     return f"browser: {action}" if action else ""
+
+
+def _punycode_host(host: str) -> str:
+    """A non-ASCII host shown the way a browser shows it: punycode.
+
+    `аpple.com` with a Cyrillic `а` is pixel-identical to `apple.com` in most
+    terminal fonts and resolves to `xn--pple-43d.com`. Every browser displays
+    the encoded form for exactly this reason, and a security prompt has a
+    stronger obligation than a browser does: it is asking someone to authorise
+    the fetch. The `hostname` attribute lowercases but does not encode.
+    """
+    if host.isascii():
+        return host
+    try:
+        return host.encode("idna").decode("ascii")
+    except UnicodeError:
+        # A host IDNA cannot encode is not a host anyone should be waved past.
+        return host.encode("unicode_escape").decode("ascii")
 
 
 def _display_url(raw: str) -> str:
@@ -603,7 +650,7 @@ def _display_url(raw: str) -> str:
         return raw
     if not parts.hostname:
         return raw
-    host = parts.hostname
+    host = _punycode_host(parts.hostname)
     if parts.port:
         host = f"{host}:{parts.port}"
     tail = parts.path or ""
@@ -614,8 +661,13 @@ def _display_url(raw: str) -> str:
     # said `browse: http…`, which identifies no site at all. Trailing, the host
     # is what survives truncation and the insecurity is still stated whenever
     # there is room for it.
-    flag = "" if parts.scheme == "https" else f" ({parts.scheme})"
-    return f"{host}{tail}{flag}"
+    # A non-https scheme LEADS. Trailing it read well and truncated first, so
+    # from 47 columns down an http URL and an https one painted identically —
+    # and the row spent four widths rendering the stub `(htt…`. Leading, it is
+    # part of the head that head-keeping truncation preserves, and https (the
+    # safe case, and the overwhelming majority) still costs nothing.
+    lead = "" if parts.scheme == "https" else f"{parts.scheme}! "
+    return f"{lead}{host}{tail}"
 
 
 def _error(tool_call_id: str, tool_name: str, message: str) -> ToolResult:

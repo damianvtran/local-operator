@@ -50,6 +50,7 @@ from local_operator.tui.events import (
     RetryEnded,
     RetryStarted,
     StartFlushTimer,
+    ToolComposing,
     ToolEnded,
     ToolStarted,
     ToolUpdated,
@@ -263,6 +264,11 @@ class OperatorApp(App[None]):
         self._status: StatusLine | None = None
         self._streaming_block: AssistantBlock | None = None
         self._tool_cards: dict[str, ToolCard] = {}
+        # Rows for calls the model is still dictating. Separate from
+        # `_tool_cards`, which holds calls that are RUNNING: a composing row has
+        # no execution behind it yet, and treating the two as one dictionary let
+        # an update for a running tool land on a row that had not started.
+        self._composing_cards: dict[str, ToolCard] = {}
         self._welcome: WelcomeView | None = None
         self._working_block: WorkingBlock | None = None
         self._total_cost: float = 0.0
@@ -1031,6 +1037,7 @@ class OperatorApp(App[None]):
         self._exit_hint = None  # its widget went with the transcript
         self._streaming_block = None
         self._tool_cards = {}
+        self._composing_cards = {}
         # An empty transcript is the welcome view's whole precondition, so the
         # clear hook is also what brings it back — and with it the boot layout,
         # since `_set_welcome_visible` drives both from this one condition. One
@@ -2309,11 +2316,15 @@ class OperatorApp(App[None]):
         standalone "interrupted" notice: each card it marks already says so, and
         naming the tool that stopped is the more useful of the two statements.
         """
-        cards = list(self._tool_cards.values())
+        # Composing rows count too: a turn that ends while the model is still
+        # dictating a call leaves a row that will never start, and leaving it
+        # "live" strands a spinner on a finished turn.
+        cards = list(self._tool_cards.values()) + list(self._composing_cards.values())
         self._interrupted_cards = len(cards)
         for card in cards:
             card.mark_interrupted()
         self._tool_cards.clear()
+        self._composing_cards.clear()
 
     def on_assistant_message_start(self, message: AssistantMessageStart) -> None:
         """A message opened — but nothing is MOUNTED until text actually arrives.
@@ -2366,11 +2377,52 @@ class OperatorApp(App[None]):
         block.finalize_text()
         self._streaming_block = None
 
+    def on_tool_composing(self, message: ToolComposing) -> None:
+        """Show the call the model is still dictating (TUI-026).
+
+        Mounted as soon as the tool's NAME is known, which is many seconds — for
+        a file, minutes — before the call itself exists. Until this landed the
+        screen held completely still while a large `write` streamed, and the only
+        reasonable reading of that frame was that the agent had hung.
+        """
+        event = message.event
+        card = self._composing_cards.get(event.tool_call_id)
+        if card is None:
+            card = ToolCard(event.tool_call_id, event.tool_name)
+            self._composing_cards[event.tool_call_id] = card
+            self._append_block(card)
+        card.set_composing(event.argument_bytes)
+
     def on_tool_started(self, message: ToolStarted) -> None:
         event = message.event
-        card = ToolCard(event.tool_call_id, event.tool_name, event.args, event.intent)
+        # Adopt the row that announced this call rather than mounting a second
+        # one: the composing card already sits in the right place in the ledger,
+        # and swapping it out would flicker a row away and an identical row back
+        # at the exact moment the call starts running.
+        card = self._adopt_composing_card(event.tool_call_id, event.tool_name)
+        if card is not None:
+            card.begin_running(event.args, event.intent)
+        else:
+            card = ToolCard(event.tool_call_id, event.tool_name, event.args, event.intent)
+            self._append_block(card)
         self._tool_cards[event.tool_call_id] = card
-        self._append_block(card)
+
+    def _adopt_composing_card(self, tool_call_id: str, tool_name: str) -> ToolCard | None:
+        """The composing row for this call, if one is on screen.
+
+        Matched by id first. A provider that does not send a call id until the
+        end of its stream leaves the row keyed by a placeholder, so the fallback
+        takes the oldest composing row with the same tool name — the calls of one
+        batch start in the order they were composed.
+        """
+        card = self._composing_cards.pop(tool_call_id, None)
+        if card is not None:
+            return card
+        for key, candidate in self._composing_cards.items():
+            if candidate.tool_name == tool_name:
+                del self._composing_cards[key]
+                return candidate
+        return None
 
     def on_tool_updated(self, message: ToolUpdated) -> None:
         """TUI-007: stream the partial result into the card's summary."""
