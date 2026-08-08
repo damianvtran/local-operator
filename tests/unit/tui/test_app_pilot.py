@@ -2165,3 +2165,31 @@ async def test_resume_id_rebinds_and_reloads(tmp_path, monkeypatch) -> None:
         await pilot.pause()
         await pilot.pause()
         assert boots == ["cafe01"], boots
+
+
+@pytest.mark.asyncio
+async def test_resume_at_latest_passes_the_sentinel_verbatim(tmp_path, monkeypatch) -> None:
+    """``/resume @latest`` must hand the factory the ``@latest`` symbol, not
+    strip the ``@`` (C14-02). resume.py only resolves the newest session on an
+    EXACT ``@latest`` match; a stripped ``latest`` falls through to a literal
+    ``sessions/latest`` path and fails to boot."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_session(tmp_path, "aabbcc")
+
+    session = FakeSession()
+    boots: list[str] = []
+    app = OperatorApp(
+        lambda: _factory(session),
+        resume_factory=_resume_factory(boots),
+    )
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        # Type ``/resume @latest``
+        for key in "/resume @latest":
+            await pilot.press(key if key != " " else "space")
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert boots == ["@latest"], boots

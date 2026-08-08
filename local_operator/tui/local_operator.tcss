@@ -595,7 +595,19 @@ ApprovalBlock:focus {
 }
 
 #subagent-header {
+    height: auto;
     color: $lo-dim;
+}
+
+/* The rows container must SIZE TO ITS CONTENT, never stretch to fill the
+ * band. A Vertical defaults to ``1fr``, which absorbs every free row: with
+ * even one subagent the band ballooned to the whole screen and crushed the
+ * transcript to a single row (D-01). ``height: auto`` ("as tall as my
+ * children") keeps the band as tall as its rows — typically one — so the
+ * transcript keeps the space above it. Rows themselves are already ``1``
+ * tall; the container is what was overeager. */
+#subagent-rows {
+    height: auto;
 }
 
 /* A row is a live surface: hover lights it, and a running row's trailing cell
