@@ -14,3 +14,9 @@ build/
 # pytest-textual-snapshot report artifact — regenerable, and it embeds the
 # environment (including secrets) in its HTML dump. Never commit it.
 snapshot_report.html
+
+# `uv` resolution artifact. This project pins nothing through it: CI and the
+# documented install both run `pip install -e ".[dev]"` against pyproject, so a
+# committed lockfile is a second source of truth that nothing reads and no job
+# validates. It landed by accident in a TUI commit.
+uv.lock

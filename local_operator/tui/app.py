@@ -22,6 +22,7 @@ error`` status and can be retried with ``/reload`` (TUI-012).
 from __future__ import annotations
 
 import os
+import time
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple, Protocol
 
 from rich.console import Group
@@ -49,6 +50,10 @@ from local_operator.tui.events import (
     RetryEnded,
     RetryStarted,
     StartFlushTimer,
+    SubagentEnded,
+    SubagentProgress,
+    SubagentStarted,
+    ToolComposing,
     ToolEnded,
     ToolStarted,
     ToolUpdated,
@@ -61,6 +66,7 @@ from local_operator.tui.markdown_theme import (
     brand_markdown_theme,
     install_markdown_theme,
 )
+from local_operator.tui.widgets.approval import ApprovalBlock
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import (
     Editor,
@@ -69,18 +75,28 @@ from local_operator.tui.widgets.editor import (
     InterruptRequested,
     ModelQueryOpened,
     ProviderQueryOpened,
+    StopRequested,
 )
 from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.status_line import McpStatus, StatusLine, format_cost
+from local_operator.tui.widgets.subagent_panel import SubagentPanel
 from local_operator.tui.widgets.toast import Toast, format_mcp_startup
+from local_operator.tui.widgets.todo_panel import TodoPanel
 from local_operator.tui.widgets.tool_card import ToolCard
+from local_operator.tui.widgets.trajectory import TrajectoryScreen
 from local_operator.tui.widgets.transcript import (
     GAP_CLASS,
     NoticeBlock,
+    NoticeKind,
     RichBlock,
     TranscriptView,
     UserBlock,
     WorkingBlock,
+)
+from local_operator.tui.widgets.usage_panel import (
+    UsageDismissed,
+    UsagePanel,
+    UsageRefreshRequested,
 )
 from local_operator.tui.widgets.welcome import (
     MODEL_PENDING,
@@ -99,6 +115,11 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("exit", "Quit the app", aliases=("quit",)),
     SlashCommand("clear", "Clear the transcript (history is untouched)"),
     SlashCommand("reload", "Retry starting the session"),
+    SlashCommand(
+        "resume",
+        "List recent sessions, or resume one (id)",
+        aliases=("recall",),
+    ),
     SlashCommand("model", "Show or switch model (provider/id)", aliases=("models",)),
     SlashCommand("provider", "List providers and their login/usage state"),
     SlashCommand("accounts", "List stored credentials"),
@@ -106,6 +127,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("goal", "Show, set, or clear the session goal"),
     SlashCommand("loop", "Iterate autonomously toward the goal"),
     SlashCommand("compact", "Explain context compaction"),
+    SlashCommand("approvals", "Show or set tool approval mode (ask | auto)"),
     SlashCommand("skills", "List loaded skills"),
     SlashCommand("mcp", "List MCP servers"),
     SlashCommand("login", "Authenticate a provider"),
@@ -134,6 +156,14 @@ LOOP_PROMPT = (
 #: dozen rows is the cheaper of those two costs. The band is only repainted
 #: when the count actually CHANGES.
 JOB_POLL_INTERVAL_S = 1.0
+
+#: How long the second Ctrl+C counts as a DOUBLE press. Short on purpose: this
+#: is a deliberate double-tap, not a mode. Long enough and a user interrupting
+#: two turns in a row would quit the app by accident, which is the one outcome a
+#: stop key must never produce. (omp uses 500 ms for the same gesture; this is a
+#: little longer because our first press also has to be READ — it prints the
+#: resume command — where omp's only clears the editor.)
+DOUBLE_INTERRUPT_WINDOW_S = 1.5
 
 #: Class the Screen carries while the session has no content. It selects the
 #: boot layout in the stylesheet (centred, clamped input card) and is flipped in
@@ -193,7 +223,7 @@ class NoticeFn(Protocol):
     every ``notice("...")`` call site a type error while the code is correct.
     """
 
-    def __call__(self, body: str, kind: str = "info") -> None: ...
+    def __call__(self, body: str, kind: NoticeKind = "info") -> None: ...
 
 
 class _ProviderRows(NamedTuple):
@@ -219,6 +249,17 @@ class OperatorApp(App[None]):
     BINDINGS = [
         Binding("ctrl+c", "interrupt", "Interrupt", show=False),
         Binding("ctrl+l", "clear_transcript", "Clear transcript", show=False),
+        # Esc is the key a user reaches for to make the agent stop, so it is the
+        # same stop as Ctrl+C rather than a second, weaker notion of "pause" the
+        # engine has no concept of.
+        #
+        # NOT `priority=True`: a priority binding is matched before the key is
+        # dispatched to the focused widget, which stole Esc from the editor's
+        # picker-close path — the model/provider/command lists could no longer be
+        # dismissed. Bubbling is exactly the precedence wanted: the editor
+        # consumes Esc (and stops the event) only while it has a list open, and
+        # every other time the key arrives here.
+        Binding("escape", "stop", "Stop", show=False),
     ]
 
     def __init__(
@@ -226,10 +267,16 @@ class OperatorApp(App[None]):
         session_factory: Callable[[], Awaitable[SessionProtocol]],
         theme_name: str = "dark",
         provider_controller: Any | None = None,
+        resume_factory: Callable[[str], Awaitable[SessionProtocol]] | None = None,
     ) -> None:
         super().__init__()
         theme_mod.set_theme(theme_name)  # dark is the product's island night
         self._session_factory = session_factory
+        # ``/resume <id>`` rebinds the session factory to a resume-specific one
+        # (the CLI wires it to ``create_session`` with ``args.resume`` mutated)
+        # and reloads — the "proper /resume command" the app is asked for. A
+        # bare ``/resume`` lists recent sessions instead.
+        self._resume_factory = resume_factory
         # Full provider/model/credential/usage facade behind the slash
         # commands; ``None`` degrades /provider /usage /model-switch to
         # pointer notices when it is absent.
@@ -239,7 +286,16 @@ class OperatorApp(App[None]):
         self._status: StatusLine | None = None
         self._streaming_block: AssistantBlock | None = None
         self._tool_cards: dict[str, ToolCard] = {}
+        # Rows for calls the model is still dictating. Separate from
+        # `_tool_cards`, which holds calls that are RUNNING: a composing row has
+        # no execution behind it yet, and treating the two as one dictionary let
+        # an update for a running tool land on a row that had not started.
+        self._composing_cards: dict[str, ToolCard] = {}
         self._welcome: WelcomeView | None = None
+        # Whatever held focus when the usage panel opened, so closing it returns
+        # the user to the composer they were typing in rather than to nothing.
+        # The approval card follows the same discipline for the same reason.
+        self._usage_focus_restore: Any | None = None
         self._working_block: WorkingBlock | None = None
         self._total_cost: float = 0.0
         # Auto-naming fires ONCE per session. Latched here rather than on the
@@ -251,6 +307,14 @@ class OperatorApp(App[None]):
         # real change instead of every tick.
         # (task jobs, bash jobs) last painted, so a repaint only happens on change.
         self._subagents_shown: tuple[int, int] = (0, 0)
+        # The dock band (subagent task list + todo list) above the input. Both
+        # are refs rather than query_one lookups because they are mounted once
+        # and repainted on a scheduler tick — a live handle avoids a relookup
+        # per poll and makes the handlers below read as plain calls. Trajectory
+        # opens through the same handle's on_open callback, which pushes the
+        # child's retained event list as a modal.
+        self._subagent_panel: SubagentPanel | None = None
+        self._todo_panel: TodoPanel | None = None
         # Serializes interactive login flows so two /login commands can never
         # race the one suspended terminal.
         self._login_lock: Any | None = None
@@ -258,6 +322,33 @@ class OperatorApp(App[None]):
         # the turn boundary (never mid-turn, so a turn is never half-applied).
         self._loop_running: bool = False
         self._loop_cancelled: bool = False
+        # The one pending tool-approval prompt, if any. The TUI owns approvals
+        # (see widgets/approval.py) because the default stdin gate deadlocks
+        # under a full-screen app; `_approve_all` is the session-scoped "allow
+        # all" the prompt's `a` answer latches, and `_approvals_denied` is the
+        # TURN-scoped latch that drains the asks belonging to a turn the user
+        # stopped (a queued asker wakes when the front prompt settles, and
+        # without the latch it would mount a fresh question for a dead turn).
+        self._approval: ApprovalBlock | None = None
+        self._approve_all: bool = False
+        # Which TURN a stop belongs to, rather than a flag someone has to clear.
+        # `_turn_epoch` counts turn boundaries; `_approvals_denied_epoch` records
+        # the epoch a stop/teardown armed the deny latch in. An asker captures the
+        # epoch it entered in and denies if the latch covers that epoch, so a
+        # `TurnStarted` racing the wake cannot un-deny a stopped turn's tools.
+        self._turn_epoch: int = 0
+        self._approvals_denied_epoch: int | None = None
+        # Tool cards the last turn boundary marked interrupted. Read once, by
+        # `on_turn_ended`, to decide whether an abort still owes the user a
+        # standalone notice or has already said it on the rows themselves.
+        self._interrupted_cards: int = 0
+        # Ctrl+C ladder: one press interrupts, a second within
+        # DOUBLE_INTERRUPT_WINDOW_S exits, and a third while the exit is under
+        # way ends the process outright.
+        self._last_interrupt_at: float = 0.0
+        # The one live "ctrl+c again to exit" hint, replaced rather than
+        # repeated so a run of interrupts leaves one row instead of N.
+        self._exit_hint: NoticeBlock | None = None
 
     # -- composition --------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -268,6 +359,14 @@ class OperatorApp(App[None]):
         # hidden the splash on mount.
         with TranscriptView():
             yield WelcomeView(lambda: session_welcome_info(self._session, self._providers))
+        # The dock band: subagent task list + todo list, sitting between the
+        # transcript and the composer. It is a transparent POSITIONER (zero own
+        # height when empty) holding one filled body per panel; the two panels
+        # each manage their own `display` so the band collapses to nothing when
+        # neither has content. Holding a ref lets the 1 Hz poll and the
+        # Subagent*/tool-end handlers repaint it without a relookup per tick.
+        self._subagent_panel = SubagentPanel(on_open=self._open_subagent_trajectory)
+        self._todo_panel = TodoPanel()
         # Two containers for one panel: the dock is the docked POSITIONER, and
         # the shell is the panel the user sees — the fill, the padding, and the
         # boot layout's clamp. A docked widget cannot be centred by its parent,
@@ -280,6 +379,16 @@ class OperatorApp(App[None]):
         # with the input when the panel becomes a card. One row does double duty
         # — zero extra height (D3/D17).
         with Container(id="input-dock"):
+            # The dock band (subagent + todo) lives INSIDE the same bottom-docked
+            # container as the input shell, ABOVE it (D-15-01). A sibling
+            # `dock: bottom` overlapped the input (Textual anchors same-edge
+            # docks to the bottom edge independently), and a margin to fix that
+            # violates the sheet's one-margin rule. As a child here, the band is
+            # a normal-flow row the dock's vertical layout reserves before the
+            # shell; it collapses to zero when both panels are hidden.
+            with Container(id="band"):
+                yield self._subagent_panel
+                yield self._todo_panel
             with Container(id="input-shell"):
                 yield Static(id="status-band")
                 editor = Editor(commands=SLASH_COMMANDS)
@@ -302,6 +411,13 @@ class OperatorApp(App[None]):
         # mount, and there is no window where two cards exist at once.
         with Container(id="toast-host"):
             yield Toast()
+        # The usage panel shares the toast's layer for the same reason: it is an
+        # overlay the user opens to READ, and taking rows from the transcript to
+        # show it would scroll away the work they opened it to reason about.
+        # Mounted once and kept hidden, so `/usage` never awaits a mount before
+        # it can show its loading state.
+        with Container(id="usage-host"):
+            yield UsagePanel()
 
     def get_css_variables(self) -> dict[str, str]:
         """Brand tokens as the stylesheet's single source of truth."""
@@ -353,6 +469,10 @@ class OperatorApp(App[None]):
             self._on_boot_failed(error)
             return
         self._session = session
+        # Approvals must be answered ON SCREEN from here on: the factory's
+        # default gate reads stdin, which this app has taken over, so leaving it
+        # installed hangs the first write/exec tool call forever.
+        session.set_approval_handler(self.request_tool_approval)
         self._controller = EventController(session, self)
         self._controller.subscribe()
         assert self._status is not None
@@ -364,6 +484,47 @@ class OperatorApp(App[None]):
         )
         self._wire_mcp_status(session)
         self._report_mcp_startup(session)
+        self._render_resumed_history(session)
+
+    def _render_resumed_history(self, session: Any) -> None:
+        """Replay a resumed session's prior messages onto the transcript.
+
+        ``--resume`` restores the conversation into LLM context but the TUI
+        transcript is a separate surface, so without this the app opens on a
+        blank screen that reads as a failed resume even though the model sees
+        everything. This mounts the prior user prompts and assistant replies as
+        blocks, so the resumed session looks resumed. Tool results and the
+        compaction summary are deliberately skipped (too noisy to replay as
+        blocks; the conversation reads cleanest as prompts + replies).
+
+        Guarded: a fresh session has an empty history, and a /clear already
+        retired the splash — this must not fight either.
+        """
+        try:
+            history = list(session.history())
+        except Exception:
+            return  # defensive: reduced hosts may lack the accessor
+        appended = False
+        for message in history:
+            role = getattr(message, "role", None)
+            text = getattr(message, "text", None) if hasattr(message, "text") else None
+            if isinstance(text, str):
+                text = text.strip()
+            if not text:
+                continue  # tool-use or empty assistant message — no prose
+            if role == "user":
+                self._append_block(UserBlock(text))
+                appended = True
+            elif role == "assistant" and getattr(message, "tool_calls", None) is None:
+                block = AssistantBlock()
+                block.update_text(text)
+                block.finalize_text()
+                self._append_block(block)
+                appended = True
+        if appended:
+            # The splash and the centred boot layout were retired by the first
+            # mounted block via _append_block; nothing further is needed here.
+            pass
 
     def _on_boot_failed(self, error: Exception) -> None:
         """Report a session that never constructed, WITHOUT retiring the splash.
@@ -382,15 +543,30 @@ class OperatorApp(App[None]):
 
     async def _reload_session(self) -> None:
         """Dispose the current session (if any) and re-run boot."""
-        if self._controller is not None:
-            self._controller.dispose()
-            self._controller = None
+        # The same three steps as `on_unmount`, in the same order, for the same
+        # reasons — this path had drifted from it on all three.
+        #
+        # 1. Deny first: `dispose` AWAITS teardown, and a turn parked on an
+        #    unanswered on-screen approval never reaches it. Measured: `/reload`
+        #    with a parked question stalled for the whole 5s dispose budget while
+        #    unmount with the identical turn returned immediately.
+        # 2. Session before controller: disposing the controller first drops the
+        #    dying session's `agent_end`, so the working line kept its spinner
+        #    running and live cards stayed `running` until the next turn.
+        self._deny_queued_approvals()
         if self._session is not None:
             try:
                 await self._session.dispose()
             except Exception:
                 pass
             self._session = None
+        if self._controller is not None:
+            self._controller.dispose()
+            self._controller = None
+        # 3. The pending approval belonged to the session that just died. Left
+        #    set, the NEW session's first write/exec approval queued behind a
+        #    question that is no longer on screen and nothing could answer it.
+        self._approval = None
         assert self._status is not None
         # A reload is a new conversation: its title and its one naming
         # attempt both reset, or the old name would outlive its session.
@@ -406,6 +582,49 @@ class OperatorApp(App[None]):
             mcp=McpStatus(),
         )
         await self._boot_session()
+
+    def _cmd_resume(self, arg: str, notice: NoticeFn) -> None:
+        """``/resume`` — list recent sessions; ``/resume <id>`` — resume one.
+
+        A bare ``/resume`` lists the resumable sessions (newest first, with
+        age) as a notice — the pickable list the recovery question actually
+        needs, in the same grammar ``--resume`` reports on exit. An id (or the
+        ``@latest`` sentinel) rebinds the session factory to one that boots
+        THAT session and reloads, so the TUI can jump between conversations
+        without a shell round-trip. Without a CLI-provided resume factory the
+        resume path is unavailable and only the listing is offered.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.resume import RESUME_LATEST, format_age, recent_sessions
+
+        if self._resume_factory is None:
+            notice("resume requires a resume-capable launcher — see CLI", "warning")
+        recent = recent_sessions(config_dir(), limit=10)
+        if not recent:
+            notice("no previous sessions to resume", "warning")
+            return
+        if not arg:
+            now = float(__import__("time").time())
+            lines = ["recent sessions — /resume <id> to open one:"]
+            for session_id, mtime in recent:
+                lines.append(f"  {session_id}   {format_age(now - mtime)}")
+            notice("\n".join(lines), "note")
+            return
+        # ``@latest`` is the oldest part of the CLI vocabulary (--resume
+        # accepts it), so the sentinel must survive verbatim: resume.py only
+        # resolves the newest session on an EXACT ``RESUME_LATEST`` match.
+        # A bare arg is the same request, spelled the way a user would type it
+        # without remembering the symbol.
+        resume_id = arg.strip() or RESUME_LATEST
+        if self._resume_factory is None:
+            notice("resume unavailable: no resume-capable launcher", "warning")
+            return
+        # Rebind the factory so the reload boots the named session, then reuse
+        # the same teardown/reboot path as /reload. Failures inside the new
+        # factory surface through _on_boot_failed exactly as a bad --resume does.
+        self._session_factory = lambda: self._resume_factory(resume_id)  # type: ignore[misc]
+        notice(f"resuming session {resume_id}…")
+        self.run_worker(self._reload_session(), thread=False, group="session")
 
     # -- MCP status ---------------------------------------------------------
     def _wire_mcp_status(self, session: SessionProtocol) -> None:
@@ -652,11 +871,86 @@ class OperatorApp(App[None]):
         self.exit()
 
     def on_interrupt_requested(self, message: InterruptRequested) -> None:
-        self._interrupt()
+        """Ctrl+C from the composer — the NORMAL path, since it holds focus.
+
+        Routed through the action rather than straight to ``_interrupt`` so the
+        double-press ladder applies here too; going direct meant the app-level
+        binding had the ladder and the key people actually press did not.
+        """
+        self.action_interrupt()
+
+    def on_stop_requested(self, message: StopRequested) -> None:
+        """Esc from the composer (the editor consumes the key so it never blurs)."""
+        self.action_stop()
 
     def action_interrupt(self) -> None:
-        """App-level Ctrl+C: interrupt the turn, never exit."""
+        """Ctrl+C: interrupt the turn. Twice in quick succession: leave.
+
+        A single Ctrl+C must never exit — the whole point of the first press is
+        to stop the agent and keep the session. But a user who wants OUT should
+        not have to find ``/exit``, so the second press within
+        :data:`DOUBLE_INTERRUPT_WINDOW_S` quits and prints the command that
+        brings this exact session back (see :meth:`resume_hint`).
+
+        There is deliberately NO third "hard exit" rung. omp has one because its
+        teardown can hang on an extension's IPC; ours cannot outlive
+        ``Session.dispose``, which bounds its own wait at 5 s. And it could not
+        work anyway: Textual stops dispatching input once ``exit()`` is called,
+        so a further Ctrl+C never reaches this method — a rung that cannot fire
+        is worse than no rung, because the docstring promises an escape the user
+        does not have.
+        """
+        now = time.monotonic()
+        if now - self._last_interrupt_at < DOUBLE_INTERRUPT_WINDOW_S:
+            self._interrupt()  # stop the work before dropping the terminal
+            self.exit()
+            return
+        self._last_interrupt_at = now
         self._interrupt()
+        # Short, and WITHOUT the command. The full `local-operator --resume <id>`
+        # belongs in the exit block printed to the terminal, where it can be
+        # copied; in a transcript line it is the unreachable copy (the alt screen
+        # is discarded on exit), it wrapped at 60 columns and split across rows at
+        # 30, and every interrupt added another identical row. What this line owes
+        # the user is that a second press exits and that doing so is recoverable.
+        #
+        # `warning`, not `info`: it says the app is one keystroke from closing,
+        # which is the loudest thing on the frame when it appears.
+        #
+        # Replaced rather than repeated, so three interrupts leave one hint.
+        resumable = bool(self.resume_hint())
+        text = "ctrl+c again to exit" + (" — the session can be resumed" if resumable else "")
+        if self._exit_hint is not None:
+            self.query_one(TranscriptView).remove_block(self._exit_hint)
+        self._exit_hint = NoticeBlock(text, "note")
+        self._append_block(self._exit_hint)
+
+    def resume_hint(self) -> str:
+        """``local-operator --resume <id>`` for this session, or "" when there is none.
+
+        Read by :func:`run_tui` after the app has released the terminal, so the
+        command lands in the user's scrollback where they can copy it, rather
+        than in a frame that is about to be torn down.
+
+        Gated on the transcript EXISTING, not merely on having a session id:
+        ``--resume`` refuses an id whose transcript is not on disk (a typo must
+        fail rather than open an empty session that looks resumed), so quitting
+        before the first turn persisted would otherwise advertise a command that
+        is guaranteed to be rejected.
+        """
+        session = self._session
+        if session is None:
+            return ""
+        session_id = getattr(session, "session_id", "")
+        if not session_id:
+            return ""
+        from local_operator.paths import config_dir
+        from local_operator.resume import TRANSCRIPT_NAME
+
+        transcript = config_dir() / "sessions" / session_id / TRANSCRIPT_NAME
+        if not transcript.is_file():
+            return ""
+        return f"local-operator --resume {session_id}"
 
     def _interrupt(self) -> None:
         """Abort the running turn AND stop any ``/loop`` in flight.
@@ -667,11 +961,221 @@ class OperatorApp(App[None]):
         """
         if self._loop_running:
             self._loop_cancelled = True
+        # A turn parked on an approval cannot see the abort signal until the
+        # callback returns, so the prompt is denied first: aborting alone would
+        # leave the engine waiting on a future nobody is going to answer.
+        self._deny_queued_approvals()
         if self._session is not None:
             self._session.abort("interrupted")
 
+    def action_stop(self) -> None:
+        """Esc: stop. One press, one meaning, wherever focus happens to be.
+
+        A pending approval is NOT answered here and left at that. Esc used to
+        deny just the front prompt and return, which meant that with two
+        approval-gated tools in one batch the user had to press it once per
+        prompt before it finally meant "stop" — and each press looked like it
+        had done nothing to the run. Stopping denies every queued prompt (via
+        the latch in :meth:`_deny_queued_approvals`) and aborts the turn.
+
+        ``n`` remains the answer that refuses ONE tool and lets the turn carry
+        on; that is the distinction Esc should not have been carrying.
+
+        With nothing running Esc does nothing — in particular it must not clear
+        the composer, which would throw away typed text on the key people press
+        to cancel.
+        """
+        pending = self._approval is not None and not self._approval.answered
+        if pending or (self._session is not None and self._session.is_streaming):
+            self._interrupt()
+
+    # -- tool approvals -------------------------------------------------------
+    async def request_tool_approval(self, tool_name: str, description: str) -> bool:
+        """The session's approval gate while this app owns the terminal.
+
+        Awaited by the engine on its own loop (the harness awaits the callback
+        inline before executing a write/exec tier tool), which is the same loop
+        the app runs on — so the prompt is mounted directly here rather than
+        marshalled across threads.
+
+        Serialization: only ONE prompt is live at a time. A tool batch can ask
+        twice concurrently, and two cards competing for focus would leave the
+        second unanswerable; the later ask waits for the earlier card to settle
+        and is then asked in turn.
+
+        The deny latch is re-read after every await, and that is what makes the
+        stop paths correct. Settling only the FRONT prompt was not enough: the
+        queued asker woke, saw no live prompt, and mounted a BRAND NEW question
+        — after Ctrl+C had already aborted the turn. Worse, write/exec tier
+        tools are not interruptible, so the runner parked on this callback is
+        settled by nothing but this future; the post-abort question was genuinely
+        live, and on teardown it mounted into a screen that was going away.
+        """
+        # Captured BEFORE the first await: this asker belongs to the turn that was
+        # running when the engine called it, and no later turn's start can move it.
+        epoch = self._turn_epoch
+        if self._approvals_are_denied(epoch):
+            return False
+        if self._approve_all:
+            return True
+        while self._approval is not None and not self._approval.answered:
+            await self._approval.wait()
+            if self._approvals_are_denied(epoch):
+                return False
+            if self._approve_all:
+                return True
+        block = ApprovalBlock(tool_name, description, on_answer=self._latch_approval_answer)
+        self._approval = block
+        self._append_block(block)
+        try:
+            return await block.wait()
+        finally:
+            block.restore_focus()
+            if self._approval is block:
+                self._approval = None
+
+    def _latch_approval_answer(self, answer: str) -> None:
+        """What an answer means beyond the one call. Runs BEFORE the future.
+
+        Called synchronously from :meth:`ApprovalBlock.resolve` rather than off a
+        posted message: a queued asker wakes the instant the future resolves, and
+        a flag latched a few pump hops later was read stale — so the user pressed
+        "allow all" and was immediately asked again for the next tool of the same
+        batch.
+        """
+        if answer == "a":
+            self._approve_all = True
+            # States the CHANGE, not its duration: "for the rest of this
+            # session" stays in the transcript at full warning after
+            # `/approvals ask` has re-armed the gate, leaving the loudest ink on
+            # screen asserting something no longer true.
+            self._append_block(
+                NoticeBlock(
+                    "tool approvals: auto — /approvals ask restores prompting",
+                    "warning",
+                )
+            )
+            if self._status is not None:
+                self._status.update(approvals_auto=True)
+
+    def _deny_queued_approvals(self) -> None:
+        """Refuse the live prompt AND every ask still queued behind it.
+
+        The latch is the load-bearing part: the queued asker is parked on the
+        front prompt's future, so settling that future WAKES it, and without a
+        latch it would go on to mount a fresh question for a turn that is being
+        stopped or an app that is being torn down.
+
+        Only for paths that END the turn (stop, teardown). A path that merely
+        clears the screen must use :meth:`_settle_live_approval`, because the
+        turn is still running and its remaining tools still deserve to ask.
+
+        Recorded as the EPOCH it was armed in rather than as a bare flag. A bare
+        flag has to be cleared by someone, the only available someone was the
+        next ``TurnStarted``, and that put a security gate's correctness on the
+        order of an asyncio future callback against the Textual message pump: a
+        ``TurnStarted`` already in the queue when the stop lands cleared the latch
+        before the parked asker re-read it, and the stopped turn's tool got a
+        fresh question. An epoch cannot be cleared early because it is not
+        cleared at all — a later turn simply carries a higher number.
+        """
+        self._approvals_denied_epoch = self._turn_epoch
+        self._settle_live_approval()
+
+    def _settle_live_approval(self) -> None:
+        """Refuse the VISIBLE prompt only, leaving later asks free to ask.
+
+        Used by ``/clear``: the widget holding the future is about to be removed,
+        so the question cannot be left pending — but the turn was not stopped, and
+        latching the deny flag here denied every later write/exec tool of the run
+        with no prompt at all, while ``/approvals`` reported the opposite.
+        """
+        approval = self._approval
+        if approval is not None and not approval.answered:
+            approval.resolve(False)
+            approval.restore_focus()
+        self._approval = None
+
+    def _approvals_are_denied(self, epoch: int) -> bool:
+        """Is an ask from ``epoch`` refused by a stop that has already happened?
+
+        ``<=`` and not ``==``: a stop in epoch 4 refuses the asks of epoch 4 and,
+        on teardown, anything still parked from earlier. A strict equality check
+        would let an asker that entered before the stop mount its question after.
+        """
+        armed = self._approvals_denied_epoch
+        return armed is not None and epoch <= armed
+
+    def _answer_live_approval_as_allowed(self) -> None:
+        """Answer the visible prompt with YES, the way the ``A`` key does.
+
+        Through the widget rather than around it, so the row repaints as a
+        receipt (`✓ allowed ...`) instead of vanishing with no record of what the
+        user just authorised.
+        """
+        approval = self._approval
+        if approval is not None and not approval.answered:
+            # `y`, not `a`: the COMMAND is what changed the mode, and it prints
+            # its own notice. Answering as the `A` key would run the keystroke's
+            # latch hook too, so the frame carried the same statement twice in the
+            # loudest ink it has.
+            approval.resolve(True, answer="y")
+            approval.restore_focus()
+        self._approval = None
+
+    def _allow_approvals_again(self) -> None:
+        """Retire the deny latch so tools can ask questions again.
+
+        Only for ``/approvals ask``, whose whole promise is "tools will prompt
+        again"; a latch left armed would make that statement false for the rest
+        of the run. The turn boundary deliberately does NOT call this — a turn
+        that starts simply carries a higher epoch than the latch, so the drain
+        cannot be cut short by message ordering.
+        """
+        self._approvals_denied_epoch = None
+
     def action_clear_transcript(self) -> None:
         self._clear_transcript()
+
+    def _cmd_approvals(self, arg: str, notice: NoticeFn) -> None:
+        """``/approvals [ask|auto]`` — the way BACK from "allow all".
+
+        "Allow all" disarms a safety gate for the whole session, so it needs a
+        stated mode and a route back; a one-way switch answered by a single
+        keystroke is the part that made it a footgun rather than a shortcut.
+        Bare ``/approvals`` reports, which is also how a user who cannot
+        remember what they pressed finds out.
+        """
+        mode = arg.strip().lower()
+        if mode in ("ask", "on", "prompt"):
+            self._approve_all = False
+            # Also clears the turn-scoped deny latch: this command's whole
+            # promise is "tools will prompt again", and a latch left armed
+            # would make that statement false for the rest of the run.
+            self._allow_approvals_again()
+            if self._status is not None:
+                self._status.update(approvals_auto=False)
+            notice("tool approvals: ask — write and command tools will prompt again")
+            return
+        if mode in ("auto", "off", "yolo"):
+            self._approve_all = True
+            # The prompt ON SCREEN is part of "every tool runs without asking".
+            # Setting the mode and leaving it pending printed the loudest notice
+            # in the app next to a question still waiting for an answer, with the
+            # tool behind it parked on a future nothing was going to settle — the
+            # `A` key never had this gap because it answers through the widget.
+            self._answer_live_approval_as_allowed()
+            if self._status is not None:
+                self._status.update(approvals_auto=True)
+            notice("tool approvals: auto — every tool runs without asking", "warning")
+            return
+        if mode:
+            notice(f"unknown approval mode {mode!r} — use ask or auto", "warning")
+            return
+        if self._approve_all:
+            notice("tool approvals: auto — /approvals ask restores prompting", "warning")
+        else:
+            notice("tool approvals: ask — write and command tools prompt before running")
 
     def _clear_transcript(self) -> None:
         transcript = self.query_one(TranscriptView)
@@ -683,8 +1187,15 @@ class OperatorApp(App[None]):
         if self._working_block is not None:
             self._working_block.stop()
             self._working_block = None
+        # The prompt's widget is about to be removed with the rest of the
+        # transcript, so the turn awaiting it is denied rather than orphaned —
+        # but NOT latched: /clear does not stop the turn, and latching here
+        # denied every later write/exec tool of the run with no prompt.
+        self._settle_live_approval()
+        self._exit_hint = None  # its widget went with the transcript
         self._streaming_block = None
         self._tool_cards = {}
+        self._composing_cards = {}
         # An empty transcript is the welcome view's whole precondition, so the
         # clear hook is also what brings it back — and with it the boot layout,
         # since `_set_welcome_visible` drives both from this one condition. One
@@ -717,6 +1228,9 @@ class OperatorApp(App[None]):
         self._sync_boot_layout()
 
     async def on_unmount(self) -> None:
+        # Before disposing the session: dispose awaits teardown, and a turn
+        # parked on an unanswered approval would never reach it.
+        self._deny_queued_approvals()
         if self._status is not None:
             self._status.dispose()
         if self._controller is not None:
@@ -731,6 +1245,26 @@ class OperatorApp(App[None]):
             return
         session = self._session
         assert self._status is not None
+        # A turn already running is STEERED, never re-prompted: `prompt()`
+        # rejects a concurrent call outright (the session serializes turns on a
+        # lock), so sending one here surfaced "session is already streaming" as
+        # an error and threw the user's text away. Steering is the supported
+        # mid-turn channel — the engine drains the queue at its next tool/message
+        # boundary, which is exactly "send it after the current step finishes".
+        if session.is_streaming:
+            session.steer(text)
+            # "boundary" is engine vocabulary the UI never defines, and this is
+            # the line answering "did my text just get thrown away?" — so it says
+            # when it will be sent, in the tense it will be sent in, at the
+            # `note` weight: above `info`/dim, which is too quiet for an answer
+            # the user is waiting for, and below `warning`, which is an alarm this
+            # is not. Three warning-tinted rows on one frame for routine receipts
+            # is how the loudest ink in the palette stops meaning anything.
+            self._append_block(NoticeBlock("queued — sends when this step finishes", "note"))
+            # Still worth a title: the steering message can be the first thing
+            # in the conversation that actually says what the task is.
+            self._maybe_name_conversation(text)
+            return
         self._status.update(streaming=True)
 
         async def run_prompt() -> None:
@@ -787,11 +1321,50 @@ class OperatorApp(App[None]):
         """Repaint the counter segments only when a running count changes."""
         agents = self._job_count("task")
         jobs = self._job_count("bash")
-        if (agents, jobs) == self._subagents_shown:
-            return
-        self._subagents_shown = (agents, jobs)
-        if self._status is not None:
-            self._status.update(subagents=agents, jobs=jobs)
+        if (agents, jobs) != self._subagents_shown:
+            self._subagents_shown = (agents, jobs)
+            if self._status is not None:
+                self._status.update(subagents=agents, jobs=jobs)
+        # The band's belt to the event stream's suspenders: elapsed time and
+        # job status move with no Subagent*/tool-end event at all, so the 1 Hz
+        # poll is what keeps them live. Both panels gate their own repaint on
+        # an equality/membership fingerprint, so a no-change tick is nearly
+        # free — and never raises, since a status surface may not take the app
+        # down (see the panels' own docstrings).
+        self._refresh_band()
+
+    def _refresh_band(self) -> None:
+        """Repaint the dock band (subagent + todo) from live session state.
+
+        Called on the 1 Hz poll and from the Subagent* event handlers. Safe to
+        call before the session is booted: both panels tolerate a ``None``
+        session (they read ``getattr``/``getattr(session, 'jobs', None)`` and
+        treat a missing manager as empty).
+        """
+        session = self._session
+        if self._subagent_panel is not None:
+            self._subagent_panel.sync(session)
+        if self._todo_panel is not None:
+            self._todo_panel.sync(session)
+
+    def _open_subagent_trajectory(self, job_id: str) -> None:
+        """Open the trajectory modal for one task job.
+
+        Reads the child's retained events once, at open (a snapshot, so
+        reading never races the child still writing them — same contract as
+        :class:`TrajectoryScreen`). Falls back to an honest empty state when
+        the job is gone (already swept) or carried no trajectory.
+        """
+        session = self._session
+        manager = getattr(session, "jobs", None) if session is not None else None
+        job = manager.get(job_id) if manager is not None else None
+        is_error = bool(
+            job is not None and (job.status == "failed" or (job.error_text and not job.result_text))
+        )
+        status = "failed" if is_error else (getattr(job, "status", "") or "running")
+        label = getattr(job, "label", "") if job is not None else job_id
+        events = getattr(job, "trajectory", None) if job is not None else None
+        self.push_screen(TrajectoryScreen(label, status, events or []))
 
     def _job_count(self, kind: str) -> int:
         """Running jobs of one ``kind`` — ``task`` (subagents) or ``bash``.
@@ -843,7 +1416,7 @@ class OperatorApp(App[None]):
         self.query_one(TranscriptView).append_block(block)
 
     # -- slash commands -----------------------------------------------------
-    def _notice(self, body: str, kind: str = "info") -> None:
+    def _notice(self, body: str, kind: NoticeKind = "info") -> None:
         """Append a notice block.
 
         A METHOD rather than the local closure it used to be, because the picker's
@@ -852,7 +1425,7 @@ class OperatorApp(App[None]):
         """
         self._append_block(NoticeBlock(body, kind))
 
-    def _system_notice(self, body: str, kind: str = "info") -> None:
+    def _system_notice(self, body: str, kind: NoticeKind = "info") -> None:
         """A notice about the HARNESS that leaves the empty state intact.
 
         Separate from :meth:`_notice` because the two answer different questions.
@@ -886,6 +1459,8 @@ class OperatorApp(App[None]):
         elif command == "/reload":
             notice("reloading session…")
             self.run_worker(self._reload_session(), thread=False, group="session")
+        elif command == "/resume":
+            self._cmd_resume(arg, notice)
         elif command == "/model":
             self._cmd_model(arg, notice)
         elif command == "/provider":
@@ -900,6 +1475,8 @@ class OperatorApp(App[None]):
             self._cmd_loop(arg, notice)
         elif command == "/compact":
             notice("compaction runs automatically when the context fills up.")
+        elif command == "/approvals":
+            self._cmd_approvals(arg, notice)
         elif command == "/skills":
             block = self._skills_block()
             if block is not None:
@@ -933,10 +1510,23 @@ class OperatorApp(App[None]):
         if not arg:
             self._open_model_picker()
             return
+        # ``/model default <provider>/<id>`` PERSISTS the choice as the boot
+        # default (config ``hosting`` + ``model_name``), so later launches
+        # open on it. Distinct from ``/model <p>/<id>``, which only switches
+        # the running session: the user phrase "make this the default" has no
+        # other home, and the picker's current-row marker already covers "which
+        # am I on". Writing config here keeps the one-word habit — ``/model
+        # default openrouter/deepseek/deepseek-chat`` — and the live switch
+        # stays available on the same command.
+        persist_default = arg.lower().startswith("default ")
+        target = arg[len("default ") :].strip() if persist_default else arg
+        if persist_default and not target:
+            notice("usage: /model default <provider>/<model-id>", "warning")
+            return
         if session is None or not hasattr(session, "set_model"):
             notice("session is still starting…", "warning")
             return
-        provider, sep, model_id = arg.partition("/")
+        provider, sep, model_id = target.partition("/")
         if not sep or not model_id:
             notice(
                 "usage: /model <provider>/<model-id> (e.g. openrouter/deepseek/deepseek-chat)",
@@ -961,6 +1551,25 @@ class OperatorApp(App[None]):
             return
         old_label = session.model_label
         session.set_model(spec)
+        persist_result: str | None = None
+        if persist_default:
+            # Persist as the boot default. Written independently of the live
+            # switch above so the two stay composable (``/model default p/m``
+            # both switches AND persists; a future flag could persist-only).
+            # Failure to write is reported but not fatal — the session already
+            # switched, and a read-only config dir should not take down a
+            # working prompt. The status line is repainted regardless (the
+            # ``return`` below used to skip it, leaving the band's model label
+            # stale on the very config the user just asked to make permanent).
+            try:
+                from local_operator.config import ConfigManager
+                from local_operator.paths import config_dir
+
+                manager = ConfigManager(config_dir())
+                manager.set_config_value("hosting", provider)
+                manager.set_config_value("model_name", model_id)
+            except Exception as error:  # config write failure
+                persist_result = f"model switched, but could not save default: {error}"
         if self._status is not None:
             # The window and the effort belong to the SPEC, not the session:
             # a switch that repainted only the label would leave the context
@@ -971,7 +1580,12 @@ class OperatorApp(App[None]):
                 context_window=_context_window(session),
             )
         suffix, warning = self._model_access_note(provider)
-        notice(f"model: {old_label} → {session.model_label} (next turn){suffix}")
+        if persist_result is not None:
+            notice(persist_result, "warning")
+        elif persist_default:
+            notice(f"default model saved: {provider}/{model_id} (next launch){suffix}")
+        else:
+            notice(f"model: {old_label} → {session.model_label} (next turn){suffix}")
         if warning:
             notice(warning, "warning")
 
@@ -1227,7 +1841,7 @@ class OperatorApp(App[None]):
     async def _loop_worker(self, iterations: int) -> None:
         """Run up to ``iterations`` goal-advancing turns, sequentially."""
 
-        def notice(body: str, kind: str = "info") -> None:
+        def notice(body: str, kind: NoticeKind = "info") -> None:
             self._append_block(NoticeBlock(body, kind))
 
         session = self._session
@@ -1238,6 +1852,14 @@ class OperatorApp(App[None]):
         try:
             for index in range(iterations):
                 if self._loop_cancelled:
+                    break
+                # Re-checked every iteration, not captured once: `/reload`
+                # replaces `self._session` underneath a running loop, and the
+                # captured reference went on driving the DISPOSED session — the
+                # old one took the remaining prompts, the new one took none, and
+                # `_loop_running` stayed True so `/loop` answered "already
+                # running". Same guard `_name_conversation_worker` already makes.
+                if session is not self._session:
                     break
                 self._append_block(UserBlock(f"[loop {index + 1}/{iterations}]"))
                 if self._status is not None:
@@ -1255,6 +1877,10 @@ class OperatorApp(App[None]):
             self._loop_running = False
         if self._loop_cancelled:
             notice(f"loop cancelled after {completed} iteration(s)")
+        elif session is not self._session:
+            # Reported as stopped, not finished: the remaining iterations never
+            # ran, and "finished" on a reload reads as the loop having completed.
+            notice(f"loop stopped by reload after {completed} iteration(s)", "warning")
         else:
             notice(f"loop finished after {completed} iteration(s)")
 
@@ -1365,78 +1991,75 @@ class OperatorApp(App[None]):
             if wants_oauth and not wants_key and not self._providers.has_any_credential(target):
                 notice(f"{target} reports usage only after /login {target}", "warning")
                 return
-        notice("fetching usage…")
+        self._open_usage_panel(target)
+
+    def _open_usage_panel(self, target: str) -> None:
+        """Show the panel in its loading state and start the fetch.
+
+        The panel opens BEFORE the request. The fetch crosses the network once
+        per logged-in provider, and a command whose only immediate effect was a
+        transcript notice read as a command that had not run.
+        """
+        panel = self._usage_panel()
+        if panel is None:
+            self._append_block(NoticeBlock("usage panel unavailable", "warning"))
+            return
+        self._usage_focus_restore = self.focused
+        panel.start_fetch(target)
+        panel.focus()
         self.run_worker(self._fetch_usage_worker(target or None), thread=False, group="usage")
 
+    def _usage_panel(self) -> UsagePanel | None:
+        """The mounted panel, or None before compose (or in a stripped harness)."""
+        try:
+            return self.query_one(UsagePanel)
+        except Exception:  # noqa: BLE001 — the panel is optional chrome
+            return None
+
     async def _fetch_usage_worker(self, provider: str | None) -> None:
-        """Worker that fetches usage and posts the result as a block."""
+        """Worker that fetches usage and hands the reports to the panel.
 
-        def notice(body: str, kind: str = "info") -> None:
-            self._append_block(NoticeBlock(body, kind))
-
+        A failure is reported INSIDE the panel rather than as a transcript
+        notice: the panel is what has focus and what carries the key that
+        retries, so sending the error anywhere else asks the user to look away
+        from the surface holding the fix.
+        """
+        panel = self._usage_panel()
         try:
             assert self._providers is not None
             reports = await self._providers.fetch_usage([provider] if provider else None)
         except Exception as error:
-            notice(f"usage fetch failed: {error}", "error")
+            if panel is None:
+                self._append_block(NoticeBlock(f"usage fetch failed: {error}", "error"))
+            else:
+                panel.show_error(f"usage fetch failed: {error}")
             return
-        self._append_block(self._usage_block(reports, provider))
+        if panel is None:
+            self._append_block(NoticeBlock("usage panel unavailable", "warning"))
+            return
+        panel.show_reports(reports)
 
-    def _usage_block(self, reports, requested: str | None) -> RichBlock:
-        """Render one or more usage reports as a compact table."""
-        dim = Style(color=theme_mod.semantic_color("dim"))
-        muted = Style(color=theme_mod.semantic_color("muted"))
-        # `label`, NOT accent. Green in this app means "a turn is live" — the
-        # band's always-on brand glyph was moved off it for exactly that reason,
-        # and a static section heading painted the same green teaches the user
-        # that green also means "heading", which weakens the liveness signal
-        # everywhere else.
-        heading = Style(color=theme_mod.semantic_color("label"))
-        lines: list[Text] = []
-        if not reports:
-            lines.append(
-                Text(
-                    "no usage data — this provider has no quota endpoint or no credential",
-                    style=dim,
-                )
-            )
-        for report in reports:
-            head = Text()
-            head.append(report.provider, style=heading)
-            if report.identity:
-                head.append(f"  ({report.identity})", style=muted)
-            head.append(" —", style=dim)
-            lines.append(head)
-            if report.notes:
-                lines.append(Text(f"  {report.notes}", style=dim))
-            for limit in report.limits:
-                a = limit.amount
-                bar = self._usage_bar(a.fraction())
-                status_tint = {
-                    "ok": theme_mod.semantic_color("success"),
-                    "warning": theme_mod.semantic_color("warning"),
-                    "exhausted": theme_mod.semantic_color("danger"),
-                    "unknown": dim,
-                }.get(limit.effective_status(), dim)
-                left = Text()
-                left.append(bar, style=status_tint)
-                label = f" {limit.label}"
-                if limit.window:
-                    label += f" ({limit.window})"
-                amount_text = _format_usage_amount(a)
-                if amount_text:
-                    label += f" — {amount_text}"
-                left.append(label, style=dim)
-                lines.append(left)
-        return RichBlock(Group(*lines))
+    def on_usage_refresh_requested(self, message: UsageRefreshRequested) -> None:
+        """``r`` in the panel — re-run the same fetch behind the same view."""
+        message.stop()
+        if self._providers is None:
+            return
+        panel = self._usage_panel()
+        if panel is None:
+            return
+        target = panel.target
+        panel.start_fetch(target)
+        self.run_worker(self._fetch_usage_worker(target or None), thread=False, group="usage")
 
-    def _usage_bar(self, fraction: float | None, width: int = 12) -> str:
-        """A minimal filled/empty bar; unknown fraction renders all-dots."""
-        if fraction is None:
-            return "·" * width
-        fraction = max(0.0, min(1.0, fraction))
-        filled = round(fraction * width)
-        return "█" * filled + "░" * (width - filled)
+    def on_usage_dismissed(self, message: UsageDismissed) -> None:
+        """Esc/q in the panel — give focus back to whatever had it."""
+        message.stop()
+        restore = self._usage_focus_restore
+        self._usage_focus_restore = None
+        if restore is not None and getattr(restore, "is_mounted", False):
+            restore.focus()  # type: ignore[union-attr]
+        else:
+            self._editor().focus()
 
     # -- provider argument list ---------------------------------------------
     def on_provider_query_opened(self, message: ProviderQueryOpened) -> None:
@@ -1703,7 +2326,7 @@ class OperatorApp(App[None]):
         serializes concurrent /login commands.
         """
 
-        async def notice(body: str, kind: str = "info") -> None:
+        async def notice(body: str, kind: NoticeKind = "info") -> None:
             self._append_block(NoticeBlock(body, kind))
 
         assert self._providers is not None
@@ -1740,7 +2363,7 @@ class OperatorApp(App[None]):
         self.run_worker(self._logout_worker(provider), thread=False, group="login")
 
     async def _logout_worker(self, provider: str) -> None:
-        def notice(body: str, kind: str = "info") -> None:
+        def notice(body: str, kind: NoticeKind = "info") -> None:
             self._append_block(NoticeBlock(body, kind))
 
         try:
@@ -1848,6 +2471,12 @@ class OperatorApp(App[None]):
     def on_turn_started(self, message: TurnStarted) -> None:
         assert self._status is not None
         self._status.update(streaming=True)
+        # A new turn may ask questions again — expressed by MOVING PAST the latch
+        # rather than by clearing it. Clearing raced the drain: a `TurnStarted`
+        # already in the message queue when the stop landed ran before the parked
+        # asker woke, so the stopped turn's write/exec tool got a fresh question.
+        # An epoch bump cannot arrive early for an asker that captured the old one.
+        self._turn_epoch += 1
         # D25: the ONE aggregate working line appears for the turn.
         if self._working_block is None:
             self._working_block = WorkingBlock()
@@ -1879,8 +2508,14 @@ class OperatorApp(App[None]):
         )
         if message.error:
             self._append_block(NoticeBlock(message.error, "error"))
-        elif message.aborted:
+        elif message.aborted and not self._interrupted_cards:
+            # Only when NOTHING was in flight. A stopped turn already says so on
+            # each card it stopped (`⊘ interrupted`), and that per-card mark is
+            # the more useful of the two because it names WHICH tool stopped;
+            # adding a standalone notice spent a row and a gap restating it, and
+            # N+1 rows when several tools were running.
             self._append_block(NoticeBlock("interrupted", "warning"))
+        self._interrupted_cards = 0
 
     def _dismiss_working_block(self) -> None:
         """Stop and remove the aggregate working line at turn end (D25)."""
@@ -1920,32 +2555,119 @@ class OperatorApp(App[None]):
         """turn_start: the spinner is already carried by the status band."""
 
     def on_turn_boundary_end(self, message: TurnBoundaryEnd) -> None:
-        """turn_end: reconcile orphaned RUNNING tool cards (TUI-008/019)."""
-        for card in list(self._tool_cards.values()):
+        """turn_end: reconcile orphaned RUNNING tool cards (TUI-008/019).
+
+        The count is kept because it decides whether an aborted turn ALSO needs a
+        standalone "interrupted" notice: each card it marks already says so, and
+        naming the tool that stopped is the more useful of the two statements.
+        """
+        # Composing rows count too: a turn that ends while the model is still
+        # dictating a call leaves a row that will never start, and leaving it
+        # "live" strands a spinner on a finished turn.
+        cards = list(self._tool_cards.values()) + list(self._composing_cards.values())
+        self._interrupted_cards = len(cards)
+        for card in cards:
             card.mark_interrupted()
         self._tool_cards.clear()
+        self._composing_cards.clear()
 
     def on_assistant_message_start(self, message: AssistantMessageStart) -> None:
-        block = AssistantBlock()
-        self._streaming_block = block
-        self._append_block(block)
+        """A message opened — but nothing is MOUNTED until text actually arrives.
+
+        A tool-use turn opens a message and goes straight to the tool calls with
+        no prose at all (every Anthropic tool turn looks like this, so it is the
+        common shape, not an edge case). Mounting the block here spent two rows
+        on it regardless: the empty block's own row, plus the blank row the
+        spacing rule opens above a block of a different kind. That read as a
+        hole between the working line and the first tool row — the excess
+        spacing reported against the tool ledger was this, not the ledger.
+
+        Deferring the mount to the first delta costs nothing: the block carries
+        no state of its own before it has text, so there is nothing to hold.
+        """
+        self._streaming_block = None
+
+    def _ensure_streaming_block(self) -> AssistantBlock:
+        """The block for the message being streamed, mounted on first use."""
+        block = self._streaming_block
+        if block is None:
+            block = AssistantBlock()
+            self._streaming_block = block
+            self._append_block(block)
+        return block
 
     def on_assistant_delta(self, message: AssistantDelta) -> None:
-        if self._streaming_block is not None:
-            self._streaming_block.update_text(message.text)
+        # Empty deltas are not text: flushing one would mount a block that then
+        # sits blank until real content lands, which is the hole this avoids.
+        if not message.text:
+            return
+        self._ensure_streaming_block().update_text(message.text)
 
     def on_assistant_message_end(self, message: AssistantMessageEnd) -> None:
-        if self._streaming_block is not None:
-            # TUI-020: adopt the authoritative text carried by the event.
-            self._streaming_block.update_text(message.text)
-            self._streaming_block.finalize_text()
+        # An empty authoritative text is not an instruction to erase what
+        # streamed. Adopting it unconditionally destroyed the prose the deltas
+        # had already painted and left an empty block mounted in its place; the
+        # controller only falls back to its own buffer when the text is None, so
+        # a provider or abort path reporting "" reaches here. Keep whatever the
+        # block has, and mount nothing when nothing streamed.
+        if not message.text:
+            block = self._streaming_block
             self._streaming_block = None
+            if block is not None:
+                block.finalize_text()
+            return
+        block = self._ensure_streaming_block()
+        # TUI-020: adopt the authoritative text carried by the event.
+        block.update_text(message.text)
+        block.finalize_text()
+        self._streaming_block = None
+
+    def on_tool_composing(self, message: ToolComposing) -> None:
+        """Show the call the model is still dictating (TUI-026).
+
+        Mounted as soon as the tool's NAME is known, which is many seconds — for
+        a file, minutes — before the call itself exists. Until this landed the
+        screen held completely still while a large `write` streamed, and the only
+        reasonable reading of that frame was that the agent had hung.
+        """
+        event = message.event
+        card = self._composing_cards.get(event.tool_call_id)
+        if card is None:
+            card = ToolCard(event.tool_call_id, event.tool_name)
+            self._composing_cards[event.tool_call_id] = card
+            self._append_block(card)
+        card.set_composing(event.argument_bytes, event.tool_name)
 
     def on_tool_started(self, message: ToolStarted) -> None:
         event = message.event
-        card = ToolCard(event.tool_call_id, event.tool_name, event.args, event.intent)
+        # Adopt the row that announced this call rather than mounting a second
+        # one: the composing card already sits in the right place in the ledger,
+        # and swapping it out would flicker a row away and an identical row back
+        # at the exact moment the call starts running.
+        card = self._adopt_composing_card(event.tool_call_id, event.tool_name)
+        if card is not None:
+            card.begin_running(event.tool_name, event.args, event.intent)
+        else:
+            card = ToolCard(event.tool_call_id, event.tool_name, event.args, event.intent)
+            self._append_block(card)
         self._tool_cards[event.tool_call_id] = card
-        self._append_block(card)
+
+    def _adopt_composing_card(self, tool_call_id: str, tool_name: str) -> ToolCard | None:
+        """The composing row for this call, if one is on screen.
+
+        Matched by id first. A provider that does not send a call id until the
+        end of its stream leaves the row keyed by a placeholder, so the fallback
+        takes the oldest composing row with the same tool name — the calls of one
+        batch start in the order they were composed.
+        """
+        card = self._composing_cards.pop(tool_call_id, None)
+        if card is not None:
+            return card
+        for key, candidate in self._composing_cards.items():
+            if candidate.tool_name == tool_name:
+                del self._composing_cards[key]
+                return candidate
+        return None
 
     def on_tool_updated(self, message: ToolUpdated) -> None:
         """TUI-007: stream the partial result into the card's summary."""
@@ -1959,6 +2681,12 @@ class OperatorApp(App[None]):
     def on_tool_ended(self, message: ToolEnded) -> None:
         event = message.event
         card = self._tool_cards.pop(event.tool_call_id, None)
+        # A todo change is visible the moment its tool settles, rather than on
+        # the next 1 Hz poll: the receipt and the band update together. The
+        # subagent panel needs no such hook — its data changes only through
+        # Subagent* events, which already repaint.
+        if str(getattr(event, "tool_name", "") or "") == "todo":
+            self._refresh_band()
         if card is None:
             return
         # Hand the card the FULL result text and details, not just a summary
@@ -1995,6 +2723,20 @@ class OperatorApp(App[None]):
             self._append_block(NoticeBlock("retry succeeded", "info"))
         else:
             self._append_block(NoticeBlock("retry failed", "error"))
+
+    # Subagent events arrive through the Controller's `_post` on the shared
+    # stream; each is an immediate repaint trigger for the band, paired with
+    # the 1 Hz poll as the belt (see `_refresh_band`). The panel re-reads the
+    # manager itself, so the handlers only need to fire the refresh, never to
+    # carry job data.
+    def on_subagent_started(self, message: SubagentStarted) -> None:
+        self._refresh_band()
+
+    def on_subagent_progress(self, message: SubagentProgress) -> None:
+        self._refresh_band()
+
+    def on_subagent_ended(self, message: SubagentEnded) -> None:
+        self._refresh_band()
 
 
 def _model_spec(session) -> Any | None:
@@ -2051,47 +2793,6 @@ def _partial_text(partial_result) -> str:
         text = getattr(content, "text", None)
         if text:
             return text
-    return ""
-
-
-def _format_usage_amount(amount) -> str:
-    """The number for one usage row, or ``""`` when the amount carries none.
-
-    ``used`` first, then ``remaining``, then ``limit``, then an explicit fraction.
-    A remaining-only balance — exactly what both account-balance fetchers report,
-    since neither vendor gives a limit to derive spend from — used to print no
-    number at all, leaving a row labelled "Balance" that never said how much and,
-    for DeepSeek, no digit anywhere on screen.
-
-    Units come from ``UNIT_LABELS`` rather than the raw key, so a row reads
-    ``519.86 USD`` and ``30%`` instead of ``519.86 usd`` and ``30 percent``. A unit
-    with no label (``unknown`` — a CNY balance already naming its currency in the
-    label) prints the bare number rather than dropping it.
-    """
-    # Imported here, not at module scope: this file deliberately keeps the
-    # provider layer off the TUI's import graph, and by the time a report exists
-    # the module is already loaded.
-    from local_operator.providers.usage import UNIT_LABELS
-
-    unit = getattr(amount, "unit", "unknown")
-    label = UNIT_LABELS.get(unit, unit)
-
-    def with_unit(value: float) -> str:
-        text = f"{value:.2f}" if unit == "usd" else f"{value:g}"
-        if not label:
-            return text
-        # "%" is a suffix, every other label is a separate word.
-        return f"{text}{label}" if label == "%" else f"{text} {label}"
-
-    if amount.used is not None:
-        return with_unit(amount.used)
-    if amount.remaining is not None:
-        return f"{with_unit(amount.remaining)} left"
-    if amount.limit is not None:
-        return f"{with_unit(amount.limit)} limit"
-    if amount.used_fraction is not None:
-        # The bar already shows this, but a bar cannot be read off precisely.
-        return f"{amount.used_fraction * 100:g}% used"
     return ""
 
 

@@ -12,7 +12,8 @@
  *   - NO uniform filler rows. Blocks own no outer margin; separation is
  *     ADAPTIVE and rides one opt-in class (.gap-above) that the transcript
  *     container applies only where the rhythm needs it — a run of one-line
- *     tool traces stays flush, prose and expanded output get a blank row.
+ *     notices stays flush, while prose, expanded output and each separate
+ *     tool action get a blank row (SPACING_AIRY in widgets/transcript.py).
  *   - one line per tool action while collapsed; each action is a subtle
  *     background-filled card (elevation = a background step, never a border
  *     or shadow) whose FILL carries the outcome
@@ -150,6 +151,23 @@ ToolCard.tool-error {
  * pointing at a row should always look the same. */
 ToolCard:hover {
     background: $lo-overlay;
+}
+
+/* Keyboard affordance, and the reason the card is a focus stop at all: a row
+ * the arrows have landed on has to look landed-on, or Enter is a guess.
+ *
+ * `tint-select` rather than the hover `overlay` on purpose. They are two
+ * different pointers — the mouse is where the hand is, focus is where the
+ * KEYBOARD is, and only one of them survives the hand leaving the mouse — so
+ * a focused row under a wandering pointer must not lose its mark. The tint is
+ * the same cool-green ground the command picker gives its highlighted row,
+ * which is already this app's word for "this is the one you are on".
+ *
+ * Last rule in the block, so it wins over the state tints AND over :hover:
+ * where the keyboard is, is the more load-bearing fact. Still no border —
+ * elevation is a background step here as everywhere. */
+ToolCard:focus {
+    background: $lo-tint-select;
 }
 
 /* The status band is the LAST row of the input panel, below the editor. It reads
@@ -301,6 +319,40 @@ Editor .text-area--suggestion {
 }
 
 Toast {
+    width: auto;
+    height: auto;
+    padding: 0 1;
+    background: $lo-overlay;
+    color: $lo-fg;
+}
+
+/* ---- usage panel (the `/usage` popup) --------------------------------- *
+ *
+ * Same treatment as the toast, and for the same reasons: it floats above every
+ * other surface, so it takes `overlay` (the ramp's top step) as a FILL, with no
+ * border — elevation is a background step, never a line (D4).
+ *
+ * It differs from the toast in what it is FOR, not in how it is placed. It is
+ * read rather than glanced at, so it holds focus and is dismissed by a key
+ * instead of a timer: nothing about the session changes underneath a table the
+ * user is reasoning about.
+ *
+ * The host HUGS the panel (`width: auto`) and both are positioned by a
+ * Python-set offset — the identical rule the toast host carries, for the
+ * identical reason. Textual hands a widget its whole region and BLANKS all of
+ * it, so a `width: 100%` host on this layer erases every column of every row
+ * the panel covers, including the transcript text either side of it. The layer
+ * keeps the panel out of the LAYOUT; it does not keep it off the screen. That
+ * also rules out `align: center middle` here, which needs a stretched host —
+ * the centring is arithmetic in the widget instead, against the measured
+ * screen it already has to read to size its own bars. */
+#usage-host {
+    layer: toast;
+    width: auto;
+    height: auto;
+}
+
+UsagePanel {
     width: auto;
     height: auto;
     padding: 0 1;
@@ -477,3 +529,140 @@ CommandPicker {
     background: $lo-surface;
     color: $lo-fg;
 }
+
+/* The tool-approval prompt. Same borderless, filled-card language as the tool
+ * ledger, because it IS a row in that ledger's story — the difference is that
+ * this one is waiting on the user.
+ *
+ * Height is content-sized rather than pinned (the exception the ToolCard note
+ * above explains): a pending prompt is deliberately two rows, the question and
+ * the key hints, and it collapses to one when answered. Both counts come from
+ * the widget's own state, not from a width-dependent measurement, so the
+ * doubling trap that forced ToolCard's pin cannot happen here.
+ *
+ * Pending sits one elevation step proud — the same "this is live" signal a
+ * running tool row uses — and the amber lives in the TEXT (glyph and keys), so
+ * the ground never shouts a colour the palette reserves for warnings. */
+ApprovalBlock {
+    height: auto;
+    background: $lo-surface;
+}
+
+ApprovalBlock.approval-pending {
+    background: $lo-raised;
+}
+
+/* Focused is the state that matters here: the prompt takes focus so its answer
+ * keys reach it instead of the composer, and the user must be able to SEE where
+ * those keys are going.
+ *
+ * `tint-select` rather than an elevation step, matching `ToolCard:focus`: it is
+ * the app's existing word for "this is the one you are on", and it stays
+ * distinguishable from hover (`$lo-overlay`) when both are live on the same row.
+ * Two focusable transcript blocks must not spell focus two different ways. */
+ApprovalBlock:focus {
+    background: $lo-tint-select;
+}
+
+/* ── dock band (subagent task list + todo list) ────────────────────────── *
+ *
+ * Sits between the transcript and the composer: a transparent POSITIONER that
+ * reserves rows only when a panel inside it is visible, so an idle session
+ * costs the layout nothing. The two panels each manage their own `display`
+ * (hidden when their ledger/store is empty), and each holds ONE filled body
+ * (`$lo-surface`, the tool card's elevation) on the ground — the same
+ * "elevation is a background step, never a line" rule as everything else. The
+ * slot's top padding row is the ONE margin the sheet permits: it separates the
+ * band from the transcript, and it is padding on the slot, never a margin, so
+ * the element that owns the vertical rhythm is the container. */
+/* The band is a normal-flow child INSIDE the docked input-dock (D-15-01).
+ * `width: auto` (content-sized) so it does NOT consume the dock's full width
+ * and defeat the shell's centering below it — a full-width sibling was the
+ * reason the boot card sat flush-left. The band's own slots stretch to the
+ * input's width via `.band-slot { width: 1fr }`, which resolves against the
+ * band's parent width when the band is content-sized. Zero rows when both
+ * panels are hidden; the height of the todo/subagent rows otherwise (D-01). */
+#band {
+    width: auto;
+    height: auto;
+}
+
+.band-slot {
+    width: 1fr;
+    height: auto;
+    padding: 1 0 0 0;
+}
+
+.band-body {
+    width: 1fr;
+    height: auto;
+    background: $lo-surface;
+    padding: 0 1;
+}
+
+#subagent-header {
+    height: auto;
+    color: $lo-dim;
+}
+
+/* The rows container must SIZE TO ITS CONTENT, never stretch to fill the
+ * band. A Vertical defaults to ``1fr``, which absorbs every free row: with
+ * even one subagent the band ballooned to the whole screen and crushed the
+ * transcript to a single row (D-01). ``height: auto`` ("as tall as my
+ * children") keeps the band as tall as its rows — typically one — so the
+ * transcript keeps the space above it. Rows themselves are already ``1``
+ * tall; the container is what was overeager. */
+#subagent-rows {
+    height: auto;
+}
+
+/* A row is a live surface: hover lights it, and a running row's trailing cell
+ * carries the spinner glyph. Rows are Static; the whole row is the click/Enter
+ * target for the trajectory modal, so hover and focus must read as reachable. */
+SubagentRow {
+    width: 1fr;
+    height: 1;
+}
+
+SubagentRow:hover {
+    background: $lo-overlay;
+}
+
+/* ── trajectory modal ──────────────────────────────────────────────────── *
+ *
+ * Opened from a band row (click or Enter). The modal is the app's own
+ * "floating read surface": same overlay ramp as the toast/usage, borderless,
+ * content-sized, holding a pinned header and a scrolling body. Esc dismisses.
+ */
+TrajectoryScreen {
+    align: center middle;
+    background: $lo-sunken;
+}
+
+TrajectoryScreen .trajectory {
+    width: auto;
+    height: auto;
+    max-width: 80;
+    max-height: 60%;
+    background: $lo-overlay;
+    padding: 1;
+}
+
+#trajectory-header {
+    width: auto;
+    height: auto;
+    color: $lo-fg;
+}
+
+#trajectory-scroll {
+    width: auto;
+    height: auto;
+    max-height: 50vh;
+}
+
+.trajectory-row {
+    width: auto;
+    height: auto;
+    color: $lo-fg;
+}
+

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import os
 import sqlite3
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -17,6 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from local_operator import resume as resume_mod
 from local_operator import session_factory
 from local_operator.session.session import Session
 from local_operator.session_factory import (
@@ -658,3 +660,162 @@ async def test_build_initial_blocks_without_turn(tmp_config_dir: Path) -> None:
     assert all(isinstance(block, str) and block.strip() for block in blocks)
     # No transcript side effects on the sessions dir from this hook.
     assert not list((tmp_config_dir / "sessions").glob("*/transcript.jsonl")) or True
+
+
+@pytest.mark.asyncio
+async def test_approval_denies_rather_than_hanging_under_a_fullscreen_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stdin gate must REFUSE while a Textual app owns the terminal.
+
+    Reading a line from stdin there is not interactive, it is a deadlock: the app
+    holds the terminal in raw mode and consumes every keystroke, so the thread
+    parked on ``input()`` never gets a line and the turn awaiting approval hangs
+    forever. That is the reported freeze — tool cards stuck on "running" while
+    the working line kept animating. A front end is expected to install its own
+    gate (``SessionProtocol.set_approval_handler``); this is the net for the gap
+    before it does.
+
+    ``input`` is replaced with a raiser so the test FAILS LOUDLY (rather than
+    blocking the suite) if the guard ever stops short-circuiting.
+    """
+    monkeypatch.setattr(session_factory.sys.stdin, "isatty", lambda: True)
+
+    def never_called(*args: Any, **kwargs: Any) -> str:
+        raise AssertionError("stdin was read while a full-screen app owned the terminal")
+
+    monkeypatch.setattr("builtins.input", never_called)
+    monkeypatch.setattr(session_factory, "_fullscreen_app_owns_terminal", lambda: True)
+
+    gate = session_factory._make_request_approval(False)
+    assert await gate("bash", "run: rm -rf /") is False
+
+
+@pytest.mark.asyncio
+async def test_approval_gate_still_prompts_without_a_fullscreen_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The plain REPL keeps its y/N prompt — the guard is narrow, not a kill switch."""
+    monkeypatch.setattr(session_factory.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(session_factory, "_fullscreen_app_owns_terminal", lambda: False)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    gate = session_factory._make_request_approval(False)
+    assert await gate("bash", "run: ls") is True
+
+
+def test_fullscreen_probe_is_false_without_a_running_app() -> None:
+    """No app running: the probe must not claim the terminal is taken."""
+    assert session_factory._fullscreen_app_owns_terminal() is False
+
+
+def test_resume_reuses_the_named_session_directory(tmp_path: Path) -> None:
+    """``--resume <id>`` points the session at an existing transcript.
+
+    Reusing the directory IS the resume mechanism: the transcript replays from
+    whatever the directory already holds, which is the same path ``--train`` takes
+    for an agent directory.
+    """
+    sessions = tmp_path / "sessions"
+    (sessions / "abc123").mkdir(parents=True)
+    (sessions / "abc123" / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    registry = FakeRegistry(tmp_path)
+
+    directory, agent_id = session_factory._transcript_dir_and_agent_id(
+        None, _args(resume="abc123"), cast("AgentRegistry", registry)
+    )
+    assert directory == sessions / "abc123"
+    assert agent_id == "main"
+
+
+def test_resume_latest_picks_the_newest_transcript(tmp_path: Path) -> None:
+    """Bare ``--resume`` reopens the most recent session.
+
+    Ordered by the TRANSCRIPT's mtime, not the directory's: a retention sweep
+    touches the directory for reasons that are not turns.
+    """
+    sessions = tmp_path / "sessions"
+    for name, when in (("older", 1_000_000), ("newer", 2_000_000)):
+        (sessions / name).mkdir(parents=True)
+        transcript = sessions / name / "transcript.jsonl"
+        transcript.write_text("{}\n", encoding="utf-8")
+        os.utime(transcript, (when, when))
+    registry = FakeRegistry(tmp_path)
+
+    directory, _ = session_factory._transcript_dir_and_agent_id(
+        None, _args(resume=resume_mod.RESUME_LATEST), cast("AgentRegistry", registry)
+    )
+    assert directory == sessions / "newer"
+
+
+@pytest.mark.parametrize("requested", ["nope", "..", "../../etc", "sub/dir", ""])
+def test_resume_refuses_a_session_it_cannot_verify(tmp_path: Path, requested: str) -> None:
+    """A typo must FAIL, not start an empty session that looks resumed.
+
+    Left to the transcript reader, an unknown id would simply create the
+    directory and open a session with no history — the one failure a resume must
+    never have. The traversal shapes are refused for the obvious reason: the id
+    arrives straight from argv and is used to build a path.
+    """
+    (tmp_path / "sessions").mkdir(parents=True)
+    registry = FakeRegistry(tmp_path)
+    with pytest.raises(resume_mod.ResumeNotFound):
+        session_factory._transcript_dir_and_agent_id(
+            None, _args(resume=requested), cast("AgentRegistry", registry)
+        )
+
+
+def test_resume_latest_with_no_sessions_is_an_honest_error(tmp_path: Path) -> None:
+    (tmp_path / "sessions").mkdir(parents=True)
+    registry = FakeRegistry(tmp_path)
+    with pytest.raises(resume_mod.ResumeNotFound, match="no previous session"):
+        session_factory._transcript_dir_and_agent_id(
+            None, _args(resume=resume_mod.RESUME_LATEST), cast("AgentRegistry", registry)
+        )
+
+
+@pytest.mark.parametrize(
+    "requested",
+    ["nope", "..", "../../etc", "sub/dir", "", ".", "C:", "C:sessions", "a\\b", "/etc/passwd"],
+)
+def test_resume_id_must_be_a_single_path_component(tmp_path: Path, requested: str) -> None:
+    """The id comes straight from argv and is used to build a path.
+
+    Enumerating escape spellings is a list that is never finished (`/`, `\\`,
+    `..`, and on Windows the drive-relative `C:x` form), so the guard asks the
+    path library one question instead: does the string survive as its own
+    basename?
+    """
+    (tmp_path / "sessions").mkdir(parents=True)
+    registry = FakeRegistry(tmp_path)
+    with pytest.raises(resume_mod.ResumeNotFound):
+        session_factory._transcript_dir_and_agent_id(
+            None, _args(resume=requested), cast("AgentRegistry", registry)
+        )
+
+
+def test_a_named_id_survives_a_stat_that_fails(tmp_path, monkeypatch) -> None:
+    """The `@latest` scan guards its stat; the named-id path did not.
+
+    Same race, on the path a user reaches by typing an id: a retention sweep
+    unlinking the directory mid-call, or a permission/ENAMETOOLONG error. A bare
+    OSError here was a traceback on the way to the TUI instead of the recovery
+    message the caller already knows how to print.
+    """
+    sessions = tmp_path / "sessions"
+    (sessions / "sess-abc").mkdir(parents=True)
+    (sessions / "sess-abc" / resume_mod.TRANSCRIPT_NAME).write_text("{}", encoding="utf-8")
+
+    # Present and readable: resolves.
+    assert resume_mod.resume_dir(tmp_path, "sess-abc").name == "sess-abc"
+
+    real_is_file = Path.is_file
+
+    def flaky(self):  # noqa: ANN001, ANN202
+        if self.name == resume_mod.TRANSCRIPT_NAME:
+            raise PermissionError("stat denied")
+        return real_is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", flaky)
+    with pytest.raises(resume_mod.ResumeNotFound):
+        resume_mod.resume_dir(tmp_path, "sess-abc")

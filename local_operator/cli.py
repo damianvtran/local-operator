@@ -30,12 +30,14 @@ Example Usage:
 from __future__ import annotations
 
 import argparse
+import copy
 import functools
 import math
 import os
 import platform
 import subprocess
 import sys
+import time
 import traceback
 from importlib.metadata import version
 from pathlib import Path
@@ -47,6 +49,11 @@ from local_operator.env import get_env_config
 from local_operator.logger import configure_cli_logging, file_logging
 from local_operator.optional import missing_extra_error
 from local_operator.paths import config_dir
+
+# `local_operator.resume` is deliberately tiny (pathlib only): importing the
+# session factory here for the same constant dragged the harness and asyncio
+# onto the CLI startup path, which test_import_graph exists to prevent.
+from local_operator.resume import RESUME_LATEST
 
 if TYPE_CHECKING:
     from local_operator.agents import AgentRegistry
@@ -103,6 +110,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # Main parser
     parser = argparse.ArgumentParser(description=CLI_DESCRIPTION, parents=[parent_parser])
 
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const=RESUME_LATEST,
+        default=None,
+        metavar="SESSION_ID",
+        dest="resume",
+        help="Resume a previous session by id, replaying its transcript. The id is the one"
+        " printed when a session is stopped with Ctrl+C twice, and is the directory name under"
+        " ~/.local-operator/sessions. Pass --resume with no id to reopen the most recent"
+        " session.",
+    )
     parser.add_argument(
         "--version",
         action="version",
@@ -436,19 +455,28 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # inside a subcommand NEVER clobbers a root-level ``--yolo`` (the
     # argparse re-default quirk that already applies to the legacy parent
     # flags must not swallow this one — ``--yolo exec "task"`` is documented).
-    _propagate_yolo(parser)
+    _propagate_global_flags(parser)
 
     return parser
 
 
-def _propagate_yolo(parser: argparse.ArgumentParser) -> None:
-    """Add a default-suppressed ``--yolo`` to every subparser (recursively).
+def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
+    """Re-declare the position-independent global options on every subparser.
 
-    Not routed through ``parent_parser``: a shared parent action with a
-    SUPPRESS default still re-applies under argparse's subparser namespace
-    reset, and resolve-style conflicts mutate the shared action. A fresh
-    action per subparser is deterministic: each accepts ``--yolo`` locally
-    and never resets the value set before the subcommand.
+    Not routed through ``parent_parser``: a shared parent action with a SUPPRESS
+    default still re-applies under argparse's subparser namespace reset, and
+    resolve-style conflicts mutate the shared action. A fresh action per
+    subparser is deterministic: each accepts the option locally and never resets
+    a value set BEFORE the subcommand.
+
+    `--yolo` needed this from the start. `--resume` needs it for a sharper
+    reason: routed only through the parent, `local-operator --resume ID exec "…"`
+    parsed the id and then had it clobbered back to ``None`` by the subparser,
+    so exec started a FRESH session — verbatim the failure the field exists to
+    prevent, and invisible because `--help` advertises the option as global.
+    Validation could not catch it either, since validation reads the value after
+    the clobber: `--resume bogus config list` exited 0 in silence while
+    `config list --resume bogus` exited 1 with the recovery listing.
     """
     for action in parser._actions:
         if not isinstance(action, argparse._SubParsersAction):
@@ -465,7 +493,16 @@ def _propagate_yolo(parser: argparse.ArgumentParser) -> None:
                 help="Auto-approve all tool executions (read/write/exec tiers)"
                 " without prompting",
             )
-            _propagate_yolo(subparser)
+            subparser.add_argument(
+                "--resume",
+                nargs="?",
+                const=RESUME_LATEST,
+                default=argparse.SUPPRESS,
+                metavar="SESSION_ID",
+                dest="resume",
+                help="Resume a previous session by id. Pass with no id for the most recent.",
+            )
+            _propagate_global_flags(subparser)
 
 
 def credential_update_command(args: argparse.Namespace) -> int:
@@ -1178,6 +1215,35 @@ def main() -> int:
         # Set up the subprocess environment early
         setup_cross_platform_environment()
 
+        # Resolve `--resume` HERE, before anything is started. Left to the
+        # session factory it surfaces inside the TUI as "session failed to
+        # start" — a full-screen app launched, painted, and torn down to report a
+        # typo — and the generic handler below would render it as a traceback
+        # panel and still exit 0. A bad session id is ordinary user error, so it
+        # gets a one-line message, the ids that DO exist, and a non-zero status.
+        if getattr(args, "resume", None) is not None:
+            from local_operator.resume import (
+                ResumeNotFound,
+                format_age,
+                recent_sessions,
+                resolve_resume_id,
+            )
+
+            try:
+                args.resume = resolve_resume_id(config_dir(), str(args.resume))
+            except ResumeNotFound as error:
+                print(f"\033[31m{error}\033[0m", file=sys.stderr)
+                # With the age: a column of bare 12-hex ids gives the reader
+                # nothing to choose between, and the recency the listing already
+                # sorted by is the one fact that makes them recognisable.
+                available = recent_sessions(config_dir())
+                if available:
+                    now = time.time()
+                    print("recent sessions (newest first):", file=sys.stderr)
+                    for session_id, mtime in available:
+                        print(f"  {session_id}   {format_age(now - mtime)}", file=sys.stderr)
+                return 1
+
         os.environ["LOCAL_OPERATOR_DEBUG"] = "true" if args.debug else "false"
         # (CL-12) No env_config binding here: the scheduler wrapper resolves its
         # own env config and the session factory does the same lazily — a
@@ -1316,6 +1382,7 @@ def main() -> int:
                 hosting=args.hosting,
                 model=args.model,
                 train=args.train,
+                resume=getattr(args, "resume", None),
             )
             # Startup preflight (CL-06) for the FOREGROUND path: hosting/
             # model (agent > flag > config) + API-key resolution fail fast
@@ -1489,6 +1556,29 @@ def main() -> int:
                 # starts cleanly. functools.partial pins it by name so a future
                 # signature change cannot re-introduce that silent failure.
                 tui_entry = functools.partial(run_tui, provider_controller=tui_controller)
+
+                # ``/resume <id>`` in the TUI needs a factory that boots an
+                # ARBITRARY session, not just the one the launch args named.
+                # Building it here closes over the same managers the boot
+                # factory used and swaps ``args.resume`` to the requested id,
+                # so a mid-session resume is exactly a relaunch onto that
+                # transcript — no second shell call, no new process. A shallow
+                # copy of the args namespace keeps the user's interactive
+                # ``args`` object untouched (``--resume`` is read once, at
+                # startup; mutating the original here would confuse the exit
+                # hint's "resume with:" line).
+                async def resume_factory(resume_id: str):
+                    resume_args = copy.copy(args)
+                    resume_args.resume = resume_id
+                    return await create_session(
+                        resume_args,
+                        config_manager,
+                        credential_manager,
+                        agent_registry,
+                        has_ui=True,
+                    )
+
+                tui_entry = functools.partial(tui_entry, resume_factory=resume_factory)
                 # The silence starts HERE, not inside ``run_tui``. The
                 # scheduler is started by the wrapper below and logs
                 # "Scheduler started" at INFO before the app has painted a

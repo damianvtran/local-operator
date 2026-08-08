@@ -181,11 +181,20 @@ class OpenAIOAuthFlow(OAuthCallbackFlow):
 
     async def exchange_token(self, code: str, state: str, redirect_uri: str) -> dict[str, Any]:
         # Form-encoded exchange, 15 s timeout (established parity).
+        #
+        # `state` is NOT sent here. OpenAI's token endpoint rejects unknown
+        # parameters outright (400 `invalid_request_error` /
+        # `unknown_parameter: state`) — observed live on `/login openai`. The
+        # device-code flow below has always omitted it and works, which is the
+        # shape this endpoint accepts. Nothing is lost: state is verified at
+        # the CALLBACK (callback_server compares it with the value sent, before
+        # the code is trusted), which is the point in OAuth where it has
+        # meaning; RFC 6749 §4.1.3 does not require echoing it on exchange. The
+        # earlier echo (PR-13) predates the endpoint's strict validation.
         payload = {
             "grant_type": "authorization_code",
             "client_id": CLIENT_ID,
             "code": code,
-            "state": state,  # PR-13: echo the verified state on exchange
             "redirect_uri": redirect_uri,
             "code_verifier": self._verifier,
         }

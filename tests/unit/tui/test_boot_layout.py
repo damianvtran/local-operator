@@ -1,6 +1,6 @@
 """Boot layout — the input is a centred card until the session has content.
 
-Two things are worth machine-checking here, and they are not the same thing:
+Three things are worth machine-checking here, and they are not the same thing:
 
 - the SWITCH: one class on the Screen carries both layouts, and it rides the
   same condition as the welcome splash. If those two can disagree the app shows
@@ -10,6 +10,12 @@ Two things are worth machine-checking here, and they are not the same thing:
   row, and no rendered row is ever wider than the terminal — including at 16 and
   20 cells, where the clamp has to degrade to "as wide as there is room for"
   rather than hold its floor and overflow.
+- the STILLNESS: the frame the user stares at while the session connects holds
+  perfectly still except for the mark's own pulse, and holds still ENTIRELY
+  once animation is gated off. The strobe this pins out was never a design
+  choice — it was the editor's blinking caret inverting a letter of the
+  placeholder twice a second — so it is worth a test that a future default
+  cannot quietly reinstate.
 
 The frame is read from the compositor rather than from widget sizes: a size
 field can be stale and a region can be off-screen, while the composed strips are
@@ -18,6 +24,7 @@ what the terminal is actually sent.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 from typing import Any
@@ -25,6 +32,7 @@ from typing import Any
 import pytest
 from rich.cells import cell_len
 
+from local_operator.harness.types import AgentMessage
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import (
     BOOT_CARD_CLASS,
@@ -42,6 +50,10 @@ TCSS = Path(__file__).parent.parent.parent.parent / "local_operator" / "tui" / "
 #: the minimalism suite measures. 16x10 is below every clamp and tier floor in
 #: the design, which is exactly why it is here.
 SIZES = [(16, 10), (20, 12), (40, 20), (80, 24), (200, 40)]
+
+#: Enough of the composer's placeholder to find its row, minus the trailing
+#: ellipsis — a truncated placeholder is still the row this looks for.
+PLACEHOLDER_HEAD = "Message Local Operator"
 
 
 class FakeSession:
@@ -93,11 +105,19 @@ class FakeSession:
     async def complete_once(self, system: str, prompt: str) -> str:
         return ""
 
+    def history(self) -> list[AgentMessage]:
+        return []
+
     async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
         self.prompts.append(text)
 
     def steer(self, text: str) -> None:
         pass
+
+    def set_approval_handler(self, handler: object | None) -> None:
+        # The TUI installs its own approval gate on boot (the stdin gate
+        # deadlocks under a full-screen app); fakes only need to accept it.
+        self.approval_handler = handler
 
     def abort(self, reason: str = "interrupted") -> None:
         pass
@@ -146,6 +166,20 @@ def _reserve(app: OperatorApp) -> tuple[bool, int]:
 def _rows(app: OperatorApp) -> list[str]:
     """The composed frame, one string per terminal row."""
     return [strip.text for strip in app.screen._compositor.render_strips()]
+
+
+def _styled_rows(app: OperatorApp) -> list[tuple[str, tuple[tuple[str, str], ...]]]:
+    """The composed frame WITH its segment styles.
+
+    :func:`_rows` answers "what does it say"; a repaint that only recolours a
+    cell — a blinking caret inverting a letter, the mark breathing — is
+    invisible to it. Stillness is a claim about the bytes the terminal receives,
+    so the styles have to be in the comparison.
+    """
+    return [
+        (strip.text, tuple((str(segment.style), segment.text) for segment in strip._segments))
+        for strip in app.screen._compositor.render_strips()
+    ]
 
 
 def _clamp() -> tuple[int, int, int]:
@@ -589,3 +623,140 @@ async def test_the_conversation_layout_reserves_nothing_and_clear_puts_it_back()
         await _settle(pilot)
         assert app.screen.has_class(BOOT_LAYOUT_CLASS)
         assert _reserve(app) != (False, 0), "and the centring comes back"
+
+
+# --- what MOVES on the boot frame ---------------------------------------------
+
+
+def _composer_cells(app: OperatorApp) -> list[tuple[str, str | None, str | None]]:
+    """(text, fg hex, bg hex) for every segment of the composer's row.
+
+    The composer is found by its content rather than by widget geometry, because
+    what is under test is what the terminal is SENT: a caret is not an object on
+    that row, it is a cell whose colours have been swapped.
+    """
+    for strip in app.screen._compositor.render_strips():
+        if PLACEHOLDER_HEAD not in strip.text and "hello" not in strip.text:
+            continue
+        cells = []
+        for segment in strip._segments:
+            style = segment.style
+            fg = style.color.get_truecolor().hex.lower() if style and style.color else None
+            bg = style.bgcolor.get_truecolor().hex.lower() if style and style.bgcolor else None
+            cells.append((segment.text, fg, bg))
+        return cells
+    raise AssertionError("the composer row is not on the frame at all")
+
+
+def _caret_cells(cells: list[tuple[str, str | None, str | None]]) -> list[str]:
+    """Cells drawn with the caret's inverted ground (`text-area--cursor`)."""
+    caret_ground = theme_mod.semantic_color("fg").lower()
+    return [text for text, _, bg in cells if bg == caret_ground]
+
+
+@pytest.mark.asyncio
+async def test_the_boot_composer_draws_no_caret_over_the_placeholder() -> None:
+    """The placeholder stays PROSE: no cell of it is inverted or covered.
+
+    This deliberately REPLACES an earlier contract in this file, which asserted
+    the opposite — that the placeholder's first cell must stay inverted, "so it
+    was not merely hidden". That was the wrong contract. Textual has nowhere to
+    put a caret except on a character, so a drawn caret here does not sit beside
+    `Message Local Operator…`, it EATS the `M`: the row rendered as
+    `▉essage Local Operator…` with the block measuring 13.76:1 against the
+    panel, roughly 2.6x the mark's own 3.71-5.35:1. Killing the blink froze that
+    artefact instead of removing it, and the loudest thing on the identity
+    screen stayed a white square on a word (D-05).
+
+    Focus is still announced — the chevron carries the accent — so the composer
+    reads as live rather than dead; it just does not shout over its own copy.
+
+    Sampled across four stock blink periods, so the no-strobe half of the
+    contract still fails loudly if blinking ever comes back.
+    """
+    app = _make_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        assert app.query_one(Editor).cursor_blink is False
+
+        samples = {tuple(_composer_cells(app))}
+        for _ in range(8):
+            await asyncio.sleep(0.25)
+            await pilot.pause()
+            samples.add(tuple(_composer_cells(app)))
+        assert len(samples) == 1, f"the composer row changed between frames: {samples}"
+
+        cells = _composer_cells(app)
+        assert not _caret_cells(cells), "a caret block is sitting on the placeholder"
+
+        # The copy survives as words, in ONE colour: a partially restyled run
+        # would mean something is still painting over a character.
+        placeholder = [(text, fg) for text, fg, _ in cells if PLACEHOLDER_HEAD in text]
+        assert placeholder, f"the placeholder is broken into pieces: {cells}"
+        assert placeholder[0][1] == theme_mod.semantic_color("dim").lower()
+
+        # ...and the field still looks focused, via the affordance that is meant
+        # to carry that (D23: focus moves the accent onto the chevron only).
+        chevron = [fg for text, fg, _ in cells if "❯" in text]
+        assert chevron == [theme_mod.semantic_color("accent").lower()]
+
+
+@pytest.mark.asyncio
+async def test_the_caret_appears_solid_as_soon_as_the_buffer_has_content() -> None:
+    """The other half of the rule: suppressed on the placeholder, present the
+    instant there is anything to point at — at the END of the buffer, which is
+    where a chat composer's caret lives, and inside it after a cursor move.
+
+    Non-blinking is re-checked here rather than assumed: the caret the user
+    actually meets is this one, and a blink reintroduced for typed text would be
+    invisible to the boot-frame test above.
+    """
+    app = _make_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        app.query_one(Editor).focus()
+        await pilot.pause()
+
+        await pilot.press("h", "e", "l", "l", "o")
+        await pilot.pause()
+        assert _caret_cells(_composer_cells(app)) == [" "], "no caret at the insertion point"
+
+        await pilot.press("left")
+        await pilot.pause()
+        assert _caret_cells(_composer_cells(app)) == ["o"], "no caret inside the text"
+
+        # Solid, not blinking: four stock blink periods, one rendering.
+        samples = set()
+        for _ in range(8):
+            await asyncio.sleep(0.25)
+            await pilot.pause()
+            samples.add(tuple(_composer_cells(app)))
+        assert len(samples) == 1, "the caret blinked once there was text"
+
+
+@pytest.mark.asyncio
+async def test_the_splash_holds_completely_still_under_the_animation_gate() -> None:
+    """With animation off (this suite's autouse fixture), the whole boot frame
+    is byte-identical over two seconds — text AND styles.
+
+    Both moving parts are covered at once here: the caret, which is static
+    unconditionally, and the mark's pulse, which the gate suppresses. The SVG
+    goldens are captured from exactly this state, so anything that moves here
+    turns a snapshot into a coin flip.
+    """
+    app = _make_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        app.query_one(Editor).focus()
+        await pilot.pause()
+
+        before = _styled_rows(app)
+        for _ in range(4):
+            await asyncio.sleep(0.5)
+            await pilot.pause()
+            assert _styled_rows(app) == before

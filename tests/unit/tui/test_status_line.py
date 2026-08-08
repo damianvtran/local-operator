@@ -699,12 +699,23 @@ def test_a_healthy_mcp_count_sheds_before_the_cwd_and_the_model_label() -> None:
     assert alarm_alone, "a danger count must survive a width the cwd cannot"
 
 
-def test_the_two_ladders_differ_only_in_where_the_mcp_rung_sits() -> None:
+def test_the_quiet_ladder_moves_mcp_without_promoting_the_widest_alarm() -> None:
     """One ordering, two positions for one rung — not two hand-maintained
-    ladders that can drift apart on the next reordering."""
+    ladders that can drift apart on the next reordering.
+
+    With one caveat the first version got wrong: lifting `mcp` out of last place
+    leaves whatever followed it at the end, and that is `approvals` — the 14-cell
+    segment the full ladder sheds FIRST precisely because dropping it buys the
+    most width. Left last, it outlived the context number in the quiet band,
+    inverting the ladder's whole argument. The narrowest survivor goes last.
+    """
     assert drop_ladder(McpStatus(configured=2, connected=1, failed=True)) is _DROP_LADDER
     assert drop_ladder(McpStatus(configured=2, connected=2)) is _DROP_LADDER_QUIET
     assert drop_ladder(McpStatus()) is _DROP_LADDER_QUIET
     assert _DROP_LADDER[-1] == "mcp"
     assert _DROP_LADDER_QUIET.index("mcp") == _DROP_LADDER_QUIET.index("cwd") - 1
-    assert [s for s in _DROP_LADDER if s != "mcp"] == [s for s in _DROP_LADDER_QUIET if s != "mcp"]
+    # The quiet band's last survivor is the context number, not the widest alarm.
+    assert _DROP_LADDER_QUIET[-1] == "context"
+    assert _DROP_LADDER_QUIET.index("approvals") < _DROP_LADDER_QUIET.index("context")
+    # Same rungs in both ladders: the reorder moves things, it never drops one.
+    assert sorted(_DROP_LADDER) == sorted(_DROP_LADDER_QUIET)

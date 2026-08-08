@@ -66,6 +66,15 @@ class AsyncJob(BaseModel):
     owner_id: str | None = None
     agent_id: str | None = None
     queued: bool = False
+    # Serialized child events of a ``task`` job (``model_dump(mode="json")``
+    # of each relayed AgentEvent), kept in memory for click-through trajectory
+    # rendering. Bounded by the writer (``subagent.TRAJECTORY_CAP``) — the
+    # runner appends one dict per child event and drops the oldest past the
+    # cap, so this field can never grow a live session out of memory.
+    # ``None`` (not []) on jobs without a trajectory: a host probing
+    # ``getattr(job, "trajectory", None)`` must be able to tell "no child
+    # events recorded" apart from "this job type has none".
+    trajectory: list[dict[str, Any]] | None = None
 
 
 class AsyncJobManager:
@@ -287,6 +296,27 @@ class AsyncJobManager:
             logger.warning("delivery sink raised for job %s", job.id, exc_info=True)
         finally:
             self._sweep_due()
+            # The slot this job just freed belongs to the longest-waiting
+            # parked job. Without this, a ``queued`` job sat forever as
+            # ``running + queued`` (occupying neither a slot nor a clear
+            # status): the task tool answered "waiting", the wait tool timed
+            # out on "still running", and the band painted it as done. Order
+            # is FIFO so the oldest request runs first.
+            self._promote_oldest_queued()
+
+    def _promote_oldest_queued(self) -> None:
+        """Start the longest-waiting ``queued`` job now that a slot is free.
+
+        Called after a running job settles (its slot is free). Idempotent and
+        safe to call from anywhere: promotes at most one job, and only when
+        the manager is under capacity — so a burst of completions promotes a
+        matching burst of parked jobs without ever exceeding
+        ``self._max_running``.
+        """
+        for job_id in self.queued_ids():
+            if self.at_capacity():
+                return
+            self.start_queued(job_id)
 
     async def _deliver(self, job: AsyncJob) -> None:
         # ``_run_job`` always stores a string on completion, so the ``or ""``
@@ -334,3 +364,23 @@ class AsyncJobManager:
         if inspect.isawaitable(value):
             return await value
         return value
+
+    # -- capacity bookkeeping ------------------------------------------------
+
+    def queued_ids(self) -> list[str]:
+        """Ids of jobs parked by ``register(..., queued=True)`` that have not
+        been promoted yet, oldest first.
+
+        A queued row holds no execution slot; promotion is automatic — the
+        manager starts the longest-waiting parked job via
+        ``_promote_oldest_queued`` whenever a running job settles and frees a
+        slot (see ``_run_job``'s finalizer). This accessor is the bookkeeping
+        half of that contract: the caller asks "who is waiting" exactly at a
+        settle, and an empty list means nothing is owed.
+        """
+        waiting = [
+            job
+            for job in self._jobs.values()
+            if job.status == "running" and job.queued and job.id in self._queued_runners
+        ]
+        return [job.id for job in sorted(waiting, key=lambda job: job.start_time)]

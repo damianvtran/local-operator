@@ -39,7 +39,7 @@ from rich.text import Text
 from textual.widgets import Static
 
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.widgets.tool_card import truncate_cells
+from local_operator.tui.widgets.tool_card import format_duration, truncate_cells
 
 #: Spinner frames shown while the session is streaming (~12.5 fps glyph
 #: cadence when shimmer is disabled).
@@ -65,6 +65,10 @@ ICON_DURATION = "◷"
 #: was checked rather than assumed, because the band's arithmetic is exact and
 #: a two-cell glyph would drift the right group's edge by one column.
 ICON_MCP = "⊙"
+#: Auto-approve indicator. Deliberately NOT one of the geometric segment icons
+#: above: this one is an ALARM, not a reading, and it reuses the app-wide
+#: warning glyph so it reads the same as a warning notice in the transcript.
+ICON_APPROVALS = "!"
 
 #: Separators point INWARD: the left group's chevrons aim right and the right
 #: group's aim left, so both runs converge on the centre gap and frame it. A
@@ -141,6 +145,16 @@ _DROP_LADDER: tuple[str, ...] = (
     # these the other way round, which contradicted this very ladder's rationale.
     "cwd",
     "context",
+    # Second-to-last, just ahead of mcp. This rung only EXISTS while the
+    # tool-approval gate has been disarmed for the session, so it is an alarm by
+    # the same argument mcp's failure branch is one — but it is the WIDEST
+    # segment in the band (`! auto-approve` is 14 cells against `⊙ 3 MCP`'s 7),
+    # and this ladder sheds by what a drop BUYS. Dropping the widest alarm first
+    # is what lets the narrow one survive to the very last step, so a cramped
+    # terminal keeps saying something rather than falling straight to the
+    # truncated tail. The mode is still not silent when it goes: `/approvals`
+    # reports it, and the notice that latched it is in the transcript.
+    "approvals",
     # DEAD LAST *when it is an alarm*, mirroring the reference's
     # `flexShrink={0}` on this indicator. Two reasons it then outlives even the
     # context number. It is the narrowest segment in the band — `⊙ 3 MCP` is 7
@@ -157,9 +171,20 @@ _DROP_LADDER: tuple[str, ...] = (
 
 
 def _mcp_before_cwd(ladder: tuple[str, ...]) -> tuple[str, ...]:
-    """``ladder`` with the mcp rung moved to just ahead of ``cwd``."""
+    """``ladder`` with the mcp rung moved to just ahead of ``cwd``.
+
+    Moving mcp forward leaves whatever followed it at the END of the ladder, and
+    in the full order that is ``approvals`` — the 14-cell segment this ladder
+    documents as the FIRST alarm to shed because dropping it buys the most width.
+    Left last it became the thing that outlived the context number in the quiet
+    band, which inverts the whole argument. So the tail is re-ordered too: the
+    narrowest survivor goes last.
+    """
     rungs = [step for step in ladder if step != "mcp"]
     rungs.insert(rungs.index("cwd"), "mcp")
+    if rungs[-1] == "approvals":
+        rungs.remove("approvals")
+        rungs.insert(rungs.index("context"), "approvals")
     return tuple(rungs)
 
 
@@ -234,25 +259,6 @@ def format_cost(cost: float) -> str:
     if cost < 1.0:
         return f"${cost:.3f}"
     return f"${cost:.2f}"
-
-
-def format_duration(seconds: float) -> str:
-    """Active processing time: ``9s``, ``41m1s``, ``1h2m``.
-
-    Units are dropped once they stop carrying information: past an hour the
-    seconds are noise, and a whole minute renders as ``5m`` rather than
-    ``5m0s``. Sub-second work renders as ``0s`` rather than vanishing, so a
-    finished turn always leaves a mark.
-    """
-    total = int(seconds)
-    if total < 60:
-        return f"{total}s"
-    if total < 3600:
-        minutes, secs = divmod(total, 60)
-        return f"{minutes}m{secs}s" if secs else f"{minutes}m"
-    hours, remainder = divmod(total, 3600)
-    minutes = remainder // 60
-    return f"{hours}h{minutes}m" if minutes else f"{hours}h"
 
 
 def format_agents(count: int) -> str:
@@ -439,6 +445,10 @@ class StatusLine:
         self._cost: str = ""
         self._conversation_name: str = ""
         self._mcp: McpStatus = McpStatus()
+        # True once the user has answered a tool-approval prompt with "allow
+        # all": a session-wide mode with no persistent indicator is how a
+        # disarmed gate gets forgotten about.
+        self._approvals_auto: bool = False
         # Cumulative ACTIVE processing time: the sum of turn durations, not
         # wall clock since launch. A session left open over lunch has not
         # been working for two hours, and reporting that it has makes the
@@ -463,6 +473,7 @@ class StatusLine:
         cost: str | None = None,
         conversation_name: str | None = None,
         mcp: McpStatus | None = None,
+        approvals_auto: bool | None = None,
     ) -> None:
         """Update any subset of segments and repaint the band."""
         if model_label is not None:
@@ -481,6 +492,8 @@ class StatusLine:
             self._jobs = jobs
         if mcp is not None:
             self._mcp = mcp
+        if approvals_auto is not None:
+            self._approvals_auto = approvals_auto
         if cost is not None:
             self._cost = cost
         if conversation_name is not None:
@@ -550,7 +563,13 @@ class StatusLine:
             # whole left/right architecture read as one undifferentiated run and
             # abuts a filesystem path against a percentage. Reachable by dragging
             # a window one cell at ordinary widths like 98 or 116 (D3).
-            if cell_len(left.plain) + cell_len(right.plain) + _MIN_GROUP_GAP <= width:
+            #
+            # Reserved only when there IS a right group. Charged unconditionally,
+            # the gap bought separation from nothing: the two-group layout was
+            # abandoned four columns early and the spinner hopped across the model
+            # label at a width where the row it reflowed to was no narrower.
+            gap = _MIN_GROUP_GAP if right.plain else 0
+            if cell_len(left.plain) + cell_len(right.plain) + gap <= width:
                 return self._compose(left, right, width, dim)
 
         # Even the irreducible row overflows. Truncate the model label rather
@@ -700,6 +719,24 @@ class StatusLine:
             parts.append(
                 ("", self._conversation_name, Style(color=theme_mod.semantic_color("muted")))
             )
+        if self._approvals_auto and "approvals" not in dropped:
+            # LAST, so its right edge is the band's right edge: everything else
+            # here is right-ALIGNED as a group, which means a segment placed first
+            # slides left every time a sibling appears (measured: column 86 -> 74
+            # -> 64 -> 51 at a fixed 100 cells). An alarm that moves is an alarm
+            # the eye has to find.
+            #
+            # The glyph rides INSIDE the styled text rather than in the icon slot,
+            # because the loop below paints icons `dim` — which made the one alarm
+            # in the band its quietest mark (4.18:1, against the same `!` at
+            # 9.4:1 in the transcript).
+            parts.append(
+                (
+                    "",
+                    f"{ICON_APPROVALS} auto-approve",
+                    Style(color=theme_mod.semantic_color("warning"), bold=True),
+                )
+            )
 
         right = Text()
         for index, (icon, text, style) in enumerate(parts):
@@ -711,7 +748,15 @@ class StatusLine:
         return right
 
     def _compose(self, left: Text, right: Text, width: int, dim: Style) -> Text:
-        """Left group, filler, right group — right-aligned to the band edge."""
+        """Left group, filler, right group — right-aligned to the band edge.
+
+        With no right group there is nothing to align and nothing to separate, so
+        the filler is not emitted at all. Padding unconditionally pushed a row
+        that exactly fitted its frame `_MIN_GROUP_GAP` cells past it, on trailing
+        blanks that aligned nothing.
+        """
+        if not right.plain:
+            return left
         gap = max(_MIN_GROUP_GAP, width - cell_len(left.plain) - cell_len(right.plain))
         row = Text()
         row.append_text(left)

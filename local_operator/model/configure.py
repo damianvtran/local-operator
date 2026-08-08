@@ -23,7 +23,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from typing import TYPE_CHECKING, Any, Optional
 
 from pydantic import BaseModel, SecretStr
@@ -38,6 +38,7 @@ from local_operator.model.catalogue import DEFAULT_TTL_S
 from local_operator.model.registry import (
     ModelInfo,
     anthropic_default_model_info,
+    anthropic_family_model_info,
     get_model_info,
     unknown_model_info,
 )
@@ -99,12 +100,22 @@ DEFAULT_MODEL_NAMES: dict[str, str] = {
 UNKNOWN_CONTEXT_WINDOW = 128_000
 UNKNOWN_MAX_OUTPUT = 8_192
 
-#: Per-provider fallback templates for an id the shipped registry does not carry.
-#: Only providers whose whole FAMILY shares a floor belong here: Anthropic's
-#: listing names models without describing them, so without a template an id the
-#: provider confirms exists still resolves to the global 128k/8192/no-cache
-#: unknown — numbers no Claude has ever had. A provider absent from this map keeps
-#: the existing behaviour and falls through to ``unknown_model_info``.
+#: Per-provider FAMILY resolvers for an id the shipped registry does not carry,
+#: tried before the flat templates below. A family answer is strictly better where
+#: one exists: Anthropic's tiers no longer share a window (Opus 5 serves 1M, Opus
+#: 4.5 serves 200k), so a single per-provider template necessarily reports one of
+#: them wrongly, and it was the 200k one — a dated snapshot of Opus 5 ran with a
+#: 160k compaction threshold on a model with 1M of room.
+_FAMILY_MODEL_RESOLVERS: dict[str, Callable[[str], ModelInfo | None]] = {
+    "anthropic": anthropic_family_model_info,
+}
+
+#: Per-provider fallback templates for an id neither the registry nor a family
+#: resolver can describe. Only providers whose whole FAMILY shares a floor belong
+#: here: an Anthropic id whose tier cannot be parsed still resolves to the global
+#: 128k/8192/no-cache unknown without one — numbers no Claude has ever had. A
+#: provider absent from this map keeps the existing behaviour and falls through to
+#: ``unknown_model_info``.
 _UNKNOWN_MODEL_TEMPLATES: dict[str, ModelInfo] = {
     "anthropic": anthropic_default_model_info,
 }
@@ -190,8 +201,14 @@ class ModelConfiguration:
 #: happily accept ``temperature`` on those variants. Dropping it there would
 #: trade a loud 400 for a silent loss of a real setting, which is the worse
 #: bug. Only families with observed rejection belong in this pattern.
+# The Claude arm matches ANY tier name at generation 5 and above, not a fixed
+# list of them. `opus|sonnet|haiku` was written when those were all there were,
+# and `claude-fable-5` — a real tier no such list contained — sailed through it
+# and sent `temperature`/`top_p` to an endpoint that rejects the pair. This is
+# the same reasoning `_anthropic_family` uses for avoiding tier lists, applied
+# to the one place that still had one.
 _NO_SAMPLING_PARAMS = re.compile(
-    r"claude-(?:opus|sonnet|haiku)-(?:[5-9]|\d{2,})(?!\d)" r"|(?:^|[/:-])o[1-9](?:-|$)" r"|gpt-5"
+    r"claude-[a-z]+-(?:[5-9]|\d{2,})(?!\d)" r"|(?:^|[/:-])o[1-9](?:-|$)" r"|gpt-5"
 )
 
 
@@ -731,9 +748,10 @@ def _info_from_discovery(provider: str, model_name: str, fallback: ModelInfo) ->
     taken only when the listing actually has it. ``local_operator.model.discovery``
     has already merged the listing over the static registry and applied the rules
     that make a listing trustworthy — a zero price is unknown rather than free, a
-    ``max_tokens`` of exactly 4096 is a lying OpenAI-compat default, capabilities
-    are OR-ed so a terse listing cannot downgrade a model — so this function is
-    only the projection of that answer onto the legacy ``ModelInfo`` shape.
+    ``max_tokens`` of exactly 4096 is a lying OpenAI-compat default, an UNSTATED
+    capability defers to the registry while a stated one (including a ``false``)
+    is the provider's own answer — so this function is only the projection of that
+    answer onto the legacy ``ModelInfo`` shape.
 
     Imported lazily. The discovery module pulls httpx and the provider registry,
     and this branch is only reached for a model the registry does not describe;
@@ -783,25 +801,42 @@ def _info_from_discovery(provider: str, model_name: str, fallback: ModelInfo) ->
         # from reading as free rather than inventing a number.
         if not info.cache_writes_price:
             info.cache_writes_price = info.input_price
-    info.supports_images = info.supports_images or row.supports_images
+    if row.supports_images is not None:
+        # The provider's own statement, including a ``false``: ``DiscoveredModel``
+        # spells "the listing did not say" as ``None``, so the only thing an
+        # OR would add here is the ability to ignore a denial. ``ModelInfo``
+        # already carries ``Optional[bool]`` with the same meaning, and
+        # ``build_model_spec`` reads ``is not None`` before trusting it.
+        info.supports_images = row.supports_images
     info.supports_prompt_cache = info.supports_prompt_cache or row.supports_prompt_cache
     return info
 
 
 def _registry_fallback(provider: str, model_id: str) -> ModelInfo:
-    """What the registry can say about ``model_id``, or the best template for it.
+    """What the registry can say about ``model_id``, or the best stand-in for it.
+
+    Three answers in descending order of confidence:
+
+    1. The shipped row for exactly this id.
+    2. The model's FAMILY, where the provider has one that can be read out of the
+       id — see :func:`anthropic_family_model_info`. This is what keeps a dated
+       snapshot of a shipped model (``claude-opus-5-20260112``) on its family's
+       real 1M window instead of a family-blind floor.
+    3. A per-provider template.
 
     The global ``unknown_model_info`` is the right answer only for a provider we
-    know nothing structural about. For Anthropic it is actively wrong: the listing
-    confirms an id exists but describes NOTHING about it (ids and display names
-    only), so an unshipped Claude id would keep 128k/8192/no-cache — numbers no
-    Claude generation has ever had. The per-provider template carries the family
-    floor instead, in the same shape ``openrouter_default_model_info`` and
-    ``radient_default_model_info`` already use for the aggregators.
+    know nothing structural about. For Anthropic it is actively wrong: an unshipped
+    Claude id would keep 128k/8192/no-cache — numbers no Claude generation has ever
+    had. The template carries the family floor instead, in the same shape
+    ``openrouter_default_model_info`` and ``radient_default_model_info`` already use
+    for the aggregators.
 
-    The id and name are overwritten so a template shared by every unknown id of a
-    provider cannot leak its placeholder identity ("Anthropic Claude") into a band
-    that is meant to name the model the session is running.
+    The template's id and name are overwritten so a placeholder shared by every
+    unknown id of a provider cannot leak its identity ("Anthropic Claude") into a
+    band that is meant to name the model the session is running. A family resolver
+    owns those two fields itself, because only it knows whether the match was the
+    same model under another spelling (keep the real name) or a newer generation
+    inheriting limits (the name would be a lie).
     """
     try:
         info = get_model_info(provider, model_id)
@@ -809,6 +844,11 @@ def _registry_fallback(provider: str, model_id: str) -> ModelInfo:
         info = None
     if info is not None and info is not unknown_model_info:
         return info
+
+    resolver = _FAMILY_MODEL_RESOLVERS.get(provider)
+    family = resolver(model_id) if resolver is not None else None
+    if family is not None:
+        return family
 
     template = _UNKNOWN_MODEL_TEMPLATES.get(provider)
     if template is not None:

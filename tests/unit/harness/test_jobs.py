@@ -253,3 +253,53 @@ async def test_list_scoped_by_owner():
 
 def test_defaults():
     assert DEFAULT_MAX_RUNNING_JOBS == 15
+
+
+@pytest.mark.asyncio
+async def test_a_completion_promotes_the_longest_queued_job():
+    """C14-01: when a running job settles, its freed slot runs the oldest
+    parked job — a queued subagent must not sit ``running + queued`` forever.
+
+    Previously nothing called ``start_queued`` after a completion, so a task
+    launched at a full manager parked indefinitely (the wait tool timed out on
+    "still running" and the band painted it ✓). This asserts the manager is
+    self-healing: 2 fill capacity, a 3rd queues, one completes, and the
+    queued job runs.
+    """
+    manager = AsyncJobManager(max_running=2)
+    gate = [asyncio.Event(), asyncio.Event()]
+    started: list[str] = []
+    completed: list[str] = []
+
+    async def gated(i: int):
+        async def runner(job_id, signal, report_progress):
+            started.append(job_id)
+            await gate[i].wait()
+            completed.append(job_id)
+            return f"done:{job_id}"
+
+        return runner
+
+    a = manager.register("task", "a", await gated(0))
+    b = manager.register("task", "b", await gated(1))
+    q = manager.register("task", "queued", quick_runner, queued=True)
+    assert require_job(manager, q).queued is True
+    assert require_job(manager, q).status == "running"  # parked, not settled
+    # The two running jobs start on their own schedules; wait for both to have
+    # grabbed their slots before asserting the queued one holds none.
+    await wait_for(lambda: len(started) >= 2)
+    assert set(started) == {a, b}  # queued holds no slot
+
+    # Free ONE slot (a completes); the queued job should promote and run.
+    gate[0].set()
+    await wait_for(lambda: require_job(manager, a).status == "completed")
+    # The promotion fires a.settled: q flips from parked to running and runs
+    # to completion on its own (the whole point — no manual start_queued).
+    await wait_for(lambda: require_job(manager, q).status == "completed")
+    assert require_job(manager, q).queued is False
+    assert require_job(manager, q).result_text == f"done:{q}"
+
+    # b is still running; free it so dispose is clean.
+    gate[1].set()
+    await wait_for(lambda: require_job(manager, b).status == "completed")
+    await manager.dispose()

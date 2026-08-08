@@ -1,9 +1,11 @@
 """Live model discovery: layered over the registry, never underneath it.
 
 The registry only knows the models that existed when it was last edited, so a
-newly released model is unreachable until discovery surfaces it. The danger is
-the other direction: every provider listing is poorer than the bundled data --
-Anthropic's returns nothing but an id and a display name -- so a naive
+newly released model is unreachable until discovery surfaces it, and its real
+limits are unknowable until a listing states them -- Anthropic's ``/v1/models``
+is the only place ``claude-opus-5`` says 1M rather than the shipped family floor.
+The danger runs both ways: a listing may also be POORER than the bundled data (a
+lean OpenAI-compatible gateway sends an id and nothing else), so a naive
 "live overwrites static" merge produces zero prices, missing output caps and a
 ``context_window`` of ``-1`` whose compaction threshold never fires.
 
@@ -195,41 +197,167 @@ def test_openai_compat_sends_a_bearer_key_and_omits_it_when_keyless() -> None:
 # -- Anthropic transport ------------------------------------------------------
 
 
+#: Captured from ``GET https://api.anthropic.com/v1/models?limit=50`` on
+#: 2026-08-07, trimmed to two entries and to the capability keys this transport
+#: reads. The two are chosen to disagree: the 5 generation serves 1M with 128k of
+#: output while Opus 4.5 serves 200k with 64k, so a transport that hardcoded
+#: either — or that kept reporting zeros and left the family floor to answer —
+#: fails on one of them.
 _ANTHROPIC_BODY = {
     "data": [
         {
-            "id": "claude-opus-5-20260601",
+            "id": "claude-opus-5",
             "display_name": "Claude Opus 5",
             "created_at": "2026-06-01T00:00:00Z",
             "type": "model",
+            "max_input_tokens": 1_000_000,
+            "max_tokens": 128_000,
+            "capabilities": {
+                "image_input": {"supported": True},
+                "pdf_input": {"supported": True},
+                "thinking": {"supported": True, "types": {"adaptive": {"supported": True}}},
+            },
         },
         {
-            "id": "claude-sonnet-4-20250514",
-            "display_name": "Claude Sonnet 4",
-            "created_at": "2025-05-14T00:00:00Z",
+            "id": "claude-opus-4-5-20251101",
+            "display_name": "Claude Opus 4.5",
+            "created_at": "2025-11-01T00:00:00Z",
             "type": "model",
+            "max_input_tokens": 200_000,
+            "max_tokens": 64_000,
+            "capabilities": {"image_input": {"supported": True}},
         },
     ],
     "has_more": False,
 }
 
+#: The same endpoint as it answered before ``max_input_tokens`` existed, and as a
+#: proxy pinned to an older API version still answers. Kept because the transport
+#: must degrade to the registry here rather than zero the numbers a session runs on.
+_ANTHROPIC_TERSE_BODY = {
+    "data": [
+        {
+            "id": "claude-opus-5",
+            "display_name": "Claude Opus 5",
+            "created_at": "2026-06-01T00:00:00Z",
+            "type": "model",
+        }
+    ],
+    "has_more": False,
+}
 
-def test_anthropic_returns_ids_and_display_names_with_zeroed_numbers() -> None:
+
+def test_anthropic_maps_the_window_output_cap_and_image_support() -> None:
+    """The reported defect: a session on `claude-opus-5` showed `1.8%/200k`.
+
+    The listing had the truth all along — 1,000,000 `max_input_tokens` — and the
+    transport threw it away, so the 200k family floor answered instead and the
+    compaction threshold came out at 160k on a model with 1M of room.
+    """
     client = _StubClient([_Response(200, _ANTHROPIC_BODY)])
     rows = fetch_models("anthropic", api_key="sk-ant", client=client)
 
     assert rows is not None
-    assert [row.id for row in rows] == ["claude-opus-5-20260601", "claude-sonnet-4-20250514"]
+    assert [row.id for row in rows] == ["claude-opus-5", "claude-opus-4-5-20251101"]
     assert rows[0].name == "Claude Opus 5"
-    # The listing carries no limits and no prices, so the transport must report
-    # "unknown" as zero and leave the numbers to the merge. Any invented default
-    # here is what produced a session running at context_window = -1.
-    assert rows[0].context_window == 0
-    assert rows[0].max_tokens == 0
+    assert rows[0].context_window == 1_000_000
+    assert rows[0].max_tokens == 128_000
+    assert rows[0].supports_images is True
+    # The generations disagree, so the second entry proves the numbers are read
+    # per model rather than taken from the first row or a constant.
+    assert rows[1].context_window == 200_000
+    assert rows[1].max_tokens == 64_000
+    # Still no prices on this wire, and a made-up one renders in the status band
+    # as fact. Prompt caching is likewise not a listing field.
     assert rows[0].input_price == 0.0
     assert rows[0].output_price == 0.0
+    assert rows[0].supports_prompt_cache is False
     assert client.calls[0][0] == "https://api.anthropic.com/v1/models"
     assert client.calls[0][2]["limit"] == 1000
+
+
+def test_anthropic_reports_unknown_for_everything_the_listing_omits() -> None:
+    """An older API version, or a proxy that strips fields, must cost the session
+    nothing: the numbers come back as the zero that means "unknown" and the
+    capability as ``None`` — "not stated", which the merge fills from the registry.
+    Inventing a default here is what produced a session at `context_window = -1`,
+    and reading the silence as ``False`` would deny image input no one denied."""
+    client = _StubClient([_Response(200, _ANTHROPIC_TERSE_BODY)])
+    rows = fetch_models("anthropic", api_key="sk-ant", client=client)
+
+    assert rows is not None
+    assert rows[0].context_window == 0
+    assert rows[0].max_tokens == 0
+    assert rows[0].supports_images is None
+
+
+@pytest.mark.parametrize(
+    "capabilities, stated, merged",
+    [
+        # Stated denial: the provider's answer, and it must survive a registry row
+        # that says otherwise (review finding C-07).
+        ({"image_input": {"supported": False}}, False, False),
+        # Stated support.
+        ({"image_input": {"supported": True}}, True, True),
+        # The key exists but says nothing, which is not a denial.
+        ({"image_input": {}}, None, True),
+        # No capabilities object at all — an older API version, a stripping proxy.
+        (None, None, True),
+    ],
+)
+def test_anthropic_capability_states_survive_the_merge(
+    tmp_path, capabilities, stated, merged
+) -> None:
+    """All three states, from the wire to the row a session resolves from.
+
+    Capabilities are objects, not flags: `{"image_input": {"supported": false}}` is
+    a text-only model advertising the key, and reading the object's truthiness
+    would report every listed capability as supported. That precision only means
+    something if it reaches the merge, which is what this pins end to end — the
+    shipped `claude-opus-5` row carries `supports_images=True`, so an OR made the
+    stated `false` unreachable.
+    """
+    entry: dict[str, Any] = {"id": "claude-opus-5", "display_name": "Claude Opus 5"}
+    if capabilities is not None:
+        entry["capabilities"] = capabilities
+    body = {"data": [entry]}
+
+    rows = fetch_models("anthropic", api_key="k", client=_StubClient([_Response(200, body)]))
+    assert rows is not None
+    assert rows[0].supports_images is stated
+
+    resolved, status = available_models(
+        "anthropic",
+        api_key="k",
+        client=_StubClient([_Response(200, body)]),
+        cache_dir=tmp_path,
+    )
+    assert status == "ok"
+    by_id = {row.id: row for row in resolved}
+    assert static_models("anthropic")["claude-opus-5"].supports_images is True, "fixture drifted"
+    assert by_id["claude-opus-5"].supports_images is merged
+
+
+def test_a_cache_round_trip_does_not_turn_unstated_into_denied(tmp_path) -> None:
+    """`dataclasses.asdict` stores the unstated capability as `null`, and reading
+    that back as False would make the same model resolve differently from disk than
+    live — the second open of a picker disagreeing with the first."""
+    body = {"data": [{"id": "claude-opus-5", "display_name": "Claude Opus 5"}]}
+    client = _StubClient([_Response(200, body)])
+
+    live, live_status = available_models(
+        "anthropic", api_key="k", client=client, cache_dir=tmp_path
+    )
+    cached, cached_status = available_models(
+        "anthropic", api_key="k", client=client, cache_dir=tmp_path
+    )
+
+    assert (live_status, cached_status) == ("ok", "cached")
+    assert len(client.calls) == 1
+    stored = json.loads((tmp_path / "anthropic.listing.json").read_text())
+    assert stored["payload"]["models"][0]["supports_images"] is None
+    for rows in (live, cached):
+        assert {row.id: row.supports_images for row in rows}["claude-opus-5"] is True
 
 
 def test_anthropic_authenticates_an_api_key_with_x_api_key() -> None:
@@ -695,20 +823,43 @@ def test_merge_prefers_live_prices_when_they_are_present() -> None:
     assert merged[0].cache_read_price == pytest.approx(0.3)
 
 
-def test_merge_ors_capability_flags_so_a_terse_listing_cannot_downgrade() -> None:
+def test_an_unstated_capability_defers_to_the_registry() -> None:
+    """Silence is not a denial. Every lean OpenAI-compatible gateway sends an id
+    and nothing else, and reading that as "no images, no caching" would downgrade
+    every bundled vision model and drop `cache_control` on the priciest ones."""
     static = {"m": _info("m", supports_images=True, supports_prompt_cache=True)}
-    merged = merge_models(static, [DiscoveredModel(id="m")])
+    live = [DiscoveredModel(id="m")]
+    assert live[0].supports_images is None, "the unstated default must be None, not False"
+    merged = merge_models(static, live)
 
     assert merged[0].supports_images is True
     assert merged[0].supports_prompt_cache is True
 
 
-def test_merge_ors_capability_flags_so_a_listing_can_upgrade() -> None:
+def test_a_stated_capability_can_upgrade_the_registry() -> None:
     static = {"m": _info("m", supports_images=False, supports_prompt_cache=False)}
     live = [DiscoveredModel(id="m", supports_images=True, supports_prompt_cache=True)]
     merged = merge_models(static, live)
 
     assert merged[0].supports_images is True
+    assert merged[0].supports_prompt_cache is True
+
+
+def test_an_explicit_false_from_the_provider_beats_a_true_registry_row() -> None:
+    """Review finding C-07. An OR made this state unreachable: every shipped
+    Anthropic row carries `supports_images=True`, so a live
+    `image_input.supported: false` merged straight back to True and a text-only
+    model went on advertising vision — the provider's own denial, overruled by a
+    hand-transcribed row it was meant to correct.
+
+    Only `supports_images` gets the third state, and only because a wire states it.
+    `supports_prompt_cache` has no such field anywhere, so its silence still ORs.
+    """
+    static = {"m": _info("m", supports_images=True, supports_prompt_cache=True)}
+    live = [DiscoveredModel(id="m", supports_images=False)]
+    merged = merge_models(static, live)
+
+    assert merged[0].supports_images is False
     assert merged[0].supports_prompt_cache is True
 
 
@@ -727,22 +878,27 @@ def test_anthropic_merge_keeps_static_numbers_and_surfaces_a_new_id() -> None:
     known_id = "claude-sonnet-4-20250514"
     assert known_id in static, "registry no longer ships the id this test pins"
     known_static = static[known_id]
+    new_id = "claude-opus-5-20260601"
+    assert new_id not in static, "registry now ships the id this test uses as unknown"
 
     live = [
-        DiscoveredModel(id="claude-opus-5-20260601", name="Claude Opus 5"),
+        DiscoveredModel(id=new_id, name="Claude Opus 5"),
         DiscoveredModel(id=known_id, name="Claude Sonnet 4"),
     ]
     by_id = {row.id: row for row in merge_models(static, live)}
 
-    # The known model keeps everything the id-and-name-only listing lacks.
+    # A listing that omitted the limits (an older API version, a stripping proxy)
+    # must leave the known model with everything the registry knows.
     assert by_id[known_id].context_window == known_static.context_window
     assert by_id[known_id].input_price == pytest.approx(known_static.input_price)
     assert by_id[known_id].output_price == pytest.approx(known_static.output_price)
     assert by_id[known_id].max_tokens == known_static.max_tokens
     # The new model is reachable, and honestly reports what the listing did not
-    # say rather than inventing a window.
-    assert by_id["claude-opus-5-20260601"].name == "Claude Opus 5"
-    assert by_id["claude-opus-5-20260601"].context_window == 0
+    # say rather than inventing a window. Inheriting its family's window is a
+    # RESOLUTION concern (`configure._registry_fallback`), not a merge one: the
+    # picker must not claim a number the provider never sent for this id.
+    assert by_id[new_id].name == "Claude Opus 5"
+    assert by_id[new_id].context_window == 0
 
 
 # -- available_models ---------------------------------------------------------
@@ -756,8 +912,11 @@ def test_available_models_reports_ok_and_merges_the_registry(tmp_path) -> None:
 
     assert status == "ok"
     by_id = {row.id: row for row in models}
-    assert "claude-opus-5-20260601" in by_id
-    assert by_id["claude-sonnet-4-20250514"].context_window > 0
+    # Live: in the payload, with the payload's window.
+    assert by_id["claude-opus-5"].context_window == 1_000_000
+    # Registry-only: the listing did not mention it, and a model the user can run
+    # today must not vanish from the picker because of that.
+    assert by_id["claude-3-5-sonnet-20241022"].context_window == 200_000
 
 
 def test_available_models_serves_a_fresh_cache_without_a_request(tmp_path) -> None:
@@ -785,9 +944,10 @@ def test_available_models_reports_cached_when_a_stale_refetch_fails(tmp_path) ->
     )
 
     assert status == "cached"
-    # Stale beats absent: the discovered ids are days old at worst, and losing
-    # them because the network blipped is the regression this guards.
-    assert "claude-opus-5-20260601" in {row.id for row in models}
+    # Stale beats absent: the numbers are days old at worst, and losing the
+    # window because the network blipped is the regression this guards.
+    by_id = {row.id: row for row in models}
+    assert by_id["claude-opus-5"].context_window == 1_000_000
 
 
 def test_available_models_reports_static_when_a_cold_fetch_fails(tmp_path) -> None:
@@ -886,6 +1046,11 @@ def test_a_cached_document_that_cannot_be_mapped_is_dropped_so_the_next_call_rec
     arriving as an object -- would otherwise be served as a FRESH hit on every
     start for the full 24h TTL. Measured before the fix: three consecutive calls
     all returned ``static`` with zero fetches and the document stayed on disk.
+
+    Dropping it was not enough either. The call that drops it has already been
+    served from a fresh hit, so the fetch never ran, and the answer fell through
+    to the registry's static rows -- of which an aggregator has NONE. So the same
+    call re-enters the cache once and recovers immediately.
     """
     poisoned = tmp_path / "openrouter.listing.json"
     poisoned.write_text(
@@ -895,18 +1060,111 @@ def test_a_cached_document_that_cannot_be_mapped_is_dropped_so_the_next_call_rec
     body = {"data": [{"id": "vendor/model", "context_length": 1_000}]}
     client = _StubClient([_Response(200, body)])
 
-    _, first_status = available_models("openrouter", api_key="k", client=client, cache_dir=tmp_path)
-    fetches_after_first = len(client.calls)
-    poisoned_survived = poisoned.exists()
-    models, second_status = available_models(
+    models, first_status = available_models(
         "openrouter", api_key="k", client=client, cache_dir=tmp_path
     )
 
-    # The first call cannot do better than the registry -- the document looks
-    # fresh, so nothing is fetched -- but it must not leave the document behind:
-    # recovery has to happen without the user deleting a file by hand.
-    assert (first_status, fetches_after_first) == ("static", 0)
-    assert not poisoned_survived
-    assert second_status == "ok"
+    # The FIRST call recovers: the unusable document is dropped and refetched in
+    # one pass, because "the next call will fix it" is an empty model list for
+    # every provider whose registry has no static rows.
+    assert first_status == "ok"
     assert len(client.calls) == 1
+    assert "vendor/model" in {row.id for row in models}
+
+
+def test_a_cached_document_from_an_older_capture_is_refetched_not_served(tmp_path) -> None:
+    """The upgrade that fixed the numbers must not be invisible for a day.
+
+    Version 1 of the Anthropic transport wrote every window as zero because it did
+    not read ``max_input_tokens``. That document is perfectly well SHAPED, so
+    without the capture stamp it is served as a fresh cache hit for the rest of its
+    24h TTL: the install that reported ``1.8%/200k`` would have gone on reporting it
+    after the fix shipped, which is indistinguishable from the fix not working.
+    """
+    stale = tmp_path / "anthropic.listing.json"
+    stale.write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time(),
+                "payload": {"models": [{"id": "claude-opus-5", "name": "Claude Opus 5"}]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = _StubClient([_Response(200, _ANTHROPIC_BODY)])
+
+    models, first_status = available_models(
+        "anthropic", api_key="sk-ant", client=client, cache_dir=tmp_path
+    )
+
+    # One pass: the stale document is dropped AND replaced, because a provider
+    # with no static rows would otherwise be left with an empty catalogue until
+    # something else happened to ask again.
+    assert first_status == "ok"
+    assert len(client.calls) == 1
+    by_id = {row.id: row for row in models}
+    assert by_id["claude-opus-5"].context_window == 1_000_000
+    assert json.loads(stale.read_text())["payload"]["capture"] == discovery.listing_capture_version(
+        "anthropic"
+    )
+
+
+def test_only_the_transport_that_changed_invalidates_its_cache(tmp_path) -> None:
+    """A capture bump is per TRANSPORT, not global.
+
+    A single global number invalidated every provider's cache on upgrade, and for
+    an aggregator — whose registry has no static rows to fall back on — the
+    replacement answer was an empty model list. Only the Anthropic reader started
+    needing a field its writer had not recorded, so only Anthropic's stamp moved.
+    """
+    assert discovery.listing_capture_version("anthropic") == 2
+    assert discovery.listing_capture_version("openrouter") == discovery.LISTING_CAPTURE_DEFAULT
+
+    cached = tmp_path / "openrouter.listing.json"
+    cached.write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time(),
+                "payload": {
+                    "capture": discovery.LISTING_CAPTURE_DEFAULT,
+                    "models": [{"id": "vendor/model", "context_window": 1_000}],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = _StubClient([])
+
+    models, status = available_models("openrouter", api_key="k", client=client, cache_dir=tmp_path)
+    # Served from the cache, no fetch, rows intact — the upgrade did not touch it.
+    assert status == "cached"
+    assert not client.calls
+    assert "vendor/model" in {row.id for row in models}
+
+
+def test_an_unstamped_document_is_the_original_shape_not_a_stale_one(tmp_path) -> None:
+    """Pre-upgrade caches carry no `capture` key at all.
+
+    Reading that absence as version 0 rejected every document written before the
+    stamp existed — for every transport, including the aggregators the
+    per-transport map exists to spare, whose registry has no static rows to answer
+    with. Measured before the fix: `static` with 0 models on any failed fetch.
+    """
+    cached = tmp_path / "openrouter.listing.json"
+    cached.write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time(),
+                # Exactly what the pre-stamp writer produced: no `capture`.
+                "payload": {"models": [{"id": "vendor/model", "context_window": 1_000}]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = _StubClient([])
+
+    models, status = available_models("openrouter", api_key="k", client=client, cache_dir=tmp_path)
+
+    assert status == "cached"
+    assert not client.calls
     assert "vendor/model" in {row.id for row in models}

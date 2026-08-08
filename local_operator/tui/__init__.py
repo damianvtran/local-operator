@@ -17,6 +17,7 @@ async def run_tui(
     session_factory: Callable[[], Awaitable[SessionProtocol]],
     theme_name: str = "dark",
     provider_controller: Any | None = None,
+    resume_factory: Callable[[str], Awaitable[SessionProtocol]] | None = None,
 ) -> int:
     """Run the full-screen TUI to completion; return a process exit code.
 
@@ -41,9 +42,18 @@ async def run_tui(
             session_factory,
             theme_name=theme_name,
             provider_controller=provider_controller,
+            resume_factory=resume_factory,
         )
         try:
             await app.run_async()
-            return int(app.return_code or 0)
         except KeyboardInterrupt:
             return 130
+        finally:
+            # AFTER the app has released the terminal, so the line lands in the
+            # user's scrollback where it can be copied — printing it from inside
+            # the app would put it in a frame that is being torn down. In the
+            # `finally` so it survives the exit paths as well as the clean one.
+            hint = app.resume_hint()
+            if hint:
+                print(f"\nsession ended — resume with:\n  {hint}\n")
+        return int(app.return_code or 0)

@@ -63,6 +63,11 @@ class ExecArgs:
     hosting: str | None = None
     model: str | None = None
     train: bool = False
+    #: Session id to resume, or the `@latest` sentinel. Accepted because the
+    #: shared parent parser offers `--resume` on every subcommand; carried
+    #: through so `exec` continues a session rather than silently starting a new
+    #: one and reporting success against the wrong history.
+    resume: str | None = None
 
 
 def slugify(command: str, max_length: int = 40) -> str:
@@ -96,6 +101,13 @@ def build_worker_argv(command: str, exec_args: ExecArgs) -> list[str]:
         argv.extend(["--hosting", exec_args.hosting])
     if exec_args.model:
         argv.extend(["--model", exec_args.model])
+    if exec_args.resume:
+        # Serialized like every other field, because `--background` is supposed to
+        # be the same request run elsewhere. Omitted, `exec --background --resume`
+        # silently started a FRESH session in the worker and reported success
+        # against the wrong history — the failure `ExecArgs.resume` exists to
+        # prevent, one process boundary further out.
+        argv.extend(["--resume", exec_args.resume])
     return argv
 
 
@@ -308,6 +320,7 @@ def _make_default_session_factory(exec_args: ExecArgs) -> SessionFactory:
             agent_id=exec_args.agent_id,
             yolo=exec_args.yolo,
             train=exec_args.train,
+            resume=exec_args.resume,
         )
         return create_session(session_args, config_manager, credential_manager, agent_registry)
 

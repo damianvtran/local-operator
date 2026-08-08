@@ -53,6 +53,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -60,6 +61,7 @@ from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
     AgentToolUpdate,
+    ApprovalDescribeFn,
     BrowserSurface,
     BrowserSurfaceProtocol,
     TextContent,
@@ -148,6 +150,16 @@ GREP_FILE_LIMIT_BYTES = 1 * 1024 * 1024
 _GREP_PRUNE_DIRS = frozenset({"__pycache__", "node_modules", "dist", "build", ".git", ".venv"})
 #: Marker prefix on approval descriptions for targets outside the workspace.
 OUTSIDE_WORKSPACE_MARKER = "[outside workspace]"
+#: The OTHER reason a target escalates: it could not be resolved at all, so
+#: nothing can be said about where it is. Distinct from the marker above because
+#: they are different sentences — a path visibly under the workspace root
+#: described as "outside the workspace" argues with itself, and a clause the user
+#: can see is wrong is a clause they learn to ignore on the genuine escape.
+UNRESOLVABLE_MARKER = "[unresolvable]"
+#: Opens the row for a URL that could not be parsed. The sentence has to differ
+#: from `browse:`, which asserts a destination — the whole point is that no
+#: destination could be determined.
+UNPARSED_URL_PREFIX = "unparsed url:"
 
 #: Environment overrides that make common CLIs non-interactive.
 NON_INTERACTIVE_ENV: dict[str, str] = {
@@ -399,31 +411,393 @@ def _safe_cwd(context: ToolContext | None) -> str:
     return context.cwd if context and context.cwd else "."
 
 
-def _resolve_workspace_path(raw: str, cwd: str) -> tuple[Path, bool]:
+def _resolve_workspace_path(raw: str, cwd: str) -> tuple[Path, bool, bool]:
     """Resolve a tool-supplied path to an absolute ``Path``.
 
     ``~`` is expanded, relative paths join onto ``cwd``, and the result is
-    fully resolved. Returns ``(path, inside)`` where ``inside`` is True when
-    the resolved path stays within the resolved workspace root — approval
-    prompts always show the resolved path, and ``outside`` targets escalate
-    approval even for read-tier tools.
+    fully resolved. Returns ``(path, inside, resolvable)``. ``inside`` is True
+    only when the resolved path is known to stay within the resolved workspace
+    root — approval prompts always show the resolved path, and a target that is
+    not ``inside`` escalates approval even for read-tier tools.
+
+    ``resolvable`` separates the two ways ``inside`` can be False, because they
+    are different sentences to the user: a path that resolved and lies elsewhere,
+    versus one that could not be resolved at all. Both escalate identically.
     """
-    root = Path(cwd).expanduser().resolve()
-    candidate = Path(raw).expanduser()
+    # `expanduser()` raises RuntimeError when `~user` names nobody the platform
+    # can resolve — the second of the two sites the describer fix named, and the
+    # one on the path every write/exec approval runs through. Falling back to the
+    # unexpanded string keeps the sentence buildable: an unresolvable `~` is then
+    # treated as a relative path under the workspace, which is where a resolved
+    # target that escapes gets caught anyway.
+    try:
+        root = Path(cwd).expanduser().resolve()
+    except RuntimeError:
+        root = Path(cwd).resolve()
+    try:
+        candidate = Path(raw).expanduser()
+    except RuntimeError:
+        candidate = Path(raw)
     path = candidate if candidate.is_absolute() else root / candidate
-    path = path.resolve()
+    try:
+        path = path.resolve()
+    except (OSError, ValueError):
+        # `resolve()` stats the path, so it raises on more than a missing parent:
+        # an embedded NUL is a `ValueError` from the lstat itself, and a symlink
+        # loop or a permission wall is an `OSError`. Unhandled, a model-supplied
+        # `a\x00b` took down the approval prompt it was being asked about — the
+        # same shape as the `expanduser` crash above, one line further on.
+        #
+        # Reported OUTSIDE, not inside. A path that cannot be resolved cannot be
+        # shown to be within the workspace, and this verdict decides whether the
+        # user is warned; the honest answer when the check cannot be made is the
+        # one that still asks. The tool's own open() will fail afterwards anyway.
+        return path, False, False
     try:
         path.relative_to(root)
     except ValueError:
-        return path, False
-    return path, True
+        return path, False, True
+    return path, True, True
 
 
-def _approval_description(path: Path, inside: bool, action: str) -> str:
+#: Two or more consecutive spaces — the part of a name a flattened prompt line
+#: cannot show literally.
+_SPACE_RUN = re.compile(r"  +")
+
+
+def _display_target(text: str) -> str:
+    """A target rendered so that what the user reads IS what the tool will use.
+
+    Plain text passes through. Anything whose displayed form would differ from
+    the real string — leading or trailing whitespace, an embedded newline, a
+    control byte — is quoted with Python escapes instead, because the prompt is
+    sanitised into one inert line downstream and a silent clean-up is the same
+    defect as naming the wrong file: `notes.md ` and `notes.md` are two files,
+    and `a\x00b` is not `ab`.
+    """
+    # The test is against what SURVIVES the prompt sanitiser, not just against
+    # leading and trailing space: it collapses internal runs too, so `/ws/  a.png`
+    # would reach the user as `/ws/ a.png` — a different file, named silently.
+    if text and text.isprintable() and text == " ".join(text.split()):
+        return text
+    # Quoting alone is not enough: the prompt sanitiser collapses whitespace runs
+    # AFTER this, so a quoted `'/ws/  a.png'` still reached the user as
+    # `'/ws/ a.png'`. Each space in a run becomes an explicit escape, which no
+    # later flattening can touch and which a technical reader can count.
+    return _SPACE_RUN.sub(lambda match: "\\x20" * len(match.group()), repr(text))
+
+
+def _approval_description(path: Path, inside: bool, action: str, resolvable: bool = True) -> str:
     """Approval prompt text for ``action`` on a RESOLVED path (the user must
-    approve the exact target, not the raw string the model typed)."""
-    marker = "" if inside else f"{OUTSIDE_WORKSPACE_MARKER} "
-    return f"{marker}{action}: {path}"
+    approve the exact target, not the raw string the model typed).
+
+    Two markers, one escalation. Both mean "this needs a closer look", and the
+    renderer treats them identically at every width where the clause collapses to
+    `!`; they differ only in the sentence spelled out when there is room for one.
+    """
+    if inside:
+        marker = ""
+    elif resolvable:
+        marker = f"{OUTSIDE_WORKSPACE_MARKER} "
+    else:
+        marker = f"{UNRESOLVABLE_MARKER} "
+    return f"{marker}{action}: {_display_target(str(path))}"
+
+
+def _describe_shell_approval(args: dict[str, Any], cwd: str) -> str:
+    """``run: <command>`` — the command IS the decision for an exec-tier call.
+
+    Kept in the argument's own order and NOT reformatted: a user authorising a
+    shell command needs the text that will actually run, and re-quoting it would
+    make the prompt and the executed string differ.
+    """
+    command = str(args.get("command") or "").strip()
+    # Quoted when it spans lines: the sanitiser downstream collapses newlines to
+    # spaces so a command cannot forge a second prompt, and a silently joined
+    # two-line command would read as one command that was never typed.
+    return f"run: {_display_target(command)}" if command else ""
+
+
+def _describe_path_approval(action: str, key: str = "path") -> ApprovalDescribeFn:
+    """``<action>: <resolved path>``, marked when the path leaves the workspace.
+
+    Resolved rather than raw, and marked from the SAME resolver the tool itself
+    uses, so the sentence the user answers names the file the tool will touch —
+    `../../etc/hosts` and `~/x` are the two forms where the raw string and the
+    target genuinely differ.
+    """
+
+    def describe(args: dict[str, Any], cwd: str) -> str:
+        # NOT stripped: `execute_write` and `execute_edit` pass the raw string to
+        # the resolver, and " notes.md" and "notes.md" are different files on a
+        # POSIX filesystem. A prompt that quietly normalises names a file the tool
+        # will not touch.
+        raw = str(args.get(key) or "")
+        if not raw.strip():
+            return ""
+        try:
+            path, inside, resolvable = _resolve_workspace_path(raw, cwd or ".")
+        except (OSError, ValueError, RuntimeError):
+            # An unresolvable path is still worth naming; the tool will fail with
+            # its own error, and a prompt that says nothing is worse than one
+            # that quotes what the model asked for.
+            return f"{action}: {_display_target(raw)}"
+        return _approval_description(path, inside, action, resolvable)
+
+    return describe
+
+
+def _describe_wake_approval(args: dict[str, Any], cwd: str) -> str:
+    """``schedule: <when> — <message>`` (or the operation for list/cancel).
+
+    Wake is the one tool that arms an UNATTENDED future turn, so the decision is
+    when it will run, how often, and what it will be told — not the parameter
+    shape. The recurrence is part of the sentence because "once in 30m" and
+    "every 30m forever" are different commitments and the difference is one
+    word.
+
+    Keys come from :class:`WakeParams`, which is ``extra="forbid"``: ``op``,
+    ``message``, ``in`` (aliased, so the raw key is what arrives here), ``at``,
+    ``every``, ``until``, ``limit``, ``id``. The first version of this function
+    invented `action`/`when`/`prompt`, which cannot appear — so it silently never
+    ran and the most dangerous tool in the set kept showing a JSON dump.
+    """
+    op = str(args.get("op") or "create").strip()
+    if op == "cancel":
+        identifier = str(args.get("id") or "").strip()
+        return f"cancel wake: {identifier}" if identifier else "cancel wake"
+    if op != "create":
+        return f"wake: {op}"
+
+    first = str(args.get("in") or args.get("at") or "").strip()
+    every = str(args.get("every") or "").strip()
+    # Plain ASCII words. The glyph this used to carry could not be gated: the
+    # check was `cell_len("⟳") == 1`, which is a static Unicode width table and
+    # not a terminal capability probe, so it measured 1 on every host and the
+    # fallback was unreachable. This sentence also reaches the headless stdin
+    # gate, where none of the TUI's glyph machinery runs at all, so it earns
+    # nothing by being clever — and the BOUND already leads, which is what makes
+    # two commitments differ at their first token.
+    if first and every:
+        when = f"{first} then every {every}"
+    elif every:
+        when = f"every {every}"
+    else:
+        when = first
+
+    bound = ""
+    if every:
+        until = str(args.get("until") or "").strip()
+        limit = args.get("limit")
+        if until:
+            bound = f" until {until}"
+        elif isinstance(limit, int):
+            bound = f" {limit}x"
+        else:
+            # The SAME slot and the same shape as a count, because an unbounded
+            # recurrence is the one wake that never stops on its own and it must
+            # not be the only bound rendered in a different grammar — the shape
+            # that most needs emphasis was the one wearing parentheses.
+            bound = " forever"
+
+    message = " ".join(str(args.get("message") or "").split())
+    # The BOUND leads the interval. Trailing, it was the last token on the row
+    # and therefore the first thing a head-keeping truncation cut, so a wake
+    # firing eight times and one that never stops painted the same text at three
+    # widths — the collision this sentence was restructured to remove, recreated
+    # inside the slot that removed it.
+    head = f"schedule:{bound} {when}" if when else "schedule"
+    return f"{head} — {message}" if message else head
+
+
+def _describe_task_approval(args: dict[str, Any], cwd: str) -> str:
+    """``subagent: <label>`` — the label names the child being started.
+
+    Only the label can practically be shown: spawning a subagent runs a fresh
+    child session whose whole prompt is the value of ``prompt``, and dumping
+    that into the approval row would make the decision to start the child
+    hinge on prose the user is not going to read from a gate line. The label
+    is a short name the caller chose precisely to stand in for the work.
+    """
+    label = " ".join(str(args.get("label") or "").split())
+    return f"subagent: {label}" if label else "subagent"
+
+
+#: Browser actions whose whole effect is "go somewhere". Everything else acts on
+#: the page that is already open, and says so.
+NAVIGATING_BROWSER_ACTIONS = frozenset({"open", "goto", "navigate"})
+
+
+def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
+    """``browse: <host/path>`` / ``browser: <action>`` — the site, then the verb.
+
+    ``https://`` is dropped for the same reason ``$HOME`` collapses to ``~``: it
+    is on every URL, it decides nothing, and it was eating eight of the forty
+    cells a narrow prompt has — at 32 columns the row read `browse: http…` and
+    named no site at all. A NON-https scheme is kept, because "this fetch is not
+    encrypted" is exactly the kind of thing this prompt exists to surface.
+    """
+    raw_url = str(args.get("url") or "").strip()
+    shown = _display_url(raw_url)
+    # `None` means `_display_url` could not build a destination from this string,
+    # so the row must not open with `browse:` as though it had. Reported rather
+    # than inferred: deciding it by comparing against a re-derived opaque form
+    # made the branch depend on whether the quoting happened to differ, and a
+    # test could not tell the two paths apart.
+    url_unparsed = shown is None
+    url = _opaque_url(raw_url) if url_unparsed else shown
+    # LOWERCASED, because `execute_browser` lowercases before it dispatches and
+    # `BrowserParams.action` is a bare `str` with no enum. Comparing the raw value
+    # meant `SCREENSHOT` fell past the screenshot branch: the prompt said
+    # `browser: SCREENSHOT` — no path, no outside-workspace marker — while the
+    # call wrote a PNG to whatever absolute path it was given. The action string
+    # is model-controlled, so the case is model-controlled too.
+    action = str(args.get("action") or "").strip().lower()
+    # A `url` argument is only what the call DOES when the action navigates.
+    # `click` and `type` carry the page they act on for context, and announcing
+    # "browse: <url>" for them describes a navigation that will not happen while
+    # hiding the interaction that will.
+    if action == "screenshot":
+        # The one browser action whose effect is on the FILESYSTEM. It rides the
+        # write gate because it writes, so the prompt names what it writes —
+        # resolved through the tool's own resolver and marked when it leaves the
+        # workspace, exactly like `write`. Without this the row said
+        # `browser: screenshot` while the call landed a PNG on /etc.
+        # NOT stripped, for the same reason `_describe_path_approval` is not:
+        # `_browser_screenshot` resolves the raw string, so `"  shot.png"` is a
+        # different file from `"shot.png"` and the prompt must name the one that
+        # will actually be written. Only the emptiness test is stripped.
+        raw_path = str(args.get("path") or "")
+        if not raw_path.strip():
+            return "screenshot to a temporary file"
+        try:
+            path, inside, resolvable = _resolve_workspace_path(raw_path, cwd or ".")
+        except (OSError, ValueError):
+            return f"screenshot: {_display_target(raw_path)}"
+        return _approval_description(path, inside, "screenshot", resolvable)
+    if url and action in NAVIGATING_BROWSER_ACTIONS:
+        if url_unparsed:
+            return f"{UNRESOLVABLE_MARKER} {UNPARSED_URL_PREFIX} {url}"
+        return f"browse: {url}"
+    if action and url:
+        if url_unparsed:
+            # ONE label, not two. `{action}: unparsed url: <raw>` spent two labels
+            # before naming anything, so the row protected the words `unparsed
+            # url` as though they were the target: 40 of 71 widths painted no
+            # character of the URL at all, and below 40 the ACTION was gone while
+            # the label survived. The marker already says the URL could not be
+            # read, so the action can keep its own slot and the string gets the
+            # rest.
+            return f"{UNRESOLVABLE_MARKER} {action}: {url}"
+        return f"{action}: {url}"
+    return f"browser: {action}" if action else ""
+
+
+def _opaque_url(raw: str) -> str:
+    """A URL this module could not parse, presented as DATA, not a destination.
+
+    Paired with :data:`UNPARSED_URL_PREFIX` by the caller, so the row names the
+    string without claiming to know where it points. The prefix is what does the
+    work: `_display_target` quotes only a space-run or a non-printable, so the
+    payload this exists for — a hostile URL of ordinary printable characters —
+    comes back bare, and it is the label in front of it, not quotation, that
+    stops the row reading as a destination.
+
+    `_display_url`'s whole contract is "host first, no userinfo", and the two
+    exits that could not honour it used to return the caller's string verbatim —
+    so a row that normally reads `browse: evil.test/x` instead led with whatever
+    the attacker put in front of the `@`. Quoting it makes the row read as the
+    raw text the model supplied rather than as a claim about where the fetch
+    goes, which is the same distinction the write describer draws for a path it
+    cannot resolve.
+    """
+    return _display_target(raw)
+
+
+def _punycode_host(host: str) -> str:
+    """A non-ASCII host shown the way a browser shows it: punycode.
+
+    `аpple.com` with a Cyrillic `а` is pixel-identical to `apple.com` in most
+    terminal fonts and resolves to `xn--pple-43d.com`. Every browser displays
+    the encoded form for exactly this reason, and a security prompt has a
+    stronger obligation than a browser does: it is asking someone to authorise
+    the fetch. The `hostname` attribute lowercases but does not encode.
+    """
+    if host.isascii():
+        return host
+    try:
+        return host.encode("idna").decode("ascii")
+    except UnicodeError:
+        # A host IDNA cannot encode is not a host anyone should be waved past.
+        return host.encode("unicode_escape").decode("ascii")
+
+
+def _display_url(raw: str) -> str | None:
+    """The URL as a DESTINATION: host first, no userinfo, no redundant scheme.
+
+    `https://` is dropped because it is on every URL and discriminates nothing —
+    the same trade `~` makes for `$HOME`. A non-https scheme is KEPT: "this fetch
+    is not encrypted" is exactly what this prompt exists to surface.
+
+    Userinfo is dropped entirely. `http://accounts.google.com@evil.test/x` is a
+    request to **evil.test**, and it is the one part of a URL an attacker fully
+    controls AND the one part a left-anchored row never truncates — so the
+    never-cut opening of the sentence would have been attacker-chosen text that
+    is not where the browser goes.
+    """
+    if not raw:
+        return raw
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        # Unparseable, so this function cannot say where the fetch goes — and
+        # echoing the caller's string is the one thing it must not do. U+FF20
+        # FULLWIDTH COMMERCIAL AT reaches here: `_validate_browser_url` gates only
+        # on the scheme prefix, and CPython's `_checknetloc` refuses the netloc
+        # under NFKC normalisation, so `http://accounts.google.com＠evil.test/x`
+        # fell out verbatim and the row led with `accounts.google.com`. Whether a
+        # WebView normalises that to `@` is unproven, but a prompt that cannot
+        # parse a URL has no business asserting a destination from it.
+        return None
+    if not parts.hostname:
+        # Same contract, different cause: with no host there is no destination to
+        # put first, so the sentence this function exists to build cannot be made.
+        return None
+    try:
+        port = parts.port
+    except ValueError:
+        # `urlsplit` defers port validation to attribute access, so a URL like
+        # `http://h:99999/` parses and then raises on `.port` — outside the try
+        # that exists to keep a malformed URL from crashing the prompt.
+        #
+        # Dropped, NOT degraded to `raw`. Returning the raw string handed back the
+        # exact input this function exists to sanitise, and one extra character
+        # was enough to reach it: `http://accounts.google.com@evil.test:99999/x`
+        # painted with its userinfo intact, so a left-anchored prompt at 46
+        # columns affirmatively named `accounts.google…` while the browser went to
+        # evil.test — and a homograph host kept its lookalike spelling. Worse than
+        # having no describer at all, which at least reads as raw data rather than
+        # as a confident destination. `parts.hostname` is already parsed and
+        # guarded above, so the sentence can be built without the port.
+        port = None
+    host = _punycode_host(parts.hostname)
+    if ":" in host:
+        # An IPv6 literal needs its brackets back: `::1:8080` does not say where
+        # the address ends and the port begins, on a row whose only job is to
+        # state the destination unambiguously.
+        host = f"[{host}]"
+    if port:
+        host = f"{host}:{port}"
+    tail = parts.path or ""
+    if parts.query:
+        tail += f"?{parts.query}"
+    # A non-https scheme LEADS. Trailing it read well and truncated first, so
+    # from 47 columns down an http URL and an https one painted identically —
+    # and the row spent four widths rendering the stub `(htt…`. Leading, it is
+    # part of the head that head-keeping truncation preserves, and https (the
+    # safe case, and the overwhelming majority) still costs nothing.
+    lead = "" if parts.scheme == "https" else f"{parts.scheme}! "
+    return f"{lead}{host}{tail}"
 
 
 def _error(tool_call_id: str, tool_name: str, message: str) -> ToolResult:
@@ -825,6 +1199,7 @@ def build_bash_tool() -> AgentTool:
     return AgentTool(
         name="bash",
         label="Shell",
+        describe_approval=_describe_shell_approval,
         description=("Run a shell command and return its exit code, stdout and stderr."),
         parameters=BashParams.model_json_schema(),
         approval_tier="exec",
@@ -1114,14 +1489,14 @@ async def execute_read(
         return _text(tool_call_id, "read", content, details={"url": target})
 
     cwd = _safe_cwd(context)
-    path, inside = _resolve_workspace_path(target, cwd)
+    path, inside, resolvable = _resolve_workspace_path(target, cwd)
     if not path.exists():
         return _error(tool_call_id, "read", f"Path does not exist: {path}")
 
     # Outside-workspace reads escalate to an approval prompt regardless of
     # the read tier auto-approval the host normally applies.
     if not inside:
-        description = _approval_description(path, inside, "read")
+        description = _approval_description(path, inside, "read", resolvable)
         if not await _check_approval(context, "read", description):
             return _error(tool_call_id, "read", "User declined to read this file.")
 
@@ -1256,6 +1631,40 @@ def _line_delta(before: str, after: str) -> tuple[int, int]:
     return added, removed
 
 
+#: The unified-diff payload cap. The diff rides the tool result's ``details``,
+#: which the transcript PERSISTS — a runaway file write must not let one tool
+#: result grow the transcript without bound. A typical edit is a handful of
+#: hunks; this admits a large one while keeping the stored payload sane. The
+#: TUI's expanded card has its own display cap; the stored cap is about the
+#: ledger, not the screen.
+_DIFF_DETAILS_CAP_LINES = 200
+
+
+def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
+    """The write/edit tool-result details: line counts + a rendered unified diff.
+
+    Both write and edit funnel their before/after states through a real
+    sequence match, so the UI's ``+N/-N`` counters and the expanded card's
+    diff view describe the SAME change and can never disagree about what
+    happened. The diff itself powers the TUI's expanded view; it is capped
+    (see ``_DIFF_DETAILS_CAP_LINES``) so the persisted details stay bounded.
+    """
+    added, removed = _line_delta(before, after)
+    if not added and not removed:
+        return {"path": str(path), "added": 0, "removed": 0}
+    diff = list(
+        difflib.unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            lineterm="",
+            n=2,
+        )
+    )
+    if len(diff) > _DIFF_DETAILS_CAP_LINES:
+        diff = diff[:_DIFF_DETAILS_CAP_LINES] + ["…"]
+    return {"path": str(path), "added": added, "removed": removed, "diff": diff}
+
+
 @_guard("write")
 async def execute_write(
     tool_call_id: str,
@@ -1272,7 +1681,7 @@ async def execute_write(
     if not params.path.strip():
         return _error(tool_call_id, "write", "path must be a non-empty string")
     # Write-tier approval is the loop's gate; see execute_bash.
-    path, inside = _resolve_workspace_path(params.path, _safe_cwd(context))
+    path, inside, _resolvable = _resolve_workspace_path(params.path, _safe_cwd(context))
 
     existed = path.exists()
     previous = ""
@@ -1286,12 +1695,12 @@ async def execute_write(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(params.content, encoding="utf-8")
     verb = "Overwrote" if existed else "Created"
-    added, removed = _line_delta(previous, params.content)
+    details = _diff_details(str(path), previous, params.content)
     return _text(
         tool_call_id,
         "write",
         f"{verb} {path} ({len(params.content)} chars).",
-        details={"path": str(path), "added": added, "removed": removed},
+        details=details,
     )
 
 
@@ -1299,6 +1708,7 @@ def build_write_tool() -> AgentTool:
     return AgentTool(
         name="write",
         label="Write",
+        describe_approval=_describe_path_approval("write"),
         description="Create or overwrite a file (parents are created automatically).",
         parameters=WriteParams.model_json_schema(),
         approval_tier="write",
@@ -1350,7 +1760,7 @@ async def execute_edit(
     if params.old_text == "":
         return _error(tool_call_id, "edit", "old_text must be a non-empty string")
 
-    path, inside = _resolve_workspace_path(params.path, _safe_cwd(context))
+    path, inside, _resolvable = _resolve_workspace_path(params.path, _safe_cwd(context))
     if not path.is_file():
         return _error(tool_call_id, "edit", f"File does not exist: {path}")
 
@@ -1378,12 +1788,12 @@ async def execute_edit(
         updated = content.replace(params.old_text, params.new_text, 1)
     path.write_text(updated, encoding="utf-8")
     replaced = occurrences if params.replace_all else 1
-    added, removed = _line_delta(content, updated)
+    details = _diff_details(str(path), content, updated)
     return _text(
         tool_call_id,
         "edit",
         f"Edited {path}: replaced {replaced} occurrence(s) of old_text.",
-        details={"path": str(path), "added": added, "removed": removed},
+        details=details,
     )
 
 
@@ -1391,6 +1801,7 @@ def build_edit_tool() -> AgentTool:
     return AgentTool(
         name="edit",
         label="Edit",
+        describe_approval=_describe_path_approval("edit"),
         description="Replace exact text in a file (errors on missing or ambiguous matches).",
         parameters=EditParams.model_json_schema(),
         approval_tier="write",
@@ -1629,14 +2040,14 @@ async def execute_grep(
         return _error(tool_call_id, "grep", f"invalid regex '{params.pattern}': {exc}")
 
     cwd = _safe_cwd(context)
-    target, inside = _resolve_workspace_path(params.path, cwd)
+    target, inside, resolvable = _resolve_workspace_path(params.path, cwd)
     if not target.exists():
         return _error(tool_call_id, "grep", f"Path does not exist: {target}")
 
     # Outside-workspace searches escalate to an approval prompt regardless
     # of the read tier auto-approval the host normally applies.
     if not inside:
-        description = _approval_description(target, inside, "grep")
+        description = _approval_description(target, inside, "grep", resolvable)
         if not await _check_approval(context, "read", description):
             return _error(tool_call_id, "grep", "User declined to search this path.")
 
@@ -1924,6 +2335,7 @@ def build_wake_tool(context: ToolContext) -> AgentTool | None:
     return AgentTool(
         name="wake",
         label="Wake",
+        describe_approval=_describe_wake_approval,
         description="Schedule a future wake (create/list/cancel), e.g. 'in 30m'.",
         parameters=WakeParams.model_json_schema(),
         # write tier: wake create persists schedules and arms unattended
@@ -2720,14 +3132,15 @@ async def _browser_screenshot(
         # literal "~" directory), relative paths resolved against the operator
         # process CWD instead of the session's, and the approval prompt showed
         # the unresolved string the model typed rather than the real target.
-        # NOTE: the write-tier approval prompt shows the RAW arguments the model
-        # wrote (loop.py builds its summary from call.raw_arguments), not this
-        # resolved path — so a user approving `../../evil.png` sees that string.
-        # That matches the pre-existing `write` tool, so it is consistent rather
-        # than a new hazard, but do not mistake resolution here for disclosure
-        # there. `inside` is deliberately unused: unlike read/grep this tool has
-        # no read-tier to escalate FROM, and `write` already always prompts.
-        resolved, _inside = _resolve_workspace_path(raw_path, _safe_cwd(context))
+        # The approval prompt now shows the RESOLVED destination: the describers
+        # in this module run `_display_target`, so a user approving
+        # `../../evil.png` reads the absolute path the write will actually touch,
+        # with the hazard clause when it leaves the workspace. (The earlier note
+        # here described the pre-describer behaviour, where the prompt echoed
+        # `call.raw_arguments` and resolution was invisible to the person
+        # answering.) `inside` is deliberately unused: unlike read/grep this tool
+        # has no read-tier to escalate FROM, and `write` already always prompts.
+        resolved, _inside, _resolvable = _resolve_workspace_path(raw_path, _safe_cwd(context))
         target = str(resolved)
     else:
         import tempfile
@@ -3184,6 +3597,7 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
     return AgentTool(
         name="browser",
         label="Browser",
+        describe_approval=_describe_browser_approval,
         description=(
             "Drive the CMUX browser: open/goto a URL, read page text, snapshot "
             "the accessibility tree for click refs, click, type, screenshot, close."
@@ -3195,4 +3609,236 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         concurrency="shared",
         interruptible=False,
         execute=execute_browser,
+    )
+
+
+# ---------------------------------------------------------------------------
+# task / wait / jobs — background subagent engine tools
+# ---------------------------------------------------------------------------
+# These three tools are the model-facing surface of the background job
+# engine. They are createIf-gated exactly like ``wake``: the ``task`` builder
+# returns None unless the ToolContext carries a ``subagent_launcher`` (the
+# session's ``Session._launch_subagent``), and ``wait``/``jobs`` return None
+# unless the context carries a job manager. A session without the engine must
+# never advertise tools that can only error.
+
+
+class TaskParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(description="Short label for the subagent (shown in the jobs list).")
+    prompt: str = Field(
+        description="The full instructions the subagent runs in a fresh child session."
+    )
+
+
+class WaitParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str = Field(description="Job id returned by the 'task' tool (or listed by 'jobs').")
+    wait_ms: int = Field(
+        default=30_000,
+        gt=0,
+        le=300_000,
+        description="Max ms to block for the job to settle (capped at 300000).",
+    )
+
+
+class JobsParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+#: Formatted status text shared by ``wait``'s settled return and the machine
+#: detail payload.
+def _job_summary(job: Any) -> str:
+    text = f"job {job.id} ({job.label}) [{job.status}]"
+    if job.status == "completed" and job.result_text:
+        text += f"\n{job.result_text}"
+    if job.status == "failed" and job.error_text:
+        text += f"\n{job.error_text}"
+    return text
+
+
+@_guard("task")
+async def execute_task(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Launch a one-shot subagent as a background job; return its job id."""
+    try:
+        params = TaskParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "task", exc)
+
+    launcher = context.subagent_launcher if context else None
+    if launcher is None:
+        return _error(
+            tool_call_id,
+            "task",
+            "subagent launching is not available in this session (no engine attached).",
+        )
+    try:
+        job_id = launcher(params.label, params.prompt)
+    except Exception as exc:  # noqa: BLE001 — engine failure surfaces as an error result
+        return _error(tool_call_id, "task", f"could not launch subagent: {exc}")
+    return _text(
+        tool_call_id,
+        "task",
+        f"launched subagent job {job_id} ({params.label}); use 'wait' with "
+        f"job_id={job_id} to await it, or 'jobs' to list running work.",
+        details={"job_id": job_id, "label": params.label},
+    )
+
+
+def build_task_tool(context: ToolContext) -> AgentTool | None:
+    if context.subagent_launcher is None:
+        return None
+    return AgentTool(
+        name="task",
+        label="Subagent task",
+        describe_approval=_describe_task_approval,
+        description=(
+            "Launch a one-shot subagent in a fresh child session, running "
+            "in the background; returns a job id to await with 'wait'."
+        ),
+        parameters=TaskParams.model_json_schema(),
+        # Spawns autonomous child work, so it rides the write gate just like
+        # scheduling a wake: the user approves starting the child.
+        approval_tier="write",
+        concurrency="exclusive",
+        interruptible=False,
+        execute=execute_task,
+    )
+
+
+@_guard("wait")
+async def execute_wait(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Block until a background job settles or ``wait_ms`` elapses."""
+    try:
+        params = WaitParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "wait", exc)
+
+    jobs = context.jobs if context else None
+    if jobs is None:
+        return _error(
+            tool_call_id,
+            "wait",
+            "job tracking is not available in this session (no job manager attached).",
+        )
+    job = jobs.get(params.job_id)
+    if job is None:
+        return _error(tool_call_id, "wait", f"unknown job {params.job_id}")
+
+    deadline = time.monotonic() + params.wait_ms / 1000.0
+    while job.status == "running":
+        if signal is not None and signal.aborted:
+            return _text(
+                tool_call_id,
+                "wait",
+                f"job {params.job_id} still running (wait aborted)",
+                details={"job_id": params.job_id, "status": "running"},
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return _text(
+                tool_call_id,
+                "wait",
+                f"job {params.job_id} still running after {params.wait_ms}ms",
+                details={"job_id": params.job_id, "status": "running"},
+            )
+        await asyncio.sleep(min(0.05, remaining))
+        job = jobs.get(params.job_id)
+        if job is None:
+            return _error(tool_call_id, "wait", f"job {params.job_id} disappeared")
+    return _text(
+        tool_call_id,
+        "wait",
+        _job_summary(job),
+        details={"job_id": job.id, "status": job.status},
+    )
+
+
+def build_wait_tool(context: ToolContext) -> AgentTool | None:
+    if context.jobs is None:
+        return None
+    return AgentTool(
+        name="wait",
+        label="Wait for job",
+        description=(
+            "Block up to wait_ms for a background job to settle, returning its "
+            "final output/status. Times out if still running."
+        ),
+        parameters=WaitParams.model_json_schema(),
+        # read-only observation of job state; blocks the turn but changes nothing.
+        approval_tier="read",
+        concurrency="exclusive",
+        interruptible=True,
+        execute=execute_wait,
+    )
+
+
+@_guard("jobs")
+async def execute_jobs(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """List running and recently-settled background jobs."""
+    try:
+        JobsParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "jobs", exc)
+
+    jobs = context.jobs if context else None
+    if jobs is None:
+        return _error(
+            tool_call_id,
+            "jobs",
+            "job tracking is not available in this session (no job manager attached).",
+        )
+    rows = jobs.list()
+    if not rows:
+        return _text(tool_call_id, "jobs", "no background jobs", details={"count": 0})
+    now = time.time()
+    lines = []
+    for job in rows:
+        # A settled job is reported by when it SETTLED (the useful fact: "it
+        # finished N seconds ago"); a running one by how long it has been going.
+        elapsed = job.settled_at if job.status != "running" and job.settled_at else now
+        lines.append(f"{job.id}  {job.status:<9}  {now - elapsed:6.1f}s  {job.label}")
+    return _text(
+        tool_call_id,
+        "jobs",
+        "\n".join(lines),
+        details={"count": len(rows)},
+    )
+
+
+def build_jobs_tool(context: ToolContext) -> AgentTool | None:
+    if context.jobs is None:
+        return None
+    return AgentTool(
+        name="jobs",
+        label="List jobs",
+        description=(
+            "List running and recently-settled background jobs (task/bash) "
+            "with their id, status and elapsed time."
+        ),
+        parameters=JobsParams.model_json_schema(),
+        approval_tier="read",
+        concurrency="shared",
+        interruptible=False,
+        execute=execute_jobs,
     )

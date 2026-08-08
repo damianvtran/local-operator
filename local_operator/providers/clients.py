@@ -18,6 +18,7 @@ retryable/auth flags for the failover layer.
 
 from __future__ import annotations
 
+import asyncio
 import email.utils
 import json
 import time
@@ -129,11 +130,20 @@ def _raise_for_status(response: httpx.Response) -> None:
 
 
 def _iter_sse_lines(response: httpx.Response) -> AsyncIterator[str]:
-    """Yield decoded ``data:`` payloads from an SSE byte stream."""
+    """Yield decoded ``data:`` payloads from an SSE byte stream.
+
+    Once bytes have started arriving, a silence longer than
+    ``STREAM_READ_TIMEOUT_S`` is treated as a stalled stream. The distinction
+    this makes — and that httpx's own read timeout cannot — is between a model
+    that has not started answering (legitimately minutes of silence for a
+    reasoning model) and a connection that accepted the request and died
+    (indistinguishable from thinking, for the whole request budget, with the UI
+    spinning).
+    """
 
     async def _gen() -> AsyncIterator[str]:
         buffer = ""
-        async for chunk in response.aiter_text():
+        async for chunk in _guarded_chunks(response):
             buffer += chunk
             while "\n" in buffer:
                 line, buffer = buffer.split("\n", 1)
@@ -144,6 +154,27 @@ def _iter_sse_lines(response: httpx.Response) -> AsyncIterator[str]:
                         yield data
 
     return _gen()
+
+
+async def _guarded_chunks(response: httpx.Response) -> AsyncIterator[str]:
+    """``response.aiter_text()`` with a stall watchdog after the first chunk."""
+    iterator = response.aiter_text().__aiter__()
+    started = False
+    while True:
+        try:
+            if started:
+                chunk = await asyncio.wait_for(iterator.__anext__(), timeout=STREAM_READ_TIMEOUT_S)
+            else:
+                chunk = await iterator.__anext__()
+        except StopAsyncIteration:
+            return
+        except (TimeoutError, asyncio.TimeoutError) as exc:
+            raise httpx.ReadTimeout(
+                f"stream stalled: no data for {STREAM_READ_TIMEOUT_S:.0f}s",
+                request=response.request,
+            ) from exc
+        started = True
+        yield chunk
 
 
 def _sampling_params(request: ChatRequest, *, top_p_key: str = "top_p") -> dict[str, float]:
@@ -278,6 +309,30 @@ _FINISH_TO_STOP_REASON = {
 # ---------------------------------------------------------------------------
 
 
+#: Longest silence tolerated BETWEEN chunks of a streaming response. Providers
+#: emit tokens or keep-alives well inside this; a stream that says nothing for
+#: three minutes has stalled, and treating that as patience turns a dead
+#: connection into a UI that looks frozen for the whole request timeout.
+STREAM_READ_TIMEOUT_S = 180.0
+
+
+def _stream_timeout(total: float) -> httpx.Timeout:
+    """Timeouts shaped for a STREAMING response, not a single request/response.
+
+    ``read`` stays at the caller's total on purpose. httpx applies its read
+    timeout to EVERY read on the stream, including the wait for response headers
+    and the first body chunk — and a reasoning model over ``/chat/completions``
+    emits nothing at all until it has finished thinking, which is legitimately
+    minutes. Bounding time-to-first-byte at the inter-chunk budget would kill
+    exactly the requests the budget was meant to protect, and `failover` would
+    retry them, re-billing the prefill each time.
+
+    The gap BETWEEN chunks is bounded separately, by :func:`_iter_sse_lines`,
+    which is the only place that knows a stream has started.
+    """
+    return httpx.Timeout(total, connect=30.0, read=total, write=120.0)
+
+
 class OpenAICompatClient:
     """``POST {base_url}/chat/completions`` with SSE streaming.
 
@@ -304,7 +359,7 @@ class OpenAICompatClient:
         self._base_url = base_url.rstrip("/")
         self._extra_headers = dict(extra_headers or {})
         self._owns_client = http_client is None
-        self._http = http_client or httpx.AsyncClient(timeout=timeout)
+        self._http = http_client or httpx.AsyncClient(timeout=_stream_timeout(timeout))
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -624,7 +679,7 @@ class AnthropicClient:
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._owns_client = http_client is None
-        self._http = http_client or httpx.AsyncClient(timeout=timeout)
+        self._http = http_client or httpx.AsyncClient(timeout=_stream_timeout(timeout))
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -959,7 +1014,7 @@ class GoogleClient:
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._owns_client = http_client is None
-        self._http = http_client or httpx.AsyncClient(timeout=timeout)
+        self._http = http_client or httpx.AsyncClient(timeout=_stream_timeout(timeout))
 
     async def aclose(self) -> None:
         if self._owns_client:

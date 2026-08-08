@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import sys
 import uuid
@@ -37,7 +38,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from local_operator.ansi import sanitize_prompt_line
 from local_operator.harness.types import AgentMessage, Message
+
+# Pure path policy, no engine — see local_operator/resume.py for why it is
+# its own module rather than living here.
+from local_operator.resume import resume_dir
 
 if TYPE_CHECKING:
     # Type-only imports: this module's whole discipline is that the heavy
@@ -59,6 +65,8 @@ if TYPE_CHECKING:
     from local_operator.skills.discovery import Skill
     from local_operator.skills.index import SkillIndex
     from local_operator.variables import VariableStore
+
+logger = logging.getLogger("local_operator.session_factory")
 
 
 def coerce_compaction_settings(raw: object) -> CompactionSettings | None:
@@ -198,6 +206,23 @@ def default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
     return _default_convert_to_llm(list(messages))
 
 
+def _fullscreen_app_owns_terminal() -> bool:
+    """True when a Textual app currently holds the terminal.
+
+    Reading input from stdin then is not "interactive", it is a DEADLOCK: the
+    app has the terminal in raw mode and consumes every keystroke, so a thread
+    parked on ``input()`` waits for a line nobody can type and the turn awaiting
+    approval never resumes. Probed through Textual's own active-app context var
+    (import-guarded, because the TUI is an optional extra and this module sits on
+    the headless path too).
+    """
+    try:
+        from textual.app import active_app
+    except Exception:  # textual absent: nothing can own the terminal
+        return False
+    return active_app.get(None) is not None
+
+
 def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
     """Build the tool-approval gate.
 
@@ -206,6 +231,13 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
     runs deny, so a background job never hangs waiting for input it will
     never get. A non-tty denial is NEVER silent (CL-04): the user must see
     why the tool was rejected and how to change it (``--yolo``).
+
+    A full-screen front end must REPLACE this gate with its own surface
+    (``SessionProtocol.set_approval_handler``); the check below is the safety
+    net for the window before it does, and for a UI that forgets to. Denying is
+    the only safe answer there — the alternative is the hang described in
+    :func:`_fullscreen_app_owns_terminal`, which looks to the user like the
+    agent froze mid-task.
     """
     if yolo:
 
@@ -222,9 +254,37 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
                 file=sys.stderr,
             )
             return False
+        if _fullscreen_app_owns_terminal():
+            # error, not warning: reaching this branch means a front end that owns
+            # the terminal did not install an approval handler, which is a wiring
+            # BUG, and the user pays for it with a tool that refuses for no
+            # visible reason. Named remedies so whoever reads the log can act.
+            #
+            # Deliberately not stderr, unlike the non-tty branch above: a stray
+            # stderr write under a full-screen app paints over the frame and stays
+            # there (see tests/unit/tui/test_logger_silence.py), so the CL-04
+            # spelling is unavailable here. The TUI routes this file's records to
+            # a rotating log, which is where this lands.
+            logger.error(
+                "approval for %r denied: a full-screen UI owns the terminal and "
+                "installed no approval handler — install one via "
+                "SessionProtocol.set_approval_handler, or run with --yolo to "
+                "auto-approve every tier",
+                tool_name,
+            )
+            return False
         try:
+            # Sanitised HERE as well as at the source. This is a second
+            # human-facing approval surface, it renders onto a real terminal
+            # with no widget between it and the escape codes, and the cost of
+            # the belt-and-braces is one function call on a path that is about
+            # to block on human input anyway.
             answer = await asyncio.to_thread(
-                input, f"Allow tool '{tool_name}' ({description})? [y/N] "
+                input,
+                "Allow tool '{}' ({})? [y/N] ".format(
+                    sanitize_prompt_line(tool_name, limit=120),
+                    sanitize_prompt_line(description),
+                ),
             )
         except (EOFError, KeyboardInterrupt):
             return False
@@ -471,6 +531,10 @@ def _transcript_dir_and_agent_id(
 ) -> tuple[Path, str]:
     """Pick where this session's JSONL transcript lives (CL-02).
 
+    ``--resume <id>`` wins over every rule below: it names an existing session
+    directory, and reusing it is what makes the transcript replay (the same
+    mechanism ``--train`` uses for an agent directory).
+
     Legacy ``--train`` semantics:
 
     - named agent + ``--train`` -> the agent's own directory, so history is
@@ -483,6 +547,13 @@ def _transcript_dir_and_agent_id(
       default agent must not persist its session.
     """
     config_dir = Path(agent_registry.config_dir)
+    resume = getattr(args, "resume", None)
+    # `is not None`, not truthiness: `--resume ""` is a user error and must be
+    # refused, where silently starting a NEW session would look like a resume
+    # that lost the history.
+    if resume is not None:
+        resumed = resume_dir(config_dir, str(resume))
+        return resumed, str(agent.id) if agent is not None else "main"
     train = bool(getattr(args, "train", False))
     if agent is not None:
         agent_id = str(agent.id)
