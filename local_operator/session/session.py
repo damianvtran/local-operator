@@ -394,7 +394,7 @@ class Session:
         """The spec every provider call is built from."""
         return self._model
 
-    def history(self) -> list[Message]:
+    def history(self) -> list[AgentMessage]:
         """The conversation as replayed into LLM context, in order.
 
         Read-only for rendering: a front end that boots against a resumed

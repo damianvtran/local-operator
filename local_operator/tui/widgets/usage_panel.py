@@ -512,7 +512,7 @@ class UsagePanel(Static):
         return list(self._reports)
 
     @property
-    def offset(self) -> int:
+    def view_offset(self) -> int:
         return self._offset
 
     def set_clock(self, now_ms: float) -> None:

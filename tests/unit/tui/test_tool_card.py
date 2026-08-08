@@ -255,10 +255,12 @@ def test_diff_lines_are_tinted_by_hunk_role() -> None:
     ctx_style = _style_at(content, " a")
     hunk_style = _style_at(content, "@@ -1,4 +1,4 @@")
     header_style = _style_at(content, "+++")
+
     # Build the expected triplet from the semantic hex (``#rrggbb``).
     def _expect(semantic: str) -> ColorTriplet:
         hexv = theme_mod.semantic_color(semantic)
         return ColorTriplet(*[int(hexv[i : i + 2], 16) for i in (1, 3, 5)])
+
     # The added line carries the success green; the removed the danger red —
     # the same two tints the summary pill uses for +N/-N.
     assert _triplet(plus_style.color) == _expect("success")

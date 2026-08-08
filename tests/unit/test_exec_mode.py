@@ -24,6 +24,7 @@ from local_operator.exec_mode import ExecArgs, build_worker_argv, slugify
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
+    AgentMessage,
     AgentStartEvent,
     Message,
     MessageEndEvent,
@@ -92,6 +93,9 @@ class FakeSession:
 
     async def complete_once(self, system: str, prompt: str) -> str:
         return ""
+
+    def history(self) -> list[AgentMessage]:
+        return []
 
     async def seed_history(self, messages: list[Message]) -> None:
         pass

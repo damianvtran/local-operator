@@ -1022,7 +1022,8 @@ class ToolCard(TranscriptBlock):
         dim = Style(color=theme_mod.semantic_color("dim"))
         line_width = max(1, width - 2 - OUTPUT_INDENT)
         indent = " " * OUTPUT_INDENT
-        shown = self._diff[:EXPAND_MAX_LINES]
+        diff = self._diff or []
+        shown = diff[:EXPAND_MAX_LINES]
         for raw in shown:
             line = raw.rstrip()
             prefix = line[:1] if line else ""
@@ -1036,7 +1037,7 @@ class ToolCard(TranscriptBlock):
                 ink = dim
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(line, line_width), style=ink)
-        hidden = len(self._diff) - len(shown)
+        hidden = len(diff) - len(shown)
         if hidden > 0:
             marker = f"… {hidden} more diff line{'s' if hidden != 1 else ''}"
             row.append("\n" + indent, style=dim)

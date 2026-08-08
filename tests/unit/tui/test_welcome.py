@@ -27,6 +27,7 @@ from rich.style import Style
 from rich.text import Text
 from textual.color import Color
 
+from local_operator.harness.types import AgentMessage
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.transcript import TranscriptView, UserBlock
@@ -471,6 +472,9 @@ class FakeSession:
         # it positionally would have swapped the system and user prompts and
         # still passed.
         return ""
+
+    def history(self) -> list[AgentMessage]:
+        return []
 
     async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
         self.prompts.append(text)

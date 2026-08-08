@@ -50,6 +50,9 @@ from local_operator.tui.events import (
     RetryEnded,
     RetryStarted,
     StartFlushTimer,
+    SubagentEnded,
+    SubagentProgress,
+    SubagentStarted,
     ToolComposing,
     ToolEnded,
     ToolStarted,
@@ -81,11 +84,6 @@ from local_operator.tui.widgets.toast import Toast, format_mcp_startup
 from local_operator.tui.widgets.todo_panel import TodoPanel
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.trajectory import TrajectoryScreen
-from local_operator.tui.widgets.usage_panel import (
-    UsageDismissed,
-    UsagePanel,
-    UsageRefreshRequested,
-)
 from local_operator.tui.widgets.transcript import (
     GAP_CLASS,
     NoticeBlock,
@@ -94,6 +92,11 @@ from local_operator.tui.widgets.transcript import (
     TranscriptView,
     UserBlock,
     WorkingBlock,
+)
+from local_operator.tui.widgets.usage_panel import (
+    UsageDismissed,
+    UsagePanel,
+    UsageRefreshRequested,
 )
 from local_operator.tui.widgets.welcome import (
     MODEL_PENDING,
@@ -595,7 +598,7 @@ class OperatorApp(App[None]):
             return
         if not arg:
             now = float(__import__("time").time())
-            lines = [f"recent sessions — /resume <id> to open one:"]
+            lines = ["recent sessions — /resume <id> to open one:"]
             for session_id, mtime in recent:
                 lines.append(f"  {session_id}   {format_age(now - mtime)}")
             notice("\n".join(lines), "note")
@@ -1506,9 +1509,7 @@ class OperatorApp(App[None]):
         persist_default = arg.lower().startswith("default ")
         target = arg[len("default ") :].strip() if persist_default else arg
         if persist_default and not target:
-            notice(
-                "usage: /model default <provider>/<model-id>", "warning"
-            )
+            notice("usage: /model default <provider>/<model-id>", "warning")
             return
         if session is None or not hasattr(session, "set_model"):
             notice("session is still starting…", "warning")

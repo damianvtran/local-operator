@@ -1661,7 +1661,7 @@ def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
         )
     )
     if len(diff) > _DIFF_DETAILS_CAP_LINES:
-        diff = diff[: _DIFF_DETAILS_CAP_LINES] + ["…"]
+        diff = diff[:_DIFF_DETAILS_CAP_LINES] + ["…"]
     return {"path": str(path), "added": added, "removed": removed, "diff": diff}
 
 
@@ -3635,9 +3635,7 @@ class TaskParams(BaseModel):
 class WaitParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    job_id: str = Field(
-        description="Job id returned by the 'task' tool (or listed by 'jobs')."
-    )
+    job_id: str = Field(description="Job id returned by the 'task' tool (or listed by 'jobs').")
     wait_ms: int = Field(
         default=30_000,
         gt=0,
@@ -3816,8 +3814,10 @@ async def execute_jobs(
     now = time.time()
     lines = []
     for job in rows:
+        # A settled job is reported by when it SETTLED (the useful fact: "it
+        # finished N seconds ago"); a running one by how long it has been going.
         elapsed = job.settled_at if job.status != "running" and job.settled_at else now
-        lines.append(f"{job.id}  {job.status:<9}  {now - job.start_time:6.1f}s  {job.label}")
+        lines.append(f"{job.id}  {job.status:<9}  {now - elapsed:6.1f}s  {job.label}")
     return _text(
         tool_call_id,
         "jobs",

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Awaitable, Callable, Protocol, runtime_checkable
 
-from local_operator.harness.types import EventHandler, Message, ModelSpec
+from local_operator.harness.types import AgentMessage, EventHandler, Message, ModelSpec
 
 
 @runtime_checkable
@@ -88,7 +88,7 @@ class SessionProtocol(Protocol):
         """
         ...
 
-    def history(self) -> list[Message]:
+    def history(self) -> list[AgentMessage]:
         """The conversation as replayed into LLM context.
 
         Read-only for RENDERING (a resumed session's transcript back on

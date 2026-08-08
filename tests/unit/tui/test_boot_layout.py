@@ -32,6 +32,7 @@ from typing import Any
 import pytest
 from rich.cells import cell_len
 
+from local_operator.harness.types import AgentMessage
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import (
     BOOT_CARD_CLASS,
@@ -103,6 +104,9 @@ class FakeSession:
 
     async def complete_once(self, system: str, prompt: str) -> str:
         return ""
+
+    def history(self) -> list[AgentMessage]:
+        return []
 
     async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
         self.prompts.append(text)

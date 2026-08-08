@@ -147,6 +147,9 @@ class FakeSession:
     async def dispose(self) -> None:
         self.disposed = True
 
+    def history(self) -> list[Any]:
+        return getattr(self, "_history", [])
+
     def emit(self, event: Any) -> None:
         for handler in list(self._handlers):
             handler(event)
@@ -217,7 +220,22 @@ def _populate(session: FakeSession) -> None:
             "t4",
             "write",
             "Overwrote src/parser.py (412 chars).",
-            details={"path": "src/parser.py", "added": 12, "removed": 3},
+            details={
+                "path": "src/parser.py",
+                "added": 12,
+                "removed": 3,
+                "diff": [
+                    "--- ",
+                    "+++ ",
+                    "@@ -1,6 +1,8 @@",
+                    " def parse(src):",
+                    "     tokenize(src)",
+                    "+    build_ast(tokens)",
+                    "+    check(ast)",
+                    "     return ast",
+                    "-    # old single-line comment",
+                ],
+            },
         )
     )
     # Engine-faithful: the loop always emits turn_end carrying the assistant
@@ -317,3 +335,74 @@ def test_populated_snapshot(snap_compare) -> None:  # type: ignore[no-untyped-de
 def test_narrow_80_snapshot(snap_compare) -> None:  # type: ignore[no-untyped-def]
     app, _session = _make_app()
     assert snap_compare(app, terminal_size=(80, 24), run_before=_populate_and_submit)
+
+
+def test_write_diff_expanded_snapshot(snap_compare) -> None:  # type: ignore[no-untyped-def]
+    """The expanded write card shows the rendered diff, colourised by hunk.
+
+    Distinct from the collapsed populated frame: the write card is expanded so
+    the designer and the regression both see the +/-, @@ and context lines in
+    their tint ramp. The band (todo/subagent) stays empty here — this frame is
+    about the diff, not the band.
+    """
+    async def expand_then_capture(pilot) -> None:  # type: ignore[no-untyped-def]
+        await _populate_and_submit(pilot)
+        # Find the write card (the 4th, tool t4) and expand it.
+        from local_operator.tui.widgets.tool_card import ToolCard
+
+        cards = list(pilot.app.query(ToolCard))
+        write_card = next((c for c in cards if c.tool_name == "write"), None)
+        assert write_card is not None, "populated frame must include a write card"
+        write_card.toggle_expanded()
+        await pilot.pause()
+        await pilot.pause()
+
+    app, _session = _make_app()
+    assert snap_compare(app, terminal_size=(100, 28), run_before=expand_then_capture)
+
+
+def test_band_with_todo_and_subagent_snapshot(snap_compare) -> None:  # type: ignore[no-untyped-def]
+    """The dock band renders a todo list and a subagent row above the composer.
+
+    Shows the band's filled bodies (todo + subagent) sitting between the
+    transcript and the input, with an empty-composer caret in place — the new
+    chrome surface this rewrite adds. The subagent row carries its spinner
+    glyph and a trailing status; the todo panel lists two items with one done.
+    """
+    async def band_then_capture(pilot) -> None:  # type: ignore[no-untyped-def]
+        from local_operator.tools import builtin
+
+        await _populate_and_submit(pilot)
+        session = pilot.app._session
+        # Seed the todo store (read live by TodoPanel) and a task job (read by
+        # SubagentPanel), then let the 1 Hz poll repaint.
+        builtin.TODO_STORE[session.session_id] = [
+            {"text": "wire the band", "status": "done"},
+            {"text": "capture frames", "status": "pending"},
+        ]
+        session.jobs = _FakeJobs()
+        pilot.app._refresh_band()
+        await pilot.pause()
+        await pilot.pause()
+
+    app, _session = _make_app()
+    assert snap_compare(app, terminal_size=(100, 28), run_before=band_then_capture)
+
+
+class _FakeJob:
+    id = "sub-123"
+    type = "task"
+    status = "running"
+    start_time = 1_700_000_000.0
+    label = "summarize workspace"
+    result_text = None
+    error_text = None
+    settled_at = None
+
+
+class _FakeJobs:
+    def list(self, *, owner_id=None):  # type: ignore[no-untyped-def]
+        return [_FakeJob()]
+
+    def get(self, job_id, *, owner_id=None):  # type: ignore[no-untyped-def]
+        return _FakeJob() if job_id == "sub-123" else None
